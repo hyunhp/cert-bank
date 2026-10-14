@@ -4,9 +4,9 @@
 State: vendor tabs live. PLTR-AIE 72 and PLTR-DE 72 (b01 pilot + b02-b09, one batch per domain each). Rules in
 `tools/qgen/PALANTIR.md`. Round 1 is first-draft: written from the exam guides, qgen-checked, NOT yet reviewed by
 batch-reviewer. Review pass (fact-check against palantir.com/docs, fix with eNN/fNN batches) before relying on them. Next:
-- P1: grow each to 190 (two mock exams, ~24 per domain), batches of 8-12 per domain, each fact-checked by
-  batch-reviewer before ingest. Target scenario mix: troubleshooting 30%+, tradeoff ~20%.
-- P2: grow to 475 (five mocks), then add PLTR-APD after reading the Application Developer guide.
+- Target (owner's decision 2026-10-14): ~400 questions per exam (50 per domain), written first, reviewed after.
+  Batches of 8 per domain per round; `qgen report` target stays 475 (5 mocks) but 400 is the agreed stop.
+  Target scenario mix: troubleshooting 30%+, tradeoff ~20%. Then PLTR-APD after reading the App Developer guide.
 - Re-check the guides (question count, pass mark, published weights) before each phase; if weights appear,
   replace the equal weights and drop `weightsAssumed`.
 - Pages: the old /aws_qbank/ address no longer works; optional redirect repo named aws_qbank.
