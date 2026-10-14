@@ -1,5 +1,15 @@
 # TODO
 
+## Palantir (started 2026-10-14)
+State: vendor tabs live; PLTR-DE and PLTR-AIE have 8 pilot questions each (one per domain), rules in
+`tools/qgen/PALANTIR.md`. Next:
+- P1: grow each to 190 (two mock exams, ~24 per domain), batches of 8-12 per domain, each fact-checked by
+  batch-reviewer before ingest. Target scenario mix: troubleshooting 30%+, tradeoff ~20%.
+- P2: grow to 475 (five mocks), then add PLTR-APD after reading the Application Developer guide.
+- Re-check the guides (question count, pass mark, published weights) before each phase; if weights appear,
+  replace the equal weights and drop `weightsAssumed`.
+- Pages: the old /aws_qbank/ address no longer works; optional redirect repo named aws_qbank.
+
 State on 2026-09-30: 4,502+ questions in 12 exams, all with detailed explanations (`data/explanations/<EXAM>.json`).
 Done the same day (see git log): bookmarks load only needed exams, explanations split from exam files, section
 (domain/task) filter chips with per-domain accuracy (localStorage only) and "one section only" mock exams,

@@ -1,4 +1,4 @@
-// Mock exam mode for the AWS Question Bank.
+// Mock exam mode for the certification question bank.
 // Draws a timed exam from one certification's pool, stratified by the official domain weights and
 // preferring questions not yet seen in earlier mock exams. Answers are hidden until submission.
 // State lives in localStorage so a reload resumes the running exam.
@@ -110,12 +110,25 @@ export function draw(exam, n, docs, spec, map, seenIds) {
 
 function timeFor(spec, n) { return Math.ceil((spec.minutes * n) / spec.questions) * 60; }
 
-function verdictFor(level, pct) {
-  const hi = (level === "professional" || level === "specialty") ? 85 : 80;
-  const mid = hi - 10;
+// Practice targets sit a margin above the official pass mark: AWS scaled scores are not percentages, so
+// AWS uses 80% (Foundational/Associate) or 85% (Professional/Specialty); vendors that publish a percent
+// pass mark (Palantir: 70%) use that mark + 10.
+function verdictFor(spec, pct) {
+  const level = spec && spec.level;
+  const hi = (spec && spec.passingPct) ? Math.min(100, spec.passingPct + 10)
+    : (level === "professional" || level === "specialty") ? 85 : 80;
+  const mid = (spec && spec.passingPct) ? spec.passingPct : hi - 10;
   if (pct >= hi) return { key: "ready", label: "Pass-ready", note: `${hi}%+ on first attempts is a comfortable margin.` };
   if (pct >= mid) return { key: "border", label: "Borderline", note: `Aim for ${hi}%+ before booking the exam.` };
   return { key: "work", label: "Needs work", note: `Focus on the weakest domains below, then retake.` };
+}
+
+function passMarkNote(spec) {
+  if (spec.passingPct) {
+    return `The official pass mark is ${spec.passingPct}% correct.` +
+      (spec.weightsAssumed ? " Official domain weights are not published, so this mock samples every domain equally." : "");
+  }
+  return `Percent correct is not the AWS scaled score; the official pass mark is ${spec.passingScore}/1000.`;
 }
 
 // ---------- styles ----------
@@ -371,7 +384,8 @@ async function renderSetup(extra) {
   const shortN = Math.min(SHORT_N, pool.length);
   const perDomain = {};
   docs.forEach(q => { const d = domainOf(q, setupExam, domainMap); perDomain[d] = (perDomain[d] || 0) + 1; });
-  const domOpts = `<option value="">All sections · official weights</option>` + spec.domains.filter(d => perDomain[d.code])
+  const wLabel = spec.weightsAssumed ? "equal weights (official weights not published)" : "official weights";
+  const domOpts = `<option value="">All sections · ${wLabel}</option>` + spec.domains.filter(d => perDomain[d.code])
     .map(d => `<option value="${d.code}"${d.code === setupDomain ? " selected" : ""}>${d.code} · ${esc(d.name)} (${perDomain[d.code]})</option>`).join("");
   const domName = setupDomain ? (spec.domains.find(d => d.code === setupDomain) || {}).name : "";
   const hist = loadHistory().filter(h => h.exam === setupExam).slice(-10).reverse();
@@ -382,7 +396,7 @@ async function renderSetup(extra) {
     <button class="linkbtn" data-act="exit">← Question bank</button>
     <h2>Mock Exam</h2>
     <p class="sub">${setupDomain ? `Timed, answers hidden until you submit. Only questions from ${setupDomain} · ${esc(domName)}; ones you haven't seen in earlier mock exams come first.`
-      : "Timed, answers hidden until you submit. Questions follow the official domain weights, and ones you haven't seen in earlier mock exams come first."}</p>
+      : `Timed, answers hidden until you submit. Questions follow the ${spec.weightsAssumed ? "domains equally (official weights are not published)" : "official domain weights"}, and ones you haven't seen in earlier mock exams come first.`}</p>
     <div class="panel">
       <select id="mkExam" aria-label="Certification">${opts}</select>
       <select id="mkDomain" aria-label="Section">${domOpts}</select>
@@ -398,7 +412,7 @@ async function renderSetup(extra) {
     </div>
     <div class="panel"><b>Recent attempts · ${setupExam}</b>
       ${hist.length ? `<table><tr><th>Date</th><th>Mode</th><th>Score</th><th>Result</th></tr>${hist.map(h => {
-        const pct = Math.round((h.correct / h.total) * 100); const v = verdictFor(spec.level, pct);
+        const pct = Math.round((h.correct / h.total) * 100); const v = verdictFor(spec, pct);
         return `<tr><td>${new Date(h.at).toLocaleDateString()}</td><td>${h.mode === "short" ? "Short" : "Full"}${h.domain ? " · " + esc(h.domain) : ""}</td><td>${h.correct}/${h.total} (${pct}%)</td><td class="v-${v.key}">${v.label}</td></tr>`;
       }).join("")}</table>` : `<div class="meta">No attempts yet.</div>`}
     </div></div>`;
@@ -500,7 +514,7 @@ function renderResults() {
   const spec = specs[state.exam];
   const { correct, total, dom, used } = state.summary;
   const pct = total ? Math.round((correct / total) * 100) : 0;
-  const v = verdictFor(spec.level, pct);
+  const v = verdictFor(spec, pct);
   const wrong = total - correct;
   const nflag = state.flags.length;
   root.innerHTML = `<div class="mk">
@@ -511,7 +525,7 @@ function renderResults() {
       <div class="score">${pct}%</div>
       <div class="verdict v-${v.key}">${v.label}</div>
       <div class="meta">${correct} of ${total} correct · time used ${fmtTime(used)}${state.timed ? " of " + fmtTime(state.duration) : ""} · ${esc(v.note)}</div>
-      <div class="meta">Percent correct is not the AWS scaled score; the official pass mark is ${spec.passingScore}/1000.</div>
+      <div class="meta">${esc(passMarkNote(spec))}</div>
     </div>
     <div class="panel"><b>By domain</b>
       ${spec.domains.map(d => {

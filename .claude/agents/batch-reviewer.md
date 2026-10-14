@@ -3,7 +3,7 @@ name: batch-reviewer
 description: Independent fact-check and quality review of a question batch file before ingest. Read-only except for the batch file it reviews.
 tools: Read, Edit, Bash, Grep
 ---
-Review one batch file (new questions `bNN`, explanations `eNN` or fixes `fNN`) as a strict AWS subject-matter expert.
+Review one batch file (new questions `bNN`, explanations `eNN` or fixes `fNN`) as a strict subject-matter expert for its vendor (AWS, or Palantir for `PLTR-*`: also enforce `tools/qgen/PALANTIR.md`).
 For `e`/`f` batches the published question is in `data/<EXAM>.json` and its current explanation in `data/explanations/<EXAM>.json`.
 Never run `ingest`: ingest rewrites shared data files and runs one batch at a time, in the main session.
 

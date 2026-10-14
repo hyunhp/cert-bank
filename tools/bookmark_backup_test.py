@@ -52,7 +52,7 @@ try:
     pg3.set_input_files("#bmImportFile", "/tmp/bad.json"); pg3.wait_for_timeout(300)
     check("bad file message", "could not be read" in pg3.inner_text("body"))
     # manifest reachable
-    r=pg3.request.get("http://localhost:8765/manifest.webmanifest"); check("manifest", r.ok and "AWS QBank" in r.text())
+    r=pg3.request.get("http://localhost:8765/manifest.webmanifest"); check("manifest", r.ok and "Cert QBank" in r.text())
     # encode/decode round trip for many ids
     rt=pg3.evaluate("(()=>{const ids=['Q000001','Q004044','Q000150','Q002000'];return decodeBookmarks(encodeBookmarks(new Set(ids))).sort().join()})()")
     check("roundtrip", rt=="Q000001,Q000150,Q002000,Q004044", rt)

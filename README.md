@@ -1,5 +1,20 @@
-# AWS Question Bank 
-- LINK: `https://hyunhp.github.io/aws_qbank/`
+# Certification Question Bank (cert-bank)
+- LINK: `https://hyunhp.github.io/cert-bank/` (2026-10-14 레포 이름 `aws_qbank` → `cert-bank`. 예전 `/aws_qbank/` 주소는 자동 이동되지 않음)
+
+## 기업별 카테고리 (2026-10-14)
+- 상단 탭에서 기업(AWS | Palantir)을 고른 뒤 시험을 선택. 탭 옆 숫자는 그 기업 문항 수 합계.
+- 시험 코드는 기업 간에도 겹치지 않게 유지(팔란티어는 `PLTR-` 접두어)해서 기존 `#exam=` 링크·북마크·도메인 통계는 그대로 동작. `#vendor=palantir`로 기업 탭을 바로 열 수 있음.
+- 브라우저 저장 키(`aws_qbank_*`)는 일부러 바꾸지 않음: 바꾸면 기존 북마크·모의고사 기록이 사라짐.
+- 데이터: `data/exam-specs.json`의 `vendor`, 화면 목록은 `index.html`의 `EXAMS`·`VENDORS`.
+
+## Palantir 시험 (2026-10-14, 파일럿)
+- PLTR-DE (Data Engineer – Associate): 8문항 · PLTR-AIE (AI Engineer – Associate): 8문항 (도메인별 1문항, 전 문항 상세 해설)
+- 공식 형식: 95문항 · 3시간 · 합격선 정답률 70% · 도메인 8개. 모의고사 결과는 70%를 그대로 기준으로 판정(합격권 80%+).
+- 도메인 가중치는 공식 미공개 → 8개 도메인 균등(12.5%)으로 출제하고 화면에 그렇게 표시. task 번호(T1.1 등)는 가이드의 항목을 나눈 비공식 분류.
+- 출제·검수 규칙과 확인된 공식 정보: `tools/qgen/PALANTIR.md`
+- Application Developer는 가이드 확인 후 `PLTR-APD`로 추가 예정. Specialist(실습형)는 대상 아님.
+- Palantir Technologies와 무관한 비공식 문제은행이며, 실제 시험 문항을 옮기지 않음.
+
   
 ## 현재 포함된 데이터 (2026-09-24 스냅샷)
 - AIF-C01 (AI Practitioner): 142문항
