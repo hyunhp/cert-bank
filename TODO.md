@@ -1,7 +1,7 @@
 # TODO
 
 ## Palantir (started 2026-10-14)
-State: vendor tabs live. PLTR-AIE 72 and PLTR-DE 72 (b01 pilot + b02-b09, one batch per domain each). Rules in
+State: vendor tabs live. PLTR-AIE 136 and PLTR-DE 136 (b01 pilot + b02-b17: two rounds of one batch per domain). Rules in
 `tools/qgen/PALANTIR.md`. Round 1 is first-draft: written from the exam guides, qgen-checked, NOT yet reviewed by
 batch-reviewer. Review pass (fact-check against palantir.com/docs, fix with eNN/fNN batches) before relying on them. Next:
 - Target (owner's decision 2026-10-14): ~400 questions per exam (50 per domain), written first, reviewed after.
