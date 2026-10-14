@@ -1,8 +1,9 @@
 # TODO
 
 ## Palantir (started 2026-10-14)
-State: vendor tabs live; PLTR-DE and PLTR-AIE have 8 pilot questions each (one per domain), rules in
-`tools/qgen/PALANTIR.md`. Next:
+State: vendor tabs live. PLTR-AIE 72 (b01 pilot + b02-b09, one batch per domain), PLTR-DE 8 (b01 pilot). Rules in
+`tools/qgen/PALANTIR.md`. Round 1 is first-draft: written from the exam guides, qgen-checked, NOT yet reviewed by
+batch-reviewer. Review pass (fact-check against palantir.com/docs, fix with eNN/fNN batches) before relying on them. Next:
 - P1: grow each to 190 (two mock exams, ~24 per domain), batches of 8-12 per domain, each fact-checked by
   batch-reviewer before ingest. Target scenario mix: troubleshooting 30%+, tradeoff ~20%.
 - P2: grow to 475 (five mocks), then add PLTR-APD after reading the Application Developer guide.
