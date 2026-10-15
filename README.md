@@ -8,11 +8,12 @@
 - 데이터: `data/exam-specs.json`의 `vendor`, 화면 목록은 `index.html`의 `EXAMS`·`VENDORS`.
 
 ## Palantir 시험 (2026-10-14, 파일럿)
-- PLTR-AIE (AI Engineer – Associate): 400문항 · PLTR-DE (Data Engineer – Associate): 400문항 (각 도메인별 50문항, 목표 달성). 전 문항 상세 해설. 1차 작성분은 아직 독립 검수 전(TODO 참고).
-- 공식 형식: 95문항 · 3시간 · 합격선 정답률 70% · 도메인 8개. 모의고사 결과는 70%를 그대로 기준으로 판정(합격권 80%+).
+- PLTR-AIE (AI Engineer – Associate): 400문항 · PLTR-DE (Data Engineer – Associate): 400문항 · PLTR-APD (Application Developer – Associate): 8문항(파일럿). 전 문항 상세 해설. 2026-10-15 공식 문서 대조 검수에서 4문항 수정(`tools/qgen/PALANTIR.md`).
+- 공식 형식: 95문항(APD는 85문항) · 3시간 · 합격선 정답률 70% · 도메인 8개. 모의고사 결과는 70%를 그대로 기준으로 판정(합격권 80%+).
 - 도메인 가중치는 공식 미공개 → 8개 도메인 균등(12.5%)으로 출제하고 화면에 그렇게 표시. task 번호(T1.1 등)는 가이드의 항목을 나눈 비공식 분류.
 - 출제·검수 규칙과 확인된 공식 정보: `tools/qgen/PALANTIR.md`
-- Application Developer는 가이드 확인 후 `PLTR-APD`로 추가 예정. Specialist(실습형)는 대상 아님.
+- Specialist(실습형)는 대상 아님.
+- 구 주소 `hyunhp.github.io/aws_qbank/` 복구용 리다이렉트 파일: `tools/redirect-aws_qbank/` (수동 1회 설정 필요).
 - Palantir Technologies와 무관한 비공식 문제은행이며, 실제 시험 문항을 옮기지 않음.
 
   

@@ -13,16 +13,17 @@ FAQ (learn.palantir.com/page/faqs) and Palantir's community announcement of the 
 | Current exams | Associate: Data Engineer, Application Developer (both refreshed), AI Engineer (new), live since 2026-08-03 |
 | Format | Timed, open-book, multiple choice; certificates valid for two years |
 | Data Engineer / AI Engineer | 95 questions, 3 hours, pass mark 70% correct, questions sequential, 8 domains each |
+| Application Developer | 85 questions, 3 hours, pass mark 70% correct, questions sequential, 8 domains (read 2026-10-15) |
 | Domain weights | Not published. This bank weights the 8 domains equally (`weightsAssumed` in `exam-specs.json`) |
 | Retakes | 14-day wait after a fail; 11 months before retaking an exam you passed |
 | Specialist level | Hands-on live exams in a real Foundry/AIP environment: out of scope for this bank |
 
 Not confirmed, so never state them in questions or on the site as fact: whether "sequential" forbids going
-back to earlier questions, whether open-book includes AI tools, details of Foundry Aware, and anything in the
-Application Developer guide (not added yet; read the guide before creating `PLTR-APD`).
+back to earlier questions, whether open-book includes AI tools, and details of Foundry Aware.
+All three guides were re-read on 2026-10-15: DE and AIE unchanged (95 q, 70%, no weights).
 
 ## Codes and task ids
-- `PLTR-DE` (Data Engineer – Associate), `PLTR-AIE` (AI Engineer – Associate); `PLTR-APD` reserved.
+- `PLTR-DE` (Data Engineer – Associate), `PLTR-AIE` (AI Engineer – Associate), `PLTR-APD` (Application Developer – Associate).
 - Domains D1-D8 follow the guides' order and names exactly.
 - The guides publish no task statements. Task ids (`T1.1` ...) are this bank's own split of each domain's
   bullets, recorded in `tools/qgen/tasks.json` and `data/exam-tasks.json`. They are unofficial.
@@ -46,3 +47,13 @@ Application Developer guide (not added yet; read the guide before creating `PLTR
 7. **Explanations**: the same detailed G/W/X/T style as AWS batches. `G:` may cite the guide's own principle
    ("the exam guide asks you to ...") when it is the reason an answer wins.
 8. **Review**: every batch is fact-checked by an independent reviewer against these rules before ingest.
+
+## Facts checked against palantir.com/docs (2026-10-15 review)
+- Transactions: an APPEND only adds files and **cannot modify existing files**; committing an APPEND that overwrote
+  a file fails. UPDATE may overwrite. (data-integration/datasets)
+- APPEND file syncs ingest files not yet ingested, **keyed by file path name**. (data-connection/file-based-syncs)
+- Restricted views are built on a backing dataset and **cannot be used as an input for transforms**.
+  (security/restricted-views)
+- Markings are mandatory, conjunctive and propagate through transform and analysis logic; granular policies on
+  restricted views are discretionary and do not propagate. (security/markings, security/access-control-propagation)
+Fixed after this review (f01, pinned): Q004782, Q005038, Q005136, Q005264.

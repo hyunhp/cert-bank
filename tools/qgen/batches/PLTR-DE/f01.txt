@@ -1,0 +1,91 @@
+# PLTR-DE fixes to published questions after the 2026-10-15 review against palantir.com/docs (pinned with I:)
+# Q004782, Q005038: restricted views cannot be used as transform inputs (docs: security/restricted-views).
+# Q005136, Q005264: an APPEND transaction cannot modify existing files; a commit that overwrites a file fails
+# (docs: data-integration/datasets, transaction types). APPEND file syncs key new files by path name.
+
+@ PLTR-DE D6 T6.3 applied troubleshooting
+S: A team adds a restricted view to filter a sales dataset by region. An engineer then tries to point a downstream transform at the restricted view so the pipeline produces a regional summary, and the pipeline cannot use it. What explains this, and what is the right design?
+A: The restricted view is corrupted; deleting and recreating it will allow the transform to read it as an input like any other dataset
+B: Restricted views cannot be transform inputs, since their rows depend on the reader; build from the backing dataset and expose results through views or permissions
+C: The build identity lacks the regional user attributes; adding every region's attribute to the build identity will let the transform read all the rows it needs
+D: The transform's preview cache is stale; clearing it will let the developer preview the view and then the scheduled build will also be able to read it
+K: B
+G: ## Restricted views are for readers, not pipelines
+Foundry documentation states that a restricted view is built on top of a backing dataset and **cannot be used as an input for transforms**. Pipelines are expected to be reproducible and independent of the user who runs them, which conflicts with row visibility that depends on user attributes.
+## Design
+- Pipelines read the **backing dataset** (with appropriate permissions and markings).
+- Per-audience row filtering is applied at the end, for readers: a restricted view on the published output, or object security policies on object types.
+- Mandatory controls (markings) on the backing data still propagate to derived outputs.
+Example: the regional summary is built from the full sales dataset; a restricted view on the summary shows each regional manager only their region.
+W: Restricted views are a reader-facing control and cannot feed transforms: the pipeline must build from the backing dataset and apply row filtering for readers on the published result.
+X: A=Corrupted view: nothing is broken; the platform deliberately does not accept restricted views as transform inputs, so recreating it changes nothing.
+C=Attributes on the build identity: the limitation is not about which rows the identity would see; restricted views are not valid transform inputs at all.
+D=Preview cache: caching has nothing to do with it; the view cannot be an input for any build, previewed or scheduled.
+T: Build pipelines from backing datasets; restricted views (and object security policies) filter what readers see, not what transforms read.
+V: restricted views
+I: Q004782
+
+@ PLTR-DE D6 T6.3 advanced tradeoff
+S: A restricted view is used for row-level access, but the team also needs a downstream transform to compute totals across all rows for an unrestricted aggregate dataset that everyone may see. How should this be designed?
+A: Have the transform take the restricted view as its input under the build identity, so that the totals reflect whatever rows the policy happens to allow
+B: Have every user compute the totals themselves from the rows they can see, then compare their subtotals in a shared spreadsheet
+C: Read the underlying dataset with a properly granted build identity, compute aggregates, and publish them after a disclosure review
+D: Remove the restricted view so the transform can read all rows, accepting that every user will then see all rows as well
+K: C
+G: ## Aggregates come from the backing dataset
+Foundry documentation states that a restricted view **cannot be used as an input for transforms**. Organization-wide aggregates therefore come from the underlying dataset, read by a build identity granted the access (including any markings) it needs.
+## Design
+- Transform reads the full backing dataset.
+- Output: aggregates only, checked for small-group disclosure (for example, suppress groups under a minimum size).
+- Publish without row-level restriction if the aggregate is non-sensitive; if markings propagate from the backing data, remove them only after a documented review.
+Example: company-wide headcount per department is computed from the full dataset and shared broadly; individual rows stay behind the restricted view.
+W: Full-dataset read for aggregation with a disclosure review: correct totals for everyone while row-level protection on the detail stays intact.
+X: A=Restricted view as input: not possible; restricted views cannot be used as transform inputs, because their contents depend on the reader.
+B=Users compute: each user only sees a subset, so no user can produce the organization-wide total, and spreadsheets are ungoverned.
+D=Remove the view: every user would then see every row, breaking the row-level protection the view exists to provide.
+T: Compute organization-wide aggregates from the backing dataset with a granted build identity; restricted views cannot feed transforms.
+V: restricted views, projects
+I: Q005038
+
+@ PLTR-DE D3 T3.2 applied troubleshooting
+S: An hourly transform is meant to add a new batch of rows to its output with APPEND transactions. Since a refactor, every run fails at commit with an error about modifying files that already exist in the dataset view. What is the cause and the fix?
+A: The output dataset has reached a storage quota, and old transactions must be deleted before any further APPEND can be committed
+B: The refactor writes the same output file name each run; an APPEND cannot modify existing files, so write a unique file per run
+C: APPEND transactions can only be committed once per day, so the schedule must be changed from hourly to daily to stop the commit failures
+D: The schema of the output changed, and any schema change makes every later APPEND fail until the dataset is deleted and recreated
+K: B
+G: ## APPEND cannot overwrite
+Foundry documentation defines an APPEND transaction as adding new files to the current dataset view and states that it **cannot modify existing files**; if an APPEND overwrites existing files, committing the transaction fails. An UPDATE transaction is the type that may overwrite existing files.
+## Fix
+- Write a uniquely named file per run (for example, including the run timestamp), so each APPEND only adds files.
+- Use UPDATE only if replacing files is really intended, knowing that downstream incremental transforms will fall back to a full recompute.
+Example: the refactor hard-coded `output.parquet`; changing it to `part-<run_id>.parquet` makes every hourly APPEND commit again.
+W: The refactored writer overwrites an existing file, which an APPEND cannot do: unique file names restore valid APPEND commits, and UPDATE remains a deliberate choice with known downstream effects.
+X: A=Storage quota: the error is about modifying existing files, which is exactly the APPEND rule, not a capacity limit.
+C=Once per day: there is no such limit; datasets routinely receive many APPEND transactions per day.
+D=Schema change: a schema change does not make APPEND commits fail with a file-modification error, and deleting the dataset destroys history.
+T: APPEND transactions only add files; overwriting an existing file requires UPDATE and otherwise fails at commit.
+V: transactions
+I: Q005136
+
+@ PLTR-DE D3 T3.2 applied troubleshooting
+S: A downstream dataset shows twice as many rows as expected after a run. The input is fed by an incremental file sync with APPEND, which ingests files not seen before, keyed by file path. The source re-delivered yesterday's export under a new, timestamped file name. What happened and what should be done?
+A: The platform automatically converted the APPEND into an UPDATE because the content matched, which is a platform defect to report to support
+B: A new path counts as a new file, so the same content was appended twice; fix the re-delivery or naming, and deduplicate by key with a uniqueness expectation
+C: The downstream transform has a bug that duplicates every row, unrelated to the input, and should be rewritten from scratch
+D: Row duplication is normal after any APPEND, so every consumer should always deduplicate the data themselves
+K: B
+G: ## APPEND file syncs key on the file path
+Foundry's incremental file sync with APPEND ingests the files that have not yet been ingested, **keyed by file path name**, and commits them as an APPEND transaction. A file with a new name is new to the sync even if its content is identical to an earlier file, so a re-delivery under a different name is ingested again.
+## Fix
+- Source side: stop re-delivering, or re-deliver under the same path so it is not re-ingested.
+- Repair: remove the duplicate file's rows (or rebuild from a clean state).
+- Guard: deduplicate by business key downstream and add a uniqueness expectation so a repeat fails visibly.
+Example: `export_2026-10-14T0200.csv` and `export_2026-10-14T0915.csv` hold the same rows; both were appended; a key-based dedupe and an expectation prevent recurrence.
+W: A re-delivered file with a new path was correctly treated as new by an APPEND sync keyed on file path: the data doubled, and the fix is at the delivery plus a key-based guard downstream.
+X: A=Automatic conversion: APPEND never converts to UPDATE; the transaction history shows two files appended.
+C=Downstream bug: the doubling is already present in the input; the transform faithfully processed what it received.
+D=Normal after APPEND: APPEND adds only new files; duplication here came from duplicated delivery, which is a defect to fix and guard against.
+T: APPEND file syncs treat each new path as new data; guard against re-delivered content with key-based deduplication and uniqueness expectations.
+V: transactions, Data Connection
+I: Q005264

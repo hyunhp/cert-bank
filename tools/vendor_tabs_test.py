@@ -54,6 +54,8 @@ with sync_playwright() as p:
     check("#exam= link sets vendor", pg.eval_on_selector(".vtab[aria-selected='true']", "e => e.dataset.vendor") == "palantir")
     check("#exam= link selects exam", pg.eval_on_selector("#chipRow .chip.active", "e => e.dataset.code") == "PLTR-DE")
 
+    pg.goto(BASE + "#exam=PLTR-APD"); pg.reload(); pg.wait_for_selector(".qcard")
+    check("PLTR-APD chip selectable", pg.eval_on_selector("#chipRow .chip.active", "e => e.dataset.code") == "PLTR-APD")
     pg.goto(BASE + "#mock=PLTR-AIE"); pg.reload(); pg.wait_for_selector("#mockRoot .mk")
     setup = pg.inner_text("#mockRoot")
     check("mock setup says equal weights", "official weights are not published" in setup, setup[:300])

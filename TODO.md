@@ -1,15 +1,19 @@
 # TODO
 
 ## Palantir (started 2026-10-14)
-State: vendor tabs live. PLTR-AIE 400 and PLTR-DE 400 (b01-b50 each: six rounds + capstone b50). Target reached; next is the independent review pass. Rules in
-`tools/qgen/PALANTIR.md`. Round 1 is first-draft: written from the exam guides, qgen-checked, NOT yet reviewed by
-batch-reviewer. Review pass (fact-check against palantir.com/docs, fix with eNN/fNN batches) before relying on them. Next:
-- Target (owner's decision 2026-10-14): ~400 questions per exam (50 per domain), written first, reviewed after.
-  Batches of 8 per domain per round; `qgen report` target stays 475 (5 mocks) but 400 is the agreed stop.
-  Target scenario mix: troubleshooting 30%+, tradeoff ~20%. Then PLTR-APD after reading the App Developer guide.
-- Re-check the guides (question count, pass mark, published weights) before each phase; if weights appear,
-  replace the equal weights and drop `weightsAssumed`.
-- Pages: the old /aws_qbank/ address no longer works; optional redirect repo named aws_qbank.
+State 2026-10-15: PLTR-AIE 400, PLTR-DE 400 (b01-b50 each), PLTR-APD 8 (pilot b01). Rules and checked facts in
+`tools/qgen/PALANTIR.md`.
+Done 2026-10-15:
+- Guides re-read: DE/AIE unchanged (95 q, 70%, no weights); APD guide read (85 q, 3 h, 70%, 8 domains), exam added.
+- Doc review of the recurring platform claims (transactions, file syncs, restricted views, markings). Four DE
+  questions contradicted the docs and were rewritten in `PLTR-DE/f01.txt` (pinned ids).
+- Redirect files for the old Pages address in `tools/redirect-aws_qbank/` (token cannot create repos).
+Next:
+- PLTR-APD to ~400 (rounds of one 8-question batch per domain, as for DE/AIE).
+- Owner step: create the `aws_qbank` repo and upload the redirect files (see that folder's README).
+- Deeper per-question review (batch-reviewer) is still worth doing on a sample of each domain; the 2026-10-15
+  pass covered claims that recur across many questions, not every explanation line.
+- Re-check the guides before each phase; if weights appear, replace the equal weights and drop `weightsAssumed`.
 
 State on 2026-09-30: 4,502+ questions in 12 exams, all with detailed explanations (`data/explanations/<EXAM>.json`).
 Done the same day (see git log): bookmarks load only needed exams, explanations split from exam files, section
