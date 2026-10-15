@@ -7,10 +7,9 @@ Done 2026-10-15:
 - Guides re-read: DE/AIE unchanged (95 q, 70%, no weights); APD guide read (85 q, 3 h, 70%, 8 domains), exam added.
 - Doc review of the recurring platform claims (transactions, file syncs, restricted views, markings). Four DE
   questions contradicted the docs and were rewritten in `PLTR-DE/f01.txt` (pinned ids).
-- Redirect files for the old Pages address in `tools/redirect-aws_qbank/` (token cannot create repos).
+- Old Pages address `/aws_qbank/`: owner decided not to redirect (2026-10-15); `/cert-bank/` is the only address.
 Next:
 - PLTR-APD to ~400 (rounds of one 8-question batch per domain, as for DE/AIE).
-- Owner step: create the `aws_qbank` repo and upload the redirect files (see that folder's README).
 - Deeper per-question review (batch-reviewer) is still worth doing on a sample of each domain; the 2026-10-15
   pass covered claims that recur across many questions, not every explanation line.
 - Re-check the guides before each phase; if weights appear, replace the equal weights and drop `weightsAssumed`.

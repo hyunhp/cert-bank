@@ -13,7 +13,6 @@
 - 도메인 가중치는 공식 미공개 → 8개 도메인 균등(12.5%)으로 출제하고 화면에 그렇게 표시. task 번호(T1.1 등)는 가이드의 항목을 나눈 비공식 분류.
 - 출제·검수 규칙과 확인된 공식 정보: `tools/qgen/PALANTIR.md`
 - Specialist(실습형)는 대상 아님.
-- 구 주소 `hyunhp.github.io/aws_qbank/` 복구용 리다이렉트 파일: `tools/redirect-aws_qbank/` (수동 1회 설정 필요).
 - Palantir Technologies와 무관한 비공식 문제은행이며, 실제 시험 문항을 옮기지 않음.
 
   
