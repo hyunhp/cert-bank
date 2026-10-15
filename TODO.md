@@ -1,7 +1,7 @@
 # TODO
 
 ## Palantir (started 2026-10-14)
-State 2026-10-15: PLTR-AIE 400, PLTR-DE 400 (b01-b50 each), PLTR-APD 72 (pilot b01 + round 1 b02-b09). Rules and checked facts in
+State 2026-10-15: PLTR-AIE 400, PLTR-DE 400 (b01-b50 each), PLTR-APD 136 (pilot b01 + rounds 1-2, b02-b17). Rules and checked facts in
 `tools/qgen/PALANTIR.md`.
 Done 2026-10-15:
 - Guides re-read: DE/AIE unchanged (95 q, 70%, no weights); APD guide read (85 q, 3 h, 70%, 8 domains), exam added.
