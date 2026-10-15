@@ -1,7 +1,7 @@
 # TODO
 
 ## Palantir (started 2026-10-14)
-State 2026-10-15: PLTR-AIE 400, PLTR-DE 400 (b01-b50 each), PLTR-APD 328 (pilot b01 + rounds 1-5, b02-b41). Rules and checked facts in
+State 2026-10-15: PLTR-AIE 400, PLTR-DE 400 (b01-b50 each), PLTR-APD 400 (b01-b50: pilot + six rounds + capstone). Rules and checked facts in
 `tools/qgen/PALANTIR.md`.
 Done 2026-10-15:
 - Guides re-read: DE/AIE unchanged (95 q, 70%, no weights); APD guide read (85 q, 3 h, 70%, 8 domains), exam added.
@@ -9,7 +9,6 @@ Done 2026-10-15:
   questions contradicted the docs and were rewritten in `PLTR-DE/f01.txt` (pinned ids).
 - Old Pages address `/aws_qbank/`: owner decided not to redirect (2026-10-15); `/cert-bank/` is the only address.
 Next:
-- PLTR-APD to ~400 (rounds of one 8-question batch per domain, as for DE/AIE).
 - Deeper per-question review (batch-reviewer) is still worth doing on a sample of each domain; the 2026-10-15
   pass covered claims that recur across many questions, not every explanation line.
 - Re-check the guides before each phase; if weights appear, replace the equal weights and drop `weightsAssumed`.
