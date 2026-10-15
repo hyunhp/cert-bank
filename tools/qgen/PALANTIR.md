@@ -57,3 +57,19 @@ All three guides were re-read on 2026-10-15: DE and AIE unchanged (95 q, 70%, no
 - Markings are mandatory, conjunctive and propagate through transform and analysis logic; granular policies on
   restricted views are discretionary and do not propagate. (security/markings, security/access-control-propagation)
 Fixed after this review (f01, pinned): Q004782, Q005038, Q005136, Q005264.
+
+## Facts checked against palantir.com/docs (2026-10-16 review, second pass)
+- Automate: condition evaluation and Action/Logic effects run as the automation OWNER in every scoping mode;
+  notification effects use each recipient's permissions; saving an automation can transfer ownership; an automation
+  owned by a third-party application runs as its service user. Project scope changes run-history visibility and
+  requires resources imported into the project; it does not change whose permissions are used.
+  (automate/permissions, automate/concept-security-permissions, automate/history-visibility-and-scope)
+- Automate retries are configurable on Action and Logic effects; fallback effects exist; the order of multiple
+  Action effects is not guaranteed. (automate/retries, automate/effect-actions)
+- Object and property security policies give row-, column- and cell-level control in the Ontology and are
+  recommended over restricted views for most Ontology use cases. Restricted views filter rows only (no column-level
+  policies). (object-permissioning/object-security-policies, object-permissioning/managing-object-security)
+- Virtual-table-backed objects: no identity federation with the source; user-specific differences come from
+  Foundry-side policies.
+Fixed in this pass (pinned): PLTR-DE f02 Q004780, Q005287, Q005389; PLTR-APD f01 Q005841, Q005632.
+Not verified in docs, kept because the exam guides name them: Workshop "lazy loading" wording, Automate "mute".

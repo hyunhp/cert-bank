@@ -8,7 +8,7 @@
 - 데이터: `data/exam-specs.json`의 `vendor`, 화면 목록은 `index.html`의 `EXAMS`·`VENDORS`.
 
 ## Palantir 시험 (2026-10-14, 파일럿)
-- PLTR-AIE (AI Engineer – Associate) · PLTR-DE (Data Engineer – Associate) · PLTR-APD (Application Developer – Associate): 각 400문항 (도메인별 50, 목표 달성). 전 문항 상세 해설. 2026-10-15 공식 문서 대조 검수에서 4문항 수정(`tools/qgen/PALANTIR.md`).
+- PLTR-AIE (AI Engineer – Associate) · PLTR-DE (Data Engineer – Associate) · PLTR-APD (Application Developer – Associate): 각 400문항 (도메인별 50, 목표 달성). 전 문항 상세 해설. 2026-10-15~16 공식 문서 대조 검수에서 9문항 수정(`tools/qgen/PALANTIR.md`).
 - 공식 형식: 95문항(APD는 85문항) · 3시간 · 합격선 정답률 70% · 도메인 8개. 모의고사 결과는 70%를 그대로 기준으로 판정(합격권 80%+).
 - 도메인 가중치는 공식 미공개 → 8개 도메인 균등(12.5%)으로 출제하고 화면에 그렇게 표시. task 번호(T1.1 등)는 가이드의 항목을 나눈 비공식 분류.
 - 출제·검수 규칙과 확인된 공식 정보: `tools/qgen/PALANTIR.md`

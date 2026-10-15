@@ -9,8 +9,10 @@ Done 2026-10-15:
   questions contradicted the docs and were rewritten in `PLTR-DE/f01.txt` (pinned ids).
 - Old Pages address `/aws_qbank/`: owner decided not to redirect (2026-10-15); `/cert-bank/` is the only address.
 Next:
-- Deeper per-question review (batch-reviewer) is still worth doing on a sample of each domain; the 2026-10-15
-  pass covered claims that recur across many questions, not every explanation line.
+- Doc review, second pass done 2026-10-16 (Automate identity/scoping/retries, object and property security
+  policies, restricted-view column limits, virtual tables): 5 more questions fixed (PLTR-DE f02, PLTR-APD f01).
+  Remaining: line-by-line review of every explanation is still open; prioritise D6/D8 of each exam (security and
+  automation claims changed most often in review so far).
 - Re-check the guides before each phase; if weights appear, replace the equal weights and drop `weightsAssumed`.
 
 State on 2026-09-30: 4,502+ questions in 12 exams, all with detailed explanations (`data/explanations/<EXAM>.json`).
