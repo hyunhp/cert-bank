@@ -11,8 +11,9 @@ Done 2026-10-15:
 Next:
 - Doc review, second pass done 2026-10-16 (Automate identity/scoping/retries, object and property security
   policies, restricted-view column limits, virtual tables): 5 more questions fixed (PLTR-DE f02, PLTR-APD f01).
-  Remaining: line-by-line review of every explanation is still open; prioritise D6/D8 of each exam (security and
-  automation claims changed most often in review so far).
+- D6/D8 precise review done 2026-10-16 (165 control-naming questions, NOT stems, AI FDE items): 3 more fixed.
+  Total 12 questions corrected by doc review. Palantir work is closed; reopen only when a guide changes or a
+  learner reports an error (record the doc URL with the fix, as in PALANTIR.md).
 - Re-check the guides before each phase; if weights appear, replace the equal weights and drop `weightsAssumed`.
 
 State on 2026-09-30: 4,502+ questions in 12 exams, all with detailed explanations (`data/explanations/<EXAM>.json`).

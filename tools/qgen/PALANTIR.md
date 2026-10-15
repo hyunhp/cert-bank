@@ -73,3 +73,15 @@ Fixed after this review (f01, pinned): Q004782, Q005038, Q005136, Q005264.
   Foundry-side policies.
 Fixed in this pass (pinned): PLTR-DE f02 Q004780, Q005287, Q005389; PLTR-APD f01 Q005841, Q005632.
 Not verified in docs, kept because the exam guides name them: Workshop "lazy loading" wording, Automate "mute".
+
+## D6/D8 precise review (2026-10-16, closing pass)
+Scope: every D6 and D8 question of all three exams whose correct answer names a platform control (165 of 300),
+plus every NOT-style stem and every AI FDE question. Checked against palantir.com/docs:
+- Compute-module Functions can run with application permissions (a third-party app's service user).
+  (compute-modules/execution-modes)
+- AI FDE acts in the user's own session (no service account) and needs user consent for writes.
+  (ai-fde/security-and-governance)
+- Automate: multiple action effects have no guaranteed order (automate/effect-actions).
+Fixed (pinned): PLTR-APD f02 Q005585 (service-identity execution wording), PLTR-AIE f01 Q004973 (no reliance on
+engine ordering), PLTR-DE f03 Q005163 (ambiguous NOT stem: colleague now already holds Viewer).
+Total fixed by doc review: 12 questions (DE 8, APD 3, AIE 1).
