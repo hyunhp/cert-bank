@@ -1,7 +1,7 @@
 # TODO
 
 ## Palantir (started 2026-10-14)
-State: vendor tabs live. PLTR-AIE 400 (b01-b50: six rounds + capstone b50, target reached) and PLTR-DE 328 (b01-b41, five rounds). Rules in
+State: vendor tabs live. PLTR-AIE 400 and PLTR-DE 400 (b01-b50 each: six rounds + capstone b50). Target reached; next is the independent review pass. Rules in
 `tools/qgen/PALANTIR.md`. Round 1 is first-draft: written from the exam guides, qgen-checked, NOT yet reviewed by
 batch-reviewer. Review pass (fact-check against palantir.com/docs, fix with eNN/fNN batches) before relying on them. Next:
 - Target (owner's decision 2026-10-14): ~400 questions per exam (50 per domain), written first, reviewed after.
