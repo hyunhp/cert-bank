@@ -1,5 +1,5 @@
 # Certification Question Bank (cert-bank)
-- LINK: `https://hyunhp.github.io/cert-bank/` (2026-10-14 레포 이름 `aws_qbank` → `cert-bank`. 예전 `/aws_qbank/` 주소는 자동 이동되지 않음)
+- LINK: [https://hyunhp.github.io/cert-bank/](https://hyunhp.github.io/cert-bank/) (2026-10-14 레포 이름 `aws_qbank` → `cert-bank`. 예전 `/aws_qbank/` 주소는 자동 이동되지 않음)
 
 ## 기업별 카테고리 (2026-10-14)
 - 상단 탭에서 기업(AWS | Palantir)을 고른 뒤 시험을 선택. 탭 옆 숫자는 그 기업 문항 수 합계.
