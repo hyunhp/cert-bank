@@ -2,7 +2,7 @@
 // URL: #exam=SAA-C03&day=3. Progress (studied days, last day opened) lives in StudyStore.
 "use strict";
 
-// [code, name, level], grouped by AWS certification level (the tabs) in display order.
+// [code, name, level, vendor] in display order: vendor tabs, then level segments, then exam chips.
 const STUDY_EXAMS = [
   ["CLF-C02", "Cloud Practitioner", "foundational"], ["AIF-C01", "AI Practitioner", "foundational"],
   ["AIB-C01", "AI Business Strategist", "foundational"],
@@ -12,7 +12,12 @@ const STUDY_EXAMS = [
   ["SAP-C02", "Solutions Architect – Professional", "professional"], ["DOP-C02", "DevOps Engineer – Professional", "professional"],
   ["AIP-C01", "Generative AI Developer – Professional", "professional"],
   ["ANS-C01", "Advanced Networking – Specialty", "specialty"], ["SCS-C03", "Security – Specialty", "specialty"],
-];
+  ["PLTR-DE", "Data Engineer – Associate", "associate", "palantir"], ["PLTR-AIE", "AI Engineer – Associate", "associate", "palantir"],
+  ["PLTR-APD", "Application Developer – Associate", "associate", "palantir"],
+].map(([code, name, level, vendor]) => [code, name, level, vendor || "aws"]);
+const VENDORS = [["aws", "AWS"], ["palantir", "Palantir"]];
+const vendorOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[3];
+const shortName = name => name.replace(/ – (Associate|Professional|Specialty)$/, "");
 const LEVELS = [["foundational", "Foundational"], ["associate", "Associate"], ["professional", "Professional"], ["specialty", "Specialty"]];
 const levelOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[2];
 // Exams with a published guide (listed in exams-index.json); all of them if the index is missing.
@@ -62,7 +67,7 @@ let specs = null;       // data/exam-specs.json (domain names)
 let glossary = null;    // data/glossary.json: {terms:[{id, term, full, match, en, ko, exams}]}
 let glossaryReady = Promise.resolve();
 const guides = {};      // exam -> {exam, days}
-let current = { exam: null, day: 1, level: null };   // level: the tab picked, if not the current exam's
+let current = { exam: null, day: 1, vendor: null, level: null };   // vendor/level: what was picked, if not the current exam's
 
 const $ = sel => document.querySelector(sel);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -137,12 +142,21 @@ function domainName(exam, code) {
 }
 
 function renderExamRow() {
-  const exams = available();
-  const level = current.level || levelOf(current.exam) || exams.length && exams[0][2];
-  $("#levelRow").innerHTML = LEVELS.filter(([l]) => exams.some(e => e[2] === l)).map(([l, label]) =>
-    `<button class="ltab" role="tab" aria-selected="${l === level}" data-level="${l}">${label}<span class="cnt">${exams.filter(e => e[2] === l).length}</span></button>`).join("");
+  const all = available();
+  const vendor = current.vendor || vendorOf(current.exam) || (all[0] || [])[3];
+  const exams = all.filter(e => e[3] === vendor);
+  const levels = LEVELS.filter(([l]) => exams.some(e => e[2] === l));
+  const level = current.level && levels.some(([l]) => l === current.level) ? current.level
+    : vendorOf(current.exam) === vendor ? levelOf(current.exam) : (levels[0] || [])[0];
+  const vendors = VENDORS.filter(([v]) => all.some(e => e[3] === v));
+  $("#vendorRow").hidden = vendors.length < 2;
+  $("#vendorRow").innerHTML = vendors.map(([v, label]) =>
+    `<button class="vtab" role="tab" aria-selected="${v === vendor}" data-vendor="${v}">${label}<span class="cnt">${all.filter(e => e[3] === v).length}</span></button>`).join("");
+  $("#levelRow").hidden = levels.length < 2;
+  $("#levelRow").innerHTML = levels.map(([l, label]) =>
+    `<button class="lseg" aria-pressed="${l === level}" data-level="${l}">${label}<span class="cnt">${exams.filter(e => e[2] === l).length}</span></button>`).join("");
   $("#examRow").innerHTML = exams.filter(e => e[2] === level).map(([code, name]) =>
-    `<button class="chip${code === current.exam ? " active" : ""}" data-exam="${code}" title="${esc(name)}">${code}<span class="nm">${esc(name)}</span></button>`).join("");
+    `<button class="chip${code === current.exam ? " active" : ""}" data-exam="${code}" title="${esc(name)}">${code}<span class="nm">${esc(shortName(name))}</span></button>`).join("");
 }
 
 function dayListHTML(guide, progress) {
@@ -217,7 +231,7 @@ function answer(qEl, picked) {
 async function show(exam, day) {
   hideTerm();
   current.exam = exam;
-  current.level = null;
+  current.vendor = current.level = null;
   renderExamRow();
   $("#main").innerHTML = `<div class="loading">Loading ${exam}…</div>`;
   let guide;
@@ -287,6 +301,7 @@ document.addEventListener("click", e => {
   if (!t) return;
   if (t.classList.contains("term")) return pop.btn === t && pop.pinned ? hideTerm() : showTerm(t, true);
   if (t.dataset.exam) return go(t.dataset.exam, null);
+  if (t.dataset.vendor) { current.vendor = t.dataset.vendor; current.level = null; return renderExamRow(); }
   if (t.dataset.level) { current.level = t.dataset.level; return renderExamRow(); }
   if (t.id === "prevBtn") return go(current.exam, current.day - 1);
   if (t.id === "nextBtn") return go(current.exam, current.day + 1);
