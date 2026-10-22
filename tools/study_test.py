@@ -38,6 +38,28 @@ for f in files:
     check(f"{f.stem} content", all(d["title"] and d["concepts"] and d["examPoints"] and d["recap"] for d in days))
 saa = json.load(open(pathlib.Path(ROOT, "data", "study", "SAA-C03.json"), encoding="utf-8"))
 
+# Glossary: unique ids, short definitions, every match form really appears (outside quiz text)
+# in each listed exam, and no form belongs to two terms in the same exam.
+import re
+gloss = json.load(open(pathlib.Path(ROOT, "data", "glossary.json"), encoding="utf-8"))["terms"]
+marked = {f.stem: "\n".join([c["body"] for d in json.load(open(f, encoding="utf-8"))["days"] for c in d["concepts"]] +
+                            [p for d in json.load(open(f, encoding="utf-8"))["days"] for p in d["examPoints"] + [d["recap"]]])
+          for f in files}
+def occurs(m, exam): return re.search(r"(?<![\w-])" + re.escape(m) + r"(?![\w-])", marked[exam]) is not None
+check("glossary ids unique", len({t["id"] for t in gloss}) == len(gloss))
+check("glossary fields", all(t["term"] and t["match"] and t["en"] and t["ko"] and t["exams"] for t in gloss))
+check("glossary en short", all(len(t["en"].split()) <= 45 for t in gloss), [t["term"] for t in gloss if len(t["en"].split()) > 45])
+check("glossary ko short", all(len(t["ko"]) <= 120 for t in gloss), [t["term"] for t in gloss if len(t["ko"]) > 120])
+check("glossary exams appear", all(any(occurs(m, e) for m in t["match"]) for t in gloss for e in t["exams"]),
+      [(t["term"], e) for t in gloss for e in t["exams"] if not any(occurs(m, e) for m in t["match"])])
+owner = {}
+for t in gloss:
+    for e in t["exams"]:
+        for m in t["match"]:
+            check(f"glossary form '{m}' has one owner in {e}", owner.setdefault((e, m), t["id"]) == t["id"])
+per_exam = {e: sum(e in t["exams"] for t in gloss) for e in marked}
+check("glossary stays selective (<= 45 per exam)", max(per_exam.values()) <= 45, per_exam)
+
 with sync_playwright() as p:
     b = p.chromium.launch()
     pg = b.new_context(viewport={"width": 390, "height": 844}).new_page()
@@ -90,6 +112,28 @@ with sync_playwright() as p:
     pg.goto(BASE + "study.html#exam=SAA-C03&day=999"); pg.reload(); pg.wait_for_selector(".daytitle")
     check("day clamps to last", pg.evaluate("location.hash") == f"#exam=SAA-C03&day={len(saa['days'])}")
     check("final day links whole exam", pg.get_attribute(".qblink", "href") == "./#exam=SAA-C03")
+
+    # Term popovers: each term marked at most once per day, never inside quiz text; tap pins the
+    # popover with both languages; Escape and clicking elsewhere close it.
+    pg.goto(BASE + "study.html#exam=SAA-C03&day=3"); pg.reload(); pg.wait_for_selector(".daytitle")
+    ids = pg.eval_on_selector_all(".term", "els => els.map(e => e.dataset.term)")
+    check("terms marked", len(ids) > 0, ids)
+    check("each term once per day", len(ids) == len(set(ids)), ids)
+    check("no terms in quiz", pg.locator(".quiz-q .term").count() == 0)
+    t0 = next(t for t in gloss if t["id"] == ids[0])
+    pg.locator(".term").first.click()
+    pop = pg.inner_text("#termPop")
+    check("popover shows term, en and ko", t0["term"] in pop and t0["en"][:30] in pop and t0["ko"][:10] in pop, pop)
+    check("popover marks expanded", pg.get_attribute(".term >> nth=0", "aria-expanded") == "true")
+    box = pg.eval_on_selector("#termPop", "e => { const r = e.getBoundingClientRect(); return [r.left, r.right, innerWidth]; }")
+    check("popover inside viewport", box[0] >= 0 and box[1] <= box[2], box)
+    pg.keyboard.press("Escape")
+    check("escape closes popover", not pg.is_visible("#termPop"))
+    pg.locator(".term").first.click(); pg.click(".daytitle")
+    check("outside click closes popover", not pg.is_visible("#termPop"))
+    pg.goto(BASE + "study.html#exam=AIB-C01&day=1"); pg.wait_for_selector(".daytitle")
+    other = pg.eval_on_selector_all(".term", "els => els.map(e => e.dataset.term)")
+    check("terms limited to their exams", all("AIB-C01" in next(t for t in gloss if t["id"] == i)["exams"] for i in other), other)
 
     for code in ["SAP-C02", "AIF-C01"]:
         pg.goto(BASE + f"study.html#exam={code}&day=1"); pg.wait_for_selector(".daytitle")
