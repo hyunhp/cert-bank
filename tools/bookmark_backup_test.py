@@ -17,6 +17,13 @@ try:
     pg.on("pageerror", lambda e: errs.append(str(e)))
     pg.goto("http://localhost:8765/#exam=SAA-C03"); pg.wait_for_selector(".qcard")
     check("tools hidden in exam view", not pg.is_visible("#bmTools"))
+    # bottom-of-card bookmark button mirrors the top star
+    card=pg.locator(".qcard").first
+    card.locator(".bookmark-foot").click()
+    check("bottom button bookmarks", card.locator(".bookmark-btn").inner_text()=="★" and card.locator(".bookmark-foot").inner_text()=="★ Bookmarked")
+    check("bottom button saved", card.get_attribute("data-qid") in pg.evaluate("JSON.parse(localStorage.getItem('aws_qbank_bookmarks_v1'))"))
+    card.locator(".bookmark-btn").click()
+    check("top star clears bottom button", card.locator(".bookmark-foot").inner_text()=="☆ Bookmark" and pg.evaluate("JSON.parse(localStorage.getItem('aws_qbank_bookmarks_v1')||'[]').length")==0)
     btns=pg.query_selector_all(".bookmark-btn")[:3]
     ids=[x.get_attribute("data-qid") for x in btns]
     for x in btns: x.click()
