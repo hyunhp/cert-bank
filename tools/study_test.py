@@ -86,7 +86,7 @@ with sync_playwright() as p:
     check("domain badge", pg.inner_text(".eyebrow .dbadge") == saa["days"][2]["domain"])
     check("concepts rendered", pg.locator(".concept").count() == len(saa["days"][2]["concepts"]))
     href = pg.get_attribute(".qblink", "href")
-    check("practice link filters domain", href == f"./#exam=SAA-C03&d={saa['days'][2]['domain']}", href)
+    check("practice link filters domain", href == f"./#exam=SAA-C03&d={saa['days'][2]['domain']}&study=3", href)
 
     pg.click("#nextBtn"); pg.wait_for_function("location.hash.endsWith('day=4')")
     pg.wait_for_function(f"document.querySelector('.daytitle').textContent === {json.dumps(saa['days'][3]['title'])}")
@@ -123,7 +123,7 @@ with sync_playwright() as p:
     check("studied persists", pg.get_attribute("#doneBtn", "aria-pressed") == "true")
     pg.goto(BASE + "study.html#exam=SAA-C03&day=999"); pg.reload(); pg.wait_for_selector(".daytitle")
     check("day clamps to last", pg.evaluate("location.hash") == f"#exam=SAA-C03&day={len(saa['days'])}")
-    check("final day links whole exam", pg.get_attribute(".qblink", "href") == "./#exam=SAA-C03")
+    check("final day links whole exam", pg.get_attribute(".qblink", "href") == f"./#exam=SAA-C03&study={len(saa['days'])}")
 
     # Term popovers: each term marked at most once per day, never inside quiz text; tap pins the
     # popover with both languages; Escape and clicking elsewhere close it.
@@ -183,6 +183,22 @@ with sync_playwright() as p:
     h = hashlib.sha1(pathlib.Path(ROOT, "js", "study.js").read_bytes()).hexdigest()[:10]
     check("study.js version stamp is current (run tools/stamp_version.py)",
           f'js/study.js?v={h}"' in open(pathlib.Path(ROOT, "study.html"), encoding="utf-8").read())
+
+    # Practice link -> question bank offers the way back to that day (header pill and exam bar), kept on reload.
+    pg.goto(BASE + "study.html#exam=SAA-C03&day=3"); pg.reload(); pg.wait_for_selector(".qblink")
+    pg.click(".qblink"); pg.wait_for_selector(".qcard")
+    check("bank: back pill to day 3", pg.is_visible("#studyBack") and pg.get_attribute("#studyBack", "href") == "study.html#exam=SAA-C03&day=3"
+          and "Day 3" in pg.inner_text("#studyBack") and not pg.is_visible(".studylink"), pg.inner_text("header.top"))
+    check("bank: exam bar back button", pg.get_attribute("#examBarStudy", "href") == "study.html#exam=SAA-C03&day=3"
+          and pg.inner_text("#examBarStudy") == "← Day 3")
+    check("bank: domain filter kept", "d=" + saa["days"][2]["domain"] in pg.evaluate("location.hash"), pg.evaluate("location.hash"))
+    pg.reload(); pg.wait_for_selector(".qcard")
+    check("bank: way back survives reload", pg.is_visible("#studyBack"))
+    pg.click("#studyBack"); pg.wait_for_selector(".daytitle")
+    check("back pill returns to the same day", pg.inner_text(".daytitle") == saa["days"][2]["title"])
+    pg2 = b.new_context(viewport={"width": 390, "height": 844}).new_page()
+    pg2.goto(BASE + "#exam=SAA-C03"); pg2.wait_for_selector(".qcard")
+    check("bank without study link: no back pill", not pg2.is_visible("#studyBack") and pg2.is_visible(".studylink"))
 
     pg.goto(BASE); pg.wait_for_selector(".qcard")
     check("question bank links to study guide", pg.get_attribute(".studylink", "href") == "study.html")

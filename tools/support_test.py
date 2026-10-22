@@ -85,8 +85,8 @@ with sync_playwright() as p:
 
     # Header pills share one size on every page (and the support page's language toggle matches them).
     for url in ["", "study.html", "support.html"]:
-        pg.goto(BASE + url); pg.wait_for_selector(".toplinks .pill")
-        hs = pg.eval_on_selector_all(".toplinks .pill, .langseg", "els => els.map(e => Math.round(e.getBoundingClientRect().height))")
+        pg.goto(BASE + url); pg.wait_for_selector(".toplinks .pill:not([hidden])")
+        hs = pg.eval_on_selector_all(".toplinks .pill:not([hidden]), .langseg", "els => els.map(e => Math.round(e.getBoundingClientRect().height))")
         check(f"{url or 'index'}: header pills same height", len(hs) >= 2 and len(set(hs)) == 1, hs)
     check("no page errors", not errs, errs)
     b.close()
