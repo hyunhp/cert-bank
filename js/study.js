@@ -2,17 +2,24 @@
 // URL: #exam=SAA-C03&day=3. Progress (studied days, last day opened) lives in StudyStore.
 "use strict";
 
+// [code, name, level], grouped by AWS certification level (the tabs) in display order.
 const STUDY_EXAMS = [
-  ["AIF-C01", "AI Practitioner"], ["AIB-C01", "AI Business Strategist"],
-  ["DEA-C01", "Data Engineer – Associate"], ["SAA-C03", "Solutions Architect – Associate"],
-  ["DVA-C02", "Developer – Associate"], ["SOA-C03", "CloudOps Engineer – Associate"],
-  ["MLA-C01", "Machine Learning Engineer – Associate"], ["SAP-C02", "Solutions Architect – Professional"],
-  ["DOP-C02", "DevOps Engineer – Professional"], ["AIP-C01", "Generative AI Developer – Professional"],
-  ["ANS-C01", "Advanced Networking – Specialty"], ["SCS-C03", "Security – Specialty"],
+  ["CLF-C02", "Cloud Practitioner", "foundational"], ["AIF-C01", "AI Practitioner", "foundational"],
+  ["AIB-C01", "AI Business Strategist", "foundational"],
+  ["SAA-C03", "Solutions Architect – Associate", "associate"], ["DVA-C02", "Developer – Associate", "associate"],
+  ["SOA-C03", "CloudOps Engineer – Associate", "associate"], ["DEA-C01", "Data Engineer – Associate", "associate"],
+  ["MLA-C01", "Machine Learning Engineer – Associate", "associate"],
+  ["SAP-C02", "Solutions Architect – Professional", "professional"], ["DOP-C02", "DevOps Engineer – Professional", "professional"],
+  ["AIP-C01", "Generative AI Developer – Professional", "professional"],
+  ["ANS-C01", "Advanced Networking – Specialty", "specialty"], ["SCS-C03", "Security – Specialty", "specialty"],
 ];
+const LEVELS = [["foundational", "Foundational"], ["associate", "Associate"], ["professional", "Professional"], ["specialty", "Specialty"]];
+const levelOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[2];
+// Exams with a published guide (listed in exams-index.json); all of them if the index is missing.
+const available = () => STUDY_EXAMS.filter(([c]) => !dataIndex || !dataIndex.study || c in dataIndex.study);
 
 // Progress store. Today it is localStorage only; the shape mirrors the planned server records
-// (one PROG#<exam> item per user: {done, lastDay, updatedAt}) so a later sync can push and pull
+// (one PROG#<exam> item per user: {done, lastDay, updatedAt}; plus lastExam on the profile) so a later sync can push and pull
 // it as is. Every read and write goes through here — keep it that way so the backend swap stays
 // local to this object. Key keeps the site's aws_qbank_ prefix like the other stored data.
 const StudyStore = {
@@ -41,6 +48,8 @@ const StudyStore = {
     return p;
   },
   setLastDay(exam, day) { return this._update(exam, p => { p.lastDay = day; }); },
+  lastExam() { return this._read().lastExam || null; },
+  setLastExam(exam) { const state = this._read(); state.lastExam = exam; this._write(state); },
   toggleDone(exam, day) {
     return this._update(exam, p => {
       p.done = p.done.includes(day) ? p.done.filter(d => d !== day) : [...p.done, day].sort((a, b) => a - b);
@@ -51,8 +60,9 @@ const StudyStore = {
 let dataIndex = null;   // data/exams-index.json
 let specs = null;       // data/exam-specs.json (domain names)
 let glossary = null;    // data/glossary.json: {terms:[{id, term, full, match, en, ko, exams}]}
+let glossaryReady = Promise.resolve();
 const guides = {};      // exam -> {exam, days}
-let current = { exam: null, day: 1 };
+let current = { exam: null, day: 1, level: null };   // level: the tab picked, if not the current exam's
 
 const $ = sel => document.querySelector(sel);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -118,14 +128,21 @@ async function loadGuide(exam) {
   return guides[exam];
 }
 
+// Domain names come from exam-specs.json, or from the guide itself for exams the question bank
+// does not cover (CLF-C02).
 function domainName(exam, code) {
-  const d = specs && specs[exam] && specs[exam].domains.find(x => x.code === code);
+  const list = (specs && specs[exam] && specs[exam].domains) || (guides[exam] && guides[exam].domains) || [];
+  const d = list.find(x => x.code === code);
   return d ? d.name : code;
 }
 
 function renderExamRow() {
-  $("#examRow").innerHTML = STUDY_EXAMS.map(([code, name]) =>
-    `<button class="chip${code === current.exam ? " active" : ""}" role="tab" aria-selected="${code === current.exam}" data-exam="${code}" title="${esc(name)}">${code}</button>`).join("");
+  const exams = available();
+  const level = current.level || levelOf(current.exam) || exams.length && exams[0][2];
+  $("#levelRow").innerHTML = LEVELS.filter(([l]) => exams.some(e => e[2] === l)).map(([l, label]) =>
+    `<button class="ltab" role="tab" aria-selected="${l === level}" data-level="${l}">${label}<span class="cnt">${exams.filter(e => e[2] === l).length}</span></button>`).join("");
+  $("#examRow").innerHTML = exams.filter(e => e[2] === level).map(([code, name]) =>
+    `<button class="chip${code === current.exam ? " active" : ""}" data-exam="${code}" title="${esc(name)}">${code}<span class="nm">${esc(name)}</span></button>`).join("");
 }
 
 function dayListHTML(guide, progress) {
@@ -200,15 +217,17 @@ function answer(qEl, picked) {
 async function show(exam, day) {
   hideTerm();
   current.exam = exam;
+  current.level = null;
   renderExamRow();
   $("#main").innerHTML = `<div class="loading">Loading ${exam}…</div>`;
   let guide;
-  try { guide = await loadGuide(exam); }
+  try { [guide] = await Promise.all([loadGuide(exam), glossaryReady]); }
   catch (e) { $("#main").innerHTML = `<div class="empty">Could not load the ${exam} study guide.</div>`; return; }
   if (current.exam !== exam) return;   // another exam was picked while loading
   const total = guide.days.length;
   current.day = Math.min(Math.max(day || StudyStore.get(exam).lastDay || 1, 1), total);
   StudyStore.setLastDay(exam, current.day);
+  StudyStore.setLastExam(exam);
   const want = `#exam=${exam}&day=${current.day}`;
   if (location.hash !== want) history.replaceState(null, "", want);
   document.title = `${exam} Day ${current.day} · Study Guide`;
@@ -217,7 +236,7 @@ async function show(exam, day) {
 
 // Term popover: one shared element. Tap or click pins it open; on devices with a mouse, hovering
 // also shows it. Escape, clicking elsewhere, scrolling or changing the day closes it.
-const pop = { el: null, btn: null, pinned: false, hoverTimer: 0 };
+const pop = { el: null, btn: null, pinned: false, y: 0 };
 function showTerm(btn, pinned) {
   const t = glossary && glossary.terms.find(x => x.id === btn.dataset.term);
   if (!t) return;
@@ -227,7 +246,7 @@ function showTerm(btn, pinned) {
     document.body.appendChild(pop.el);
   }
   if (pop.btn && pop.btn !== btn) pop.btn.setAttribute("aria-expanded", "false");
-  pop.btn = btn; pop.pinned = pinned;
+  pop.btn = btn; pop.pinned = pinned; pop.y = scrollY;
   btn.setAttribute("aria-expanded", "true");
   btn.setAttribute("aria-describedby", "termPop");
   pop.el.innerHTML = `<div class="tp-head"><b>${esc(t.term)}</b>${t.full ? ` · ${esc(t.full)}` : ""}</div>` +
@@ -240,7 +259,6 @@ function showTerm(btn, pinned) {
   pop.el.style.left = `${left}px`; pop.el.style.top = `${top}px`;
 }
 function hideTerm() {
-  clearTimeout(pop.hoverTimer);
   if (pop.el) pop.el.hidden = true;
   if (pop.btn) { pop.btn.setAttribute("aria-expanded", "false"); pop.btn.removeAttribute("aria-describedby"); }
   pop.btn = null; pop.pinned = false;
@@ -249,15 +267,15 @@ const canHover = matchMedia("(hover: hover)").matches;
 document.addEventListener("mouseover", e => {
   if (!canHover) return;
   const b = e.target.closest(".term");
-  if (b && b !== pop.btn) { clearTimeout(pop.hoverTimer); pop.hoverTimer = setTimeout(() => showTerm(b, false), 120); }
+  if (b && b !== pop.btn) showTerm(b, false);
 });
 document.addEventListener("mouseout", e => {
   const b = e.target.closest(".term");
   if (!b) return;
-  clearTimeout(pop.hoverTimer);
   if (b === pop.btn && !pop.pinned && !b.contains(e.relatedTarget)) hideTerm();
 });
-window.addEventListener("scroll", () => { if (pop.btn) hideTerm(); }, { passive: true });
+// A real scroll closes it; the few pixels a tap or scroll-into-view can leave behind do not.
+window.addEventListener("scroll", () => { if (pop.btn && Math.abs(scrollY - pop.y) > 40) hideTerm(); }, { passive: true });
 
 function go(exam, day) {
   location.hash = `exam=${exam}${day ? "&day=" + day : ""}`;   // hashchange renders
@@ -269,6 +287,7 @@ document.addEventListener("click", e => {
   if (!t) return;
   if (t.classList.contains("term")) return pop.btn === t && pop.pinned ? hideTerm() : showTerm(t, true);
   if (t.dataset.exam) return go(t.dataset.exam, null);
+  if (t.dataset.level) { current.level = t.dataset.level; return renderExamRow(); }
   if (t.id === "prevBtn") return go(current.exam, current.day - 1);
   if (t.id === "nextBtn") return go(current.exam, current.day + 1);
   if (t.dataset.day) return go(current.exam, +t.dataset.day);
@@ -307,10 +326,14 @@ window.addEventListener("hashchange", () => {
 
 (async function init() {
   try { await loadIndex(); } catch (e) { /* index missing: fetch files without version */ }
-  await loadGlossary();
+  glossaryReady = loadGlossary();   // fetched alongside the first exam's guide
   const h = parseHash();
   if (h.exam) return show(h.exam, h.day);
-  current.exam = null;
+  // No exam in the link: reopen the last exam studied, else the first one listed.
+  const last = StudyStore.lastExam();
+  const exams = available();
+  const exam = exams.some(([c]) => c === last) ? last : exams.length ? exams[0][0] : null;
+  if (exam) return show(exam, null);
   renderExamRow();
-  $("#main").innerHTML = `<div class="empty">Pick an exam above to open its study plan.</div>`;
+  $("#main").innerHTML = `<div class="empty">No study guides found.</div>`;
 })();

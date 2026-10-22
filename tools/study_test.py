@@ -26,11 +26,11 @@ def check(name, cond, info=""):
 specs = json.load(open(pathlib.Path(ROOT, "data", "exam-specs.json"), encoding="utf-8"))
 idx = json.load(open(pathlib.Path(ROOT, "data", "exams-index.json"), encoding="utf-8"))
 files = sorted(pathlib.Path(ROOT, "data", "study").glob("*.json"))
-check("12 study guides", len(files) == 12, [f.stem for f in files])
+check("study guides present", len(files) >= 12, [f.stem for f in files])
 check("index lists every guide", sorted(idx.get("study", {})) == [f.stem for f in files])
 for f in files:
     g = json.load(open(f, encoding="utf-8"))
-    codes = {d["code"] for d in specs[f.stem]["domains"]}
+    codes = {d["code"] for d in (specs[f.stem]["domains"] if f.stem in specs else g["domains"])}
     days = g["days"]
     check(f"{f.stem} days numbered", [d["day"] for d in days] == list(range(1, len(days) + 1)))
     check(f"{f.stem} domains", all(d["domain"] in codes for d in days[:-1]) and days[-1]["domain"] is None)
@@ -67,9 +67,18 @@ with sync_playwright() as p:
     pg.on("pageerror", lambda e: errs.append(str(e)))
     pg.route("**/fonts.googleapis.com/**", lambda r: r.abort())
 
-    pg.goto(BASE + "study.html"); pg.wait_for_selector("#examRow .chip")
-    check("exam chips", pg.locator("#examRow .chip").count() == 12)
-    check("empty state before picking", "Pick an exam" in pg.inner_text("#main"))
+    # No exam in the link: the first listed exam opens; afterwards the last exam studied reopens.
+    first = "CLF-C02" if "CLF-C02" in idx.get("study", {}) else "AIF-C01"
+    pg.goto(BASE + "study.html"); pg.wait_for_selector(".daytitle")
+    check("default opens first exam", pg.evaluate("location.hash") == f"#exam={first}&day=1", pg.evaluate("location.hash"))
+    tabs = pg.eval_on_selector_all(".ltab", "els => els.map(e => [e.dataset.level, e.getAttribute('aria-selected')])")
+    check("level tabs", [t[0] for t in tabs] == ["foundational", "associate", "professional", "specialty"] and tabs[0][1] == "true", tabs)
+    chips = pg.eval_on_selector_all("#examRow .chip", "els => els.map(e => e.dataset.exam)")
+    check("foundational chips", "AIF-C01" in chips and "SAA-C03" not in chips, chips)
+    pg.click(".ltab[data-level='specialty']")
+    chips = pg.eval_on_selector_all("#examRow .chip", "els => els.map(e => e.dataset.exam)")
+    check("specialty tab lists its exams", chips == ["ANS-C01", "SCS-C03"], chips)
+    check("all exams reachable", sum(int(c) for c in pg.eval_on_selector_all(".ltab .cnt", "els => els.map(e => e.textContent)")) == len(files))
 
     pg.goto(BASE + "study.html#exam=SAA-C03&day=3"); pg.reload(); pg.wait_for_selector(".daytitle")
     check("deep link opens day 3", pg.inner_text(".daytitle") == saa["days"][2]["title"])
@@ -105,6 +114,8 @@ with sync_playwright() as p:
 
     pg.goto(BASE + "study.html#exam=DEA-C01"); pg.wait_for_selector(".daytitle")
     check("other exam starts at day 1", pg.evaluate("location.hash") == "#exam=DEA-C01&day=1")
+    pg.goto(BASE + "study.html"); pg.reload(); pg.wait_for_selector(".daytitle")
+    check("last exam reopens", pg.evaluate("location.hash").startswith("#exam=DEA-C01"), pg.evaluate("location.hash"))
     pg.goto(BASE + "study.html#exam=SAA-C03"); pg.reload(); pg.wait_for_selector(".daytitle")
     check("last day remembered", pg.evaluate("location.hash") == "#exam=SAA-C03&day=10", pg.evaluate("location.hash"))
     pg.goto(BASE + "study.html#exam=SAA-C03&day=3"); pg.reload(); pg.wait_for_selector(".daytitle")
