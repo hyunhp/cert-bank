@@ -1,7 +1,7 @@
 # TODO
 
 ## Support page (started 2026-10-22)
-- `support.html` live with KakaoPay (domestic). Ko-fi (international, PayPal payout) url still empty: owner will send it.
+- `support.html` live with KakaoPay (domestic), merged in PR #9; repo Sponsor button via `.github/FUNDING.yml` -> support.html. Ko-fi (international, PayPal payout) url still empty: owner will send it.
 - Toss ID (toss.me) closed 2024-08-01; KakaoBank has no receive link; Naver Pay receive link unconfirmed (owner to check the app).
 
 ## Study guide (started 2026-10-22) — terse handoff
