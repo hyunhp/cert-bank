@@ -152,6 +152,8 @@ function injectStyles() {
 .mk .btn.ghost{background:var(--surface);color:var(--accent-ink);border-color:var(--line)}
 .mk .btn.warn{background:var(--bad);border-color:var(--bad)}
 .mk .btn:disabled{opacity:.45;cursor:default}
+.mk .support{margin:22px 0 0;font-size:.85rem;color:var(--muted);text-align:center;word-break:keep-all}
+.mk .support a{color:var(--accent);font-weight:600;white-space:nowrap}
 .mk .btnrow{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 .mk .meta{font-size:.82rem;color:var(--muted)}
 .mk .linkbtn{background:none;border:none;color:var(--accent);font:inherit;font-size:.85rem;cursor:pointer;padding:0}
@@ -539,6 +541,9 @@ function renderResults() {
       <button class="btn ghost" data-review="all">Review all</button>
     </div>
     <div class="btnrow"><button class="btn ghost" data-act="new">New mock exam</button><button class="btn ghost" data-act="exit">Back to question bank</button></div>
+    <p class="support">${(navigator.language || "").toLowerCase().startsWith("ko")
+      ? `도움이 되셨나요? 후원은 선택이며, 모든 문제는 계속 무료입니다. <a href="support.html">☕ 후원하기</a>`
+      : `Found this useful? Support is optional, and all questions stay free. <a href="support.html">☕ Support</a>`}</p>
   </div>`;
   root.onclick = (e) => {
     const r = e.target.closest("[data-review]");

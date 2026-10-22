@@ -1,5 +1,9 @@
 # TODO
 
+## Support page (started 2026-10-22)
+- `support.html` live with KakaoPay (domestic). Ko-fi (international, PayPal payout) url still empty: owner will send it.
+- Toss ID (toss.me) closed 2024-08-01; KakaoBank has no receive link; Naver Pay receive link unconfirmed (owner to check the app).
+
 ## Study guide (started 2026-10-22) — terse handoff
 Rules/design: `tools/study/README.md`. Private owner notes (routines, artifact links): owner's private doc "cert-bank 학습 가이드 이관 인계 메모" (source of truth) + local copy `.handoff/SESSION.md`
 (git-ignored, local only; ask owner if missing).
