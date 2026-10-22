@@ -79,6 +79,11 @@ with sync_playwright() as p:
         ok("diagram renders in review", True)
     bm = pg.locator(".rv [data-bm]").first; bm.click()
     ok("bookmark from review", "★" in bm.inner_text())
+    card = pg.locator(".rv").first
+    ok("review card has a bottom star in step", card.locator(".bookmark-foot").inner_text() == "★")
+    card.locator(".bookmark-foot").click()
+    ok("bottom star clears the top star", card.locator(".bookmark-btn").inner_text() == "☆" and card.locator(".bookmark-foot").inner_text() == "☆")
+    card.locator(".bookmark-foot").click()   # back on: later checks expect this bookmark
     sw = pg.evaluate("document.documentElement.scrollWidth")
     ok("no horizontal overflow on mobile", sw <= 390, sw)
     pg.screenshot(path="/tmp/mock_review.png")

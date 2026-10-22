@@ -585,6 +585,8 @@ async function renderReview() {
           return `<div class="choice locked ${cls}${got.has(k) ? " picked" : ""}"><span class="bubble"></span><span><span class="key">${LETTERS[j]}.</span> ${esc(c ? c.text : "")}${got.has(k) ? ' <span class="yours">· your answer</span>' : ""}</span></div>`;
         }).join("")}</div>
         <div class="explain show ${ok ? "" : "wrong"}" id="mk-explain-${esc(id)}"><div class="ans-line">Answer: ${letters}</div>${qb.explainHtml ? qb.explainHtml(q.explanation) : `<div class="exp-body">${esc(q.explanation)}</div>`}</div>
+        <div class="remarks"><span class="tags">#${i + 1} · ${esc(id)}</span>
+          <button class="bookmark-foot${bm ? " active" : ""}" data-bm="${esc(id)}" type="button" aria-label="Bookmark this question" title="Bookmark this question">${bm ? "★" : "☆"}</button></div>
       </div>`;
     }).join("")}
     <div class="btnrow"><button class="btn ghost" data-act="results">Back to results</button></div>
@@ -594,7 +596,12 @@ async function renderReview() {
     const f = e.target.closest("[data-filter]");
     if (f) { reviewFilter = f.dataset.filter; renderReview(); return; }
     const b = e.target.closest("[data-bm]");
-    if (b) { const on = qb.toggleBookmark(b.dataset.bm); b.classList.toggle("active", on); b.textContent = on ? "★" : "☆"; return; }
+    if (b) {
+      const on = qb.toggleBookmark(b.dataset.bm);
+      // the top and bottom stars of a review card stay in step
+      b.closest(".rv").querySelectorAll("[data-bm]").forEach(x => { x.classList.toggle("active", on); x.textContent = on ? "★" : "☆"; });
+      return;
+    }
     const t = e.target.closest("[data-act]");
     if (t && t.dataset.act === "results") { view = "results"; render(); window.scrollTo(0, 0); }
   };
