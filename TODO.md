@@ -1,7 +1,7 @@
 # TODO
 
 ## Study guide (started 2026-10-22) — terse handoff
-Rules/design: `tools/study/README.md`. Private owner notes (routines, artifact links): `.handoff/SESSION.md`
+Rules/design: `tools/study/README.md`. Private owner notes (routines, artifact links): owner's private doc "cert-bank 학습 가이드 이관 인계 메모" (source of truth) + local copy `.handoff/SESSION.md`
 (git-ignored, local only; ask owner if missing).
 Phases:
 - P1 data `data/study/<EXAM>.json` 12 exams/349 days — DONE (main, PR #1).
@@ -9,10 +9,7 @@ Phases:
   FIS name, DNSSEC KSK (KMS us-east-1, no CloudHSM), DX MTU (priv 9001/transit 8500/VPN 1446), Entra ID,
   Bedrock InvokeModel = CloudTrail management event.
 - P2 `study.html` + `js/study.js` — DONE (main). No timeline (owner dropped it). Progress via `StudyStore` only.
-- P3 glossary popovers — branch `study-glossary`, NOT merged. Owner: "restore cut terms", wants ~more marks.
-  State: 208 terms (17 restored: SCP RTO RPO BGP FM hallucination OWASP SIEM KPI OLTP/OLAP loss function OCR
-  strangler fig prompt injection X.509 temperature SLA). Gap-fill pass for zero-mark days (DOP SAP SOA DVA ...)
-  in progress → review its additions, run tests, PR to main.
+- P3 glossary popovers — branch `study-glossary`, PR open (224 terms, zero-mark days 107→61).
 - P4 cutover — TODO, last: delete old 9am progress routine, add stateless study reminder, then delete old
   tracker/daily/hub artifacts. Details in `.handoff/SESSION.md`. Deletion is irreversible: only after owner
   checks live site.
