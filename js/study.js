@@ -50,13 +50,41 @@ const StudyStore = {
 
 let dataIndex = null;   // data/exams-index.json
 let specs = null;       // data/exam-specs.json (domain names)
+let glossary = null;    // data/glossary.json: {terms:[{id, term, full, match, en, ko, exams}]}
 const guides = {};      // exam -> {exam, days}
 let current = { exam: null, day: 1 };
 
 const $ = sel => document.querySelector(sel);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-// Body text goes through here; the glossary (P3) will mark known terms at this point.
 const text = s => esc(s);
+
+// Glossary terms. Each term is marked only in the exams it was chosen for, and only at its first
+// appearance in a day (concepts, then exam points, then recap) — few marks keep them useful.
+// Quiz text is never marked: tapping a choice answers it.
+const termRegex = {};   // exam -> {re, byText}
+function termsFor(exam) {
+  if (!glossary) return null;
+  if (!(exam in termRegex)) {
+    const byText = new Map();
+    for (const t of glossary.terms) if (t.exams.includes(exam)) for (const m of t.match) byText.set(m, t);
+    const alts = [...byText.keys()].sort((a, b) => b.length - a.length).map(m => m.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    termRegex[exam] = alts.length ? { re: new RegExp(`(?<![\\w-])(${alts.join("|")})(?![\\w-])`, "g"), byText } : null;
+  }
+  return termRegex[exam];
+}
+function withTerms(s, seen) {
+  const tr = termsFor(current.exam);
+  if (!tr) return esc(s);
+  let out = "", last = 0;
+  for (const m of s.matchAll(tr.re)) {
+    const t = tr.byText.get(m[0]);
+    if (seen.has(t.id)) continue;
+    seen.add(t.id);
+    out += esc(s.slice(last, m.index)) + `<button type="button" class="term" data-term="${esc(t.id)}" aria-expanded="false">${esc(m[0])}</button>`;
+    last = m.index + m[0].length;
+  }
+  return out + esc(s.slice(last));
+}
 
 function parseHash() {
   const p = new URLSearchParams(location.hash.replace(/^#/, ""));
@@ -70,6 +98,14 @@ async function loadIndex() {
   dataIndex = await res.json();
   const v = dataIndex.files && dataIndex.files["exam-specs.json"];
   specs = await (await fetch(`./data/exam-specs.json${v ? "?v=" + v : ""}`)).json();
+}
+
+async function loadGlossary() {
+  const v = dataIndex && dataIndex.files && dataIndex.files["glossary.json"];
+  try {
+    const res = await fetch(`./data/glossary.json${v ? "?v=" + v : ""}`);
+    if (res.ok) glossary = await res.json();
+  } catch (e) { /* no glossary: text renders unmarked */ }
 }
 
 async function loadGuide(exam) {
@@ -117,6 +153,10 @@ function renderDay() {
   const progress = StudyStore.get(current.exam);
   const studied = progress.done.includes(d.day);
   const qbank = `./#exam=${current.exam}${d.domain ? "&d=" + d.domain : ""}`;
+  const seen = new Set();   // glossary terms already marked on this day
+  const conceptsHTML = d.concepts.map(c => `<section class="concept"><h3>${esc(c.heading)}</h3><p>${withTerms(c.body, seen)}</p></section>`).join("");
+  const pointsHTML = d.examPoints.map(p => `<li>${withTerms(p, seen)}</li>`).join("");
+  const recapHTML = withTerms(d.recap, seen);
   $("#main").innerHTML = `
     <div class="daybar">
       <button class="navbtn" id="prevBtn" ${d.day === 1 ? "disabled" : ""} aria-label="Previous day">←<span class="t"> Prev</span></button>
@@ -129,13 +169,13 @@ function renderDay() {
       <h2 class="daytitle">${esc(d.title)}</h2>
       <div class="svcs">${d.services.map(s => `<span class="svc">${esc(s)}</span>`).join("")}</div>
       <div class="label">Concepts</div>
-      ${d.concepts.map(c => `<section class="concept"><h3>${esc(c.heading)}</h3><p>${text(c.body)}</p></section>`).join("")}
+      ${conceptsHTML}
       <div class="label">Exam angle</div>
-      <ul class="points">${d.examPoints.map(p => `<li>${text(p)}</li>`).join("")}</ul>
+      <ul class="points">${pointsHTML}</ul>
       <div class="label">Check yourself</div>
       ${quizHTML(d.quiz)}
       <div class="label">Recap</div>
-      <p class="recap">${text(d.recap)}</p>
+      <p class="recap">${recapHTML}</p>
       <div class="dayfoot">
         <button class="donebtn" id="doneBtn" aria-pressed="${studied}">${studied ? "✓ Studied" : "Mark as studied"}</button>
         <a class="qblink" href="${qbank}">Practice ${d.domain ? d.domain + " " : ""}questions →</a>
@@ -158,6 +198,7 @@ function answer(qEl, picked) {
 }
 
 async function show(exam, day) {
+  hideTerm();
   current.exam = exam;
   renderExamRow();
   $("#main").innerHTML = `<div class="loading">Loading ${exam}…</div>`;
@@ -174,13 +215,59 @@ async function show(exam, day) {
   renderDay();
 }
 
+// Term popover: one shared element. Tap or click pins it open; on devices with a mouse, hovering
+// also shows it. Escape, clicking elsewhere, scrolling or changing the day closes it.
+const pop = { el: null, btn: null, pinned: false, hoverTimer: 0 };
+function showTerm(btn, pinned) {
+  const t = glossary && glossary.terms.find(x => x.id === btn.dataset.term);
+  if (!t) return;
+  if (!pop.el) {
+    pop.el = document.createElement("div");
+    pop.el.className = "termpop"; pop.el.id = "termPop"; pop.el.setAttribute("role", "tooltip");
+    document.body.appendChild(pop.el);
+  }
+  if (pop.btn && pop.btn !== btn) pop.btn.setAttribute("aria-expanded", "false");
+  pop.btn = btn; pop.pinned = pinned;
+  btn.setAttribute("aria-expanded", "true");
+  btn.setAttribute("aria-describedby", "termPop");
+  pop.el.innerHTML = `<div class="tp-head"><b>${esc(t.term)}</b>${t.full ? ` · ${esc(t.full)}` : ""}</div>` +
+    `<p class="tp-en">${esc(t.en)}</p><p class="tp-ko" lang="ko">${esc(t.ko)}</p>`;
+  pop.el.hidden = false;
+  // Below the term if it fits, else above; clamped to the viewport with a 12px margin.
+  const r = btn.getBoundingClientRect(), w = pop.el.offsetWidth, h = pop.el.offsetHeight;
+  const left = Math.min(Math.max(12, r.left + r.width / 2 - w / 2), innerWidth - w - 12);
+  const top = r.bottom + 8 + h <= innerHeight - 12 ? r.bottom + 8 : Math.max(12, r.top - 8 - h);
+  pop.el.style.left = `${left}px`; pop.el.style.top = `${top}px`;
+}
+function hideTerm() {
+  clearTimeout(pop.hoverTimer);
+  if (pop.el) pop.el.hidden = true;
+  if (pop.btn) { pop.btn.setAttribute("aria-expanded", "false"); pop.btn.removeAttribute("aria-describedby"); }
+  pop.btn = null; pop.pinned = false;
+}
+const canHover = matchMedia("(hover: hover)").matches;
+document.addEventListener("mouseover", e => {
+  if (!canHover) return;
+  const b = e.target.closest(".term");
+  if (b && b !== pop.btn) { clearTimeout(pop.hoverTimer); pop.hoverTimer = setTimeout(() => showTerm(b, false), 120); }
+});
+document.addEventListener("mouseout", e => {
+  const b = e.target.closest(".term");
+  if (!b) return;
+  clearTimeout(pop.hoverTimer);
+  if (b === pop.btn && !pop.pinned && !b.contains(e.relatedTarget)) hideTerm();
+});
+window.addEventListener("scroll", () => { if (pop.btn) hideTerm(); }, { passive: true });
+
 function go(exam, day) {
   location.hash = `exam=${exam}${day ? "&day=" + day : ""}`;   // hashchange renders
 }
 
 document.addEventListener("click", e => {
   const t = e.target.closest("button");
+  if (pop.btn && t !== pop.btn) hideTerm();
   if (!t) return;
+  if (t.classList.contains("term")) return pop.btn === t && pop.pinned ? hideTerm() : showTerm(t, true);
   if (t.dataset.exam) return go(t.dataset.exam, null);
   if (t.id === "prevBtn") return go(current.exam, current.day - 1);
   if (t.id === "nextBtn") return go(current.exam, current.day + 1);
@@ -208,6 +295,7 @@ document.addEventListener("click", e => {
   if (nav && nav.open && !nav.contains(e.target)) nav.open = false;
 });
 document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && pop.btn) { const b = pop.btn; hideTerm(); b.focus(); return; }
   const nav = $("#dayNav");
   if (e.key === "Escape" && nav && nav.open) { nav.open = false; nav.querySelector("summary").focus(); }
 });
@@ -219,6 +307,7 @@ window.addEventListener("hashchange", () => {
 
 (async function init() {
   try { await loadIndex(); } catch (e) { /* index missing: fetch files without version */ }
+  await loadGlossary();
   const h = parseHash();
   if (h.exam) return show(h.exam, h.day);
   current.exam = null;
