@@ -69,3 +69,6 @@ The site is static (GitHub Pages, no build step). Working notes, data formats, r
 [CLAUDE.md](CLAUDE.md); open work is in [TODO.md](TODO.md); the study guide and glossary rules are in
 [tools/study/README.md](tools/study/README.md). The repository was renamed from `aws_qbank` on 2026-10-14; the old
 address does not redirect.
+
+---
+Tip: to open a link in a new tab, hold **Ctrl** (Windows/Linux) or **Cmd** (Mac) while clicking it.
