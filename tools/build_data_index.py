@@ -44,8 +44,11 @@ def build():
             unique[d["id"]] = d
             if len(d.get("examCodes") or []) > 1:
                 shared.add(d["id"])
+    # Day-by-day study guides (study.html), fetched as data/study/<EXAM>.json?v=<hash>.
+    study = {p.stem: hashlib.sha1(p.read_bytes()).hexdigest()[:10] for p in sorted((DATA / "study").glob("*.json"))}
     index = {
         "exams": exams,
+        "study": study,
         "files": {name: hashlib.sha1((DATA / name).read_bytes()).hexdigest()[:10] for name in EXTRA},
         "totalUnique": len(unique),
         "sharedUnique": len(shared),

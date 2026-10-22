@@ -13,6 +13,8 @@ vendor. Keep the `aws_qbank_*` localStorage keys: renaming them would wipe every
 Palantir exams publish a percent pass mark (`passingPct`) and no domain weights (`weightsAssumed`, equal weights).
 **Before any `PLTR-*` work read `tools/qgen/PALANTIR.md`** (official facts and writing rules).
 Open work items are in `TODO.md` — read it at the start of a session.
+Study guide: `study.html` + `js/study.js` read `data/study/<EXAM>.json` (day-by-day plans, edited directly,
+not through qgen). See `tools/study/README.md`, including the planned (unbuilt) backend design.
 
 ## Hard rules
 - Never create files or folders the site reads whose names start with `_` (GitHub Pages/Jekyll
@@ -51,4 +53,4 @@ answer), stem length. `python3 tools/qgen/length_bias.py <batch>` lists the ques
 - Plan gaps: `python3 tools/qgen/qgen.py plan <EXAM>`; status: `python3 tools/qgen/qgen.py report`
 - Validate: `python3 tools/qgen/qgen.py check <batch>`; write: `... ingest <batch>`
 - Tests (all must pass before commit):
-  `node tools/mock_unit_test.mjs && python3 tools/mock_e2e_test.py && python3 tools/mock_link_test.py && python3 tools/bookmark_backup_test.py && python3 tools/loading_perf_test.py && python3 tools/domain_filter_test.py && python3 tools/vendor_tabs_test.py && python3 tools/diagrams/scroll_ui_test.py && python3 tools/diagrams/check.py && python3 tools/diagrams/site_test.py`
+  `node tools/mock_unit_test.mjs && python3 tools/study_test.py && python3 tools/mock_e2e_test.py && python3 tools/mock_link_test.py && python3 tools/bookmark_backup_test.py && python3 tools/loading_perf_test.py && python3 tools/domain_filter_test.py && python3 tools/vendor_tabs_test.py && python3 tools/diagrams/scroll_ui_test.py && python3 tools/diagrams/check.py && python3 tools/diagrams/site_test.py`
