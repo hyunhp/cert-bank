@@ -151,6 +151,22 @@ with sync_playwright() as p:
         pg.goto(BASE + f"study.html#exam={code}&day=1"); pg.wait_for_selector(".daytitle")
         check(f"{code} no horizontal overflow", pg.evaluate("document.documentElement.scrollWidth <= innerWidth + 1"))
 
+    # Compact day bar (same as the question bank's exam bar) and back-to-top.
+    pg.goto(BASE + "study.html#exam=SAA-C03&day=3"); pg.reload(); pg.wait_for_selector(".daytitle")
+    check("day bar hidden at top", not pg.evaluate("document.getElementById('dayBar').classList.contains('show')"))
+    pg.evaluate("window.scrollTo(0, document.body.scrollHeight)"); pg.wait_for_timeout(300)
+    check("day bar shown after scrolling", pg.evaluate("document.getElementById('dayBar').classList.contains('show')"))
+    check("day bar text", pg.inner_text("#dayBarCode") == "SAA-C03" and pg.inner_text("#dayBarName").startswith("Day 3 / "), pg.inner_text("#dayBar"))
+    check("back-to-top shown", pg.evaluate("document.getElementById('toTop').classList.contains('show')"))
+    check("day bar support link", pg.get_attribute("#dayBar .barsupport", "href") == "support.html")
+    pg.click("#barNext"); pg.wait_for_function("location.hash === '#exam=SAA-C03&day=4'")
+    pg.wait_for_function("scrollY === 0")
+    check("bar next opens next day at the top", pg.inner_text(".eyebrow").startswith("SAA-C03 · Day 4"))
+    check("day bar hides again at top", not pg.evaluate("document.getElementById('dayBar').classList.contains('show')"))
+    pg.goto(BASE + "study.html#exam=SAA-C03&day=1"); pg.reload(); pg.wait_for_selector(".daytitle")
+    pg.evaluate("window.scrollTo(0, document.body.scrollHeight)"); pg.wait_for_timeout(300)
+    check("bar prev disabled on day 1", pg.evaluate("document.getElementById('barPrev').disabled"))
+
     pg.goto(BASE); pg.wait_for_selector(".qcard")
     check("question bank links to study guide", pg.get_attribute(".studylink", "href") == "study.html")
     check("no page errors", not errs, errs)
