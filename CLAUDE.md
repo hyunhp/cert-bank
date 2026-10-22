@@ -17,7 +17,8 @@ Study guide: `study.html` + `js/study.js` read `data/study/<EXAM>.json` (day-by-
 not through qgen) and mark terms from `data/glossary.json` with tap/hover popovers (EN + KO). See
 `tools/study/README.md` for the glossary rules and the planned (unbuilt) backend design.
 Donations: `support.html` holds the only copy of the payment links (`METHODS`; empty url = "coming soon").
-KakaoPay links only open in the phone app (404 in desktop browsers): desktops see `assets/kakaopay-qr.svg`; if the
+KakaoPay links only open in the phone app (404 in desktop browsers): the card shows `assets/kakaopay-qr.svg` and is a
+link only on phones/tablets (user-agent check, not pointer type). If the
 link changes, regenerate it (`segno.make(url, error="m").save(path, scale=1, border=2)`).
 The header link, the bottom card in `index.html`, the study page header and the mock exam results all point to it.
 
@@ -58,4 +59,4 @@ answer), stem length. `python3 tools/qgen/length_bias.py <batch>` lists the ques
 - Plan gaps: `python3 tools/qgen/qgen.py plan <EXAM>`; status: `python3 tools/qgen/qgen.py report`
 - Validate: `python3 tools/qgen/qgen.py check <batch>`; write: `... ingest <batch>`
 - Tests (all must pass before commit):
-  `node tools/mock_unit_test.mjs && python3 tools/study_test.py && python3 tools/mock_e2e_test.py && python3 tools/mock_link_test.py && python3 tools/bookmark_backup_test.py && python3 tools/loading_perf_test.py && python3 tools/domain_filter_test.py && python3 tools/vendor_tabs_test.py && python3 tools/diagrams/scroll_ui_test.py && python3 tools/diagrams/check.py && python3 tools/diagrams/site_test.py`
+  `node tools/mock_unit_test.mjs && python3 tools/study_test.py && python3 tools/mock_e2e_test.py && python3 tools/mock_link_test.py && python3 tools/bookmark_backup_test.py && python3 tools/loading_perf_test.py && python3 tools/domain_filter_test.py && python3 tools/vendor_tabs_test.py && python3 tools/support_test.py && python3 tools/diagrams/scroll_ui_test.py && python3 tools/diagrams/check.py && python3 tools/diagrams/site_test.py`
