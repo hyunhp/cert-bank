@@ -71,14 +71,15 @@ with sync_playwright() as p:
     first = "CLF-C02" if "CLF-C02" in idx.get("study", {}) else "AIF-C01"
     pg.goto(BASE + "study.html"); pg.wait_for_selector(".daytitle")
     check("default opens first exam", pg.evaluate("location.hash") == f"#exam={first}&day=1", pg.evaluate("location.hash"))
-    tabs = pg.eval_on_selector_all(".ltab", "els => els.map(e => [e.dataset.level, e.getAttribute('aria-selected')])")
+    tabs = pg.eval_on_selector_all(".lseg", "els => els.map(e => [e.dataset.level, e.getAttribute('aria-pressed')])")
     check("level tabs", [t[0] for t in tabs] == ["foundational", "associate", "professional", "specialty"] and tabs[0][1] == "true", tabs)
     chips = pg.eval_on_selector_all("#examRow .chip", "els => els.map(e => e.dataset.exam)")
     check("foundational chips", "AIF-C01" in chips and "SAA-C03" not in chips, chips)
-    pg.click(".ltab[data-level='specialty']")
+    pg.click(".lseg[data-level='specialty']")
     chips = pg.eval_on_selector_all("#examRow .chip", "els => els.map(e => e.dataset.exam)")
     check("specialty tab lists its exams", chips == ["ANS-C01", "SCS-C03"], chips)
-    check("all exams reachable", sum(int(c) for c in pg.eval_on_selector_all(".ltab .cnt", "els => els.map(e => e.textContent)")) == len(files))
+    vt = pg.eval_on_selector_all(".vtab", "els => els.map(e => [e.dataset.vendor, +e.querySelector('.cnt').textContent])")
+    check("all exams reachable", sum(n for _, n in vt) == len(files) if vt else len(files) == sum(int(c) for c in pg.eval_on_selector_all(".lseg .cnt", "els => els.map(e => e.textContent)")), vt)
 
     pg.goto(BASE + "study.html#exam=SAA-C03&day=3"); pg.reload(); pg.wait_for_selector(".daytitle")
     check("deep link opens day 3", pg.inner_text(".daytitle") == saa["days"][2]["title"])

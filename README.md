@@ -1,112 +1,71 @@
-# Certification Question Bank (cert-bank)
-- LINK: [https://hyunhp.github.io/cert-bank/](https://hyunhp.github.io/cert-bank/) (2026-10-14 레포 이름 `aws_qbank` → `cert-bank`. 예전 `/aws_qbank/` 주소는 자동 이동되지 않음)
+# Certification Question Bank & Study Guide
 
-## 학습 가이드 (2026-10-22)
-- [study.html](https://hyunhp.github.io/cert-bank/study.html): AWS 12개 시험의 Day별 학습 계획 (14/28/35일, 총 349일). Day마다 개념 4~5개, 시험 포인트, 확인 퀴즈 2문항(해설 포함), 한 줄 요약.
-- `#exam=SAA-C03&day=3`으로 바로 열림. 이전/다음 버튼과 도메인별 Day 목록으로 이동하고, "Practice Dn questions"를 누르면 그 도메인 문항만 걸러진 문제은행으로 이동.
-- "Mark as studied"와 마지막으로 본 Day는 이 브라우저(localStorage)에만 저장.
-- 용어 툴팁: 점선 밑줄 용어를 탭(PC는 마우스 올리기)하면 영어 정의와 한국어 설명이 뜸. 192개 용어(`data/glossary.json`)를 시험별로 골라, 하루에 처음 나올 때만 표시(평균 하루 1개 남짓). 독립 검수로 사실 확인.
-- 예전 학습 트래커 아티팩트에서 옮겨 온 내용이며, 2026-10-22에 종료·변경된 AWS 서비스를 기준으로 검수함.
-- 데이터 `data/study/<EXAM>.json`, 코드 `js/study.js`, 테스트 `python3 tools/study_test.py`, 설명과 향후 백엔드 설계: `tools/study/README.md`
+**[Open the site →](https://hyunhp.github.io/cert-bank/)** · [한국어](README.ko.md)
 
-## 기업별 카테고리 (2026-10-14)
-- 상단 탭에서 기업(AWS | Palantir)을 고른 뒤 시험을 선택. 탭 옆 숫자는 그 기업 문항 수 합계.
-- 시험 코드는 기업 간에도 겹치지 않게 유지(팔란티어는 `PLTR-` 접두어)해서 기존 `#exam=` 링크·북마크·도메인 통계는 그대로 동작. `#vendor=palantir`로 기업 탭을 바로 열 수 있음.
-- 브라우저 저장 키(`aws_qbank_*`)는 일부러 바꾸지 않음: 바꾸면 기존 북마크·모의고사 기록이 사라짐.
-- 데이터: `data/exam-specs.json`의 `vendor`, 화면 목록은 `index.html`의 `EXAMS`·`VENDORS`.
+Free, original practice material for AWS and Palantir certifications. Unofficial: not affiliated with Amazon Web
+Services or Palantir Technologies, and no real exam questions (no dumps).
 
-## Palantir 시험 (2026-10-14, 파일럿)
-- PLTR-AIE (AI Engineer – Associate) · PLTR-DE (Data Engineer – Associate) · PLTR-APD (Application Developer – Associate): 각 400문항 (도메인별 50, 목표 달성). 전 문항 상세 해설. 2026-10-15~16 공식 문서 대조 검수(반복 주장 + D6·D8 정밀)에서 12문항 수정(`tools/qgen/PALANTIR.md`).
-- 공식 형식: 95문항(APD는 85문항) · 3시간 · 합격선 정답률 70% · 도메인 8개. 모의고사 결과는 70%를 그대로 기준으로 판정(합격권 80%+).
-- 도메인 가중치는 공식 미공개 → 8개 도메인 균등(12.5%)으로 출제하고 화면에 그렇게 표시. task 번호(T1.1 등)는 가이드의 항목을 나눈 비공식 분류.
-- 출제·검수 규칙과 확인된 공식 정보: `tools/qgen/PALANTIR.md`
-- Specialist(실습형)는 대상 아님.
-- Palantir Technologies와 무관한 비공식 문제은행이며, 실제 시험 문항을 옮기지 않음.
+## What's here
 
-  
-## 현재 포함된 데이터 (2026-09-24 스냅샷)
-- AIF-C01 (AI Practitioner): 142문항
-- AIB-C01 (AI Business Strategist): 148문항 (고난도 19문항 추가)
-- DEA-C01 (Data Engineer – Associate): 199문항 (고난도 19문항 추가)
-- SAA-C03 (Solutions Architect – Associate): 182문항 (고난도 20문항 추가)
-- DVA-C02 (Developer – Associate): 184문항 (고난도 19문항 추가)
-- SOA-C03 (CloudOps Engineer – Associate): 157문항 (고난도 20문항 추가)
-- MLA-C01 (ML Engineer – Associate): 197문항 (고난도 19문항 추가)
-- SAP-C02 (Solutions Architect – Professional): 216문항 (고난도 20문항 추가)
-- DOP-C02 (DevOps Engineer – Professional): 244문항 (고난도 19문항 추가)
-- AIP-C01 (GenAI Developer – Professional): 208문항 (고난도 41문항 추가, 테스트용 더미 1문항 제거)
-- ANS-C01 (Advanced Networking – Specialty): 208문항 (고난도 20문항 추가)
-- SCS-C03 (Security – Specialty): 211문항 (고난도 20문항 추가)
-- **12개 자격증 노출** (자격증 간 공유 태깅된 문항은 두 개 이상의 카운트에 중복 포함됨)
-
-
-## 모의고사 모드 (2026-09-26)
-
-- 문항 목록 위의 📝 Mock Exam 버튼 또는 `#mock=SAA-C03` 주소로 들어감. 기존 전체 보기 모드는 그대로 유지.
-- 실제 시험 길이(문항 수·시간) 또는 짧은 모드(20문항, 시간은 비례)를 선택. 공식 도메인 가중치대로 층화 추출하고, 이전 모의고사에서 안 본 문항을 먼저 뽑음. 보기 순서도 매번 섞음.
-- 시험 중에는 정답·해설 비공개, 플래그·현황판·타이머(0:00에 자동 제출), 새로고침해도 이어서 진행.
-- 결과: 정답률, 도메인별 정답률, 합격권 판정(Foundational·Associate 80%, Professional·Specialty 85% 기준 — AWS 환산 점수가 아님), 틀린/플래그 문항 리뷰(해설·다이어그램), 응시 기록.
-- 데이터: `data/exam-specs.json`(문항 수·시간·도메인 가중치), `data/exam-domains.json`(여러 자격증에 걸친 문항의 자격증별 도메인).
-- 코드: `js/mock.js`(수정 후 `python3 tools/stamp_version.py`로 캐시 버전 갱신). 테스트: `node tools/mock_unit_test.mjs`, `python3 tools/mock_e2e_test.py`.
-
-## 해설 아키텍처 다이어그램 (2026-09-25)
-
-- 구조가 핵심인 473개 고유 문항의 해설에 정답 아키텍처 다이어그램을 표시 (정답 확인 후에만 보임).
-- 선별: SAA/SAP는 전 문항 수작업 검토, 나머지 자격증은 SAA/SAP 결정으로 학습한 분류기가 후보를 올리고 문항별로 직접 검토. 대상과 사유는 `tools/diagrams/selection.json`, 검토 후 제외한 후보는 `tools/diagrams/rejected.txt`.
-- 브라우저에서 `js/diagram.js`가 `diagrams/<문항ID>.json` 설계도를 그려서 표시하고, 해설을 처음 열 때만 불러옴. 실패해도 해설 텍스트와 퀴즈 기능에는 영향 없음.
-- 설계도 원본은 유형·자격증별 DSL 파일(`tools/diagrams/src/*.txt`)이며 `tools/diagrams/dsl.py`로 JSON을 생성. 도구·형식 설명: `tools/diagrams/README.md`
-- 아이콘: [AWS Architecture Icons](https://aws.amazon.com/architecture/icons/) (AWS 제공, 아키텍처 다이어그램 용도)
-
-| 자격증 | 다이어그램 / 문항 (공유 문항 중복 집계) |
-|---|---|
-| AIB-C01 | 3 / 148 |
-| AIF-C01 | 5 / 142 |
-| AIP-C01 | 37 / 208 |
-| ANS-C01 | 82 / 208 |
-| DEA-C01 | 33 / 199 |
-| DOP-C02 | 58 / 244 |
-| DVA-C02 | 19 / 184 |
-| MLA-C01 | 16 / 197 |
-| SAA-C03 | 83 / 182 |
-| SAP-C02 | 102 / 216 |
-| SCS-C03 | 45 / 211 |
-| SOA-C03 | 29 / 157 |
-
-## 정답 위치 재배치 (2026-09-24)
-- 기존 문항은 정답이 A/B에 몰려 있어(A 61%, B 35%) 문항 ID 기반 시드로 보기 순서를 섞음. 해설 속 보기 문자 참조("Option B", "(A, D)" 등)도 새 위치로 함께 변환.
-- 스크립트: `tools/rebalance_answers.py` (결정적이라 다시 실행해도 같은 결과; 마스터 DB에서 재추출한 경우 export 후 한 번 실행)
-
-## 오답 보기 보강 ("가장 긴 보기 = 정답" 단서 제거)
-- 오답 보기에 그럴듯한 근거를 붙이거나 정답의 불필요한 부연을 줄여, 보기 길이만으로 정답을 고를 수 없게 조정. 오답의 핵심 오류는 유지해 해설과 일치.
-- 변경 내역: `tools/distractor_rewrites/<자격증>.json` ({문항ID: {보기키: 새 텍스트}}) — 사이트 데이터 기준 보기 키.
-- 최종 분포 (단일 정답 문항 중 정답이 가장 긴 비율 / 가장 짧은 비율):
-
-| 자격증 | 가장 김 | 가장 짧음 |
+| | What it is | Link |
 |---|---|---|
-| AIF-C01 | 21% | 24% |
-| AIB-C01 | 22% | 27% |
-| DEA-C01 | 19% | 32% |
-| SAA-C03 | 12% | 32% |
-| DVA-C02 | 16% | 25% |
-| SOA-C03 | 16% | 29% |
-| MLA-C01 | 18% | 24% |
-| SAP-C02 | 12% | 26% |
-| DOP-C02 | 10% | 28% |
-| AIP-C01 | 19% | 29% |
-| ANS-C01 | 16% | 14% |
-| SCS-C03 | 18% | 20% |
+| **Question Bank** | 5,800+ original multiple-choice questions with detailed explanations | [Open](https://hyunhp.github.io/cert-bank/) |
+| **Study Guide** | A day-by-day study plan per exam: key concepts, what the exam looks for, two check questions and a one-line recap | [Open](https://hyunhp.github.io/cert-bank/study.html) |
 
-- 4지선다에서 무작위 기준값은 각 25%. 어느 쪽으로도 단서가 되지 않도록 맞춤.
+## How to use
 
-## 기존 문항 고난도화 (difficulty=basic → 시나리오형)
-- basic 문항 492개 전부를 제약 조건이 여러 개인 시나리오형 문항으로 재작성. 현재 난이도 분포: advanced 1,361 / applied 826 / basic 0.
-- 변경 내역(문항 전체): `tools/hardened/<자격증>.json`
+**Question Bank**
+1. Pick a vendor (AWS or Palantir), a level, then an exam.
+2. Optionally narrow to one exam section (domain).
+3. Click a question to see the answer and why each option is right or wrong. Many explanations include an
+   architecture diagram.
+4. ☆ bookmarks a question; find it later under ⭐ Bookmarks.
+5. 📝 **Mock Exam** gives a timed test with the real exam's length and section weights.
 
-## 전 문항 상세 해설 (2026-09-24 완료)
-- 전체 2,187개 고유 문항의 해설을 **정답 근거 → 오답별 이유(보기마다 한 줄) → 핵심 포인트** 구조로 통일.
-- 재작성 문항은 `tools/hardened/`, 나머지 문항의 해설은 `tools/explanations/<자격증>.json`에 기록.
-- 사이트: 긴 해설이 잘리지 않도록 표시 높이를 늘리고 줄바꿈을 유지.
+**Study Guide**
+1. Pick an exam. The page reopens the exam and day you studied last.
+2. Read the day's concepts and exam tips, then answer the two check questions.
+3. Tap an <ins>underlined</ins> term to see a short English definition with a Korean explanation.
+4. Press **Mark as studied**, then **Practice questions** to drill that day's section in the Question Bank.
 
-## 사실·정답 위치 수정
-- `tools/factual_fixes.json`: Q001485(Guardrails 프롬프트 공격 필터 적용 대상), Q001510(데이터 이벤트 예시를 InvokeAgent로 수정), Q001998(오답 보강 중 C/D 텍스트가 뒤바뀐 것을 복원).
-- 전 문항 정답 위치 감사: 보강 전 원본과 보강 후 보기를 대조해 정답 내용이 다른 키로 옮겨간 문항이 없는지 확인(Q001998 외 이상 없음).
+## Exams covered
+
+| Vendor | Level | Exam | Questions | Study days |
+|---|---|---|---|---|
+| AWS | Foundational | CLF-C02 Cloud Practitioner | – | 14 |
+| | | AIF-C01 AI Practitioner | 356 | 14 |
+| | | AIB-C01 AI Business Strategist | 445 | 14 |
+| | Associate | SAA-C03 Solutions Architect | 395 | 28 |
+| | | DVA-C02 Developer | 395 | 28 |
+| | | SOA-C03 CloudOps Engineer | 395 | 28 |
+| | | DEA-C01 Data Engineer | 395 | 28 |
+| | | MLA-C01 Machine Learning Engineer | 395 | 28 |
+| | Professional | SAP-C02 Solutions Architect | 396 | 35 |
+| | | DOP-C02 DevOps Engineer | 395 | 35 |
+| | | AIP-C01 Generative AI Developer | 405 | 35 |
+| | Specialty | ANS-C01 Advanced Networking | 395 | 28 |
+| | | SCS-C03 Security | 395 | 28 |
+| Palantir | Associate | PLTR-DE Data Engineer | 400 | 17 |
+| | | PLTR-AIE AI Engineer | 400 | 17 |
+| | | PLTR-APD Application Developer | 400 | 17 |
+
+Some questions belong to more than one exam. Palantir publishes no section weights, so its sections count equally.
+
+## Your data
+
+Bookmarks, mock exam history, section scores and study progress are saved **only in your browser**. Nothing is
+sent to a server. To move bookmarks to another browser or device, use the backup link or file on the Bookmarks tab.
+
+## Accuracy
+
+Content is checked against official AWS and Palantir documentation. Services that AWS has closed to new customers
+are marked as such in explanations and study notes, because exams may still mention them. Found a mistake? Please
+[open an issue](https://github.com/hyunhp/cert-bank/issues) with the question id (for example `Q001234`) or the
+exam and day.
+
+## For maintainers
+
+The site is static (GitHub Pages, no build step). Working notes, data formats, rules and test commands are in
+[CLAUDE.md](CLAUDE.md); open work is in [TODO.md](TODO.md); the study guide and glossary rules are in
+[tools/study/README.md](tools/study/README.md). The repository was renamed from `aws_qbank` on 2026-10-14; the old
+address does not redirect.

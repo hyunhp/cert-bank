@@ -40,8 +40,18 @@ with sync_playwright() as p:
     check("aws chips only", "SAA-C03" in codes and not any(c.startswith("PLTR-") for c in codes), codes)
     check("bookmarks chip kept", "__BOOKMARKS__" in codes)
 
+    # Level segments (AWS only): the selected exam's level is pressed; another level swaps the chips.
+    segs = pg.eval_on_selector_all(".lseg", "els => els.map(e => [e.dataset.level, e.getAttribute('aria-pressed')])")
+    check("aws level segments", [x[0] for x in segs] == ["foundational", "associate", "professional", "specialty"], segs)
+    check("exam's level pressed", dict(segs).get("associate") == "true", segs)
+    pg.click(".lseg[data-level='specialty']")
+    codes = pg.eval_on_selector_all("#chipRow .chip[data-code]", "els => els.map(e => e.dataset.code)")
+    check("specialty chips", [c for c in codes if c != "__BOOKMARKS__"] == ["ANS-C01", "SCS-C03"], codes)
+    check("chip shows exam name", "Advanced Networking" in pg.inner_text("#chipRow"))
+    pg.click(".lseg[data-level='associate']")
     pg.click(".vtab[data-vendor='palantir']"); pg.wait_for_selector(".qcard")
     codes = pg.eval_on_selector_all("#chipRow .chip[data-code]", "els => els.map(e => e.dataset.code)")
+    check("single-level vendor hides segments", not pg.is_visible("#levelRow"))
     check("palantir chips only", sorted(c for c in codes if c != "__BOOKMARKS__") == sorted(pl_exams), codes)
     active = pg.eval_on_selector("#chipRow .chip.active", "e => e.dataset.code")
     check("first palantir exam selected", active in pl_exams, active)

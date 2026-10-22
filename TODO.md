@@ -13,9 +13,13 @@ Phases:
   marks (a "≥1 mark every day" pass was tried and reverted: weak/basic terms).
 - CLF-C02 (Cloud Practitioner) 14-day guide — DONE (main, PR #2), independently fact-checked. Domains live inside
   `data/study/CLF-C02.json`, NOT in exam-specs.json (qbank/mock tests iterate specs; no CLF questions).
+- Palantir study guides PLTR-DE/AIE/APD (17 days: 2 per domain + final) — DONE 2026-10-22, built only from the
+  reviewed PLTR bank + PALANTIR.md facts, independently reviewed. Study page and question bank both use
+  vendor tabs → level segments → named exam chips; question bank section filters sit in a shaded panel.
+- Kendra/Q Business availability notes on 19 AIB/AIF/AIP questions — DONE (explain batches AIF-C01/e14, AIP-C01/e16).
 - P4 cutover — DONE 2026-10-22: old 9am progress routine deleted; new routine "학습 가이드 리마인드" weekdays 06:50 KST
-  (12 exam links; owner must attach Gmail connector in claude.ai routines UI, API could not); 26 old artifacts deleted.
-- Rulesets for main: owner asked how; recommended (protect default branch, block deletion/force push, require PR with 0 approvals, no bypass). Not applied yet.
+  (12 exam links; Gmail connector attached by owner; 13 exam links (adds CLF-C02)); 26 old artifacts deleted.
+- Rulesets for main: set up by owner 2026-10-22 (PR required). Work on a branch, open a PR, merge via API.
 - P5 backend (Cognito OTP, API GW/Lambda/DynamoDB, Scheduler, SES) — design only, later. Needs own domain +
   personal AWS account.
 Known test noise (also on main before this work): `bookmark_backup_test` "toast shown" 17/18,
