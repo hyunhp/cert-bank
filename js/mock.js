@@ -542,8 +542,8 @@ function renderResults() {
     </div>
     <div class="btnrow"><button class="btn ghost" data-act="new">New mock exam</button><button class="btn ghost" data-act="exit">Back to question bank</button></div>
     <p class="support">${(navigator.language || "").toLowerCase().startsWith("ko")
-      ? `도움이 되셨나요? 후원은 선택이며, 모든 문제는 계속 무료입니다. <a href="support.html">☕ 후원하기</a>`
-      : `Found this useful? Support is optional, and all questions stay free. <a href="support.html">☕ Support</a>`}</p>
+      ? `도움이 되셨나요? 후원은 선택이며, 모든 문제는 계속 무료입니다. <a href="support.html">☕ Support this site</a>`
+      : `Found this useful? Support is optional, and all questions stay free. <a href="support.html">☕ Support this site</a>`}</p>
   </div>`;
   root.onclick = (e) => {
     const r = e.target.closest("[data-review]");
