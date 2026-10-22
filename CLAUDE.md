@@ -17,6 +17,8 @@ Study guide: `study.html` + `js/study.js` read `data/study/<EXAM>.json` (day-by-
 not through qgen) and mark terms from `data/glossary.json` with tap/hover popovers (EN + KO). See
 `tools/study/README.md` for the glossary rules and the planned (unbuilt) backend design.
 Donations: `support.html` holds the only copy of the payment links (`METHODS`; empty url = "coming soon").
+KakaoPay links only open in the phone app (404 in desktop browsers): desktops see `assets/kakaopay-qr.svg`; if the
+link changes, regenerate it (`segno.make(url, error="m").save(path, scale=1, border=2)`).
 The header link, the bottom card in `index.html`, the study page header and the mock exam results all point to it.
 
 ## Hard rules
