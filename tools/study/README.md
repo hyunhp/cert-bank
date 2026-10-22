@@ -22,7 +22,18 @@ answer, explain}], recap}]}`
   the question bank filtered to the day's domain.
 - Progress (studied days, last day opened) is in localStorage `aws_qbank_study_v1`, read and written
   only through `StudyStore` in `js/study.js`.
-- Body text goes through `text()` in `js/study.js`; the glossary tooltips (planned) hook in there.
+
+## Glossary (`data/glossary.json`)
+`{"terms": [{id, term, full, match, en, ko, exams}]}` — 224 terms (2026-10-22), 1-2 marked terms on most days; days that explain their own terms stay unmarked by design.
+- A term is marked only in the exams listed in `exams`, only at its first appearance in a day, and only in
+  concept bodies, exam points and the recap (never headings or quiz text: tapping a choice answers it).
+- `match` lists exact, case-sensitive surface forms; matching is whole-word (not next to letters, digits or
+  `-`), longest form first. Avoid forms that are ordinary English words.
+- Selection rule: only what a learner new to that exam would stumble on and the text does not already explain
+  where it is used. Fewer is better; the test caps it at 45 per exam.
+- Each entry was drafted per exam group, then fact-checked by an independent reviewer; keep that two-step
+  process for new terms. `en` at most 40 words, `ko` natural Korean of about 100 characters at most.
+- After editing run `python3 tools/build_data_index.py` and `python3 tools/study_test.py`.
 
 ## Planned backend (not built; design only, 2026-10-22)
 Goal: let other people get a daily study reminder and keep progress across devices, while

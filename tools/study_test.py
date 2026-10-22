@@ -26,17 +26,39 @@ def check(name, cond, info=""):
 specs = json.load(open(pathlib.Path(ROOT, "data", "exam-specs.json"), encoding="utf-8"))
 idx = json.load(open(pathlib.Path(ROOT, "data", "exams-index.json"), encoding="utf-8"))
 files = sorted(pathlib.Path(ROOT, "data", "study").glob("*.json"))
-check("12 study guides", len(files) == 12, [f.stem for f in files])
+check("study guides present", len(files) >= 12, [f.stem for f in files])
 check("index lists every guide", sorted(idx.get("study", {})) == [f.stem for f in files])
 for f in files:
     g = json.load(open(f, encoding="utf-8"))
-    codes = {d["code"] for d in specs[f.stem]["domains"]}
+    codes = {d["code"] for d in (specs[f.stem]["domains"] if f.stem in specs else g["domains"])}
     days = g["days"]
     check(f"{f.stem} days numbered", [d["day"] for d in days] == list(range(1, len(days) + 1)))
     check(f"{f.stem} domains", all(d["domain"] in codes for d in days[:-1]) and days[-1]["domain"] is None)
     check(f"{f.stem} quiz", all(len(d["quiz"]) == 2 and all(0 <= q["answer"] < len(q["choices"]) for q in d["quiz"]) for d in days))
     check(f"{f.stem} content", all(d["title"] and d["concepts"] and d["examPoints"] and d["recap"] for d in days))
 saa = json.load(open(pathlib.Path(ROOT, "data", "study", "SAA-C03.json"), encoding="utf-8"))
+
+# Glossary: unique ids, short definitions, every match form really appears (outside quiz text)
+# in each listed exam, and no form belongs to two terms in the same exam.
+import re
+gloss = json.load(open(pathlib.Path(ROOT, "data", "glossary.json"), encoding="utf-8"))["terms"]
+marked = {f.stem: "\n".join([c["body"] for d in json.load(open(f, encoding="utf-8"))["days"] for c in d["concepts"]] +
+                            [p for d in json.load(open(f, encoding="utf-8"))["days"] for p in d["examPoints"] + [d["recap"]]])
+          for f in files}
+def occurs(m, exam): return re.search(r"(?<![\w-])" + re.escape(m) + r"(?![\w-])", marked[exam]) is not None
+check("glossary ids unique", len({t["id"] for t in gloss}) == len(gloss))
+check("glossary fields", all(t["term"] and t["match"] and t["en"] and t["ko"] and t["exams"] for t in gloss))
+check("glossary en short", all(len(t["en"].split()) <= 45 for t in gloss), [t["term"] for t in gloss if len(t["en"].split()) > 45])
+check("glossary ko short", all(len(t["ko"]) <= 120 for t in gloss), [t["term"] for t in gloss if len(t["ko"]) > 120])
+check("glossary exams appear", all(any(occurs(m, e) for m in t["match"]) for t in gloss for e in t["exams"]),
+      [(t["term"], e) for t in gloss for e in t["exams"] if not any(occurs(m, e) for m in t["match"])])
+owner = {}
+for t in gloss:
+    for e in t["exams"]:
+        for m in t["match"]:
+            check(f"glossary form '{m}' has one owner in {e}", owner.setdefault((e, m), t["id"]) == t["id"])
+per_exam = {e: sum(e in t["exams"] for t in gloss) for e in marked}
+check("glossary stays selective (<= 45 per exam)", max(per_exam.values()) <= 45, per_exam)
 
 with sync_playwright() as p:
     b = p.chromium.launch()
@@ -45,9 +67,18 @@ with sync_playwright() as p:
     pg.on("pageerror", lambda e: errs.append(str(e)))
     pg.route("**/fonts.googleapis.com/**", lambda r: r.abort())
 
-    pg.goto(BASE + "study.html"); pg.wait_for_selector("#examRow .chip")
-    check("exam chips", pg.locator("#examRow .chip").count() == 12)
-    check("empty state before picking", "Pick an exam" in pg.inner_text("#main"))
+    # No exam in the link: the first listed exam opens; afterwards the last exam studied reopens.
+    first = "CLF-C02" if "CLF-C02" in idx.get("study", {}) else "AIF-C01"
+    pg.goto(BASE + "study.html"); pg.wait_for_selector(".daytitle")
+    check("default opens first exam", pg.evaluate("location.hash") == f"#exam={first}&day=1", pg.evaluate("location.hash"))
+    tabs = pg.eval_on_selector_all(".ltab", "els => els.map(e => [e.dataset.level, e.getAttribute('aria-selected')])")
+    check("level tabs", [t[0] for t in tabs] == ["foundational", "associate", "professional", "specialty"] and tabs[0][1] == "true", tabs)
+    chips = pg.eval_on_selector_all("#examRow .chip", "els => els.map(e => e.dataset.exam)")
+    check("foundational chips", "AIF-C01" in chips and "SAA-C03" not in chips, chips)
+    pg.click(".ltab[data-level='specialty']")
+    chips = pg.eval_on_selector_all("#examRow .chip", "els => els.map(e => e.dataset.exam)")
+    check("specialty tab lists its exams", chips == ["ANS-C01", "SCS-C03"], chips)
+    check("all exams reachable", sum(int(c) for c in pg.eval_on_selector_all(".ltab .cnt", "els => els.map(e => e.textContent)")) == len(files))
 
     pg.goto(BASE + "study.html#exam=SAA-C03&day=3"); pg.reload(); pg.wait_for_selector(".daytitle")
     check("deep link opens day 3", pg.inner_text(".daytitle") == saa["days"][2]["title"])
@@ -83,6 +114,8 @@ with sync_playwright() as p:
 
     pg.goto(BASE + "study.html#exam=DEA-C01"); pg.wait_for_selector(".daytitle")
     check("other exam starts at day 1", pg.evaluate("location.hash") == "#exam=DEA-C01&day=1")
+    pg.goto(BASE + "study.html"); pg.reload(); pg.wait_for_selector(".daytitle")
+    check("last exam reopens", pg.evaluate("location.hash").startswith("#exam=DEA-C01"), pg.evaluate("location.hash"))
     pg.goto(BASE + "study.html#exam=SAA-C03"); pg.reload(); pg.wait_for_selector(".daytitle")
     check("last day remembered", pg.evaluate("location.hash") == "#exam=SAA-C03&day=10", pg.evaluate("location.hash"))
     pg.goto(BASE + "study.html#exam=SAA-C03&day=3"); pg.reload(); pg.wait_for_selector(".daytitle")
@@ -90,6 +123,28 @@ with sync_playwright() as p:
     pg.goto(BASE + "study.html#exam=SAA-C03&day=999"); pg.reload(); pg.wait_for_selector(".daytitle")
     check("day clamps to last", pg.evaluate("location.hash") == f"#exam=SAA-C03&day={len(saa['days'])}")
     check("final day links whole exam", pg.get_attribute(".qblink", "href") == "./#exam=SAA-C03")
+
+    # Term popovers: each term marked at most once per day, never inside quiz text; tap pins the
+    # popover with both languages; Escape and clicking elsewhere close it.
+    pg.goto(BASE + "study.html#exam=SAA-C03&day=3"); pg.reload(); pg.wait_for_selector(".daytitle")
+    ids = pg.eval_on_selector_all(".term", "els => els.map(e => e.dataset.term)")
+    check("terms marked", len(ids) > 0, ids)
+    check("each term once per day", len(ids) == len(set(ids)), ids)
+    check("no terms in quiz", pg.locator(".quiz-q .term").count() == 0)
+    t0 = next(t for t in gloss if t["id"] == ids[0])
+    pg.locator(".term").first.click()
+    pop = pg.inner_text("#termPop")
+    check("popover shows term, en and ko", t0["term"] in pop and t0["en"][:30] in pop and t0["ko"][:10] in pop, pop)
+    check("popover marks expanded", pg.get_attribute(".term >> nth=0", "aria-expanded") == "true")
+    box = pg.eval_on_selector("#termPop", "e => { const r = e.getBoundingClientRect(); return [r.left, r.right, innerWidth]; }")
+    check("popover inside viewport", box[0] >= 0 and box[1] <= box[2], box)
+    pg.keyboard.press("Escape")
+    check("escape closes popover", not pg.is_visible("#termPop"))
+    pg.locator(".term").first.click(); pg.click(".daytitle")
+    check("outside click closes popover", not pg.is_visible("#termPop"))
+    pg.goto(BASE + "study.html#exam=AIB-C01&day=1"); pg.wait_for_selector(".daytitle")
+    other = pg.eval_on_selector_all(".term", "els => els.map(e => e.dataset.term)")
+    check("terms limited to their exams", all("AIB-C01" in next(t for t in gloss if t["id"] == i)["exams"] for i in other), other)
 
     for code in ["SAP-C02", "AIF-C01"]:
         pg.goto(BASE + f"study.html#exam={code}&day=1"); pg.wait_for_selector(".daytitle")

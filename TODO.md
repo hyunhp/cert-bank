@@ -1,5 +1,28 @@
 # TODO
 
+## Study guide (started 2026-10-22) — terse handoff
+Rules/design: `tools/study/README.md`. Private owner notes (routines, artifact links): owner's private doc "cert-bank 학습 가이드 이관 인계 메모" (source of truth) + local copy `.handoff/SESSION.md`
+(git-ignored, local only; ask owner if missing).
+Phases:
+- P1 data `data/study/<EXAM>.json` 12 exams/349 days — DONE (main, PR #1).
+- P1.5 retired-service review — DONE. Also fixed: Firehose name, Cognito refresh token not JWT, CMK name,
+  FIS name, DNSSEC KSK (KMS us-east-1, no CloudHSM), DX MTU (priv 9001/transit 8500/VPN 1446), Entra ID,
+  Bedrock InvokeModel = CloudTrail management event.
+- P2 `study.html` + `js/study.js` — DONE (main). No timeline (owner dropped it). Progress via `StudyStore` only.
+- P3 glossary popovers — branch `study-glossary`, PR #2 open, not merged. 224 terms. Owner asked for fewer-but-useful
+  marks; a "≥1 mark every day" pass was tried and reverted (weak/basic terms). Same PR also has: level tabs
+  (Foundational/Associate/Professional/Specialty), default exam = last opened else first listed, instant popover,
+  full-width concept text, short page intros.
+- CLF-C02 (Cloud Practitioner) guide — being written (`data/study/CLF-C02.json`, 14 days, domains inside the file,
+  NOT in exam-specs.json: qbank/mock tests iterate specs). Needs independent review + glossary terms, then PR.
+- P4 cutover — DONE 2026-10-22: old 9am progress routine deleted; new routine "학습 가이드 리마인드" weekdays 06:50 KST
+  (12 exam links; owner must attach Gmail connector in claude.ai routines UI, API could not); 26 old artifacts deleted.
+- Rulesets for main: owner asked how; recommended setup in reply (not applied).
+- P5 backend (Cognito OTP, API GW/Lambda/DynamoDB, Scheduler, SES) — design only, later. Needs own domain +
+  personal AWS account.
+Known test noise (also on main before this work): `bookmark_backup_test` "toast shown" 17/18,
+`diagrams/check.py` exit 1. Playwright here: `pip install playwright==1.56.0` (matches /opt/pw-browsers chromium-1194).
+
 ## Palantir (started 2026-10-14)
 State 2026-10-15: PLTR-AIE 400, PLTR-DE 400 (b01-b50 each), PLTR-APD 400 (b01-b50: pilot + six rounds + capstone). Rules and checked facts in
 `tools/qgen/PALANTIR.md`.
@@ -39,6 +62,11 @@ image content moderation, SNS Message Data Protection. Sunset: RDS Custom for Or
 Client, AWS Service Management Connector (mention removed from Q001823). App Runner and ARC readiness check already
 carry an availability note in their explanations. Re-check every few months; the original Security Hub is now
 "Security Hub CSPM" (don't state a rename date).
+
+Found 2026-10-22 (study-guide review): Amazon Q Business closed to new customers 2026-07-31 (successor Amazon Quick)
+and Amazon Kendra 2026-07-30 (successor Bedrock Knowledge Bases); QuickSight now offered as Quick Sight inside
+Amazon Quick; AppStream 2.0 renamed WorkSpaces Applications (2025-11-06). Study guides are annotated; question-bank
+items in AIB/AIF/AIP that mention Kendra or Q Business still need availability notes via explain batches.
 
 ## 2. Reveal frame cost (no action needed)
 Profiling (4x CPU) shows the ~100 ms frame is one ~45-70 ms Layout on any reveal, independent of list size and of

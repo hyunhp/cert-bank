@@ -2,17 +2,24 @@
 // URL: #exam=SAA-C03&day=3. Progress (studied days, last day opened) lives in StudyStore.
 "use strict";
 
+// [code, name, level], grouped by AWS certification level (the tabs) in display order.
 const STUDY_EXAMS = [
-  ["AIF-C01", "AI Practitioner"], ["AIB-C01", "AI Business Strategist"],
-  ["DEA-C01", "Data Engineer – Associate"], ["SAA-C03", "Solutions Architect – Associate"],
-  ["DVA-C02", "Developer – Associate"], ["SOA-C03", "CloudOps Engineer – Associate"],
-  ["MLA-C01", "Machine Learning Engineer – Associate"], ["SAP-C02", "Solutions Architect – Professional"],
-  ["DOP-C02", "DevOps Engineer – Professional"], ["AIP-C01", "Generative AI Developer – Professional"],
-  ["ANS-C01", "Advanced Networking – Specialty"], ["SCS-C03", "Security – Specialty"],
+  ["CLF-C02", "Cloud Practitioner", "foundational"], ["AIF-C01", "AI Practitioner", "foundational"],
+  ["AIB-C01", "AI Business Strategist", "foundational"],
+  ["SAA-C03", "Solutions Architect – Associate", "associate"], ["DVA-C02", "Developer – Associate", "associate"],
+  ["SOA-C03", "CloudOps Engineer – Associate", "associate"], ["DEA-C01", "Data Engineer – Associate", "associate"],
+  ["MLA-C01", "Machine Learning Engineer – Associate", "associate"],
+  ["SAP-C02", "Solutions Architect – Professional", "professional"], ["DOP-C02", "DevOps Engineer – Professional", "professional"],
+  ["AIP-C01", "Generative AI Developer – Professional", "professional"],
+  ["ANS-C01", "Advanced Networking – Specialty", "specialty"], ["SCS-C03", "Security – Specialty", "specialty"],
 ];
+const LEVELS = [["foundational", "Foundational"], ["associate", "Associate"], ["professional", "Professional"], ["specialty", "Specialty"]];
+const levelOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[2];
+// Exams with a published guide (listed in exams-index.json); all of them if the index is missing.
+const available = () => STUDY_EXAMS.filter(([c]) => !dataIndex || !dataIndex.study || c in dataIndex.study);
 
 // Progress store. Today it is localStorage only; the shape mirrors the planned server records
-// (one PROG#<exam> item per user: {done, lastDay, updatedAt}) so a later sync can push and pull
+// (one PROG#<exam> item per user: {done, lastDay, updatedAt}; plus lastExam on the profile) so a later sync can push and pull
 // it as is. Every read and write goes through here — keep it that way so the backend swap stays
 // local to this object. Key keeps the site's aws_qbank_ prefix like the other stored data.
 const StudyStore = {
@@ -41,6 +48,8 @@ const StudyStore = {
     return p;
   },
   setLastDay(exam, day) { return this._update(exam, p => { p.lastDay = day; }); },
+  lastExam() { return this._read().lastExam || null; },
+  setLastExam(exam) { const state = this._read(); state.lastExam = exam; this._write(state); },
   toggleDone(exam, day) {
     return this._update(exam, p => {
       p.done = p.done.includes(day) ? p.done.filter(d => d !== day) : [...p.done, day].sort((a, b) => a - b);
@@ -50,13 +59,42 @@ const StudyStore = {
 
 let dataIndex = null;   // data/exams-index.json
 let specs = null;       // data/exam-specs.json (domain names)
+let glossary = null;    // data/glossary.json: {terms:[{id, term, full, match, en, ko, exams}]}
+let glossaryReady = Promise.resolve();
 const guides = {};      // exam -> {exam, days}
-let current = { exam: null, day: 1 };
+let current = { exam: null, day: 1, level: null };   // level: the tab picked, if not the current exam's
 
 const $ = sel => document.querySelector(sel);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-// Body text goes through here; the glossary (P3) will mark known terms at this point.
 const text = s => esc(s);
+
+// Glossary terms. Each term is marked only in the exams it was chosen for, and only at its first
+// appearance in a day (concepts, then exam points, then recap) — few marks keep them useful.
+// Quiz text is never marked: tapping a choice answers it.
+const termRegex = {};   // exam -> {re, byText}
+function termsFor(exam) {
+  if (!glossary) return null;
+  if (!(exam in termRegex)) {
+    const byText = new Map();
+    for (const t of glossary.terms) if (t.exams.includes(exam)) for (const m of t.match) byText.set(m, t);
+    const alts = [...byText.keys()].sort((a, b) => b.length - a.length).map(m => m.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    termRegex[exam] = alts.length ? { re: new RegExp(`(?<![\\w-])(${alts.join("|")})(?![\\w-])`, "g"), byText } : null;
+  }
+  return termRegex[exam];
+}
+function withTerms(s, seen) {
+  const tr = termsFor(current.exam);
+  if (!tr) return esc(s);
+  let out = "", last = 0;
+  for (const m of s.matchAll(tr.re)) {
+    const t = tr.byText.get(m[0]);
+    if (seen.has(t.id)) continue;
+    seen.add(t.id);
+    out += esc(s.slice(last, m.index)) + `<button type="button" class="term" data-term="${esc(t.id)}" aria-expanded="false">${esc(m[0])}</button>`;
+    last = m.index + m[0].length;
+  }
+  return out + esc(s.slice(last));
+}
 
 function parseHash() {
   const p = new URLSearchParams(location.hash.replace(/^#/, ""));
@@ -72,6 +110,14 @@ async function loadIndex() {
   specs = await (await fetch(`./data/exam-specs.json${v ? "?v=" + v : ""}`)).json();
 }
 
+async function loadGlossary() {
+  const v = dataIndex && dataIndex.files && dataIndex.files["glossary.json"];
+  try {
+    const res = await fetch(`./data/glossary.json${v ? "?v=" + v : ""}`);
+    if (res.ok) glossary = await res.json();
+  } catch (e) { /* no glossary: text renders unmarked */ }
+}
+
 async function loadGuide(exam) {
   if (!guides[exam]) {
     const v = dataIndex && dataIndex.study && dataIndex.study[exam];
@@ -82,14 +128,21 @@ async function loadGuide(exam) {
   return guides[exam];
 }
 
+// Domain names come from exam-specs.json, or from the guide itself for exams the question bank
+// does not cover (CLF-C02).
 function domainName(exam, code) {
-  const d = specs && specs[exam] && specs[exam].domains.find(x => x.code === code);
+  const list = (specs && specs[exam] && specs[exam].domains) || (guides[exam] && guides[exam].domains) || [];
+  const d = list.find(x => x.code === code);
   return d ? d.name : code;
 }
 
 function renderExamRow() {
-  $("#examRow").innerHTML = STUDY_EXAMS.map(([code, name]) =>
-    `<button class="chip${code === current.exam ? " active" : ""}" role="tab" aria-selected="${code === current.exam}" data-exam="${code}" title="${esc(name)}">${code}</button>`).join("");
+  const exams = available();
+  const level = current.level || levelOf(current.exam) || exams.length && exams[0][2];
+  $("#levelRow").innerHTML = LEVELS.filter(([l]) => exams.some(e => e[2] === l)).map(([l, label]) =>
+    `<button class="ltab" role="tab" aria-selected="${l === level}" data-level="${l}">${label}<span class="cnt">${exams.filter(e => e[2] === l).length}</span></button>`).join("");
+  $("#examRow").innerHTML = exams.filter(e => e[2] === level).map(([code, name]) =>
+    `<button class="chip${code === current.exam ? " active" : ""}" data-exam="${code}" title="${esc(name)}">${code}<span class="nm">${esc(name)}</span></button>`).join("");
 }
 
 function dayListHTML(guide, progress) {
@@ -117,6 +170,10 @@ function renderDay() {
   const progress = StudyStore.get(current.exam);
   const studied = progress.done.includes(d.day);
   const qbank = `./#exam=${current.exam}${d.domain ? "&d=" + d.domain : ""}`;
+  const seen = new Set();   // glossary terms already marked on this day
+  const conceptsHTML = d.concepts.map(c => `<section class="concept"><h3>${esc(c.heading)}</h3><p>${withTerms(c.body, seen)}</p></section>`).join("");
+  const pointsHTML = d.examPoints.map(p => `<li>${withTerms(p, seen)}</li>`).join("");
+  const recapHTML = withTerms(d.recap, seen);
   $("#main").innerHTML = `
     <div class="daybar">
       <button class="navbtn" id="prevBtn" ${d.day === 1 ? "disabled" : ""} aria-label="Previous day">←<span class="t"> Prev</span></button>
@@ -129,13 +186,13 @@ function renderDay() {
       <h2 class="daytitle">${esc(d.title)}</h2>
       <div class="svcs">${d.services.map(s => `<span class="svc">${esc(s)}</span>`).join("")}</div>
       <div class="label">Concepts</div>
-      ${d.concepts.map(c => `<section class="concept"><h3>${esc(c.heading)}</h3><p>${text(c.body)}</p></section>`).join("")}
+      ${conceptsHTML}
       <div class="label">Exam angle</div>
-      <ul class="points">${d.examPoints.map(p => `<li>${text(p)}</li>`).join("")}</ul>
+      <ul class="points">${pointsHTML}</ul>
       <div class="label">Check yourself</div>
       ${quizHTML(d.quiz)}
       <div class="label">Recap</div>
-      <p class="recap">${text(d.recap)}</p>
+      <p class="recap">${recapHTML}</p>
       <div class="dayfoot">
         <button class="donebtn" id="doneBtn" aria-pressed="${studied}">${studied ? "✓ Studied" : "Mark as studied"}</button>
         <a class="qblink" href="${qbank}">Practice ${d.domain ? d.domain + " " : ""}questions →</a>
@@ -158,21 +215,67 @@ function answer(qEl, picked) {
 }
 
 async function show(exam, day) {
+  hideTerm();
   current.exam = exam;
+  current.level = null;
   renderExamRow();
   $("#main").innerHTML = `<div class="loading">Loading ${exam}…</div>`;
   let guide;
-  try { guide = await loadGuide(exam); }
+  try { [guide] = await Promise.all([loadGuide(exam), glossaryReady]); }
   catch (e) { $("#main").innerHTML = `<div class="empty">Could not load the ${exam} study guide.</div>`; return; }
   if (current.exam !== exam) return;   // another exam was picked while loading
   const total = guide.days.length;
   current.day = Math.min(Math.max(day || StudyStore.get(exam).lastDay || 1, 1), total);
   StudyStore.setLastDay(exam, current.day);
+  StudyStore.setLastExam(exam);
   const want = `#exam=${exam}&day=${current.day}`;
   if (location.hash !== want) history.replaceState(null, "", want);
   document.title = `${exam} Day ${current.day} · Study Guide`;
   renderDay();
 }
+
+// Term popover: one shared element. Tap or click pins it open; on devices with a mouse, hovering
+// also shows it. Escape, clicking elsewhere, scrolling or changing the day closes it.
+const pop = { el: null, btn: null, pinned: false, y: 0 };
+function showTerm(btn, pinned) {
+  const t = glossary && glossary.terms.find(x => x.id === btn.dataset.term);
+  if (!t) return;
+  if (!pop.el) {
+    pop.el = document.createElement("div");
+    pop.el.className = "termpop"; pop.el.id = "termPop"; pop.el.setAttribute("role", "tooltip");
+    document.body.appendChild(pop.el);
+  }
+  if (pop.btn && pop.btn !== btn) pop.btn.setAttribute("aria-expanded", "false");
+  pop.btn = btn; pop.pinned = pinned; pop.y = scrollY;
+  btn.setAttribute("aria-expanded", "true");
+  btn.setAttribute("aria-describedby", "termPop");
+  pop.el.innerHTML = `<div class="tp-head"><b>${esc(t.term)}</b>${t.full ? ` · ${esc(t.full)}` : ""}</div>` +
+    `<p class="tp-en">${esc(t.en)}</p><p class="tp-ko" lang="ko">${esc(t.ko)}</p>`;
+  pop.el.hidden = false;
+  // Below the term if it fits, else above; clamped to the viewport with a 12px margin.
+  const r = btn.getBoundingClientRect(), w = pop.el.offsetWidth, h = pop.el.offsetHeight;
+  const left = Math.min(Math.max(12, r.left + r.width / 2 - w / 2), innerWidth - w - 12);
+  const top = r.bottom + 8 + h <= innerHeight - 12 ? r.bottom + 8 : Math.max(12, r.top - 8 - h);
+  pop.el.style.left = `${left}px`; pop.el.style.top = `${top}px`;
+}
+function hideTerm() {
+  if (pop.el) pop.el.hidden = true;
+  if (pop.btn) { pop.btn.setAttribute("aria-expanded", "false"); pop.btn.removeAttribute("aria-describedby"); }
+  pop.btn = null; pop.pinned = false;
+}
+const canHover = matchMedia("(hover: hover)").matches;
+document.addEventListener("mouseover", e => {
+  if (!canHover) return;
+  const b = e.target.closest(".term");
+  if (b && b !== pop.btn) showTerm(b, false);
+});
+document.addEventListener("mouseout", e => {
+  const b = e.target.closest(".term");
+  if (!b) return;
+  if (b === pop.btn && !pop.pinned && !b.contains(e.relatedTarget)) hideTerm();
+});
+// A real scroll closes it; the few pixels a tap or scroll-into-view can leave behind do not.
+window.addEventListener("scroll", () => { if (pop.btn && Math.abs(scrollY - pop.y) > 40) hideTerm(); }, { passive: true });
 
 function go(exam, day) {
   location.hash = `exam=${exam}${day ? "&day=" + day : ""}`;   // hashchange renders
@@ -180,8 +283,11 @@ function go(exam, day) {
 
 document.addEventListener("click", e => {
   const t = e.target.closest("button");
+  if (pop.btn && t !== pop.btn) hideTerm();
   if (!t) return;
+  if (t.classList.contains("term")) return pop.btn === t && pop.pinned ? hideTerm() : showTerm(t, true);
   if (t.dataset.exam) return go(t.dataset.exam, null);
+  if (t.dataset.level) { current.level = t.dataset.level; return renderExamRow(); }
   if (t.id === "prevBtn") return go(current.exam, current.day - 1);
   if (t.id === "nextBtn") return go(current.exam, current.day + 1);
   if (t.dataset.day) return go(current.exam, +t.dataset.day);
@@ -208,6 +314,7 @@ document.addEventListener("click", e => {
   if (nav && nav.open && !nav.contains(e.target)) nav.open = false;
 });
 document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && pop.btn) { const b = pop.btn; hideTerm(); b.focus(); return; }
   const nav = $("#dayNav");
   if (e.key === "Escape" && nav && nav.open) { nav.open = false; nav.querySelector("summary").focus(); }
 });
@@ -219,9 +326,14 @@ window.addEventListener("hashchange", () => {
 
 (async function init() {
   try { await loadIndex(); } catch (e) { /* index missing: fetch files without version */ }
+  glossaryReady = loadGlossary();   // fetched alongside the first exam's guide
   const h = parseHash();
   if (h.exam) return show(h.exam, h.day);
-  current.exam = null;
+  // No exam in the link: reopen the last exam studied, else the first one listed.
+  const last = StudyStore.lastExam();
+  const exams = available();
+  const exam = exams.some(([c]) => c === last) ? last : exams.length ? exams[0][0] : null;
+  if (exam) return show(exam, null);
   renderExamRow();
-  $("#main").innerHTML = `<div class="empty">Pick an exam above to open its study plan.</div>`;
+  $("#main").innerHTML = `<div class="empty">No study guides found.</div>`;
 })();
