@@ -63,6 +63,12 @@ are marked as such in explanations and study notes, because exams may still ment
 [open an issue](https://github.com/hyunhp/cert-bank/issues) with the question id (for example `Q001234`) or the
 exam and day.
 
+## Support
+
+Everything here is free and stays free: no paywall, no ads, no sign-up. If the site helped you, you can
+[buy a coffee](https://hyunhp.github.io/cert-bank/support.html) (KakaoPay in Korea; an international option is coming).
+Reporting a wrong answer as a GitHub issue helps just as much.
+
 ## For maintainers
 
 The site is static (GitHub Pages, no build step). Working notes, data formats, rules and test commands are in
