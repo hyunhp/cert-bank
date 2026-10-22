@@ -20,10 +20,12 @@ try:
     # bottom-of-card bookmark button mirrors the top star
     card=pg.locator(".qcard").first
     card.locator(".bookmark-foot").click()
-    check("bottom button bookmarks", card.locator(".bookmark-btn").inner_text()=="★" and card.locator(".bookmark-foot").inner_text()=="★ Bookmarked")
+    check("bottom button bookmarks", card.locator(".bookmark-btn").inner_text()=="★" and card.locator(".bookmark-foot").inner_text()=="★")
     check("bottom button saved", card.get_attribute("data-qid") in pg.evaluate("JSON.parse(localStorage.getItem('aws_qbank_bookmarks_v1'))"))
+    mids=pg.evaluate("""(()=>{const r=document.querySelector('.qcard .remarks');return [...r.children].map(e=>{const b=e.getBoundingClientRect();return Math.round(b.top+b.height/2)})})()""")
+    check("footer items share one centre line", max(mids)-min(mids)<=1, mids)
     card.locator(".bookmark-btn").click()
-    check("top star clears bottom button", card.locator(".bookmark-foot").inner_text()=="☆ Bookmark" and pg.evaluate("JSON.parse(localStorage.getItem('aws_qbank_bookmarks_v1')||'[]').length")==0)
+    check("top star clears bottom button", card.locator(".bookmark-foot").inner_text()=="☆" and pg.evaluate("JSON.parse(localStorage.getItem('aws_qbank_bookmarks_v1')||'[]').length")==0)
     btns=pg.query_selector_all(".bookmark-btn")[:3]
     ids=[x.get_attribute("data-qid") for x in btns]
     for x in btns: x.click()
