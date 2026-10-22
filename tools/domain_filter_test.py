@@ -70,7 +70,7 @@ with sync_playwright() as p:
     check("stale domain falls back to all", pg.locator(".qcard").count() == len(qs))
     pg.goto(BASE + "?x=3#exam=SAA-C03"); pg.wait_for_selector(".qcard")
     check("filter row for another exam", pg.locator("#domainRow .fchip[data-d]").count() >= 4)
-    pg.click(".chip[data-code='AIF-C01']"); pg.wait_for_selector(".qcard")
+    pg.click(".lseg[data-level='foundational']"); pg.click(".chip[data-code='AIF-C01']"); pg.wait_for_selector(".qcard")
     check("switching exam clears filter", "d=" not in pg.evaluate("location.hash"))
 
     # accuracy: five wrong answers in D4 flag the domain

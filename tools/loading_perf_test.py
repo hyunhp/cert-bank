@@ -36,7 +36,7 @@ with sync_playwright() as p:
     check("index loaded", any("exams-index.json" in u for u in data_reqs), data_reqs)
     check("versioned exam URL", exam_files and exam_files[0].endswith("?v=" + index["exams"]["SAA-C03"]["v"]), exam_files)
     check("stats from index", pg.inner_text("#statTotal").strip() == str(index["totalUnique"]), pg.inner_text("#statTotal"))
-    check("chip counts from index", str(index["exams"]["AIF-C01"]["count"]) in pg.inner_text("#chipRow"))
+    check("chip counts from index", str(index["exams"]["SAA-C03"]["count"]) in pg.inner_text("#chipRow"))
 
     # bookmark something from another exam, then open Bookmarks in a fresh page
     aif = json.load(open(pathlib.Path(ROOT, "data", "AIF-C01.json"), encoding="utf-8"))[0]["id"]
