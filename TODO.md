@@ -2,7 +2,7 @@
 
 ## Support page (started 2026-10-22)
 - `support.html` live with KakaoPay (domestic; QR on computers, app link on phones, `tools/support_test.py`), merged in PR #9/#11; repo Sponsor button via `.github/FUNDING.yml` -> support.html. Ko-fi (international, PayPal payout) url still empty: owner will send it.
-- Toss ID (toss.me) closed 2024-08-01; KakaoBank has no receive link; Naver Pay receive link unconfirmed (owner to check the app).
+- Toss ID (toss.me) closed 2024-08-01; KakaoBank has no receive link; Naver Pay dropped (owner, 2026-10-22).
 
 ## Study guide (started 2026-10-22) — terse handoff
 Rules/design: `tools/study/README.md`. Private owner notes (routines, artifact links): owner's private doc "cert-bank 학습 가이드 이관 인계 메모" (source of truth) + local copy `.handoff/SESSION.md`
@@ -23,13 +23,13 @@ Phases:
 - 2026-10-22 polish (PR #5, #6): level segment always shown (Palantir shows "Associate"; Specialist is hands-on,
   out of scope); study-guide link text vendor-neutral; README rewritten user-facing in EN (README.md) + KO
   (README.ko.md) with a Ctrl/Cmd-click tip (GitHub strips target=_blank, so links can't force a new tab).
-- Open: only P5 backend. Everything else in this section is done.
+- Nothing open in this section (P5 backend dropped by the owner on 2026-10-22: not planned).
 - Kendra/Q Business availability notes on 19 AIB/AIF/AIP questions — DONE (explain batches AIF-C01/e14, AIP-C01/e16).
 - P4 cutover — DONE 2026-10-22: old 9am progress routine deleted; new routine "학습 가이드 리마인드" weekdays 06:50 KST
   (13 exam links incl. CLF-C02; Gmail connector attached by owner); 26 old artifacts deleted.
 - Rulesets for main: set up by owner 2026-10-22 (PR required). Work on a branch, open a PR, merge via API.
-- P5 backend (Cognito OTP, API GW/Lambda/DynamoDB, Scheduler, SES) — design only, later. Needs own domain +
-  personal AWS account.
+- P5 backend (Cognito OTP, API GW/Lambda/DynamoDB, Scheduler, SES): dropped 2026-10-22, not planned; the design
+  notes in `tools/study/README.md` stay for reference only.
 Test noise fixed 2026-10-22: `bookmark_backup_test` "toast shown" (the test read the toast after it had gone; now
 records toasts as they appear) and `diagrams/check.py` (5 layout errors fixed in `tools/diagrams/src`). All suites
 should pass; a failure is real. Playwright here: `pip install playwright==1.56.0` (matches /opt/pw-browsers chromium-1194).
@@ -78,6 +78,24 @@ Found 2026-10-22 (study-guide review): Amazon Q Business closed to new customers
 and Amazon Kendra 2026-07-30 (successor Bedrock Knowledge Bases); QuickSight now offered as Quick Sight inside
 Amazon Quick; AppStream 2.0 renamed WorkSpaces Applications (2025-11-06). Study guides and the AIB/AIF/AIP
 question-bank items are annotated (explain batches AIF-C01/e14, AIP-C01/e16).
+
+Re-check 2026-10-22 (AWS "Service Availability Updates" of 2026-06-30 and 2026-09-29, service docs):
+- Amazon Bedrock Agents (launched 2023-11) renamed **Amazon Bedrock Agents Classic**, closed to new customers
+  2026-07-30 (maintenance: existing customers keep using it). New agent work goes to **Amazon Bedrock AgentCore**.
+  Exam guides may still say "Bedrock Agents"; where it is the keyed answer it stays the intended answer.
+- Amazon Cognito Sync and AWS Directory Service Simple AD: closed to new customers 2026-07-30 (successors: AppSync
+  with DynamoDB; AWS Managed Microsoft AD). AWS IoT Device Defender Detect: closed to new customers 2026-08-31.
+- Amazon Mechanical Turk: end of support 2026-09-29 (closed); SageMaker Ground Truth and Augmented AI (A2I) still
+  run with private or vendor workforces, but the Mechanical Turk (public) workforce option is gone.
+  SageMaker Ground Truth Plus: end of support 2026-06-30.
+- Amazon DevOps Guru: closed to new customers 2026-10-29, end of support 2027-09-30 (use CloudWatch anomaly
+  detection / alarms; AWS also points to Amazon DevOps Agent for investigations).
+- Amazon Pinpoint: closed to new customers 2025-05-20, end of support 2026-10-30 (engagement features to Amazon
+  Connect, email to SES; SMS/voice/push APIs continue as AWS End User Messaging).
+- Also closed 2026-10-29: WorkSpaces Secure Browser, Chime SDK SIP media application, standalone Infrastructure
+  Composer console (end of support 2026-12-07; the VS Code Toolkit experience stays). Not mentioned in the bank.
+Annotated in explain batches AIB-C01/e17, AIF-C01/e15, AIP-C01/e17-e18, MLA-C01/e14, SOA-C03/e13, DEA-C01/e14,
+SAP-C02/e16. Next re-check: around 2027-01 (after the Q4 availability update).
 
 ## 2. Reveal frame cost (no action needed)
 Profiling (4x CPU) shows the ~100 ms frame is one ~45-70 ms Layout on any reveal, independent of list size and of
