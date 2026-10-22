@@ -1,6 +1,13 @@
 # Certification Question Bank (cert-bank)
 - LINK: [https://hyunhp.github.io/cert-bank/](https://hyunhp.github.io/cert-bank/) (2026-10-14 레포 이름 `aws_qbank` → `cert-bank`. 예전 `/aws_qbank/` 주소는 자동 이동되지 않음)
 
+## 학습 가이드 (2026-10-22)
+- [study.html](https://hyunhp.github.io/cert-bank/study.html): AWS 12개 시험의 Day별 학습 계획 (14/28/35일, 총 349일). Day마다 개념 4~5개, 시험 포인트, 확인 퀴즈 2문항(해설 포함), 한 줄 요약.
+- `#exam=SAA-C03&day=3`으로 바로 열림. 이전/다음 버튼과 도메인별 Day 목록으로 이동하고, "Practice Dn questions"를 누르면 그 도메인 문항만 걸러진 문제은행으로 이동.
+- "Mark as studied"와 마지막으로 본 Day는 이 브라우저(localStorage)에만 저장.
+- 예전 학습 트래커 아티팩트에서 옮겨 온 내용이며, 2026-10-22에 종료·변경된 AWS 서비스를 기준으로 검수함.
+- 데이터 `data/study/<EXAM>.json`, 코드 `js/study.js`, 테스트 `python3 tools/study_test.py`, 설명과 향후 백엔드 설계: `tools/study/README.md`
+
 ## 기업별 카테고리 (2026-10-14)
 - 상단 탭에서 기업(AWS | Palantir)을 고른 뒤 시험을 선택. 탭 옆 숫자는 그 기업 문항 수 합계.
 - 시험 코드는 기업 간에도 겹치지 않게 유지(팔란티어는 `PLTR-` 접두어)해서 기존 `#exam=` 링크·북마크·도메인 통계는 그대로 동작. `#vendor=palantir`로 기업 탭을 바로 열 수 있음.
