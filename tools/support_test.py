@@ -71,7 +71,7 @@ with sync_playwright() as p:
 
     pg.goto(BASE + "#exam=SAA-C03"); pg.wait_for_selector(".qcard")
     check("header support link", pg.get_attribute(".supportlink", "href") == "support.html"
-          and pg.inner_text(".supportlink").strip() == "☕ Support this site", pg.inner_text("header.top"))
+          and " ".join(pg.inner_text(".supportlink").split()) == "☕ Support this site", pg.inner_text("header.top"))
     check("exam bar support button", pg.get_attribute("#examBarSupport", "href") == "support.html")
     check("bottom support card", pg.get_attribute(".supportcard a", "href") == "support.html"
           and pg.inner_text(".supportcard a").strip() == "☕ Support this site")
@@ -83,6 +83,11 @@ with sync_playwright() as p:
     pg.goto(BASE + "study.html"); pg.wait_for_selector(".supportlink")
     check("study header support link", pg.get_attribute(".supportlink", "href") == "support.html")
 
+    # Header pills share one size on every page (and the support page's language toggle matches them).
+    for url in ["", "study.html", "support.html"]:
+        pg.goto(BASE + url); pg.wait_for_selector(".toplinks .pill")
+        hs = pg.eval_on_selector_all(".toplinks .pill, .langseg", "els => els.map(e => Math.round(e.getBoundingClientRect().height))")
+        check(f"{url or 'index'}: header pills same height", len(hs) >= 2 and len(set(hs)) == 1, hs)
     check("no page errors", not errs, errs)
     b.close()
 print(f"{ok}/{ok + fail} passed")
