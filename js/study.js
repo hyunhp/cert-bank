@@ -152,7 +152,7 @@ function renderExamRow() {
   $("#vendorRow").hidden = vendors.length < 2;
   $("#vendorRow").innerHTML = vendors.map(([v, label]) =>
     `<button class="vtab" role="tab" aria-selected="${v === vendor}" data-vendor="${v}">${label}<span class="cnt">${all.filter(e => e[3] === v).length}</span></button>`).join("");
-  $("#levelRow").hidden = levels.length < 2;
+  $("#levelRow").hidden = !levels.length;   // shown even for one level, so every vendor looks the same
   $("#levelRow").innerHTML = levels.map(([l, label]) =>
     `<button class="lseg" aria-pressed="${l === level}" data-level="${l}">${label}<span class="cnt">${exams.filter(e => e[2] === l).length}</span></button>`).join("");
   $("#examRow").innerHTML = exams.filter(e => e[2] === level).map(([code, name]) =>
