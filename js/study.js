@@ -189,7 +189,7 @@ function renderDay() {
   }
   const progress = StudyStore.get(current.exam);
   const studied = progress.done.includes(d.day);
-  const qbank = `./#exam=${current.exam}${d.domain ? "&d=" + d.domain : ""}`;
+  const qbank = `./#exam=${current.exam}${d.domain ? "&d=" + d.domain : ""}&study=${d.day}`;   // &study: the bank offers a way back
   const seen = new Set();   // glossary terms already marked on this day
   const conceptsHTML = d.concepts.map(c => `<section class="concept"><h3>${esc(c.heading)}</h3><p>${withTerms(c.body, seen)}</p></section>`).join("");
   const pointsHTML = d.examPoints.map(p => `<li>${withTerms(p, seen)}</li>`).join("");

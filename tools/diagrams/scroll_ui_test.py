@@ -32,7 +32,8 @@ with sync_playwright() as p:
         ok(f"[{scheme}] bar is compact ({bh:.0f}px)", bh<=48)
         pg.screenshot(path=str(pathlib.Path(tempfile.gettempdir(), f"scroll_{scheme}.png")))
         # answer a question while scrolled -> score appears in bar
-        card=pg.locator(".qcard").nth(5); card.scroll_into_view_if_needed(); card.locator(".choice").first.click()
+        card=pg.locator(".qcard:not(:has(.badge.multi))").nth(5)   # single-answer: one click scores it (order is random)
+        card.scroll_into_view_if_needed(); card.locator(".choice").first.click()
         try: pg.wait_for_function("(document.getElementById('examBarScore').textContent||'').includes('/')", timeout=5000)
         except Exception: pass
         ok(f"[{scheme}] bar shows score", "/" in pg.inner_text("#examBarScore"))
