@@ -65,7 +65,8 @@ with sync_playwright() as p:
     pg.goto(BASE + "#exam=SAA-C03"); pg.wait_for_selector(".qcard")
     check("header support link", pg.get_attribute(".supportlink", "href") == "support.html"
           and pg.inner_text(".supportlink").strip() == "☕ Support this site", pg.inner_text("header.top"))
-    check("bottom support card", pg.get_attribute(".supportcard a", "href") == "support.html")
+    check("bottom support card", pg.get_attribute(".supportcard a", "href") == "support.html"
+          and pg.inner_text(".supportcard a").strip() == "☕ Support this site")
     pg.click("#mockBtn"); pg.wait_for_selector(".mk h2"); pg.click('[data-mode="short"]')
     pg.click('[data-act="start"]'); pg.wait_for_selector(".mkbar")
     pg.click('[data-act="grid"]'); pg.click('[data-act="ask"]')

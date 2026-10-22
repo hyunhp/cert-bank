@@ -13,7 +13,7 @@ const FOOT = 10;          // bottom inset per nesting level
 const ROW_GAP = 18;       // extra space between rows (edge labels live here)
 const EDGE = "#545B64";
 const INK = "#16191F";
-const FONT = "'IBM Plex Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif";
+const FONT = "'IBM Plex Sans', 'IBM Plex Sans KR', 'Helvetica Neue', Helvetica, Arial, sans-serif";
 
 const GROUP_STYLE = {
   "aws-cloud":      { stroke: "#232F3E", dash: null,  fill: "none",    text: "#232F3E" },
