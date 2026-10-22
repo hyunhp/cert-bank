@@ -31,11 +31,15 @@ try:
     check("export contents", sorted(data["bookmarks"])==sorted(ids), data)
     # fresh context: restore by link
     ctx2=b.new_context(); pg2=ctx2.new_page(); pg2.on("pageerror", lambda e: errs.append(str(e)))
+    # The toast lives 300 ms..3.5 s after the restore, which can end before the cards finish loading:
+    # record every toast as it appears instead of reading the page afterwards.
+    pg2.add_init_script("window.__toasts=[];const ap=Element.prototype.appendChild;Element.prototype.appendChild=function(n){if(n&&n.className==='bmtoast')window.__toasts.push(n.textContent);return ap.call(this,n)}")
     pg2.goto(link.replace("https://","http://")); pg2.wait_for_function("document.querySelectorAll('.qcard').length===3", timeout=20000)
     check("restored via link", sorted(pg2.evaluate("JSON.parse(localStorage.getItem('aws_qbank_bookmarks_v1'))"))==sorted(ids))
     check("hash normalized", pg2.evaluate("location.hash")=="#bookmarks")
     check("restored cards shown", len(pg2.query_selector_all(".qcard"))==3)
-    check("toast shown", "Restored 3" in (pg2.inner_text("body")))
+    pg2.wait_for_function("window.__toasts.length>0", timeout=5000)
+    check("toast shown", any("Restored 3" in t for t in pg2.evaluate("window.__toasts")), pg2.evaluate("window.__toasts"))
     # fresh context: import file
     ctx3=b.new_context(); pg3=ctx3.new_page(); pg3.on("pageerror", lambda e: errs.append(str(e)))
     pg3.goto("http://localhost:8765/#bookmarks"); pg3.wait_for_function("document.querySelector('#listArea') && document.querySelector('#listArea').innerText.includes(\"haven't bookmarked\")", timeout=20000)

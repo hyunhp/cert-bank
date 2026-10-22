@@ -1,7 +1,7 @@
 # TODO
 
 ## Support page (started 2026-10-22)
-- `support.html` live with KakaoPay (domestic), merged in PR #9; repo Sponsor button via `.github/FUNDING.yml` -> support.html. Ko-fi (international, PayPal payout) url still empty: owner will send it.
+- `support.html` live with KakaoPay (domestic; QR on computers, app link on phones, `tools/support_test.py`), merged in PR #9/#11; repo Sponsor button via `.github/FUNDING.yml` -> support.html. Ko-fi (international, PayPal payout) url still empty: owner will send it.
 - Toss ID (toss.me) closed 2024-08-01; KakaoBank has no receive link; Naver Pay receive link unconfirmed (owner to check the app).
 
 ## Study guide (started 2026-10-22) — terse handoff
@@ -30,8 +30,9 @@ Phases:
 - Rulesets for main: set up by owner 2026-10-22 (PR required). Work on a branch, open a PR, merge via API.
 - P5 backend (Cognito OTP, API GW/Lambda/DynamoDB, Scheduler, SES) — design only, later. Needs own domain +
   personal AWS account.
-Known test noise (also on main before this work): `bookmark_backup_test` "toast shown" 17/18,
-`diagrams/check.py` exit 1. Playwright here: `pip install playwright==1.56.0` (matches /opt/pw-browsers chromium-1194).
+Test noise fixed 2026-10-22: `bookmark_backup_test` "toast shown" (the test read the toast after it had gone; now
+records toasts as they appear) and `diagrams/check.py` (5 layout errors fixed in `tools/diagrams/src`). All suites
+should pass; a failure is real. Playwright here: `pip install playwright==1.56.0` (matches /opt/pw-browsers chromium-1194).
 
 ## Palantir (started 2026-10-14)
 State 2026-10-15: PLTR-AIE 400, PLTR-DE 400 (b01-b50 each), PLTR-APD 400 (b01-b50: pilot + six rounds + capstone). Rules and checked facts in
@@ -75,8 +76,8 @@ carry an availability note in their explanations. Re-check every few months; the
 
 Found 2026-10-22 (study-guide review): Amazon Q Business closed to new customers 2026-07-31 (successor Amazon Quick)
 and Amazon Kendra 2026-07-30 (successor Bedrock Knowledge Bases); QuickSight now offered as Quick Sight inside
-Amazon Quick; AppStream 2.0 renamed WorkSpaces Applications (2025-11-06). Study guides are annotated; question-bank
-items in AIB/AIF/AIP that mention Kendra or Q Business still need availability notes via explain batches.
+Amazon Quick; AppStream 2.0 renamed WorkSpaces Applications (2025-11-06). Study guides and the AIB/AIF/AIP
+question-bank items are annotated (explain batches AIF-C01/e14, AIP-C01/e16).
 
 ## 2. Reveal frame cost (no action needed)
 Profiling (4x CPU) shows the ~100 ms frame is one ~45-70 ms Layout on any reveal, independent of list size and of
