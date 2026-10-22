@@ -30,7 +30,8 @@ page header and the mock exam results all point to it.
   and `python3 tools/qgen/qgen.py ingest <file>`. Never hand-edit `data/<EXAM>.json`.
 - `ingest` assigns question ids and rewrites shared data files: run it **one batch at a time,
   never in parallel**. Parallel work = writing batch files only.
-- After editing `js/mock.js` run `python3 tools/stamp_version.py`.
+- After editing `js/mock.js` or `js/study.js` run `python3 tools/stamp_version.py` (versions the script URL so a
+  cached page and a new script, or the reverse, never meet).
 - Never paste tokens into files or chat; push with the local git credential (gh auth / SSH).
 
 ## Batch format (see tools/qgen/qgen.py docstring)

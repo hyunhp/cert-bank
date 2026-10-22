@@ -8,7 +8,7 @@
   question bank to the day's domain. No horizontal overflow on a phone-sized viewport.
     python3 tools/study_test.py
 """
-import functools, http.server, json, pathlib, threading
+import functools, hashlib, http.server, json, pathlib, threading
 from playwright.sync_api import sync_playwright
 
 ROOT = str(pathlib.Path(__file__).resolve().parents[1])
@@ -162,10 +162,27 @@ with sync_playwright() as p:
     pg.click("#barNext"); pg.wait_for_function("location.hash === '#exam=SAA-C03&day=4'")
     pg.wait_for_function("scrollY === 0")
     check("bar next opens next day at the top", pg.inner_text(".eyebrow").startswith("SAA-C03 · Day 4"))
-    check("day bar hides again at top", not pg.evaluate("document.getElementById('dayBar').classList.contains('show')"))
+    try: pg.wait_for_function("!document.getElementById('dayBar').classList.contains('show')", timeout=3000); hidden = True
+    except Exception: hidden = False
+    check("day bar hides again at top", hidden)
     pg.goto(BASE + "study.html#exam=SAA-C03&day=1"); pg.reload(); pg.wait_for_selector(".daytitle")
     pg.evaluate("window.scrollTo(0, document.body.scrollHeight)"); pg.wait_for_timeout(300)
     check("bar prev disabled on day 1", pg.evaluate("document.getElementById('barPrev').disabled"))
+
+    # A cached older study.html (no day bar) paired with the current script must still render the day.
+    old = re.sub(r'<div class="exambar" id="dayBar".*?</div></div>\s*<button class="totop"[^>]*>.</button>', "",
+                  open(pathlib.Path(ROOT, "study.html"), encoding="utf-8").read(), flags=re.S)
+    check("test setup: day bar stripped", 'id="dayBar"' not in old)
+    pg2 = b.new_context(viewport={"width": 390, "height": 844}).new_page()
+    errs2 = []
+    pg2.on("pageerror", lambda e: errs2.append(str(e)))
+    pg2.route("**/study.html*", lambda r: r.fulfill(status=200, content_type="text/html", body=old))
+    pg2.goto(BASE + "study.html#exam=SAA-C03&day=2"); pg2.wait_for_selector(".daytitle")
+    pg2.evaluate("window.scrollTo(0, document.body.scrollHeight)"); pg2.wait_for_timeout(200)
+    check("old page + new script: day renders without errors", not errs2, errs2)
+    h = hashlib.sha1(pathlib.Path(ROOT, "js", "study.js").read_bytes()).hexdigest()[:10]
+    check("study.js version stamp is current (run tools/stamp_version.py)",
+          f'js/study.js?v={h}"' in open(pathlib.Path(ROOT, "study.html"), encoding="utf-8").read())
 
     pg.goto(BASE); pg.wait_for_selector(".qcard")
     check("question bank links to study guide", pg.get_attribute(".studylink", "href") == "study.html")

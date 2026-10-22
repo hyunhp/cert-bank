@@ -181,10 +181,12 @@ function renderDay() {
   const guide = guides[current.exam];
   const total = guide.days.length;
   const d = guide.days[current.day - 1];
-  $("#dayBarCode").textContent = current.exam;
-  $("#dayBarName").textContent = `Day ${d.day} / ${total} · ${d.title}`;
-  $("#barPrev").disabled = d.day === 1;
-  $("#barNext").disabled = d.day === total;
+  if ($("#dayBar")) {   // absent if a cached older study.html is paired with this script
+    $("#dayBarCode").textContent = current.exam;
+    $("#dayBarName").textContent = `Day ${d.day} / ${total} · ${d.title}`;
+    $("#barPrev").disabled = d.day === 1;
+    $("#barNext").disabled = d.day === total;
+  }
   const progress = StudyStore.get(current.exam);
   const studied = progress.done.includes(d.day);
   const qbank = `./#exam=${current.exam}${d.domain ? "&d=" + d.domain : ""}`;
@@ -343,14 +345,15 @@ document.addEventListener("keydown", e => {
 const smooth = !matchMedia("(prefers-reduced-motion: reduce)").matches;
 function updateScrollUi() {
   const nav = document.querySelector(".daybar");
+  const bar = $("#dayBar"), top = $("#toTop");
+  if (!bar || !top) return;
   const showBar = !!nav && nav.getBoundingClientRect().bottom < 0;
-  const bar = $("#dayBar");
   bar.classList.toggle("show", showBar);
   bar.setAttribute("aria-hidden", showBar ? "false" : "true");
   bar.querySelectorAll("button, a").forEach(el => { el.tabIndex = showBar ? 0 : -1; });
   const showTop = scrollY > innerHeight * 1.5;
-  $("#toTop").classList.toggle("show", showTop);
-  $("#toTop").tabIndex = showTop ? 0 : -1;
+  top.classList.toggle("show", showTop);
+  top.tabIndex = showTop ? 0 : -1;
 }
 window.addEventListener("scroll", updateScrollUi, { passive: true });
 window.addEventListener("resize", updateScrollUi);
