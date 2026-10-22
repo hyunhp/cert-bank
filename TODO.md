@@ -63,6 +63,11 @@ Client, AWS Service Management Connector (mention removed from Q001823). App Run
 carry an availability note in their explanations. Re-check every few months; the original Security Hub is now
 "Security Hub CSPM" (don't state a rename date).
 
+Found 2026-10-22 (study-guide review): Amazon Q Business closed to new customers 2026-07-31 (successor Amazon Quick)
+and Amazon Kendra 2026-07-30 (successor Bedrock Knowledge Bases); QuickSight now offered as Quick Sight inside
+Amazon Quick; AppStream 2.0 renamed WorkSpaces Applications (2025-11-06). Study guides are annotated; question-bank
+items in AIB/AIF/AIP that mention Kendra or Q Business still need availability notes via explain batches.
+
 ## 2. Reveal frame cost (no action needed)
 Profiling (4x CPU) shows the ~100 ms frame is one ~45-70 ms Layout on any reveal, independent of list size and of
 diagrams (`injectStyles` is not the cause); it is the explanation text layout itself. `.explain{contain:layout style}`
