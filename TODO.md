@@ -9,10 +9,15 @@ Phases:
   FIS name, DNSSEC KSK (KMS us-east-1, no CloudHSM), DX MTU (priv 9001/transit 8500/VPN 1446), Entra ID,
   Bedrock InvokeModel = CloudTrail management event.
 - P2 `study.html` + `js/study.js` — DONE (main). No timeline (owner dropped it). Progress via `StudyStore` only.
-- P3 glossary popovers — branch `study-glossary`, PR open (224 terms, zero-mark days 107→61).
-- P4 cutover — TODO, last: delete old 9am progress routine, add stateless study reminder, then delete old
-  tracker/daily/hub artifacts. Details in `.handoff/SESSION.md`. Deletion is irreversible: only after owner
-  checks live site.
+- P3 glossary popovers — branch `study-glossary`, PR #2 open, not merged. 224 terms. Owner asked for fewer-but-useful
+  marks; a "≥1 mark every day" pass was tried and reverted (weak/basic terms). Same PR also has: level tabs
+  (Foundational/Associate/Professional/Specialty), default exam = last opened else first listed, instant popover,
+  full-width concept text, short page intros.
+- CLF-C02 (Cloud Practitioner) guide — being written (`data/study/CLF-C02.json`, 14 days, domains inside the file,
+  NOT in exam-specs.json: qbank/mock tests iterate specs). Needs independent review + glossary terms, then PR.
+- P4 cutover — DONE 2026-10-22: old 9am progress routine deleted; new routine "학습 가이드 리마인드" weekdays 06:50 KST
+  (12 exam links; owner must attach Gmail connector in claude.ai routines UI, API could not); 26 old artifacts deleted.
+- Rulesets for main: owner asked how; recommended setup in reply (not applied).
 - P5 backend (Cognito OTP, API GW/Lambda/DynamoDB, Scheduler, SES) — design only, later. Needs own domain +
   personal AWS account.
 Known test noise (also on main before this work): `bookmark_backup_test` "toast shown" 17/18,
