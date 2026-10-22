@@ -14,7 +14,8 @@ Palantir exams publish a percent pass mark (`passingPct`) and no domain weights 
 **Before any `PLTR-*` work read `tools/qgen/PALANTIR.md`** (official facts and writing rules).
 Open work items are in `TODO.md` — read it at the start of a session.
 Study guide: `study.html` + `js/study.js` read `data/study/<EXAM>.json` (day-by-day plans, edited directly,
-not through qgen). See `tools/study/README.md`, including the planned (unbuilt) backend design.
+not through qgen) and mark terms from `data/glossary.json` with tap/hover popovers (EN + KO). See
+`tools/study/README.md` for the glossary rules and the planned (unbuilt) backend design.
 
 ## Hard rules
 - Never create files or folders the site reads whose names start with `_` (GitHub Pages/Jekyll

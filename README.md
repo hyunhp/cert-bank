@@ -5,6 +5,7 @@
 - [study.html](https://hyunhp.github.io/cert-bank/study.html): AWS 12개 시험의 Day별 학습 계획 (14/28/35일, 총 349일). Day마다 개념 4~5개, 시험 포인트, 확인 퀴즈 2문항(해설 포함), 한 줄 요약.
 - `#exam=SAA-C03&day=3`으로 바로 열림. 이전/다음 버튼과 도메인별 Day 목록으로 이동하고, "Practice Dn questions"를 누르면 그 도메인 문항만 걸러진 문제은행으로 이동.
 - "Mark as studied"와 마지막으로 본 Day는 이 브라우저(localStorage)에만 저장.
+- 용어 툴팁: 점선 밑줄 용어를 탭(PC는 마우스 올리기)하면 영어 정의와 한국어 설명이 뜸. 192개 용어(`data/glossary.json`)를 시험별로 골라, 하루에 처음 나올 때만 표시(평균 하루 1개 남짓). 독립 검수로 사실 확인.
 - 예전 학습 트래커 아티팩트에서 옮겨 온 내용이며, 2026-10-22에 종료·변경된 AWS 서비스를 기준으로 검수함.
 - 데이터 `data/study/<EXAM>.json`, 코드 `js/study.js`, 테스트 `python3 tools/study_test.py`, 설명과 향후 백엔드 설계: `tools/study/README.md`
 
