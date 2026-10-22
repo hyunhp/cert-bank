@@ -181,6 +181,10 @@ function renderDay() {
   const guide = guides[current.exam];
   const total = guide.days.length;
   const d = guide.days[current.day - 1];
+  $("#dayBarCode").textContent = current.exam;
+  $("#dayBarName").textContent = `Day ${d.day} / ${total} · ${d.title}`;
+  $("#barPrev").disabled = d.day === 1;
+  $("#barNext").disabled = d.day === total;
   const progress = StudyStore.get(current.exam);
   const studied = progress.done.includes(d.day);
   const qbank = `./#exam=${current.exam}${d.domain ? "&d=" + d.domain : ""}`;
@@ -303,8 +307,9 @@ document.addEventListener("click", e => {
   if (t.dataset.exam) return go(t.dataset.exam, null);
   if (t.dataset.vendor) { current.vendor = t.dataset.vendor; current.level = null; return renderExamRow(); }
   if (t.dataset.level) { current.level = t.dataset.level; return renderExamRow(); }
-  if (t.id === "prevBtn") return go(current.exam, current.day - 1);
-  if (t.id === "nextBtn") return go(current.exam, current.day + 1);
+  if (t.id === "prevBtn" || t.id === "barPrev") return go(current.exam, current.day - 1);
+  if (t.id === "nextBtn" || t.id === "barNext") return go(current.exam, current.day + 1);
+  if (t.id === "toTop") return window.scrollTo({ top: 0, behavior: smooth ? "smooth" : "auto" });
   if (t.dataset.day) return go(current.exam, +t.dataset.day);
   if (t.id === "doneBtn") {
     const studied = StudyStore.toggleDone(current.exam, current.day).done.includes(current.day);
@@ -333,6 +338,22 @@ document.addEventListener("keydown", e => {
   const nav = $("#dayNav");
   if (e.key === "Escape" && nav && nav.open) { nav.open = false; nav.querySelector("summary").focus(); }
 });
+
+// Compact day bar once the day navigation leaves the viewport; back-to-top after ~1.5 screens (as in the question bank).
+const smooth = !matchMedia("(prefers-reduced-motion: reduce)").matches;
+function updateScrollUi() {
+  const nav = document.querySelector(".daybar");
+  const showBar = !!nav && nav.getBoundingClientRect().bottom < 0;
+  const bar = $("#dayBar");
+  bar.classList.toggle("show", showBar);
+  bar.setAttribute("aria-hidden", showBar ? "false" : "true");
+  bar.querySelectorAll("button, a").forEach(el => { el.tabIndex = showBar ? 0 : -1; });
+  const showTop = scrollY > innerHeight * 1.5;
+  $("#toTop").classList.toggle("show", showTop);
+  $("#toTop").tabIndex = showTop ? 0 : -1;
+}
+window.addEventListener("scroll", updateScrollUi, { passive: true });
+window.addEventListener("resize", updateScrollUi);
 
 window.addEventListener("hashchange", () => {
   const h = parseHash();

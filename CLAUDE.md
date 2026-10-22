@@ -20,7 +20,8 @@ Donations: `support.html` holds the only copy of the payment links (`METHODS`; e
 KakaoPay links only open in the phone app (404 in desktop browsers): the card shows `assets/kakaopay-qr.svg` and is a
 link only on phones/tablets (user-agent check, not pointer type). If the
 link changes, regenerate it (`segno.make(url, error="m").save(path, scale=1, border=2)`).
-The header link, the bottom card in `index.html`, the study page header and the mock exam results all point to it.
+The header link, the sticky top bars (question bank exam bar, study day bar), the bottom card in `index.html`, the study
+page header and the mock exam results all point to it.
 
 ## Hard rules
 - Never create files or folders the site reads whose names start with `_` (GitHub Pages/Jekyll
