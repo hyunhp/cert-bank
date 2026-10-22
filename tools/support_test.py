@@ -2,7 +2,8 @@
 
 - support.html: KakaoPay opens as a link only on phones/tablets; computers (also touchscreen laptops) get a
   non-link card with a QR code, because KakaoPay links give a 404 in desktop browsers. Empty urls show "coming soon".
-- Korean browsers get Korean text and KakaoPay first; others get English and Ko-fi first.
+- English by default, even in Korean browsers; ?lang=ko or the toggle (remembered) switches to Korean.
+  Methods with a link come first (Korean: KakaoPay before Ko-fi; English: Ko-fi before KakaoPay).
 - The header link, the bottom card and the mock exam results point to support.html.
     python3 tools/support_test.py
 """
@@ -49,18 +50,24 @@ with sync_playwright() as p:
     check("phone: QR still shown", pg.locator(KAKAO + " .qr").count() == 1)
     check("phone: no horizontal scroll", not pg.evaluate("document.documentElement.scrollWidth > innerWidth"))
 
+    check("Korean browser still defaults to English", pg.inner_text("h1") == "Support cert-bank", pg.inner_text("h1"))
+    pg.goto(BASE + "support.html?lang=ko"); pg.wait_for_selector(".method")
     order = pg.eval_on_selector_all(".method", "els => els.map(e => e.dataset.method)")
-    check("Korean: KakaoPay first", order[:1] == ["kakaopay"], order)
-    check("Korean: Korean title", "후원" in pg.title())
+    check("?lang=ko: KakaoPay first", order[:1] == ["kakaopay"], order)
+    check("?lang=ko: Korean title", "후원" in pg.title())
     check("empty url shows coming soon", pg.eval_on_selector("[data-method=kofi]", "e => e.tagName") == "DIV"
           and "준비 중" in pg.inner_text("[data-method=kofi]"))
 
     pg = page(locale="en-US", viewport={"width": 1000, "height": 800}, user_agent=WIN)
     pg.goto(BASE + "support.html"); pg.wait_for_selector(".method")
     order = pg.eval_on_selector_all(".method", "els => els.map(e => e.dataset.method)")
-    check("English: Ko-fi first", order[:1] == ["kofi"], order)
+    kofi_live = pg.eval_on_selector("[data-method=kofi]", "e => !e.classList.contains('soon')")
+    expect = ["kofi", "kakaopay"] if kofi_live else ["kakaopay", "kofi"]
+    check("English: working method first", order == expect, order)
     pg.click(".lang[data-lang=ko]")
     check("language toggle switches to Korean", "후원" in pg.inner_text("h1"))
+    pg.reload(); pg.wait_for_selector(".method")
+    check("toggle choice is remembered", "후원" in pg.inner_text("h1"))
 
     pg.goto(BASE + "#exam=SAA-C03"); pg.wait_for_selector(".qcard")
     check("header support link", pg.get_attribute(".supportlink", "href") == "support.html"
