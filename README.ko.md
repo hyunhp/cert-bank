@@ -68,3 +68,6 @@ Amazon Web Services, Palantir Technologies와 관련 없는 비공식 사이트�
 [CLAUDE.md](CLAUDE.md), 남은 작업은 [TODO.md](TODO.md), 학습 가이드와 용어집 규칙은
 [tools/study/README.md](tools/study/README.md)에 있습니다. 저장소 이름은 2026-10-14에 `aws_qbank`에서 바뀌었고,
 예전 주소는 자동으로 이동되지 않습니다.
+
+---
+팁: 링크를 새 탭으로 열려면 **Ctrl**(Windows/Linux) 또는 **Cmd**(Mac)를 누른 채 클릭하세요.
