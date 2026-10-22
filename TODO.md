@@ -16,6 +16,10 @@ Phases:
 - Palantir study guides PLTR-DE/AIE/APD (17 days: 2 per domain + final) — DONE 2026-10-22, built only from the
   reviewed PLTR bank + PALANTIR.md facts, independently reviewed. Study page and question bank both use
   vendor tabs → level segments → named exam chips; question bank section filters sit in a shaded panel.
+- 2026-10-22 polish (PR #5, #6): level segment always shown (Palantir shows "Associate"; Specialist is hands-on,
+  out of scope); study-guide link text vendor-neutral; README rewritten user-facing in EN (README.md) + KO
+  (README.ko.md) with a Ctrl/Cmd-click tip (GitHub strips target=_blank, so links can't force a new tab).
+- Open: only P5 backend. Everything else in this section is done.
 - Kendra/Q Business availability notes on 19 AIB/AIF/AIP questions — DONE (explain batches AIF-C01/e14, AIP-C01/e16).
 - P4 cutover — DONE 2026-10-22: old 9am progress routine deleted; new routine "학습 가이드 리마인드" weekdays 06:50 KST
   (12 exam links; Gmail connector attached by owner; 13 exam links (adds CLF-C02)); 26 old artifacts deleted.
