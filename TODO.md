@@ -1,5 +1,26 @@
 # TODO
 
+## Study guide (started 2026-10-22) — terse handoff
+Rules/design: `tools/study/README.md`. Private owner notes (routines, artifact links): `.handoff/SESSION.md`
+(git-ignored, local only; ask owner if missing).
+Phases:
+- P1 data `data/study/<EXAM>.json` 12 exams/349 days — DONE (main, PR #1).
+- P1.5 retired-service review — DONE. Also fixed: Firehose name, Cognito refresh token not JWT, CMK name,
+  FIS name, DNSSEC KSK (KMS us-east-1, no CloudHSM), DX MTU (priv 9001/transit 8500/VPN 1446), Entra ID,
+  Bedrock InvokeModel = CloudTrail management event.
+- P2 `study.html` + `js/study.js` — DONE (main). No timeline (owner dropped it). Progress via `StudyStore` only.
+- P3 glossary popovers — branch `study-glossary`, NOT merged. Owner: "restore cut terms", wants ~more marks.
+  State: 208 terms (17 restored: SCP RTO RPO BGP FM hallucination OWASP SIEM KPI OLTP/OLAP loss function OCR
+  strangler fig prompt injection X.509 temperature SLA). Gap-fill pass for zero-mark days (DOP SAP SOA DVA ...)
+  in progress → review its additions, run tests, PR to main.
+- P4 cutover — TODO, last: delete old 9am progress routine, add stateless study reminder, then delete old
+  tracker/daily/hub artifacts. Details in `.handoff/SESSION.md`. Deletion is irreversible: only after owner
+  checks live site.
+- P5 backend (Cognito OTP, API GW/Lambda/DynamoDB, Scheduler, SES) — design only, later. Needs own domain +
+  personal AWS account.
+Known test noise (also on main before this work): `bookmark_backup_test` "toast shown" 17/18,
+`diagrams/check.py` exit 1. Playwright here: `pip install playwright==1.56.0` (matches /opt/pw-browsers chromium-1194).
+
 ## Palantir (started 2026-10-14)
 State 2026-10-15: PLTR-AIE 400, PLTR-DE 400 (b01-b50 each), PLTR-APD 400 (b01-b50: pilot + six rounds + capstone). Rules and checked facts in
 `tools/qgen/PALANTIR.md`.
