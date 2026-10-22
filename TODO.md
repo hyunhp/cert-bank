@@ -22,7 +22,7 @@ Phases:
 - Open: only P5 backend. Everything else in this section is done.
 - Kendra/Q Business availability notes on 19 AIB/AIF/AIP questions — DONE (explain batches AIF-C01/e14, AIP-C01/e16).
 - P4 cutover — DONE 2026-10-22: old 9am progress routine deleted; new routine "학습 가이드 리마인드" weekdays 06:50 KST
-  (12 exam links; Gmail connector attached by owner; 13 exam links (adds CLF-C02)); 26 old artifacts deleted.
+  (13 exam links incl. CLF-C02; Gmail connector attached by owner); 26 old artifacts deleted.
 - Rulesets for main: set up by owner 2026-10-22 (PR required). Work on a branch, open a PR, merge via API.
 - P5 backend (Cognito OTP, API GW/Lambda/DynamoDB, Scheduler, SES) — design only, later. Needs own domain +
   personal AWS account.
