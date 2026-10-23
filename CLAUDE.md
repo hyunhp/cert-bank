@@ -36,7 +36,7 @@ page header and the mock exam results all point to it.
 
 ## Batch format (see tools/qgen/qgen.py docstring)
 ```
-@ EXAM Dx Tx.x basic|applied|advanced use-case|tradeoff|comparison|troubleshooting [+OTHER:Dy]
+@ EXAM Dx Tx.x applied|advanced use-case|tradeoff|comparison|troubleshooting|definition [+OTHER:Dy]
 S: stem (multi-answer stems end with "(Select TWO)")
 A:..D: (E: for multi)   K: A  or  K: A,C
 W: why correct   X: B=... | C=... | D=...   T: takeaway   V: services (optional)
