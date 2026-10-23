@@ -7,8 +7,12 @@ Notices live in `data/exam-specs.json` ("update"), shown above the section filte
   C03 from 2026-12-01 (adds AI security, Bedrock, containers per secondary sources). Full exam guides with task
   statements are published when registration opens on 2026-10-27: then add SAP-C03 / DVA-C03 as new exams (specs,
   tasks, retag still-valid C02 questions, write the gap) and retire the C02 notices.
-- MLA-C01 -> MLA-C02: English C02 beta since 2026-09-29, GA 2027-01-14 (adds GenAI/agentic AI). Plan the same once the
-  GA guide is final.
+- MLA-C01 -> MLA-C02: DONE 2026-10-23. MLA-C02 registered (same four domains, 28/24/24/24; same twelve tasks, so
+  `tasksFrom: MLA-C01`); `tools/qgen/shares.json` shares 389 MLA-C01 questions (6 excluded: SageMaker Neo / model
+  compression, removed in C02) and 80 new GenAI questions in batches/MLA-C02/b01-b04 (vector stores and RAG data,
+  FM selection/customization/evaluation, FM deployment/agents/CI-CD, FM monitoring/cost/guardrails), each reviewed.
+  Task titles came from AWS's C01/C02 comparison page via secondary sources: re-check against the GA guide (2027-01-14)
+  and then drop MLA-C01 from the site.
 - ANS-C01: retires 2026-12-31, no successor. Keep the bank (credentials stay valid 3 years); consider hiding it later.
 - No change found for CLF-C02, AIF-C01, AIB-C01 (new, beta from 2026-09-29), SAA-C03, DEA-C01, SOA-C03, DOP-C02,
   AIP-C01, SCS-C03 (only three language versions end 2026-12-31).

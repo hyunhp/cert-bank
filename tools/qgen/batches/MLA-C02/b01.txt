@@ -1,0 +1,434 @@
+# MLA-C02 batch 01: Domain 1 generative AI data work (vector stores, knowledge base ingestion, chunking, embeddings, metadata, parsing, PII and dataset quality), detailed explanations
+
+@ MLA-C02 D1 T1.1 applied comparison
+S: A retailer keeps its product catalog, prices and stock levels in an Amazon Aurora PostgreSQL cluster. The ML team will add embeddings of product descriptions for a shopping assistant. Each search must return only in-stock items in the shopper's price range, and the embeddings must change in the same transaction that updates a product row. Which vector store fits best?
+A: An Amazon S3 Vectors index in a vector bucket, with price and stock copied into each vector's filterable metadata by a nightly export job
+B: An Amazon OpenSearch Serverless vector search collection, with a Lambda function that copies each product row into the index after commit
+C: The pgvector extension in the existing Aurora PostgreSQL cluster, storing a vector column in the product table and filtering with SQL
+D: A Bedrock knowledge base with an S3 data source holding one exported file per product, re-synced each hour to pick up stock changes
+K: C
+G: ## Where vectors can live on AWS
+A vector store keeps embeddings (lists of numbers) and finds the nearest ones to a query vector. Common AWS choices:
+- **Amazon OpenSearch Service / OpenSearch Serverless**: a search engine with k-NN vector fields, strong at large-scale vector and hybrid (keyword plus vector) search.
+- **Amazon Aurora PostgreSQL or RDS for PostgreSQL with pgvector**: an extension that adds a `vector` column type, distance operators and vector indexes to an ordinary relational database.
+- **Amazon S3 Vectors**: vector buckets and vector indexes in S3, priced for large, less frequently queried collections.
+## Why "next to the data" matters
+With pgvector the embedding is just another column. One query can mix similarity and business rules, for example `SELECT id FROM products WHERE in_stock AND price BETWEEN 20 AND 50 ORDER BY embedding <=> $1 LIMIT 10;`. An `UPDATE` that changes the description and the embedding commits atomically, so search never sees a half-updated product.
+Any separate store needs a copy job, and the copy is always a little behind the database.
+W: pgvector in the existing Aurora cluster: the vector lives in the product row, so stock and price filters are plain SQL predicates evaluated against current data and the embedding changes in the same transaction as the row.
+X: A=S3 Vectors with nightly export: metadata copied once a night is stale for stock levels during the day, and a separate store cannot share a transaction with the Aurora update.
+B=OpenSearch Serverless with a copy function: it can filter on copied fields, but the copy happens after commit, so the index can briefly disagree with the database and there is no shared transaction.
+D=Knowledge base with hourly sync: exported files and hourly syncs leave stock data up to an hour old, and the knowledge base has no link to the transactional row at all.
+T: When embeddings must stay transactionally consistent with relational data and be filtered by its columns, put them in the same PostgreSQL database with pgvector.
+V: Amazon Aurora, pgvector, Amazon OpenSearch Serverless, Amazon S3 Vectors
+
+@ MLA-C02 D1 T1.1 applied troubleshooting
+S: An ML engineer creates an Amazon Bedrock knowledge base that uses Amazon Titan Text Embeddings V2 with 1,024 output dimensions. The vector index in the Amazon OpenSearch Serverless collection was created from an older template whose knn_vector field has dimension 1536. Every ingestion job fails for all documents. What should the engineer do?
+A: Turn on the normalize option for Titan Text Embeddings V2 so that each 1,024-value vector is padded with zeros to the 1536 values the index expects
+B: Create a new vector index whose knn_vector field uses dimension 1024, update the knowledge base to use it, and run the ingestion job again
+C: Change the vector field's engine from faiss to lucene, because only the lucene engine accepts vectors shorter than the dimension in the mapping
+D: Raise the maximum indexing capacity of the OpenSearch Serverless account so that the collection can accept the larger 1536-value vectors
+K: B
+G: ## The dimension contract
+An embedding model always returns vectors of a fixed length (its **dimension**). Titan Text Embeddings V2 lets you choose 256, 512 or 1,024 values; the older Titan Text Embeddings G1 model returned 1,536.
+A vector index stores vectors in a field such as `"type": "knn_vector", "dimension": 1024`. Every vector written to that field must have exactly that many values, and every query vector must too. A mismatch is not a quality problem: the write is rejected.
+## Fixing a mismatch
+The dimension of an existing field cannot be changed in place. You create a new index (or a new field) with the right dimension, point the application or knowledge base at it, and re-ingest. The same rule applies to pgvector (`vector(1024)`) and to S3 Vectors indexes, where the dimension is fixed when the index is created.
+W: New index with dimension 1024: matching the field to the model's output is the only fix, and since the mapping cannot be edited, the index is recreated and the documents are ingested again.
+X: A=Normalize to pad vectors: normalization scales a vector to unit length; it never changes the number of values, so the vectors still have 1,024 dimensions.
+C=Switch the engine to lucene: every k-NN engine requires vectors to match the field dimension exactly; the engine choice affects the index algorithm, not the length check.
+D=Raise indexing capacity: capacity units control throughput and cost, and the failure is a mapping rejection that more capacity cannot change.
+T: The vector field dimension must equal the embedding model's output dimension; a mismatch means recreating the index and re-ingesting.
+V: Amazon Bedrock Knowledge Bases, Amazon OpenSearch Serverless, Amazon Titan Text Embeddings
+
+@ MLA-C02 D1 T1.1 advanced troubleshooting
+S: A team stores support-article embeddings in an Amazon S3 Vectors index with PutVectors. To return the article text with each result, they attach the full text as a metadata key. PutVectors now fails with a metadata size error for long articles, although the text is never used in query filters. Which change fixes this?
+A: Switch the index distance metric from cosine to euclidean, because euclidean indexes store vectors more compactly and leave more room for metadata on each vector
+B: Move the article text into a separately named metadata key in the same index, because the filterable size limit applies to each key rather than to the vector
+C: Store the vectors as 16-bit floats instead of 32-bit floats, so that the space saved on every vector can be used for the larger text metadata value
+D: Create a new vector index that declares the text key as non-filterable metadata, which has a larger size allowance, and write the vectors to that index
+K: D
+G: ## Amazon S3 Vectors in brief
+S3 Vectors adds **vector buckets** and **vector indexes** to Amazon S3. You write vectors with `PutVectors` (each with a key, the float32 values and optional metadata) and search with `QueryVectors`, optionally filtering on metadata. There are no servers or clusters to size.
+## Filterable and non-filterable metadata
+- **Filterable** metadata can be used in query filters, such as `{"category": "billing"}`. It has a small size allowance per vector.
+- **Non-filterable** metadata is only returned with results. It has a larger allowance and suits things like the chunk text or a source URL.
+Which keys are non-filterable is declared **when the index is created** and cannot be changed later. Bedrock knowledge bases that use S3 Vectors rely on this: the chunk text key is set as non-filterable.
+W: New index with a non-filterable text key: text that is only returned, never filtered on, belongs in non-filterable metadata, and because that setting is fixed at creation the index is recreated.
+X: A=Change the distance metric: the metric only decides how similarity is scored; it has no effect on vector storage or on metadata size limits.
+B=Use a different key name: the filterable allowance covers all filterable metadata of one vector together, so renaming or splitting the key does not help.
+C=Use 16-bit floats: S3 Vectors stores float32 vectors, and vector values are not counted against the metadata allowance anyway.
+T: In S3 Vectors, put large return-only fields such as chunk text in non-filterable metadata, which must be declared when the index is created.
+V: Amazon S3 Vectors
+
+@ MLA-C02 D1 T1.1 applied use-case
+S: A company's Bedrock knowledge base must answer questions about resolved support tickets within about a minute of the ticket closing. Tickets close a few hundred times an hour. Today a workflow writes each ticket to the S3 data source and an ingestion job runs nightly. Which approach meets the freshness goal with the least operational overhead?
+A: Schedule StartIngestionJob every minute with Amazon EventBridge Scheduler, so that each run picks up the tickets written to Amazon S3 since the last run
+B: Add a custom data source and call the IngestKnowledgeBaseDocuments API from the ticket workflow, so that each closed ticket is chunked and embedded directly
+C: Turn on S3 Event Notifications for the data source bucket, because the knowledge base subscribes to them and re-syncs changed objects automatically
+D: Write each ticket into the OpenSearch Serverless vector index with the bulk API, using the same field names the knowledge base mapped for text and vectors
+K: B
+G: ## Two ways data gets into a knowledge base
+- **Sync (ingestion job)**: `StartIngestionJob` scans a data source such as an S3 prefix, finds added, changed and deleted files, then parses, chunks, embeds and writes them to the vector store. Syncs are incremental, but each one still scans the source, and jobs for one data source run one at a time.
+- **Direct ingestion**: `IngestKnowledgeBaseDocuments` sends specific documents (inline content for a custom data source, or S3 locations) straight into the knowledge base. The knowledge base chunks and embeds them right away; `DeleteKnowledgeBaseDocuments` removes them. This suits event-driven, small, frequent changes.
+## Choosing
+Large periodic refreshes: sync. A steady stream of individual records that must be searchable soon after they appear: direct ingestion from the workflow that creates them.
+W: Custom data source with direct ingestion: each ticket is pushed as it closes, the knowledge base handles chunking and embedding, and nothing has to scan the source or be scheduled.
+X: A=Per-minute ingestion jobs: each job scans the whole data source, and only one job can run per data source at a time, so a new start fails while the previous sync is still running and the schedule cannot keep up reliably.
+C=S3 Event Notifications: knowledge bases do not subscribe to bucket events; a sync starts only when you call StartIngestionJob or ingest documents directly.
+D=Bulk writes to the index: this bypasses the knowledge base, so the text is not chunked or embedded by it, the records belong to no data source, and you must compute and manage vectors yourself.
+T: For frequent, event-driven updates to a Bedrock knowledge base, push documents with IngestKnowledgeBaseDocuments instead of scheduling full sync jobs.
+V: Amazon Bedrock Knowledge Bases
+
+@ MLA-C02 D1 T1.1 applied use-case
+S: A media company wants a RAG assistant over 5,000 hours of recorded podcast episodes stored as MP3 files in Amazon S3. Each answer must cite the episode and the time in the episode where the supporting passage starts so listeners can jump to it. Which ingestion design meets this requirement?
+A: Add the MP3 files directly to the knowledge base's S3 data source with the default parser, which transcribes audio and keeps the time of every chunk
+B: Embed fixed-length audio clips with Amazon Titan Multimodal Embeddings G1, storing the clip start time as metadata next to each audio vector
+C: Transcribe each episode with Amazon Transcribe, split the timed transcript into passages, and store each passage with episode and start time metadata
+D: Transcribe each episode with Amazon Transcribe and ingest each full transcript as one chunk, citing the episode start time with every answer given
+K: C
+G: ## Audio has to become text first
+Text embedding models and the default knowledge base parser work on text. Spoken content is usually converted with **Amazon Transcribe**, whose JSON output lists every word with its `start_time` and `end_time`. (Newer managed options, such as Amazon Bedrock Data Automation parsing or multimodal embedding models that accept audio, can also process audio; whatever the tool, the design must keep the time of each passage.)
+## Keeping timestamps through chunking
+If you only keep the plain transcript, the times are lost. Instead:
+- Group words into passages, for example about 45 seconds or a paragraph each.
+- Store each passage as its own document or row with metadata such as `episode_id` and `start_seconds`.
+- Return that metadata with retrieved chunks so the answer can cite "Episode 214 at 12:35".
+In a Bedrock knowledge base, each passage file can carry a `.metadata.json` sidecar; in pgvector the times are simply columns.
+W: Timed transcript split into passages: Transcribe supplies word-level times, and storing each passage with its start time as metadata lets every retrieved chunk carry the exact jump point.
+X: A=Raw MP3 with the default parser: the default parser extracts text from text-based documents such as PDF, Word, HTML and CSV; it does not transcribe audio, so the MP3 files are not indexed as spoken text.
+B=Titan Multimodal Embeddings for audio: that model accepts text and images, not audio, so it cannot embed the clips.
+D=One chunk per transcript: a whole episode is far larger than a useful chunk, retrieval loses precision, and the only time available is the start of the episode, not of the passage.
+T: To cite positions in audio, transcribe with word timings, chunk the transcript into passages, and keep the passage start time as metadata.
+V: Amazon Transcribe, Amazon Bedrock Knowledge Bases
+
+@ MLA-C02 D1 T1.1 applied use-case
+S: An ML engineer is setting up an existing Amazon OpenSearch Serverless vector search collection as the vector store for a new Amazon Bedrock knowledge base. Which TWO steps are required before the first ingestion job can succeed? (Select TWO)
+A: Create a vector index with a knn_vector field whose dimension matches the embedding model, plus fields for chunk text and metadata
+B: Add the knowledge base service role to the collection's data access policy with permissions to read and write the index and documents
+C: Recreate the collection as a time series collection so that each ingestion job appends new vectors with a timestamp it can roll back to
+D: Enable fine-grained access control in OpenSearch Dashboards on the collection and map the knowledge base service role to the all_access role
+E: Set the shard and replica counts on the vector index to match the number of documents expected in the data source after the first sync
+K: A,B
+G: ## What a knowledge base needs from OpenSearch Serverless
+OpenSearch Serverless organizes data in **collections**; a collection of type **vector search** is the one meant for embeddings. Inside it the knowledge base writes to a **vector index** that you map when you create the knowledge base:
+- a `knn_vector` field with the embedding dimension (for example 1,024) and an engine such as `faiss`,
+- a text field that holds the chunk text,
+- a metadata field that the knowledge base manages.
+## Access control
+OpenSearch Serverless does not use the OpenSearch security plugin. Access is granted with **data access policies** that list principals and permissions on collections and indexes (for example `aoss:WriteDocument`, `aoss:ReadDocument`, `aoss:DescribeIndex`). The knowledge base service role also needs IAM permission to call the collection API. Capacity and shards are managed by the service.
+W: A=Vector index with matching dimension: the knowledge base writes vectors, text and metadata into fields you map, and the vector field must accept the model's dimension.
+B=Data access policy for the service role: without it, the role that runs ingestion is denied when it reads and writes the index.
+X: C=Time series collection: time series collections serve log-style analytics; vector data uses the vector search collection type the team already has.
+D=Fine-grained access control: that is a feature of provisioned OpenSearch Service domains; serverless collections use data access policies instead.
+E=Shard and replica counts: OpenSearch Serverless manages shards and capacity itself; there are no shard settings to size for a knowledge base.
+T: For a knowledge base on OpenSearch Serverless, map a vector index with the right dimension and grant the knowledge base role access through a data access policy.
+V: Amazon OpenSearch Serverless, Amazon Bedrock Knowledge Bases
+
+@ MLA-C02 D1 T1.1 advanced troubleshooting
+S: A team stores 3 million document embeddings in Amazon RDS for PostgreSQL with pgvector. They built an HNSW index for Euclidean (L2) distance. Queries rank results by cosine distance (the <=> operator) with LIMIT 10, and EXPLAIN shows a sequential scan, making each search take seconds. What should the ML engineer do?
+A: Run VACUUM ANALYZE on the table so that the planner updates its statistics and begins choosing the HNSW index for the cosine distance queries
+B: Replace the HNSW index with an IVFFlat index built for L2 distance, because only IVFFlat indexes can serve cosine distance ordering in queries
+C: Rebuild the HNSW index with the cosine distance operator class so that the distance the index was built for matches the queries
+D: Raise the hnsw.ef_search setting for the session so that the planner treats the existing index as precise enough to use for cosine queries
+K: C
+G: ## pgvector distance operators
+pgvector compares vectors with three operators:
+- `<->` Euclidean (L2) distance
+- `<=>` cosine distance
+- `<#>` negative inner product
+## Indexes are built for one operator
+An approximate index (HNSW or IVFFlat) is created with an **operator class** that fixes the distance it understands:
+`CREATE INDEX ON docs USING hnsw (embedding vector_cosine_ops);`
+`vector_l2_ops` serves `<->`, `vector_cosine_ops` serves `<=>`, `vector_ip_ops` serves `<#>`. If the query's operator does not match the index's operator class, PostgreSQL cannot use the index and falls back to comparing the query with every row.
+Pick the distance your embedding model is designed for (cosine is common for text embeddings) and use the same one in the index and the queries.
+W: Matching operator class: an HNSW index built with vector_cosine_ops serves the <=> cosine queries, so the planner can use it and the sequential scan disappears. (Switching the queries to the L2 operator <-> would also use the existing index, but changes the ranking unless the vectors are normalized.)
+X: A=VACUUM ANALYZE: fresh statistics cannot make the planner use an index built for a different operator; the mismatch, not the statistics, blocks the index.
+B=Switch to IVFFlat with L2: IVFFlat follows the same operator class rule, so an IVFFlat index built for L2 distance would also be ignored by cosine queries.
+D=Raise hnsw.ef_search: this setting trades recall for speed during an index scan that is already happening; it does not let an L2 index serve cosine queries.
+T: A pgvector index is used only when the query operator matches its operator class: <-> with vector_l2_ops, <=> with vector_cosine_ops, <#> with vector_ip_ops.
+V: Amazon RDS for PostgreSQL, pgvector
+
+@ MLA-C02 D1 T1.1 applied use-case
+S: A Bedrock knowledge base already indexes product manuals from an S3 data source. The engineering team also wants pages from the company's Confluence Cloud space, which requires sign-in, included in the same assistant's answers. Which approach requires the least custom code and ongoing maintenance?
+A: Point a web crawler data source at the Confluence space URLs so that the knowledge base follows links and indexes each page it can reach
+B: Create a second knowledge base for Confluence and change the application to query both knowledge bases and merge the two sets of results
+C: Write a Lambda function that exports Confluence pages to the S3 data source each night and then starts an ingestion job for that bucket
+D: Add a Confluence data source to the existing knowledge base with credentials stored in AWS Secrets Manager, and sync it on its own schedule
+K: D
+G: ## One knowledge base, several data sources
+A Bedrock knowledge base can hold more than one **data source**, all feeding the same vector store. Built-in connectors include Amazon S3, Confluence, Microsoft SharePoint, Salesforce and a web crawler, plus custom data sources for anything else.
+- Each data source has its own parsing and chunking settings and its own sync (ingestion job).
+- Connectors to systems that need sign-in read credentials from **AWS Secrets Manager**.
+- Retrieval searches across all data sources of the knowledge base, so the application code does not change.
+## Picking a connector
+The web crawler is meant for public web pages it can fetch without logging in. Content behind authentication in a supported SaaS product should use that product's connector.
+W: Confluence data source on the existing knowledge base: the managed connector authenticates with the stored secret, syncs independently, and its chunks appear in the same retrieval results with no application change.
+X: A=Web crawler: the crawler fetches publicly reachable pages and is not meant for content behind a Confluence sign-in, so the pages would not be indexed.
+B=Second knowledge base: it works but adds a second store, a second query and custom merge and ranking logic in the application, which is more to maintain.
+C=Nightly export function: custom export code must handle paging, attachments, deletions and permission changes, which the managed connector already does.
+T: To add another source to a Bedrock knowledge base, prefer a built-in connector as an extra data source of the same knowledge base over custom export code.
+V: Amazon Bedrock Knowledge Bases, AWS Secrets Manager
+
+@ MLA-C02 D1 T1.2 applied use-case
+S: A bank loads 12,000 FAQ files into a Bedrock knowledge base. Each file holds exactly one short question and its answer of about 120 words. With fixed-size chunking at 60 tokens, retrieved chunks often contain only the question or only the answer. Which chunking setting fits this content best?
+A: Use semantic chunking with a low breakpoint percentile threshold so that every sentence boundary inside a file starts a new and separate chunk
+B: Use no chunking, so that each FAQ file becomes exactly one chunk that always keeps the question together with its complete answer text
+C: Keep fixed-size chunking at 60 tokens and raise the overlap percentage so that each chunk repeats a large part of the previous chunk's text
+D: Use hierarchical chunking with 60-token child chunks so that the child chunks hold the questions and parent chunks hold only the answers
+K: B
+G: ## Chunking options in Bedrock Knowledge Bases
+- **Default / fixed-size**: split text into chunks of a set token count, with an optional overlap percentage.
+- **Hierarchical**: small child chunks are matched, and their larger parent chunk is returned for context.
+- **Semantic**: split where the meaning changes, using embedding similarity between neighboring sentences.
+- **No chunking**: each file is one chunk. You pre-split the content yourself.
+- **Custom**: a Lambda function does the splitting.
+## Match the strategy to the document shape
+Chunking exists to cut long documents into retrievable pieces. When each file is already one small, self-contained unit (a FAQ entry, a product card, a ticket summary), cutting it again only separates parts that belong together. Example: "Can I close my account online?" in one chunk and "Yes, from the settings page..." in another means neither chunk answers the question.
+W: No chunking: each file is already a natural, short unit, so keeping it whole guarantees that the question and its answer are retrieved together.
+X: A=Semantic chunking with a low threshold: a low threshold splits more often, so a 120-word entry would be cut into even smaller pieces that separate the question from the answer.
+C=Larger overlap at 60 tokens: overlap duplicates text between neighbors but the chunks stay too small to hold a full question and answer, and the index grows.
+D=Hierarchical chunking: parents and children are formed by size, not by question and answer roles, and the documents are too short to benefit from a hierarchy.
+T: If every file is already one small, self-contained unit, use no chunking instead of splitting it further.
+V: Amazon Bedrock Knowledge Bases
+
+@ MLA-C02 D1 T1.2 advanced troubleshooting
+S: A manufacturer indexes 200 router manuals that share most of their wording. A chunk such as "Hold the reset button for 10 seconds" contains no model name, so questions about model R7 often retrieve steps from model R5. The chunk size is reasonable. Which change fixes this best at ingestion time?
+A: Increase the number of retrieved results from 5 to 25 so that a chunk from the correct manual is very likely to appear among the results returned
+B: Reduce the embedding dimension from 1,024 to 256 so that small differences in wording between manuals carry more weight in similarity search
+C: Switch to semantic chunking so that the chunk boundaries follow topic changes in each manual rather than a fixed number of tokens per chunk
+D: Add a custom transformation Lambda function that prepends the model name and section title to each chunk and stores the model as metadata
+K: D
+G: ## Chunks lose their document context
+A chunk is embedded on its own. If the words that identify where it came from (product name, chapter, version) appear only in the document title or first page, most chunks carry no trace of them. Identical procedures from different manuals then produce almost identical vectors, and the retriever cannot tell them apart.
+## Contextual chunk headers and metadata
+Two complementary fixes at ingestion time:
+- **Prepend context to the chunk text**, for example `Model R7 > Factory reset: Hold the reset button for 10 seconds`. The embedding now encodes the model.
+- **Attach metadata** such as `model = "R7"`, so the application can filter retrieval when it knows which model the user owns.
+In Bedrock Knowledge Bases a **custom transformation** Lambda function can run after chunking to rewrite chunk text and add metadata; in a self-built pipeline you do the same before calling the embedding model.
+W: Context header plus metadata: putting the model name into each chunk's text changes its embedding, and the model attribute allows an exact filter, so R7 questions stop matching R5 chunks.
+X: A=Return more results: more results add more near-identical chunks from the wrong manuals, and the generator still cannot tell which model each chunk belongs to.
+B=Fewer dimensions: shrinking the vector removes detail rather than adding it, and the chunks still do not contain any model name to distinguish them.
+C=Semantic chunking: better boundaries do not add the missing model name; the reset procedure chunk would still look the same in every manual.
+T: When chunks lose identifying context, prepend document and section context to the chunk text and store it as filterable metadata.
+V: Amazon Bedrock Knowledge Bases, AWS Lambda
+
+@ MLA-C02 D1 T1.2 applied troubleshooting
+S: A team builds its own retrieval pipeline with Cohere Embed on Amazon Bedrock. A batch job embedded all 2 million documents, reusing the query code, so every call used input_type "search_query". Queries also use "search_query". Retrieval quality is noticeably worse than in the vendor's benchmarks. What should the team change?
+A: Re-embed the documents with input_type "search_document" and keep "search_query" for the user queries, so each side uses the type the model expects
+B: Re-embed both the documents and the queries with input_type "classification", because that type yields the most general purpose vectors
+C: Keep the stored embeddings and switch the queries to Amazon Titan Text Embeddings V2, so that queries and documents use two separate models
+D: Keep the embeddings and normalize every stored vector to unit length, because the input_type only affects the scale of the vectors returned
+K: A
+G: ## Asymmetric embeddings for search
+Many retrieval embedding models treat the two sides of a search differently: a short question and the long passage that answers it. Cohere Embed models on Amazon Bedrock require an `input_type` on each call:
+- `search_document` for the texts you store in the vector database,
+- `search_query` for the user's question at search time,
+- `classification` and `clustering` for other uses.
+The model was trained so that a `search_query` vector lands near the `search_document` vectors that answer it. Embedding the corpus as queries breaks that pairing and lowers recall.
+## The general rule
+Whatever model you use, embed documents and queries with the same model and version, and follow the model's instructions for each side (input type, prefixes, dimension). Changing any of these for stored vectors means re-embedding the corpus.
+W: search_document for the corpus: the model's document and query spaces are meant to be paired, so re-embedding the stored texts with the document type restores the expected retrieval quality.
+X: B=Use classification for both: that type is tuned for training classifiers on the vectors, not for matching questions to passages, so search quality would not reach the benchmark.
+C=Switch the query model: vectors from two different models live in unrelated spaces, so similarity between a Titan query and Cohere documents is meaningless.
+D=Normalize the stored vectors: input_type changes what the vector represents, not only its length, so scaling the wrong vectors does not fix them.
+T: For asymmetric embedding models such as Cohere Embed, embed stored texts as documents and questions as queries, always with the same model.
+V: Amazon Bedrock, Cohere Embed
+
+@ MLA-C02 D1 T1.2 applied use-case
+S: An online store wants shoppers to search 4 million product photos either by typing text such as "red leather ankle boots" or by uploading a photo of a similar item. Product photos have no reliable captions. Which embedding approach supports both kinds of search with one vector index?
+A: Embed the photos and the text queries with Amazon Titan Text Embeddings V2, sending each photo as a base64 string in the request's text input field
+B: Embed the photos, typed queries and uploaded query photos with Amazon Titan Multimodal Embeddings G1, which maps images and text into one space
+C: Run Amazon Rekognition DetectLabels on each photo, store the label names as keywords, and match the typed queries with a keyword search only
+D: Generate a caption for every catalog photo with a text model, embed only the captions with Titan Text Embeddings V2, and embed queries as text
+K: B
+G: ## Multimodal embeddings
+A **multimodal embedding model** places images and text in one shared vector space: a photo of red boots and the text "red leather ankle boots" produce nearby vectors. **Amazon Titan Multimodal Embeddings G1** on Amazon Bedrock accepts text, an image, or both in one request, and Cohere Embed v4 offers similar image and text support.
+## Why one space matters here
+- Typed query: embed the text, search the photo vectors.
+- Photo query: embed the uploaded image with the same model, search the same vectors.
+Both searches use one index because every vector came from the same model. A text-only embedding model cannot take an image, and a caption-based approach needs a way to turn the shopper's photo into text first.
+W: Titan Multimodal Embeddings G1: images and text share one vector space, so typed queries and uploaded photos can both be compared directly with the stored photo vectors.
+X: A=Titan Text Embeddings V2 on base64: a text model treats the base64 string as random characters; it does not decode or understand the image.
+C=Rekognition labels with keyword search: generic labels miss attributes like style and material, and keyword search cannot handle a query by uploaded photo at all.
+D=Captions with a text model: it can serve typed queries, but uploaded photos have no caption, so photo search would need another model call per query and loses visual detail.
+T: To search images by text and by image in one index, embed everything with a multimodal embedding model such as Titan Multimodal Embeddings.
+V: Amazon Titan Multimodal Embeddings, Amazon Bedrock
+
+@ MLA-C02 D1 T1.2 applied troubleshooting
+S: Documents in a Bedrock knowledge base each have a .metadata.json file with "publish_date": "2026-03-15" stored as a string. A retrieval filter using greaterThan on publish_date to keep only documents newer than 2025 returns errors or no results. What should the ML engineer change?
+A: Store the date as a number such as 20260315 in the metadata files, re-sync the data source, and filter with greaterThan on that numeric value
+B: Change the retrieval filter from greaterThan to stringContains with the value "2026" so that it compares dates stored as strings correctly
+C: Move the publish date into the first line of each document's text so that semantic search ranks the newer documents above the older ones
+D: Rename the attribute to x-amz-bedrock-kb-date so that the knowledge base recognizes it as a built-in date field with range comparisons
+K: A
+G: ## Metadata filters in Bedrock Knowledge Bases
+For an S3 data source, each document can have a sidecar file named after it, such as `policy.pdf.metadata.json`:
+`{"metadataAttributes": {"department": "hr", "publish_year": 2026}}`
+Attributes are copied to every chunk of that document at sync time. At query time a filter narrows the search before similarity ranking, for example `{"equals": {"key": "department", "value": "hr"}}` or `{"greaterThan": {"key": "publish_year", "value": 2025}}`.
+## Types matter
+Range operators such as `greaterThan` and `lessThanOrEquals` compare **numbers**. String operators include `equals`, `in`, `startsWith` and `stringContains`. A date written as the string `"2026-03-15"` cannot be range-filtered. A sortable number such as `20260315` (or an epoch timestamp) can.
+After changing metadata files, run a sync so the new values reach the vector store.
+W: Numeric date attribute: range operators work on numbers, so a sortable number like 20260315 lets greaterThan keep only newer documents after the next sync.
+X: B=stringContains "2026": this matches only that one year and is not a range; documents from later years or month ranges would need a different filter each time.
+C=Date in the document text: semantic similarity does not enforce any date rule, so old documents still appear whenever their content matches well.
+D=Special attribute name: there is no built-in date attribute that turns a string into a range-comparable date; the value type is what matters.
+T: Store values you want to range-filter (dates, versions, prices) as numbers in knowledge base metadata; string values support only string operators.
+V: Amazon Bedrock Knowledge Bases
+
+@ MLA-C02 D1 T1.2 applied use-case
+S: An insurer is building its own RAG pipeline into Aurora PostgreSQL with pgvector. Source documents are scanned, multi-page claim forms saved as image-only PDFs with tables of line items. The extracted text must keep table rows intact before chunking and embedding. Which preprocessing step fits?
+A: Send the PDF bytes directly to Amazon Titan Text Embeddings V2, which reads the scanned page images and keeps every table row inside one vector
+B: Run Amazon Rekognition DetectText on each page image and join the detected lines from top to bottom into plain text that is then chunked by size
+C: Run asynchronous Amazon Textract document analysis with the TABLES and LAYOUT features, and convert each table to row-wise text before chunking
+D: Run Amazon Comprehend DetectEntities on each PDF file so that every table row is returned as one entity that can be embedded on its own later
+K: C
+G: ## Parsing comes before chunking
+An embedding model only sees the text you give it. For scanned PDFs there is no text layer at all; the pages are pictures. A parsing step must first:
+- run OCR to read the characters,
+- understand structure: headings, reading order, and especially tables, so a line item stays "Item | Qty | Amount" instead of three unrelated columns.
+## Tools on AWS
+- **Amazon Textract** document analysis returns words plus structure. `TABLES` gives cells with row and column positions; `LAYOUT` gives titles, sections and reading order. Multi-page PDFs use the asynchronous API (`StartDocumentAnalysis`).
+- In a Bedrock knowledge base the same need is met by the **Bedrock Data Automation** or **foundation model** parser options.
+A common pattern is to turn each table row into a line such as `Line 3: MRI scan, qty 1, 1,250.00 USD` so that chunking cannot separate a value from its column name.
+W: Textract with TABLES and LAYOUT: it performs OCR on image-only pages and returns table cells with their positions, so rows can be rebuilt as text before chunking.
+X: A=PDF bytes to a text embedding model: Titan Text Embeddings takes text only; it does not do OCR or read images inside a PDF.
+B=Rekognition DetectText: it finds short text in photos and returns lines without table structure, so rows and columns of a dense form would be mixed up.
+D=Comprehend DetectEntities: it finds entities in text that already exists; it does not perform OCR on scanned pages or return table rows.
+T: For scanned documents with tables, parse with a layout-aware OCR service such as Textract (TABLES, LAYOUT) before chunking and embedding.
+V: Amazon Textract, Amazon Aurora, pgvector
+
+@ MLA-C02 D1 T1.2 advanced troubleshooting
+S: A team embeds 1,500-token chunks with an embedding model whose maximum input is much shorter than that, with truncation set to "END" so that requests do not fail. No errors are reported, but questions answered by text near the end of a chunk are rarely retrieved. What is the most effective fix?
+A: Increase the chunk overlap to 50 percent so that the text at the end of each chunk also appears at the start of the following chunk
+B: Reduce the chunk size so that every chunk fits within the embedding model's input limit, then re-chunk and re-embed the corpus
+C: Normalize all stored vectors to unit length so that long chunks no longer dominate the similarity scores computed against queries
+D: Raise the number of results returned per query from 5 to 20 so that chunks whose ending text was cut off still make it into the results
+K: B
+G: ## Every embedding model has an input limit
+An embedding model reads at most a fixed number of tokens per input. With truncation turned on, longer input is cut silently: `END` drops the tail, `START` drops the beginning. The vector then represents only the part the model read.
+## The symptom
+The full chunk text is still stored and returned to the generator, so nothing looks broken. But the chunk's vector says nothing about its last part, so questions answered by that part do not match it. Recall drops quietly for content that happens to sit late in chunks.
+## Fix
+Set the chunk size (in tokens, with some margin) below the model's input limit, or choose an embedding model with a longer input. Changing chunking means re-chunking and re-embedding the corpus.
+W: Chunks within the input limit: when the whole chunk fits, its vector represents all of its text, so content near the end becomes retrievable again.
+X: A=More overlap: with truncation at the end, much of each chunk's tail is still never embedded, and the index grows with duplicated text.
+C=Normalize vectors: unit length changes scale, not content; the part of the chunk the model never read is still missing from the vector.
+D=Return more results: the truncated chunks rank low because their vectors lack the relevant text, and raising the count also adds unrelated context.
+T: Keep chunk size below the embedding model's input limit; silent truncation hides the end of each chunk from search.
+V: Amazon Bedrock, Cohere Embed
+
+@ MLA-C02 D1 T1.2 applied tradeoff
+S: A team runs a custom RAG pipeline that stores 40 million chunk embeddings in Amazon OpenSearch Service. Which TWO changes require the team to re-chunk or re-embed the entire stored corpus before the change takes effect? (Select TWO)
+A: Replacing the embedding model with a different model, or changing the output dimension setting of the current model
+B: Changing the chunk size and overlap that the pipeline uses to split every document before the chunks are embedded
+C: Adding a reranking model that reorders the top 50 retrieved chunks before the best ones are sent to the generator
+D: Changing the number of chunks retrieved per query from 5 to 8 and adjusting the minimum similarity score threshold
+E: Switching the text generation model that writes the final answer to a newer model with a larger context window size
+K: A,B
+G: ## What lives in the index and what happens at query time
+Some RAG settings are baked into the stored vectors; others only affect how the stored vectors are used.
+Baked in at ingestion (changing them means rebuilding the index):
+- **Embedding model and its settings** (model, version, dimension, input type). Query vectors must come from the same model as the stored vectors.
+- **Chunking** (strategy, size, overlap, parsing). The stored units themselves change.
+Applied at query time (no re-indexing):
+- number of results (`k`) and score thresholds,
+- metadata filters,
+- reranking of retrieved results,
+- the generation model and its prompt.
+## Plan for re-embedding
+For a large corpus, re-embedding costs time and money, so teams usually build a new index alongside the old one, backfill it, compare quality, then switch traffic.
+W: A=New embedding model or dimension: vectors from a different model or dimension are not comparable with the stored ones, so every chunk must be embedded again.
+B=New chunk size and overlap: the stored chunks are the old units of text, so the corpus has to be split again and every new chunk embedded.
+X: C=Add a reranker: it scores retrieved text with the query at search time and leaves the stored vectors untouched.
+D=Change k and the score threshold: these only control how many stored results are returned and which are kept.
+E=New generation model: the generator reads the retrieved text after search, so the index does not depend on it.
+T: Changing the embedding model or the chunking rebuilds the index; k, filters, reranking and the generator are query-time settings.
+V: Amazon OpenSearch Service
+
+@ MLA-C02 D1 T1.3 applied use-case
+S: Before fine-tuning a model on Amazon Bedrock, a company must find which of its 300 S3 buckets contain personal data, then create copies of 2 million English chat transcripts in which names, phone numbers and addresses are replaced by their entity type. Which TWO services should the ML engineer use? (Select TWO)
+A: Amazon Macie sensitive data discovery to find and report which buckets and objects across the account contain personal data
+B: Amazon Comprehend asynchronous PII detection jobs in redaction mode to write copies of the transcripts with each PII entity replaced
+C: Amazon Inspector scans of the S3 buckets to find objects with personal data and to replace each match with a masked placeholder value
+D: AWS Glue Data Quality rulesets on the transcript tables to detect and rewrite each name, phone number and address in the text field
+E: Amazon CloudWatch Logs data protection policies on the transcript buckets to mask personal data in objects as they are written to S3
+K: A,B
+G: ## Discover, then redact
+Handling PII for training data has two separate jobs:
+- **Discovery**: where is the sensitive data? **Amazon Macie** inventories S3 buckets and inspects objects with managed and custom data identifiers, then reports findings (bucket, object, type of data). Macie reports; it does not change the objects.
+- **Redaction**: produce a clean copy. **Amazon Comprehend** PII detection can run as an asynchronous job (`StartPiiEntitiesDetectionJob`) over documents in S3. In redaction mode it writes output files where each entity is masked or replaced with its type, for example `[NAME] called from [PHONE]`.
+## Why replace with the entity type
+Replacing with a type keeps the sentence structure the model learns from while removing the personal value. Masking with random strings or deleting the words leaves broken sentences in the training data.
+W: A=Macie discovery: it scans S3 at account scale and reports which buckets and objects hold personal data, which answers the first requirement.
+B=Comprehend redaction jobs: they process the transcripts in S3 in bulk and write copies with each detected entity replaced by its type.
+X: C=Amazon Inspector: it assesses workloads such as EC2 instances, container images and Lambda functions for vulnerabilities; it does not inspect S3 object content for PII.
+D=Glue Data Quality: its rules measure completeness, uniqueness and value patterns and report results; they do not rewrite free text.
+E=CloudWatch Logs data protection: these policies mask sensitive data in log events in CloudWatch Logs, not in objects stored in S3.
+T: Use Macie to find where personal data sits in S3 and Comprehend PII jobs to create redacted copies of text for training.
+V: Amazon Macie, Amazon Comprehend, Amazon Bedrock
+
+@ MLA-C02 D1 T1.3 applied use-case
+S: An AWS Glue job prepares a JSONL fine-tuning dataset of prompt and completion pairs. Recent runs included empty completions, very short completions and many repeated prompts. The ML engineer wants each run to measure these problems and keep failing records out of the training output automatically. What should the engineer add?
+A: An Amazon Macie job with custom data identifiers that flags empty or very short completion values as sensitive findings for review
+B: An Amazon Bedrock model evaluation job that scores the dataset records for completeness before the fine-tuning job is started
+C: An AWS Glue Data Quality ruleset in the job, using row-level results to send records that fail the rules to a quarantine prefix
+D: Amazon CloudWatch anomaly detection on the size of each output file so that unusual datasets stop the fine-tuning job from running
+K: C
+G: ## Data quality checks for fine-tuning data
+Fine-tuning learns from every record, so empty answers, very short answers and heavy duplication directly teach the model bad habits. These are measurable properties of the dataset, the same kind of checks used for tabular ML data.
+## AWS Glue Data Quality
+Glue Data Quality uses a rule language, DQDL, for example:
+`Rules = [ IsComplete "completion", ColumnLength "completion" > 20, Uniqueness "prompt" > 0.95 ]`
+- In a Glue ETL job the ruleset runs on each batch, reports a score and per-rule results, and can add **row-level** outcomes so you can split passing and failing records.
+- Failing records can go to a quarantine location for review while clean records continue to training.
+- Results can be published to CloudWatch and used to stop the pipeline when the score drops.
+W: Glue Data Quality ruleset with row-level results: DQDL rules measure completeness, length and uniqueness on every run, and row-level outcomes let the job route failing records away from the training output.
+X: A=Macie custom identifiers: Macie looks for sensitive data patterns in S3 objects; it does not evaluate field completeness or length, and it cannot filter records in a job.
+B=Bedrock model evaluation: it evaluates model outputs against prompts and metrics; it does not validate or filter the records of a training dataset.
+D=Anomaly detection on file size: total size says little about individual empty or duplicate records and cannot separate good records from bad ones.
+T: Put DQDL rules (completeness, length, uniqueness) in the Glue job that builds the fine-tuning dataset and quarantine failing rows automatically.
+V: AWS Glue Data Quality, AWS Glue
+
+@ MLA-C02 D1 T1.3 advanced use-case
+S: A company fine-tuned a model for customer support on 400,000 past chats. About 90 percent came from customers in North America; chats from India and Nigeria, now growing markets, are rare. Answers to customers in those markets are noticeably worse. Which TWO data steps address the cause? (Select TWO)
+A: Measure how the training records are distributed across customer region and language variety, and compare it with current traffic
+B: Collect or create additional high-quality chats for the underrepresented regions and rebalance the dataset before fine-tuning again
+C: Remove the customer region field from every training record so that the model cannot learn any difference between the regions
+D: Increase the number of training epochs on the same dataset so that the model has more passes to learn the rare regional examples
+E: Add a guardrail denied topic for regional dialects so that the model declines to answer questions phrased in an unfamiliar style
+K: A,B
+G: ## Bias in fine-tuning data is often representation bias
+A fine-tuned model learns the patterns of the examples it sees. If one group of users dominates the data, the model gets very good at their phrasing, products and issues and stays weak for the rest. This is **representation (sampling) bias**: the training data does not match the population the model will serve.
+## Measure first, then rebalance
+- **Measure**: count records by the relevant attributes (region, language variety, product line) and compare with production traffic or the target population. A quick Athena query or a data profile is enough; for labeled data, SageMaker Clarify pre-training metrics such as class imbalance do the same.
+- **Rebalance**: add real examples from underrepresented groups, create reviewed synthetic examples, or reweight or upsample them, then hold out an evaluation set per group to confirm the gap closes.
+Example: 360,000 North American chats and 8,000 from India and Nigeria combined; after rebalancing, each growing market contributes a meaningful share and is evaluated separately.
+W: A=Measure the distribution: quantifying the skew by region and language variety confirms the cause and shows how much data each group needs.
+B=Collect and rebalance: adding good examples from the underrepresented markets gives the model the patterns it currently never learned.
+X: C=Drop the region field: the difference lives in the chat text itself, so removing a label leaves the skew in place and only hides it from analysis.
+D=More epochs: repeating the same skewed data reinforces the majority patterns and risks overfitting the few rare examples.
+E=Denied topic for dialects: this refuses customers instead of serving them and treats a data gap as a content safety problem.
+T: When a fine-tuned model underperforms for some user groups, measure group representation in the training data and rebalance it with more good examples.
+V: Amazon Bedrock, Amazon SageMaker Clarify
+
+@ MLA-C02 D1 T1.3 advanced troubleshooting
+S: A team augmented 20,000 support examples with paraphrases, giving 100,000 records, then randomly split them 90/10 into training and evaluation sets for fine-tuning. The fine-tuned model scores very high on the evaluation set but performs much worse in production. Which data fix addresses the most likely cause?
+A: Raise the evaluation share from 10 to 30 percent with the same random split so that the evaluation score has a smaller margin of error
+B: Remove all paraphrased records from the evaluation set only, so that it holds only original examples while training keeps the paraphrases
+C: Shuffle the 100,000 records again with a different random seed and repeat the 90/10 split, then fine-tune and evaluate the model again
+D: Split by original example so each one and all its paraphrases land in the same set, and remove near-duplicates across the two sets
+K: D
+G: ## Leakage between training and evaluation data
+An evaluation set is useful only if it contains examples the model has not effectively seen. Paraphrase augmentation creates groups of near-identical records. A random split by record scatters each group across both sets, so most evaluation records have a twin in training. The model is rewarded for remembering, and the score overstates real performance. This is **data leakage** (also called contamination).
+## Group-aware splitting and deduplication
+- Assign a group id to each original example and all of its paraphrases, then split **by group**, so a group lives entirely in training or entirely in evaluation.
+- Run near-duplicate detection across the sets (for example embedding similarity or MinHash over text) to catch repeats that came from the source data itself.
+- Keep the evaluation set close to production traffic.
+Example: original example 4711 and its four paraphrases all go to training; example 4712 and its paraphrases all go to evaluation.
+W: Group-aware split with cross-set deduplication: keeping each original and its paraphrases on one side removes the leakage, so the evaluation score reflects examples the model has truly not seen.
+X: A=Larger random evaluation share: a bigger random split still places paraphrases of the same example on both sides, so the leak remains.
+B=Drop paraphrases from evaluation only: the originals left in evaluation still have their paraphrases in training, which is the same leak in another form.
+C=Reshuffle with a new seed: any random record-level split scatters paraphrase groups across both sets, whatever the seed.
+T: When augmentation or duplicates create near-identical records, split by source group and deduplicate across sets before evaluating a fine-tuned model.
+V: Amazon Bedrock
