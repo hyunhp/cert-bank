@@ -1,6 +1,19 @@
 # TODO
 
-## Support page (started 2026-10-22)
+## AWS exam versions (checked 2026-10-23) — next action after 2026-10-27
+Notices live in `data/exam-specs.json` ("update"), shown above the section filters and in mock setup.
+- SAP-C02 -> SAP-C03: last C02 day 2026-11-16, C03 from 2026-11-17 (5 restructured domains, adds GenAI/agentic AI,
+  resilience, DevSecOps, post-quantum crypto per secondary sources). DVA-C02 -> DVA-C03: last C02 day 2026-11-30,
+  C03 from 2026-12-01 (adds AI security, Bedrock, containers per secondary sources). Full exam guides with task
+  statements are published when registration opens on 2026-10-27: then add SAP-C03 / DVA-C03 as new exams (specs,
+  tasks, retag still-valid C02 questions, write the gap) and retire the C02 notices.
+- MLA-C01 -> MLA-C02: English C02 beta since 2026-09-29, GA 2027-01-14 (adds GenAI/agentic AI). Plan the same once the
+  GA guide is final.
+- ANS-C01: retires 2026-12-31, no successor. Keep the bank (credentials stay valid 3 years); consider hiding it later.
+- No change found for CLF-C02, AIF-C01, AIB-C01 (new, beta from 2026-09-29), SAA-C03, DEA-C01, SOA-C03, DOP-C02,
+  AIP-C01, SCS-C03 (only three language versions end 2026-12-31).
+
+
 - `support.html` live with KakaoPay (domestic; QR on computers, app link on phones, `tools/support_test.py`), merged in PR #9/#11; repo Sponsor button via `.github/FUNDING.yml` -> support.html. Ko-fi (international, PayPal payout) url still empty: owner will send it.
 - Toss ID (toss.me) closed 2024-08-01; KakaoBank has no receive link; Naver Pay dropped (owner, 2026-10-22).
 - No ads (owner decision 2026-10-22: AdSense considered and dropped; the support page and README promise "no ads").
