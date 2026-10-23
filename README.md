@@ -40,6 +40,7 @@ Services or Palantir Technologies, and no real exam questions (no dumps).
 | | | SOA-C03 CloudOps Engineer | 395 | 28 |
 | | | DEA-C01 Data Engineer | 395 | 28 |
 | | | MLA-C01 Machine Learning Engineer | 395 | 28 |
+| | | MLA-C02 Machine Learning Engineer (new, GA 2027-01-14) | 469 | – |
 | | Professional | SAP-C02 Solutions Architect | 396 | 35 |
 | | | DOP-C02 DevOps Engineer | 395 | 35 |
 | | | AIP-C01 Generative AI Developer | 405 | 35 |
