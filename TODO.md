@@ -18,8 +18,11 @@ Phases:
 - P2 `study.html` + `js/study.js` — DONE (main). No timeline (owner dropped it). Progress via `StudyStore` only.
 - P3 glossary popovers + level tabs + default exam — DONE (main, PR #2). 233 terms; owner wants fewer-but-useful
   marks (a "≥1 mark every day" pass was tried and reverted: weak/basic terms).
-- CLF-C02 (Cloud Practitioner) 14-day guide — DONE (main, PR #2), independently fact-checked. Domains live inside
-  `data/study/CLF-C02.json`, NOT in exam-specs.json (qbank/mock tests iterate specs; no CLF questions).
+- CLF-C02 (Cloud Practitioner) 14-day guide — DONE (main, PR #2), independently fact-checked.
+- CLF-C02 question bank started 2026-10-23: exam registered in exam-specs/tasks, first 50 questions (b01 D1+D4,
+  b02 D2, b03 D3; each independently reviewed). Pool 50 / target 325: continue with b04+ (`qgen plan CLF-C02`).
+  Support plans are mid-change (new plans Dec 2025; Developer/Business/Enterprise On-Ramp end 2027-01-01): keep
+  plan-tier claims out of keyed answers until the old plans are gone.
 - Palantir study guides PLTR-DE/AIE/APD (17 days: 2 per domain + final) — DONE 2026-10-22, built only from the
   reviewed PLTR bank + PALANTIR.md facts, independently reviewed. Study page and question bank both use
   vendor tabs → level segments → named exam chips; question bank section filters sit in a shaded panel.

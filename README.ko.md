@@ -31,7 +31,7 @@ Amazon Web Services, Palantir Technologies와 관련 없는 비공식 사이트�
 
 | 회사 | 등급 | 시험 | 문항 수 | 학습 일수 |
 |---|---|---|---|---|
-| AWS | Foundational | CLF-C02 Cloud Practitioner | – | 14 |
+| AWS | Foundational | CLF-C02 Cloud Practitioner | 50 | 14 |
 | | | AIF-C01 AI Practitioner | 356 | 14 |
 | | | AIB-C01 AI Business Strategist | 445 | 14 |
 | | Associate | SAA-C03 Solutions Architect | 395 | 28 |

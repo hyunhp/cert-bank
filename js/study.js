@@ -133,8 +133,8 @@ async function loadGuide(exam) {
   return guides[exam];
 }
 
-// Domain names come from exam-specs.json, or from the guide itself for exams the question bank
-// does not cover (CLF-C02).
+// Domain names come from exam-specs.json, or from the guide itself for an exam the question bank
+// does not cover.
 function domainName(exam, code) {
   const list = (specs && specs[exam] && specs[exam].domains) || (guides[exam] && guides[exam].domains) || [];
   const d = list.find(x => x.code === code);

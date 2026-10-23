@@ -32,7 +32,7 @@ Services or Palantir Technologies, and no real exam questions (no dumps).
 
 | Vendor | Level | Exam | Questions | Study days |
 |---|---|---|---|---|
-| AWS | Foundational | CLF-C02 Cloud Practitioner | – | 14 |
+| AWS | Foundational | CLF-C02 Cloud Practitioner | 50 | 14 |
 | | | AIF-C01 AI Practitioner | 356 | 14 |
 | | | AIB-C01 AI Business Strategist | 445 | 14 |
 | | Associate | SAA-C03 Solutions Architect | 395 | 28 |
