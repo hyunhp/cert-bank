@@ -399,6 +399,7 @@ async function renderSetup(extra) {
     <h2>Mock Exam</h2>
     <p class="sub">${setupDomain ? `Timed, answers hidden until you submit. Only questions from ${setupDomain} · ${esc(domName)}; ones you haven't seen in earlier mock exams come first.`
       : `Timed, answers hidden until you submit. Questions follow the ${spec.weightsAssumed ? "domains equally (official weights are not published)" : "official domain weights"}, and ones you haven't seen in earlier mock exams come first.`}</p>
+    ${spec.update ? `<p class="examnotice" role="note">${esc(spec.update)}</p>` : ""}
     <div class="panel">
       <select id="mkExam" aria-label="Certification">${opts}</select>
       <select id="mkDomain" aria-label="Section">${domOpts}</select>
