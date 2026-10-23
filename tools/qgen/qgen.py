@@ -120,7 +120,8 @@ def plan(code, quiet=False):
     spec = SPECS[code]
     tgt = target(code)
     by_dom = collections.Counter(domain_of(q, code, dmap) for q in qs)
-    by_task = collections.Counter(q.get("taskId") for q in qs if q["examCodes"][0] == code)
+    same_tasks = {code, SPECS[code].get("tasksFrom")}   # a newer version may reuse the older version's task ids
+    by_task = collections.Counter(q.get("taskId") for q in qs if q["examCodes"][0] in same_tasks)
     multi = sum(1 for q in qs if len(q["correctKeys"]) > 1)
     rows = []
     for d in spec["domains"]:
