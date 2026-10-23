@@ -63,26 +63,29 @@ D=Serverless Inference: serverless endpoints do not offer GPUs at all, so they c
 T: Several models, different containers, one GPU endpoint, independent scaling → SageMaker AI inference components.
 V: Amazon SageMaker AI
 
-@ MLA-C02 D3 T3.1 applied tradeoff
-S: A legal-tech company runs an open-weight LLM on SageMaker AI to draft contract reviews. Each request carries a document bundle of up to 200 MB, and generation takes 5 to 15 minutes. Requests arrive in irregular bursts during the day, GPU instances should scale to zero between bursts, and callers must be told when each result is ready. Which inference option fits best?
-A: An asynchronous inference endpoint that queues requests with their input in Amazon S3, scales to zero instances when idle, and publishes results to Amazon SNS topics.
-B: A real-time endpoint with response streaming, which keeps the client connection open while the review is generated and sends the full document as the request body.
-C: A Serverless Inference endpoint with its maximum memory size, which scales to zero automatically between bursts and returns the review in the HTTP response.
-D: A batch transform job started for every incoming request, which reads the bundle from S3, writes the review to S3, and is polled by each caller until done.
+@ MLA-C02 D3 T3.1 applied troubleshooting
+S: A legal-tech company serves an open-weight LLM on a SageMaker AI asynchronous inference endpoint. Requests carry document bundles of up to 200 MB and take 5 to 15 minutes each. To save cost, the auto scaling minimum is 0 and a target-tracking policy uses the backlog size per instance. After a quiet night at zero instances, new requests stay queued and no instance starts. What should the ML engineer change?
+A: Add a step scaling policy driven by a CloudWatch alarm on the endpoint's backlog-without-capacity metric, so that queued requests start the first instance.
+B: Set the minimum instance count back to 1, so that one GPU instance stays running through the night and picks up the first requests in the morning.
+C: Lower the target value of the target-tracking policy to one queued request per instance, so that a single waiting request triggers a scale-out.
+D: Increase the invocation timeout of the asynchronous endpoint to its maximum, so that the queued requests are kept long enough for an instance to start.
 K: A
-G: ## SageMaker AI inference options
-- **Real-time endpoints**: always-on instances for low-latency requests; request payloads are limited to 6 MB and the client waits for the answer.
-- **Serverless Inference**: CPU-only, scales to zero, small payloads; good for light models with idle periods.
-- **Asynchronous inference**: requests are placed in an internal queue. The input is read from Amazon S3 (payloads up to 1 GB), processing can run for a long time, the output is written to S3, and optional Amazon SNS topics report success or failure. With an auto scaling policy whose minimum is 0, the endpoint scales to zero instances when the queue is empty.
-- **Batch transform**: a job that processes a whole dataset in S3 on temporary instances and then stops.
-## Choosing for long LLM jobs
-Large inputs, minutes of generation, bursty arrival and "tell me when it is done" are the textbook signals for asynchronous inference. Example: the caller uploads `s3://legal-in/req-123.zip`, calls `InvokeEndpointAsync` with that location, and receives an SNS message when `s3://legal-out/req-123.out` is ready.
-W: Asynchronous inference: it accepts large S3 inputs, allows long processing, queues bursts, can scale the GPU instances to zero when the queue is empty, and notifies callers through SNS success and error topics.
-X: B=Real-time with streaming: a real-time request body is limited to 6 MB, so a 200 MB bundle cannot be sent, and the client would hold a connection for up to 15 minutes. Streaming improves time to first token; it does not queue work or notify callers.
-C=Serverless Inference: serverless endpoints have no GPUs and accept only small payloads, so they cannot run this LLM or take these inputs, whatever the memory setting.
-D=Batch transform per request: each job starts its own instances and stops afterwards, which adds minutes of startup to every request and leaves callers polling. Batch transform is for whole datasets, not a stream of individual requests.
-T: Large payloads, minutes-long generation, bursty traffic, scale to zero and completion notifications → SageMaker AI asynchronous inference.
-V: Amazon SageMaker AI, Amazon SNS, Amazon S3
+G: ## Asynchronous inference and scaling to zero
+Asynchronous inference puts each request in an internal queue, reads the input from Amazon S3 (payloads up to 1 GB), allows long processing, writes the output to S3 and can notify through Amazon SNS. Because work waits in the queue, the endpoint may scale down to **zero instances** when idle, which is the main cost advantage over a real-time endpoint for bursty, long-running LLM jobs.
+## Why target tracking alone does not wake the endpoint
+The usual scaling metric is `ApproximateBacklogSizePerInstance`: queued requests divided by the number of instances. It works well for adding and removing instances while at least one is running. At zero instances there is nothing to divide by, so a target-tracking policy on this metric does not start the first instance.
+## The scale-from-zero pattern
+SageMaker AI publishes `HasBacklogWithoutCapacity` for asynchronous endpoints: it is 1 when requests are queued and no instance is running. The documented pattern is:
+- a CloudWatch alarm on `HasBacklogWithoutCapacity` greater than or equal to 1,
+- a **step scaling** policy, triggered by that alarm, that adds the first instance,
+- the existing target-tracking policy on backlog per instance, which then scales further out and back in to 0.
+Example: at 08:00 the first request lands in the queue, the alarm fires within a few minutes, one GPU instance starts, and the backlog policy adds more instances if the morning burst grows.
+W: Step scaling on the backlog-without-capacity alarm: this metric reports queued work while no instance runs, so the alarm and step policy start the first instance; target tracking then handles further scaling, and the endpoint can still return to zero when idle.
+X: B=Minimum of 1: it removes the symptom by keeping a GPU instance running all night, which is the idle cost the team set the minimum to 0 to avoid.
+C=Lower target value: any per-instance metric is undefined at zero instances, so changing the target value does not let target tracking start the first instance.
+D=Longer invocation timeout: the timeout limits how long a request may be processed once it runs. It does not add capacity, so requests would still wait with no instance to run them.
+T: An asynchronous endpoint that scales to zero also needs a step scaling policy on HasBacklogWithoutCapacity to start the first instance; backlog-per-instance target tracking cannot scale out from zero.
+V: Amazon SageMaker AI, Amazon CloudWatch, Application Auto Scaling
 
 @ MLA-C02 D3 T3.1 advanced use-case
 S: An ML engineer must host a 70B-parameter open-weight LLM on SageMaker AI. In 16-bit precision the weights need about 140 GB, more than the memory of any single GPU on the chosen ml.p4d.24xlarge instance (eight GPUs with 40 GB each). What is the most direct way to serve the model?
@@ -162,7 +165,7 @@ Creating the knowledge base and data source, in the console or with CloudFormati
 ## Infrastructure as code plus a sync step
 A common pattern: CloudFormation or the CDK creates the vector index, knowledge base and data source; then a pipeline step (CodeBuild, a Step Functions task) or a custom resource calls `StartIngestionJob` and waits for status `COMPLETE` before the application is tested.
 W: Never-synced data source: the stack created only configuration. Running an ingestion job after deployment chunks and embeds the S3 documents into the vector index, after which Retrieve finds them.
-X: B=Provisioned Throughput for embeddings: embedding models used by knowledge bases run on demand; no model units are needed for ingestion. The issue is that no ingestion ever ran.
+X: B=Provisioned Throughput for embeddings: knowledge bases embed documents with on-demand embedding models, so no model units are required. Capacity is not the problem; no ingestion job has ever run.
 C=CloudFormation cannot attach data sources: the AWS::Bedrock::DataSource resource exists precisely to define S3 data sources in a template, and the stack created it successfully.
 D=Standby replication: OpenSearch Serverless does not keep an index empty until a copy to another collection completes. The index is empty because nothing was ever written to it.
 T: Creating a knowledge base and data source does not load documents: run StartIngestionJob (as a pipeline step or custom resource) after deploying and after every content change.
@@ -337,7 +340,7 @@ Bedrock Prompt Management stores a prompt as a template with `{{variables}}`, a 
 - A **version** is an immutable snapshot of the draft at that moment, with a number.
 - Its ARN ends with the version, for example `arn:aws:bedrock:us-east-1:111122223333:prompt/PROMPT12345:3`.
 ## Using a version at run time
-The application can pass the prompt version ARN as `modelId` in `Converse` (or `InvokeModel`) and supply `promptVariables`; Bedrock fills the template and calls the model set in the prompt. A release pipeline creates the version and then updates the ARN the application reads (for example from Parameter Store). Rolling back means pointing back to the previous version ARN.
+The application can pass the prompt version ARN as `modelId` in `Converse` and supply `promptVariables`; Bedrock fills the template and calls the model set in the prompt. A release pipeline creates the version and then updates the ARN the application reads (for example from Parameter Store). Rolling back means pointing back to the previous version ARN.
 W: A=Prompt version per release: each release freezes the exact template and settings into a numbered, immutable version, which gives the traceability.
 B=Reference the versioned ARN: production uses only that frozen version, so draft edits cannot change what it runs until a release switches the ARN.
 X: C=Draft ARN with edit windows: production would still run whatever the draft contains, including untested edits made during a window, and nothing records which text a past release used.
