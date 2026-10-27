@@ -30,7 +30,8 @@ with sync_playwright() as p:
     pg.route("**/fonts.googleapis.com/**",lambda r:r.abort())
     for code,(qid,sh) in exams.items():
         for target in list(dict.fromkeys(x for x in (qid,sh) if x)):
-            pg.goto(BASE+f"?fresh={target}#exam={code}"); pg.wait_for_selector(".qcard")
+            # Query differs per exam so a shared id tested again in the next exam reloads instead of only changing the hash.
+            pg.goto(BASE+f"?fresh={code}-{target}#exam={code}"); pg.wait_for_selector(".qcard")
             pg.click("#sequentialBtn"); pg.wait_for_selector(f"#card-{target}")
             rl=pg.locator(f"#card-{target} .reveal-link")
             (rl.first.click() if rl.count() else pg.locator(f"#card-{target} .choice").first.click())

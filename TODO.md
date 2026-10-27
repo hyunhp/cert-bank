@@ -18,11 +18,9 @@ Notices live in `data/exam-specs.json` ("update"), shown above the section filte
   AIP-C01, SCS-C03 (only three language versions end 2026-12-31).
 
 
-- `support.html` live with KakaoPay (domestic; QR on computers, app link on phones, `tools/support_test.py`), merged in PR #9/#11; repo Sponsor button via `.github/FUNDING.yml` -> support.html. Ko-fi (international, PayPal payout) url still empty: owner will send it.
+- `support.html` live with KakaoPay (domestic; QR on computers, app link on phones, `tools/support_test.py`), merged in PR #9/#11; repo Sponsor button via `.github/FUNDING.yml` -> support.html. Ko-fi (international, PayPal payout) live 2026-10-27: https://ko-fi.com/hyunhopark.
 - Toss ID (toss.me) closed 2024-08-01; KakaoBank has no receive link; Naver Pay dropped (owner, 2026-10-22).
 - No ads (owner decision 2026-10-22: AdSense considered and dropped; the support page and README promise "no ads").
-- Ko-fi: owner is opening a PayPal account (PayPal showed "can't send a new code now" during phone verification);
-  when the Ko-fi URL arrives, set `url` for `kofi` in `support.html` METHODS and update the READMEs' "coming" note.
 
 ## Study guide (started 2026-10-22) — terse handoff
 Rules/design: `tools/study/README.md`. Private owner notes (routines, artifact links): owner's private doc "cert-bank 학습 가이드 이관 인계 메모" (source of truth) + local copy `.handoff/SESSION.md`
