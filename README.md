@@ -9,7 +9,7 @@ Services or Palantir Technologies, and no real exam questions (no dumps).
 
 | | What it is | Link |
 |---|---|---|
-| **Question Bank** | 5,800+ original multiple-choice questions with detailed explanations | [Open](https://hyunhp.github.io/cert-bank/) |
+| **Question Bank** | 6,300+ original multiple-choice questions with detailed explanations | [Open](https://hyunhp.github.io/cert-bank/) |
 | **Study Guide** | A day-by-day study plan per exam: key concepts, what the exam looks for, two check questions and a one-line recap | [Open](https://hyunhp.github.io/cert-bank/study.html) |
 
 ## How to use
@@ -42,6 +42,7 @@ Services or Palantir Technologies, and no real exam questions (no dumps).
 | | | MLA-C01 Machine Learning Engineer | 395 | 28 |
 | | | MLA-C02 Machine Learning Engineer (new, GA 2027-01-14) | 469 | – |
 | | Professional | SAP-C02 Solutions Architect | 396 | 35 |
+| | | SAP-C03 Solutions Architect (new, from 2026-11-17) | 508 | – |
 | | | DOP-C02 DevOps Engineer | 395 | 35 |
 | | | AIP-C01 Generative AI Developer | 405 | 35 |
 | | Specialty | ANS-C01 Advanced Networking | 395 | 28 |
