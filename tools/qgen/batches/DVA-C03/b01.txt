@@ -1,26 +1,26 @@
 # DVA-C03 batch 01: D2 T2.3 security risks of using and integrating AI services (2.3.1 access, 2.3.2 data privacy, 2.3.3 input/output filtering, 2.3.4 agent interactions, 2.3.5 sensitive content in logs)
 
-@ DVA-C03 D2 T2.3 applied troubleshooting
-S: A developer changes a Lambda function in us-east-1 to call the Amazon Bedrock Converse API with the US cross-Region inference profile ID `us.anthropic.claude-sonnet-4-6` instead of the in-Region model ID. The function's execution role allows `bedrock:InvokeModel` only on `arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-6`. Every call now fails with AccessDeniedException. Which change to the role policy fixes the error while keeping least privilege?
-A: Allow bedrock:InvokeModel on the inference profile ARN, and on the foundation model ARN in every destination Region that the inference profile can route requests to
-B: Add the bedrock:Converse action on the existing us-east-1 foundation model ARN, because Converse calls are authorized separately from InvokeModel calls
-C: Add bedrock:GetInferenceProfile and bedrock:ListInferenceProfiles on the profile ARN so that the SDK can resolve the profile to the us-east-1 model
-D: Replace the resource with arn:aws:bedrock:us-east-1:*:inference-profile/* and remove the foundation model ARN, since the profile now owns all model access
-K: A
-G: ## Model IDs, inference profiles and IAM resources
-An Amazon Bedrock inference call names a target in `modelId`. That target is an IAM resource with its own ARN:
-- A foundation model in one Region: `arn:aws:bedrock:us-east-1::foundation-model/<model-id>` (no account ID, because AWS owns the model).
-- A system-defined cross-Region inference profile: `arn:aws:bedrock:us-east-1:<account>:inference-profile/us.<model-id>`. The `us.` prefix means Bedrock may route the request to any of several US Regions to find capacity.
-## What IAM checks for a cross-Region call
-When you call through an inference profile, Bedrock authorizes the action on the **profile** and on the **foundation model in the Region that actually serves the request**. The Bedrock user guide states that when an inference profile is in the `Resource` list, you must also list the foundation model in each Region associated with that profile.
-`Converse` and `ConverseStream` have no actions of their own; they require `bedrock:InvokeModel` (and `bedrock:InvokeModelWithResponseStream` for streaming).
-## Tightening further
-To allow the model only through the profile, add the condition key `bedrock:InferenceProfileArn` to the statement that lists the foundation model ARNs. Direct calls to the in-Region model are then denied.
-W: Profile ARN plus destination model ARNs: the request is authorized against the inference profile and against the model in whichever Region serves it, so both resource types must be allowed, and only for this one model.
-X: B=Separate Converse action: Converse is authorized by bedrock:InvokeModel, which the role already has. The failure is about the resource (the profile and other Regions), not the action name.
-C=Profile read permissions: Get and List actions let a caller describe profiles but do not authorize inference. The SDK passes the profile ID as is, it does not resolve it to a local model.
-D=Wildcard profile only: allowing every inference profile is broader than needed, and without the foundation model ARNs in the destination Regions the routed request is still denied.
-T: Calling through a cross-Region inference profile needs bedrock:InvokeModel on the profile ARN and on the foundation model ARN in each destination Region.
+@ DVA-C03 D2 T2.3 advanced use-case
+S: A Lambda function in us-east-1 calls Anthropic Claude models on Amazon Bedrock, and its execution role allows inference through any inference profile. A new data residency rule says this role's requests may be processed only in US Regions: US geographic inference profiles stay allowed, but global cross-Region inference profiles must be blocked, even if someone later adds broader Bedrock permissions to the role. What should the developer do?
+A: Add a Deny for bedrock:InvokeModel* on all resources with a StringEquals condition listing every commercial AWS Region outside the US as the value of aws:RequestedRegion
+B: Add a Deny for bedrock:InvokeModel* on all resources with a StringEquals condition that matches the value unspecified in the aws:RequestedRegion condition key
+C: Rewrite the role's Allow statement to list only the US geographic inference profile ARNs and their models, and remove every global inference profile ARN from the policy
+D: Create an interface VPC endpoint for bedrock-runtime in us-east-1 with private DNS enabled, so that every inference request from the function is processed in that Region
+K: B
+G: ## How Bedrock authorizes a global cross-Region inference call
+A **global** inference profile (ID prefix `global.`) can route a request to any supported commercial Region worldwide; a **geographic** profile such as `us.` stays inside one geography. For a global profile, Bedrock evaluates IAM for three resources:
+- the inference profile in the source Region, `arn:aws:bedrock:us-east-1:<account>:inference-profile/global.<model>`;
+- the foundation model in the source Region;
+- the Region-agnostic global foundation model, `arn:aws:bedrock:::foundation-model/<model>` (no Region, no account).
+For that last evaluation Bedrock sets the global condition key `aws:RequestedRegion` to the literal value `unspecified`, not to the Region that ends up serving the request.
+## Blocking global routing
+The Bedrock user guide documents two ways to disable global cross-Region inference for a role: leave out one of the three required Allow statements, or add an **explicit Deny** with `"StringEquals": {"aws:RequestedRegion": "unspecified"}`. Only the explicit Deny survives later changes, because a Deny always overrides an Allow.
+It also warns that ordinary Region-deny conditions that list Region names (for example `us-west-2`) do not match the global foundation model evaluation, so they do not stop global routing. The same detail matters for SCPs that block unused Regions: they must allow `unspecified` (or exempt the inference profile) if global inference is wanted.
+W: Deny on aws:RequestedRegion unspecified: every global profile call needs the Region-agnostic model evaluation that carries this value, so the explicit Deny blocks global routing permanently while geographic US profiles keep working.
+X: A=Deny listing non-US Regions: the global model evaluation carries unspecified, not a Region name, so a list of Region names never matches it and global calls still succeed.
+C=Allow only US profiles: it blocks global profiles today, but it is only an absence of Allow; anyone who later adds broader Bedrock permissions re-enables global routing.
+D=Interface endpoint in us-east-1: the endpoint changes only the network path into the source Region; Bedrock still routes a global profile request to other Regions behind it.
+T: Block global cross-Region inference with an explicit Deny on bedrock:InvokeModel* where aws:RequestedRegion equals unspecified; Region-name lists do not catch it.
 V: Amazon Bedrock, AWS IAM, AWS Lambda
 
 @ DVA-C03 D2 T2.3 applied use-case
@@ -32,10 +32,10 @@ D: Call AWS STS AssumeRole for the task role at startup and send the returned se
 K: B
 G: ## Two kinds of Amazon Bedrock API keys
 Amazon Bedrock API keys let a client authenticate with `Authorization: Bearer <key>` (or the `AWS_BEARER_TOKEN_BEDROCK` environment variable) instead of SigV4.
-- **Short-term key**: generated from the credentials of an existing IAM principal, for example with the `aws-bedrock-token-generator` library (`provide_token()` in Python). It lasts up to 12 hours or the remaining session duration, whichever is shorter, and it **inherits the permissions of the principal** that generated it. AWS recommends short-term keys for production.
-- **Long-term key**: an IAM service-specific credential for `bedrock.amazonaws.com`. Creating one **creates or uses an IAM user** with attached policies, and it lasts until its configured expiration. AWS recommends long-term keys only for exploration.
+- **Short-term key**: generated from the credentials of an existing IAM principal, for example with the `aws-bedrock-token-generator` library (`provide_token()` in Python). It lasts up to 12 hours or the remaining session duration, whichever is shorter, can be used only in the Region where it was generated, and **inherits the permissions of the principal** that generated it.
+- **Long-term key**: an IAM service-specific credential for `bedrock.amazonaws.com`. Creating one **creates or uses an IAM user** with attached policies, and it lasts until its configured expiration. AWS recommends long-term keys only for exploration and tells you to switch to short-term credentials for applications with greater security requirements.
 ## Refreshing in a long-running process
-The token generator caches a valid token and issues a new one when needed, so the recommended pattern is to call it before each request rather than once at startup.
+A token generated once at startup stops working when it expires. The Bedrock documentation notes that generating a token is inexpensive and can be done for each API call, so the generator always builds the key from the role's current, automatically refreshed credentials.
 W: Short-term keys from the token generator: they are derived from the task role, carry exactly its permissions, expire within 12 hours, and involve no IAM user, which meets every requirement.
 X: A=Long-term key in Secrets Manager: a long-term key is tied to an IAM user and is the long-lived credential type the team forbids; storing and rotating it does not change what it is.
 C=IAM user access keys: an IAM user with permanent access keys breaks both rules, and Bedrock bearer tokens are not produced by trading an access key pair at startup.
@@ -47,7 +47,7 @@ V: Amazon Bedrock, Amazon ECS, AWS IAM
 S: A developer accidentally pushed two Amazon Bedrock API keys to a public repository: a long-term key created for a test IAM user and a short-term key generated from the developer's assumed-role session, which is still valid for several hours. Both keys must stop working immediately without disrupting other Bedrock users in the account. Which actions should the developer take? (Select TWO)
 A: Deactivate or delete the long-term key's service-specific credential on the IAM user with UpdateServiceSpecificCredential or DeleteServiceSpecificCredential
 B: Rotate the test IAM user's access key pair, because the long-term API key is derived from that user's active access key and stops working once it is replaced
-C: Attach a policy to the role that generated the short-term key denying bedrock:CallWithBearerToken, or revoke that role's active sessions
+C: Attach a policy to the role that made the short-term key that denies the bedrock and bedrock-mantle CallWithBearerToken actions, or revoke its sessions
 D: Generate a new short-term key from the same role, because generating a fresh token invalidates every earlier token that was issued for that role session
 E: Disable model invocation logging and delete the CloudTrail trail so that the leaked key values are no longer stored in any log destination
 K: A,C
@@ -55,16 +55,18 @@ G: ## How each key type is revoked
 A **long-term** Bedrock API key is an IAM service-specific credential attached to an IAM user. It is independent of that user's access keys and is managed with its own APIs:
 - `UpdateServiceSpecificCredential` with `Status=Inactive` disables it at once (reversible).
 - `ResetServiceSpecificCredential` issues a new value; `DeleteServiceSpecificCredential` removes it.
-A **short-term** key is derived from an IAM session and inherits its permissions; it has no stored credential to delete. The documented ways to stop it are to invalidate the session that generated it or to attach a policy that denies `bedrock:CallWithBearerToken` (the action that controls using any API key with Bedrock).
+A **short-term** key is a pre-signed value that inherits the credentials and expiration of the session that generated it; it cannot be deactivated, reset or deleted on its own. The documented ways to stop it early are:
+- invalidate the session that generated it, with a Deny on `*` conditioned on `aws:TokenIssueTime` earlier than now;
+- attach a policy to that identity denying `bedrock:CallWithBearerToken` **and** `bedrock-mantle:CallWithBearerToken` (the actions that control API key use on the `bedrock` and `bedrock-mantle` endpoints; denying only the first leaves the Mantle endpoint open).
+The same Deny attached to the IAM user of a long-term key also blocks that key. These controls affect the whole session or identity, not just one key.
 ## Limiting blast radius
 `bedrock:CallWithBearerToken` can be scoped with the condition key `bedrock:bearerTokenType` (`SHORT_TERM` or `LONG_TERM`), and `iam:CreateServiceSpecificCredential` with `iam:ServiceSpecificCredentialAgeDays` caps how long new long-term keys can live.
-Note: CloudTrail records the API calls made with a key, but the key itself travels in the Authorization header and is not logged.
 W: A=Deactivate or delete the service-specific credential: this is the documented revocation path for a long-term key and affects only that one credential.
-C=Deny CallWithBearerToken or revoke the sessions: a short-term key cannot be deleted, so blocking bearer-token use for that role or invalidating its session is how it is cut off before expiry.
+C=Deny the CallWithBearerToken actions or revoke the sessions: a short-term key cannot be deleted, so blocking API key use on both Bedrock endpoints for that role, or invalidating the session it came from, cuts it off before expiry.
 X: B=Rotate the user's access keys: a long-term API key is a separate service-specific credential, not derived from the access key pair, so it keeps working after rotation.
 D=Generate a new short-term key: issuing a new token does not invalidate earlier ones; each stays valid until its own expiry.
-E=Disable logging and delete the trail: the key values are not written to CloudTrail or invocation logs, and removing audit trails destroys the evidence of how the keys were used.
-T: Revoke a long-term Bedrock API key through its service-specific credential; stop a short-term key by denying bedrock:CallWithBearerToken or invalidating the session it came from.
+E=Disable logging and delete the trail: removing logs does not revoke anything, so both keys keep working, and deleting audit trails destroys the evidence of how the leaked keys were used.
+T: Revoke a long-term Bedrock API key through its service-specific credential; stop a short-term key by denying the CallWithBearerToken actions or invalidating the session it came from.
 V: Amazon Bedrock, AWS IAM, AWS CloudTrail
 
 @ DVA-C03 D2 T2.3 applied troubleshooting
@@ -75,18 +77,18 @@ C: Grant the role aws-marketplace:Subscribe, aws-marketplace:Unsubscribe and aws
 D: Create an interface VPC endpoint for bedrock-runtime, because first-time access to third-party models is only allowed from traffic that stays within a VPC
 K: C
 G: ## Automatic model access
-Access to most serverless foundation models on Amazon Bedrock is enabled by default; there is no manual approval step for them. For a **third-party** model, the first invocation in an account starts an AWS Marketplace subscription in the background:
+Access to many serverless foundation models on Amazon Bedrock is enabled by default, given the right AWS Marketplace permissions; there is no per-model access request to submit for them. For a **third-party** model, the first invocation in an account starts an AWS Marketplace subscription in the background:
 - During setup (up to about 15 minutes) calls may succeed temporarily.
 - If a prerequisite is missing, the subscription fails and later calls return `AccessDeniedException`.
 ## Prerequisites
 - The principal that makes the first call needs `aws-marketplace:Subscribe`, `aws-marketplace:Unsubscribe` and `aws-marketplace:ViewSubscriptions`.
 - The account needs a valid payment method for Marketplace purchases.
 - Anthropic models also need the one-time first-time-use form (`PutUseCaseForModelAccess`).
-After the missing permission is granted, the subscription can take a couple of minutes to complete.
+After the missing permission is granted, the subscription can take up to 2 minutes to complete.
 ## Controlling access the other way
 Because access is on by default, an organization that wants to review a model's license first blocks it with an SCP or IAM deny and lifts the deny after approval.
 W: Marketplace permissions for the calling role: the pattern of a few successes followed by AccessDeniedException is a failed background subscription, and these three actions are the documented prerequisite the role is missing.
-X: A=Manual model access request: serverless models are enabled by default and there is no approval queue to wait in; the failure comes from the subscription that the first invocation started.
+X: A=Manual model access request: access is enabled by default once the Marketplace prerequisites are met, so there is no approval queue to wait in; the failure comes from the subscription that the first invocation started.
 B=Cross-Region inference profile: routing to more Regions adds capacity, but the account still has no Marketplace subscription, so every Region denies the call the same way.
 D=Interface VPC endpoint: PrivateLink changes the network path only. Model access does not depend on whether the request arrives through a VPC endpoint.
 T: First use of a third-party Bedrock model subscribes the account through AWS Marketplace; without aws-marketplace Subscribe/Unsubscribe/ViewSubscriptions on the caller, calls fail with AccessDeniedException.
@@ -104,6 +106,7 @@ Bedrock splits its APIs across separate service endpoints, and each needs its ow
 - `bedrock`: control plane (create guardrails, logging configuration, custom models).
 - `bedrock-runtime`: inference (`InvokeModel`, `Converse`, `ApplyGuardrail`).
 - `bedrock-agent` and `bedrock-agent-runtime`: Agents and Knowledge Bases.
+- `bedrock-mantle`: the OpenAI-compatible Mantle endpoint.
 An interface endpoint places elastic network interfaces with private IPs in your subnets. Traffic from the function to Bedrock then stays on the AWS network, with no internet gateway, NAT device or public IP.
 ## Private DNS
 With **private DNS enabled**, the standard name `bedrock-runtime.<region>.amazonaws.com` resolves to the endpoint's private IPs inside the VPC, so the SDK needs no `endpoint_url` change. Without it, code must point at the `vpce-...` DNS name.
@@ -160,13 +163,13 @@ V: Amazon Bedrock
 
 @ DVA-C03 D2 T2.3 applied use-case
 S: A developer creates an Amazon Bedrock guardrail whose denied topics and blocked messages contain confidential product codenames. Security requires that the guardrail configuration be encrypted with a customer managed AWS KMS key that the security team controls and audits. The developer's role creates the guardrail, and an application role uses it on Converse calls. What should the developer do?
-A: Keep default encryption with the AWS managed key aws/bedrock, and add a statement to that key's policy that lets the security team audit and disable its usage
+A: Keep the guardrail's default AWS-provided encryption, and let the security team audit guardrail use through the CloudTrail events for each Converse call
 B: Set kmsKeyId on CreateGuardrail to the customer managed key, allow the creator role Decrypt, GenerateDataKey, DescribeKey and CreateGrant, and the app role Decrypt
 C: Pass the customer managed key ARN in the guardrailConfig of every Converse request, so that Bedrock decrypts the guardrail definition with that key at inference time
 D: Turn on SSE-KMS with the customer managed key on the S3 bucket that receives model invocation logs, since Bedrock stores guardrail definitions alongside those logs
 K: B
 G: ## Encrypting Amazon Bedrock resources with your own key
-By default Bedrock encrypts resources such as guardrails with an AWS managed key. To meet a "we control the key" requirement you supply a **customer managed key** when you create the resource, for example:
+By default Bedrock encrypts a guardrail with a key that AWS provides and controls. To meet a "we control the key" requirement you supply a **customer managed key** when you create the resource, for example:
 - Guardrails: `kmsKeyId` on `CreateGuardrail`.
 - Model customization jobs and custom models: `customModelKmsKeyId`.
 - Agents: `customerEncryptionKeyArn`.
@@ -177,7 +180,7 @@ The Bedrock documentation gives two sets of permissions:
 - **Users** (call inference with the guardrail): `kms:Decrypt`.
 Every use of the key appears in CloudTrail, and disabling the key cuts off use of the encrypted resource, which gives the security team both control and an audit trail.
 W: kmsKeyId on CreateGuardrail with the documented grants: the guardrail is encrypted with the security team's key, the creator can write it, the application can decrypt it at inference, and every key use is logged.
-X: A=AWS managed key: the key policy of an AWS managed key cannot be edited and the security team does not control it, so it does not meet a customer-controlled key requirement.
+X: A=Default encryption with CloudTrail auditing: the security team can see the calls but does not own the key, cannot change its policy and cannot disable it, so the customer-controlled key requirement is not met.
 C=Key in guardrailConfig: guardrailConfig carries only the guardrail identifier, version and trace setting; encryption is fixed when the guardrail is created, not chosen per request.
 D=SSE-KMS on the logging bucket: guardrail definitions are stored by Bedrock, not in your invocation log bucket, so encrypting that bucket leaves the guardrail on the default key.
 T: Encrypt Bedrock resources with a customer managed key at creation time (kmsKeyId for guardrails) and grant creators Decrypt, GenerateDataKey, DescribeKey and CreateGrant, and users Decrypt.
