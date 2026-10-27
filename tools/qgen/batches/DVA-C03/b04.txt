@@ -1,0 +1,468 @@
+# DVA-C03 batch 04: non-AI skills new or thin in the shared DVA-C02 pool
+# T3.1.2 container images, T3.3.2 container deployments, T3.2.4 application environments,
+# T2.1.4 presigned vs CloudFront signed URLs/cookies, T4.2.5 workload health, T4.2.3 action alerts
+
+@ DVA-C03 D3 T3.1 applied use-case
+S: A Java service is packaged with a single-stage Dockerfile that starts FROM a Maven and JDK image, copies the whole repository, and runs mvn package. The image is 900 MB because it contains Maven, the JDK, the source code and the local dependency cache, and every source-only change downloads all dependencies again, taking 5 minutes. Which Dockerfile change makes the runtime image small and lets source-only changes reuse the downloaded dependencies?
+A: Keep one stage, run mvn package, and then add a later RUN instruction that deletes the ~/.m2 cache, the source and the JDK tools to cut the size
+B: Use a build stage that copies pom.xml and resolves dependencies before copying src, then a final JRE-only stage that copies just the built JAR
+C: Keep one stage but copy the whole repository first and run dependency download and packaging in one RUN instruction with --no-cache set
+D: Keep one stage but switch the base to a JRE-only image and install Maven with the OS package manager in a RUN instruction before packaging
+K: B
+G: ## Image layers and the build cache
+Each Dockerfile instruction such as `RUN`, `COPY` or `ADD` creates a **layer**. Two rules follow from that:
+- **Layers only add.** If one `RUN` writes 400 MB and a later `RUN rm -rf` deletes it, the image still carries the 400 MB in the earlier layer; the deletion only hides the files.
+- **Cache reuse stops at the first change.** Docker reuses a cached layer only while the instruction and its inputs are unchanged. Once one layer is rebuilt (for example `COPY . .` after any source edit), every later instruction runs again.
+So put slow, rarely changing steps first: copy only the dependency manifest (`pom.xml`, `package.json`, `requirements.txt`), download dependencies, and only then copy the source.
+## Multi-stage builds
+A Dockerfile can have several `FROM` lines. Each starts a new stage, and only the **last** stage becomes the image you push. Earlier stages are build scratch space:
+- `FROM maven:3-eclipse-temurin-21 AS build` then `COPY pom.xml .`, `RUN mvn dependency:go-offline`, `COPY src ./src`, `RUN mvn package`
+- `FROM eclipse-temurin:21-jre` then `COPY --from=build /app/target/app.jar /app/app.jar`
+The final image holds a JRE and one JAR, often a few hundred MB smaller, and contains no compiler or source that an attacker could use.
+W: Multi-stage build with dependencies resolved first: the dependency layer is reused whenever pom.xml is unchanged, so source edits rebuild only the compile step, and the final stage ships just a JRE and the JAR without Maven, the JDK, the source or the cache.
+X: A=Delete in a later layer: the files removed by the later RUN still exist in the earlier layers, so the pushed image stays about the same size, and the dependency cache is still rebuilt on every source change.
+C=Copy everything first with no cache: any source change invalidates the COPY layer and everything after it, and --no-cache disables reuse completely, so builds become slower, and the JDK and Maven remain in the image.
+D=JRE base plus Maven in one stage: Maven, its downloaded dependencies and the source still end up in the shipped layers, and with no dependency-first COPY the 5-minute download still repeats on every edit.
+T: Copy dependency manifests before source to keep the cache warm, and use a multi-stage build so the final image contains only the runtime and the built artifact.
+V: Docker, Amazon ECR
+
+@ DVA-C03 D3 T3.1 applied troubleshooting
+S: An AWS CodeBuild project builds a container image successfully, but the post_build command docker push 123456789012.dkr.ecr.us-east-1.amazonaws.com/orders:$CODEBUILD_RESOLVED_SOURCE_VERSION fails with "no basic auth credentials". The project's service role has only the default CloudWatch Logs and S3 permissions that CodeBuild created. Which TWO changes allow the push without storing long-term credentials? (Select TWO)
+A: Add a pre_build command that pipes aws ecr get-login-password into docker login with the username AWS and the registry URI of the account and Region
+B: Add an ECR repository policy that allows the codebuild.amazonaws.com service principal to call ecr:BatchGetImage and ecr:GetDownloadUrlForLayer
+C: Grant the service role ecr:GetAuthorizationToken plus the layer upload actions and ecr:PutImage on the orders repository in its IAM policy
+D: Store an IAM user's access key ID and secret access key as plaintext environment variables of the project so Docker can sign the push
+E: Enable the local Docker layer cache mode for the project so that the image layers are uploaded to ECR from the cache of the build host
+K: A,C
+G: ## How Docker authenticates to Amazon ECR
+Docker does not understand IAM. It speaks the registry protocol and needs a username and password for the registry host (`<account>.dkr.ecr.<region>.amazonaws.com`). ECR bridges the two worlds:
+- `aws ecr get-login-password --region us-east-1` calls **`ecr:GetAuthorizationToken`** with the caller's IAM credentials and returns a token that is valid for 12 hours.
+- `docker login --username AWS --password-stdin <registry>` stores that token for the registry. Without this step Docker has no credentials at all, which is the "no basic auth credentials" error.
+## What the role must allow for a push
+After login, every request is still authorized against the IAM identity that obtained the token. A push needs:
+- `ecr:GetAuthorizationToken` (resource `*`)
+- on the repository: `ecr:BatchCheckLayerAvailability`, `ecr:InitiateLayerUpload`, `ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`, `ecr:PutImage`
+The AWS managed policy `AmazonEC2ContainerRegistryPowerUser` covers this, but a policy scoped to one repository is better practice.
+## Typical buildspec
+- `pre_build`: `aws ecr get-login-password ... | docker login --username AWS --password-stdin $REGISTRY`
+- `build`: `docker build -t $REGISTRY/orders:$TAG .`
+- `post_build`: `docker push $REGISTRY/orders:$TAG`
+W: A=Log in with get-login-password: Docker needs a registry credential, and piping the ECR token into docker login provides one that is derived from the service role and expires after 12 hours.
+C=Push permissions on the role: the token and every layer upload are authorized against the service role, so it needs GetAuthorizationToken plus the upload actions and PutImage on the repository, or the push fails with access denied after login.
+X: B=Repository policy for the CodeBuild principal: that pattern lets CodeBuild itself pull a custom build environment image; it grants only pull actions and does nothing for docker commands that run inside the build with the service role.
+D=Access keys in environment variables: this is exactly the long-term credential the requirement rules out, plaintext variables are visible in the project configuration, and Docker still needs a docker login step to use them.
+E=Local Docker layer cache: the cache keeps layers on the build host to speed up later builds; it does not authenticate Docker to ECR or upload anything by itself.
+T: To push to ECR from CodeBuild, log Docker in with aws ecr get-login-password and give the service role GetAuthorizationToken plus the repository's push actions.
+V: AWS CodeBuild, Amazon ECR, AWS IAM
+
+@ DVA-C03 D3 T3.1 advanced troubleshooting
+S: An Amazon ECR repository stores images tagged with the Git commit SHA. The pipeline also moves a staging tag to whichever image is currently deployed in the staging environment. After the security team set the repository's tag mutability to IMMUTABLE, the pipeline step that pushes the staging tag fails with ImageTagAlreadyExistsException. Commit SHA tags must never be overwritten, and the staging tag must keep moving. What is the simplest fix?
+A: Keep IMMUTABLE and add a lifecycle policy rule for the staging tag with sinceImagePushed of 1 day, so the old tag is gone before the next push
+B: Change the repository to IMMUTABLE_WITH_EXCLUSION with a wildcard exclusion filter for staging, so that only the staging tag stays mutable
+C: Change the repository back to MUTABLE and rely on commit SHAs being unique, so no pipeline run ever pushes the same SHA tag a second time
+D: Keep IMMUTABLE and push the staging tag with the docker push --force option, which overrides ECR tag immutability for that single tag
+K: B
+G: ## Tag mutability in Amazon ECR
+A tag is a movable pointer to an image digest (`sha256:...`). With the default **MUTABLE** setting, pushing an existing tag simply repoints it. With **IMMUTABLE**, ECR rejects any push that would repoint an existing tag and returns `ImageTagAlreadyExistsException`. That protects release tags: once `orders:3f2a9c1` is deployed, nobody can silently replace what it means.
+## Exclusion filters
+Many pipelines need both kinds of tags: immutable version tags plus a few moving environment tags such as `latest`, `staging` or `prod`. ECR supports this with two extra settings:
+- `IMMUTABLE_WITH_EXCLUSION`: all tags are immutable **except** those that match the exclusion filters (wildcards allowed).
+- `MUTABLE_WITH_EXCLUSION`: all tags are mutable except the ones that match the filters.
+Example: `aws ecr put-image-tag-mutability --repository-name orders --image-tag-mutability IMMUTABLE_WITH_EXCLUSION --image-tag-mutability-exclusion-filters filterType=WILDCARD,filter=staging`
+The enforcement is server-side in ECR, so no client flag can bypass it.
+W: Immutable with an exclusion for staging: ECR keeps every commit SHA tag immutable, while pushes of the staging tag are allowed to repoint it, so the pipeline works again without weakening the release guarantee.
+X: A=Lifecycle rule to drop the tag: lifecycle rules run asynchronously within 24 hours rather than at push time, and an expire action deletes the whole image, including its commit SHA tag, not just the staging pointer.
+C=Back to MUTABLE: uniqueness of SHAs prevents accidental reuse by the pipeline, but nothing stops a person or another job from overwriting a SHA tag, so the "must never be overwritten" control is lost.
+D=docker push --force: Docker has no such option, and immutability is enforced by the registry on the server side, so a client flag could not override it anyway.
+T: When most tags must be immutable but a few environment tags must move, use ECR IMMUTABLE_WITH_EXCLUSION with filters for the moving tags.
+V: Amazon ECR
+
+@ DVA-C03 D3 T3.1 applied use-case
+S: An Amazon ECR repository receives about 50 images a day. Requirements: delete untagged images 3 days after they are pushed, keep only the 20 newest images whose tags start with dev-, and never delete images whose tags start with release-. Which lifecycle policy meets these requirements?
+A: Rule 1: tagStatus any with imageCountMoreThan 20 and action expire. Rule 2: tagStatus tagged with tagPatternList release-* and action expire after 3 days
+B: Rule 1: tagStatus tagged with tagPatternList release-* and a retain action. Rule 2: tagStatus any with sinceImagePushed 3 days and action expire
+C: Rule 1: tagStatus untagged with sinceImagePushed 3 days and action expire. Rule 2: tagStatus tagged with tagPatternList dev-* and imageCountMoreThan 20, expire
+D: Rule 1: tagStatus untagged with tagPatternList dev-* and imageCountMoreThan 20, expire. Rule 2: tagStatus tagged with release-* and sinceImagePushed 3 days
+K: C
+G: ## Anatomy of an ECR lifecycle rule
+A lifecycle policy is a JSON list of rules. Each rule has:
+- `rulePriority`: unique integer; lower numbers are applied first.
+- `selection.tagStatus`: `untagged`, `tagged` (then `tagPatternList` or `tagPrefixList` is required) or `any`. A rule with `untagged` must not have a tag list. A rule with `any` must have the highest priority number, so it is evaluated last.
+- `selection.countType`: `imageCountMoreThan` (keep the newest N, act on the rest) or `sinceImagePushed` with `countUnit: days` (act on images older than N days). Newer count types such as `sinceImagePulled` work with archiving.
+- `action.type`: `expire` (delete) or `transition` (move to the archive storage class). There is no "retain" action.
+## How rules combine
+All rules are evaluated, then applied by priority; each image is acted on by at most one rule. Anything that no rule selects is **kept**. So the way to protect release images is simply not to select them: no `any` rule that could catch them, and no rule that names `release-*`.
+Example for this case: priority 1 `untagged` + `sinceImagePushed` 3 days, priority 2 `tagged` + `tagPatternList: ["dev-*"]` + `imageCountMoreThan` 20, both `expire`. Use the lifecycle policy preview before applying; expirations happen within 24 hours of an image meeting the criteria.
+W: Untagged by age, dev-* by count, release-* untouched: the first rule removes untagged images after 3 days, the second keeps only the 20 newest dev- images, and because no rule selects release- tags, those images are never expired.
+X: A=An any rule keeping 20 images: tagStatus any selects every image, including release- images, so all but the newest 20 images of any kind would be deleted, and the second rule actively expires release images.
+B=Retain action plus an any rule: ECR lifecycle rules support only expire and transition actions, and the any rule with 3 days would delete release- and dev- images older than 3 days as well.
+D=Untagged rule with a tag list: a rule with tagStatus untagged must not include a tagPatternList, so this policy is invalid, and the second rule would delete release- images after 3 days.
+T: ECR lifecycle rules only expire or archive what they select; protect images by never selecting them, and keep tagStatus any as the last rule if you use it at all.
+V: Amazon ECR
+
+@ DVA-C03 D3 T3.1 applied use-case
+S: A team runs Python services from images in Amazon ECR and uses basic scanning with scan on push. Last week a critical CVE was published for a pip library that is baked into images pushed months ago that are still running. Nobody was alerted. The team wants automatic findings for both OS and programming language packages, re-evaluated when new CVEs appear, with a notification to an SNS topic. What should the developer configure?
+A: Keep basic scanning and add a scheduled Lambda function that calls StartImageScan for every image each day, sending any findings to the SNS topic
+B: Keep basic scanning and change the registry scan on push filter to a wildcard so every repository is scanned, then email the scan results to the team
+C: Switch the registry to enhanced scanning with continuous scan, and add an EventBridge rule for Amazon Inspector findings that targets the SNS topic
+D: Enable image signing with AWS Signer and an ECS policy that blocks unsigned images, which stops images with known CVEs from being deployed
+K: C
+G: ## Two scanning types in Amazon ECR
+Scanning is configured at the **private registry** level, with repository filters.
+- **Basic scanning** uses AWS native technology to find CVEs in **operating system packages**. Frequencies: scan on push or manual. Each image can be scanned once per 24 hours, and results are a point-in-time snapshot: an image scanned in March does not get a new finding when a CVE is published in June unless someone scans it again.
+- **Enhanced scanning** integrates with **Amazon Inspector**. It finds vulnerabilities in OS packages **and programming language packages** (for example pip, npm, Maven). Frequencies: scan on push or **continuous scan**. With continuous scan, Inspector re-evaluates images in scope whenever new vulnerability information arrives and updates findings automatically.
+## Getting alerts
+Inspector publishes finding events to Amazon EventBridge. A rule such as source `aws.inspector2`, detail-type `Inspector2 Finding`, filtered by severity, can target an SNS topic, a Lambda function or a ticketing integration. ECR also sends `ECR Image Scan` events for basic scans.
+W: Enhanced continuous scanning with an EventBridge rule: Amazon Inspector covers the pip library as a language package, re-scores existing images automatically when new CVEs are published, and its finding events can be routed to the SNS topic without custom code.
+X: A=Daily manual scans: basic scanning examines operating system packages only, so the vulnerable pip library would still not be reported, and the team must build and maintain the scheduling and notification code.
+B=Wildcard scan on push: this only widens which repositories are scanned at push time; images pushed months ago are not rescanned, and language packages are still out of scope for basic scanning.
+D=Image signing with AWS Signer: signing proves who built an image and that it was not altered, but it says nothing about vulnerabilities inside a correctly signed image, so the CVE would still go unnoticed.
+T: For language-package CVEs and alerts on images already in ECR, use enhanced scanning (Amazon Inspector) with continuous scan and route its findings through EventBridge.
+V: Amazon ECR, Amazon Inspector, Amazon EventBridge, Amazon SNS
+
+@ DVA-C03 D3 T3.3 applied use-case
+S: An Amazon ECS service on AWS Fargate has a desired count of 6 tasks and uses the rolling update deployment type. During deployments the service must never have fewer than 6 healthy tasks, and to stay within the account's vCPU quota it must never run more than 3 extra tasks at a time. Which deployment configuration meets these requirements?
+A: minimumHealthyPercent 50 and maximumPercent 150
+B: minimumHealthyPercent 100 and maximumPercent 100
+C: minimumHealthyPercent 100 and maximumPercent 200
+D: minimumHealthyPercent 100 and maximumPercent 150
+K: D
+G: ## Two numbers control an ECS rolling update
+Both values are percentages of the service's **desired count**:
+- `minimumHealthyPercent` is the floor: how many tasks must stay running and healthy. It is **rounded up**. With desired 4 and 50%, ECS may stop 2 old tasks before starting new ones.
+- `maximumPercent` is the ceiling: how many tasks (old plus new) may run at once. It is **rounded down**. With desired 4 and 200%, ECS may start 4 new tasks before stopping any old ones.
+The gap between the two is the room ECS has to work in. If floor and ceiling are both equal to the desired count, ECS can neither start an extra task nor stop an old one, and the deployment cannot make progress; ECS reports a service event saying it was unable to stop or start tasks because of the deployment configuration.
+## Worked example for desired count 6
+- 100 / 150: floor 6, ceiling 9. ECS starts up to 3 new tasks, waits until they are healthy, stops 3 old ones, and repeats.
+- 50 / 150: floor 3. Capacity may drop by half.
+- 100 / 200: ceiling 12, so up to 6 extra tasks run at once.
+Defaults for a rolling update service are 100 and 200. Deployment failure detection (circuit breaker, CloudWatch alarms) is configured separately.
+W: 100 and 150: the floor is 6 healthy tasks, so capacity never drops, and the ceiling is 9 tasks, so at most 3 new tasks run beside the old ones in each step.
+X: A=50 and 150: the ceiling is right, but a 50 percent floor lets ECS stop 3 old tasks before replacements are healthy, which breaks the never fewer than 6 rule.
+B=100 and 100: floor and ceiling both equal 6, so ECS can neither start an extra task nor stop an old one, and the deployment stalls with a service event about the deployment configuration.
+C=100 and 200: capacity never drops, but the ceiling is 12 tasks, so ECS may launch 6 extra tasks at once and exceed the vCPU headroom the team has.
+T: minimumHealthyPercent sets the rounded-up floor and maximumPercent the rounded-down ceiling of tasks during an ECS rolling update; the gap between them is the batch size.
+V: Amazon ECS, AWS Fargate
+
+@ DVA-C03 D3 T3.3 advanced troubleshooting
+S: An Amazon ECS service on Fargate uses a task definition whose image is 123456789012.dkr.ecr.us-east-1.amazonaws.com/orders:stable. A developer pushed a fixed image and moved the stable tag to it. An hour later, tasks that service auto scaling launched in the meantime still run the old code. No one changed the service or the task definition. What explains this, and what is the fix?
+A: Fargate keeps pulled images on its hosts for 24 hours; set ECS_IMAGE_PULL_BEHAVIOR to always in the task's environment to force fresh pulls
+B: ECR serves the previous manifest of a moved tag for a while; wait for the tag change to propagate, or push the image again under the stable tag
+C: ECS resolved stable to an image digest at the last deployment and uses that digest for all tasks; start a new deployment of the service
+D: Auto scaling launches tasks from the first ACTIVE revision of the family; deregister the older revisions so that the service uses the newest one
+K: C
+G: ## Tags move, digests do not
+An image tag such as `orders:stable` is a pointer that can be moved. The **digest** (`sha256:...`) identifies exact image content and never changes.
+## Software version consistency in ECS
+By default, when a service deployment starts, Amazon ECS **resolves each container's image tag to a digest**: the first task of the deployment establishes the digest, and ECS then uses that digest for every other task of the deployment and for later tasks such as scale-out or replacement of failed tasks. All tasks in a service therefore run identical images, even if someone moves the tag later.
+Consequences:
+- Moving a tag in ECR does **not** change what a running service starts.
+- To pick up the new image under the same tag, start a new deployment (`aws ecs update-service --force-new-deployment`), which resolves the tag again.
+- Better practice is a unique tag (or digest) per build and a new task definition revision per release, so every deployment is explicit and easy to roll back.
+The behavior can be configured per container with the `versionConsistency` parameter in the container definition.
+W: Digest pinned at deployment: ECS resolved stable to the old digest when the service was last deployed and keeps using it for new tasks, so a new deployment (force new deployment, or a new revision with a unique tag) is what makes the service resolve the moved tag.
+X: A=Fargate image cache and pull behavior: ECS_IMAGE_PULL_BEHAVIOR is an ECS agent setting for EC2 container instances, not a task variable on Fargate, and no host cache explains new tasks getting the old image an hour later.
+B=Tag propagation delay in ECR: a tag move is effective for new pulls right away, and pushing the same image again does not change what the service starts, because ECS is not resolving the tag for these tasks at all.
+D=First ACTIVE revision: the service runs the exact revision it was last updated with, not the first or newest one of the family, and deregistering revisions does not change a running service.
+T: ECS pins image tags to digests at each deployment, so moving a tag changes nothing until you start a new deployment; prefer unique tags per build.
+V: Amazon ECS, AWS Fargate, Amazon ECR
+
+@ DVA-C03 D3 T3.3 applied troubleshooting
+S: A team moves an ECS service from the EC2 launch type to Fargate. The task definition uses the bridge network mode, sets cpu 256 and memory 512 only in the container definition, and maps containerPort 8080 to hostPort 0. It already has a task execution role for ECR pulls and logs. Registering it with requiresCompatibilities FARGATE fails validation. Which TWO changes are required? (Select TWO)
+A: Set the network mode to awsvpc, and set hostPort to 8080 or remove it so that it matches the container port of the application
+B: Keep the bridge network mode and add a placement constraint that restricts the tasks to Fargate capacity in the cluster's subnets
+C: Add task-level cpu and memory values, such as 256 CPU units and 512 MiB, which form a valid Fargate task size combination
+D: Set privileged to true on the container so that Fargate is allowed to map dynamic host ports on the shared host network
+E: Switch the network mode to host so that the container binds port 8080 directly on the Fargate host without a port mapping
+K: A,C
+G: ## What Fargate requires in a task definition
+On Fargate there is no container instance you manage, so several EC2-launch-type options do not apply:
+- **Network mode must be `awsvpc`.** Each task gets its own elastic network interface and private IP in your subnets, with security groups on the task. In `awsvpc` mode `hostPort` must equal `containerPort` or be omitted; dynamic host ports (`hostPort: 0`) are a `bridge` mode feature.
+- **Task-level CPU and memory are required**, and they must be one of the supported combinations (for example 256 CPU units with 512 MiB, 1 GB or 2 GB). Container-level values are optional limits within the task size.
+- Parameters that are not valid on Fargate include `privileged`, `links`, `placementConstraints`, `dnsServers`, `extraHosts`, `ipcMode` and others.
+- A **task execution role** lets the Fargate agent pull private ECR images, fetch secrets and send logs with the `awslogs` driver.
+Example: `"networkMode": "awsvpc", "requiresCompatibilities": ["FARGATE"], "cpu": "256", "memory": "512"`, container `portMappings: [{"containerPort": 8080}]`.
+W: A=awsvpc with matching ports: Fargate tasks only use the awsvpc network mode, where each task has its own IP address, so the port mapping must use 8080 for both values or omit hostPort.
+C=Task-level CPU and memory: Fargate sizes and bills each task by its task-level CPU and memory, so the task definition must declare a supported combination such as 256 units and 512 MiB at the task level.
+X: B=Bridge mode with a placement constraint: bridge mode is not supported on Fargate, and placementConstraints is one of the task definition parameters that Fargate rejects.
+D=Privileged container: privileged is not a valid parameter on Fargate, and privilege has nothing to do with port mapping; dynamic host ports exist only in bridge mode on EC2 instances.
+E=Host network mode: Fargate does not support host mode; there is no shared host network you can bind to, so awsvpc is the only valid choice.
+T: A Fargate task definition needs the awsvpc network mode with hostPort equal to containerPort (or omitted) and a valid task-level CPU and memory combination.
+V: Amazon ECS, AWS Fargate
+
+@ DVA-C03 D3 T3.3 applied use-case
+S: A Kubernetes Deployment on Amazon EKS runs 10 replicas of an API, and each pod has a readiness probe. A namespace ResourceQuota leaves room for only 2 additional pods. During every rollout, the service must keep at least 10 ready pods. Which update strategy in the Deployment manifest meets these requirements?
+A: RollingUpdate with maxSurge 0 and maxUnavailable 2
+B: RollingUpdate with maxSurge 2 and maxUnavailable 0
+C: RollingUpdate with the default maxSurge and maxUnavailable
+D: Recreate, with progressDeadlineSeconds set to 120
+K: B
+G: ## How a Deployment rolls out
+A Deployment manages ReplicaSets. When you change the pod template (for example the image tag), Kubernetes creates a new ReplicaSet and shifts pods from the old one to the new one according to `spec.strategy`:
+- `type: Recreate` deletes all old pods first, then creates new ones. There is a gap with no pods.
+- `type: RollingUpdate` (default) replaces pods gradually within two limits:
+  - `maxSurge`: how many pods may exist **above** `replicas` (number or percentage, percentages round **up**).
+  - `maxUnavailable`: how many pods may be **missing** from `replicas` (percentages round **down**). Both cannot be 0.
+A new pod counts as available only when its **readiness probe** succeeds, so the rollout waits for real readiness before it removes old pods.
+## Example
+`replicas: 10`, `maxSurge: 2`, `maxUnavailable: 0`: Kubernetes creates 2 new pods (12 total), waits until they are Ready, terminates 2 old ones, and repeats. Ready capacity never drops below 10.
+The defaults are 25% and 25%: for 10 replicas that is up to 3 extra pods and up to 2 unavailable.
+If new pods never become Ready, the rollout stops making progress and after `progressDeadlineSeconds` (default 600) the Deployment reports `ProgressDeadlineExceeded`. Kubernetes does not roll back by itself; use `kubectl rollout undo`.
+W: maxSurge 2 and maxUnavailable 0: Kubernetes adds at most 2 new pods, which fits the quota, and removes an old pod only after a new one passes its readiness probe, so ready capacity never falls below 10.
+X: A=maxSurge 0 and maxUnavailable 2: no extra pods are created, so Kubernetes must first take down 2 old pods, which drops ready capacity to 8 during each step.
+C=Default 25 percent values: maxSurge rounds up to 3 pods, exceeding the 2-pod quota headroom, and maxUnavailable rounds down to 2, which allows ready capacity to fall to 8.
+D=Recreate with a progress deadline: Recreate removes every old pod before creating the new ones, causing an outage, and the progress deadline only reports a stalled rollout; it does not keep capacity.
+T: For zero capacity loss in a Kubernetes rollout, set maxUnavailable to 0 and size maxSurge to the spare room you have; readiness probes gate each step.
+V: Amazon EKS
+
+@ DVA-C03 D3 T3.3 advanced troubleshooting
+S: A CodeBuild project on an x86_64 build environment pushes api:1.4.0 to Amazon ECR. The team sets cpuArchitecture to ARM64 in the runtimePlatform of the ECS Fargate task definition to move the service to Graviton, and new tasks stop at once with "exec format error". The same tag must keep working on x86_64 EKS nodes. What should the team do?
+A: Set operatingSystemFamily to LINUX in runtimePlatform, so Fargate on Graviton translates the x86_64 instructions of the image through emulation
+B: Add --platform linux/arm64 to the FROM line of the final stage only, so the one image that the build produces runs on both architectures
+C: Add an ECR pull through cache rule for the repository, which converts each pulled image to the CPU architecture of the requesting host
+D: Build and push an arm64 and an amd64 image, then create and push a manifest list for api:1.4.0 that references both architecture images
+K: D
+G: ## One tag, several architectures
+Compiled binaries and native libraries in an image target one CPU architecture. An x86_64 image on an ARM64 (Graviton) host fails as soon as the entrypoint runs, typically with `exec format error`.
+A **manifest list** (OCI image index) lets one tag cover several architectures. It is a small manifest that lists one image per platform, for example `linux/amd64` and `linux/arm64`. When a client pulls the tag, the container runtime picks the entry that matches its own platform.
+## Building one in an AWS pipeline
+- Build each architecture natively, for example one CodeBuild project with an x86_64 environment and one with an ARM environment, and push `api:1.4.0-amd64` and `api:1.4.0-arm64`.
+- Create and push the list: `docker manifest create <repo>:1.4.0 <repo>:1.4.0-amd64 <repo>:1.4.0-arm64` then `docker manifest push <repo>:1.4.0`. (`docker buildx build --platform linux/amd64,linux/arm64 --push` is another way.)
+- Amazon ECR stores manifest lists, and ECS task definitions and EKS pod specs can reference them like any other image.
+- ECS on Fargate selects ARM64 through `runtimePlatform.cpuArchitecture: ARM64`.
+Note: AWS Lambda does not support multi-architecture images; a Lambda function must point to an image built for its one architecture.
+W: Per-architecture images plus a manifest list: the tag then resolves to the arm64 image on Graviton Fargate tasks and to the amd64 image on x86_64 EKS nodes, so one release tag works on both.
+X: A=operatingSystemFamily and emulation: operatingSystemFamily only selects Linux or Windows; Fargate does not emulate another CPU architecture, so the x86_64 binaries still cannot run on Graviton.
+B=Platform flag on the final stage: that produces a single arm64 image, which would fix Fargate but break the x86_64 EKS nodes; one single-architecture image cannot serve both.
+C=Pull through cache conversion: pull through cache rules mirror images from an upstream registry into ECR; they never rebuild or convert an image for a different CPU architecture.
+T: To run one tag on both x86_64 and Graviton, push an image per architecture and a manifest list that references them; the runtime picks the matching one.
+V: Amazon ECR, Amazon ECS, AWS Fargate, Amazon EKS, AWS CodeBuild
+
+@ DVA-C03 D3 T3.2 applied troubleshooting
+S: A REST API in Amazon API Gateway uses one Lambda integration with the function ARN arn:aws:lambda:us-east-1:123456789012:function:orders:${stageVariables.lambdaAlias}. The dev stage, with lambdaAlias set to dev, works. A new qa stage with lambdaAlias set to qa returns HTTP 500, and the execution log shows "Invalid permissions on Lambda function". The qa alias exists and points to version 7. What should the developer do?
+A: Add lambda:InvokeFunction for the orders function to the Lambda execution role, so the function is allowed to be invoked through the qa alias
+B: Redeploy the API to the qa stage, because stage variable values are read only when a deployment is created and are not used before that
+C: Add a resource-based permission on the orders function qualified with the qa alias that lets apigateway.amazonaws.com invoke it from this API
+D: Point the qa alias to $LATEST instead of version 7, because API Gateway can invoke an alias only when the alias targets the unpublished version
+K: C
+G: ## Environments with stages and aliases
+A common layout uses one API definition and one function, with environments expressed by **API Gateway stages** and **Lambda aliases**:
+- Lambda versions are immutable snapshots; aliases (`dev`, `qa`, `prod`) are named pointers to versions.
+- Each stage sets a **stage variable** such as `lambdaAlias`, and the integration ARN ends with `:${stageVariables.lambdaAlias}`, so the `qa` stage calls `orders:qa`.
+## Why the permission is per alias
+API Gateway invokes Lambda as the service principal `apigateway.amazonaws.com`, which needs a statement in the function's **resource-based policy**. Each qualified ARN (`orders:dev`, `orders:qa`) has its own policy. When you pick a function in the console, API Gateway adds the permission for that exact ARN, but with a stage variable it cannot know the final ARN, so you add one per alias:
+`aws lambda add-permission --function-name orders --qualifier qa --statement-id apigw-qa --action lambda:InvokeFunction --principal apigateway.amazonaws.com --source-arn arn:aws:execute-api:us-east-1:123456789012:<api-id>/*/*/*`
+Without it, the call fails and the execution log reports `Invalid permissions on Lambda function`.
+W: Per-alias resource-based permission: the qa alias is a separate qualified ARN, so it needs its own add-permission statement for apigateway.amazonaws.com scoped to this API's source ARN, just like the dev alias already has.
+X: A=Execution role permission: the execution role is what the function uses to call other services; who may invoke the function is decided by its resource-based policy, so this change has no effect.
+B=Redeploy for stage variables: stage variables are stage settings that take effect without a new deployment, and the error text points to missing invoke permission, not to an unresolved variable.
+D=Alias to $LATEST: API Gateway can invoke aliases that point to published versions; changing the target does not add the missing permission and also removes the immutable version that qa should test.
+T: When an API Gateway integration selects a Lambda alias through a stage variable, add a lambda add-permission statement for every alias that the stages use.
+V: Amazon API Gateway, AWS Lambda
+
+@ DVA-C03 D3 T3.2 applied use-case
+S: A pipeline builds a container image once and pushes it to Amazon ECR as orders:build-512. After the image passes tests in the staging environment, the production deployment step must reference the same image under the tag prod-2026.11.03 in the same repository. The step runs in a container without a Docker daemon, and the image layers must not be downloaded or uploaded again. How should the developer add the production tag?
+A: Run aws ecr tag-resource on the repository with the key prod-2026.11.03, so that the image is tagged without pulling or pushing its layers again
+B: Get the image manifest of build-512 with aws ecr batch-get-image, then call aws ecr put-image with that manifest and the new image tag
+C: Rebuild the image in the production stage from the same commit with the tag prod-2026.11.03, so that the build contents match the staging image
+D: Add a registry replication rule with a filter for build-512 that copies the image into the same repository under the prod-2026.11.03 tag
+K: B
+G: ## Promoting an image between environments
+A reliable promotion moves the **exact bytes** that were tested. In ECR the identity of an image is its **digest**, which is computed from its manifest. Tags are pointers you add per environment, such as `build-512`, `staging`, or `prod-2026.11.03`.
+Rebuilding from the same commit is not a promotion: base image updates, unpinned dependencies or timestamps can produce a different digest than the one you tested.
+## Retagging with the ECR API
+ECR can add a tag to an existing image without Docker:
+- `MANIFEST=$(aws ecr batch-get-image --repository-name orders --image-ids imageTag=build-512 --query 'images[].imageManifest' --output text)`
+- `aws ecr put-image --repository-name orders --image-tag prod-2026.11.03 --image-manifest "$MANIFEST"`
+The layers are already in the repository, so only the small manifest is written. `describe-images` then shows both tags on the same digest. Production task definitions or pod specs can reference the tag or, stricter still, the digest.
+W: batch-get-image then put-image: the existing manifest is written again under the new tag, so prod-2026.11.03 points to the same digest that staging tested, without Docker and without moving any layer data.
+X: A=tag-resource on the repository: this adds AWS resource tags (key-value metadata for billing or access control) to the repository itself; it never creates an image tag that a task definition could pull.
+C=Rebuild from the same commit: a rebuild needs Docker and can produce a different digest than the tested image, for example if a base image or an unpinned dependency changed in the meantime.
+D=Replication rule: replication copies images to other Regions or accounts with their existing tags; it cannot copy into the same repository or rename a tag.
+T: Promote an ECR image by retagging its manifest with batch-get-image and put-image, so every environment runs the same digest.
+V: Amazon ECR
+
+@ DVA-C03 D3 T3.2 applied use-case
+S: A React single-page app is hosted with AWS Amplify Hosting from one Git repository. The main branch is production and the develop branch is staging. The build reads an environment variable API_URL that must point to the production API for main and to the staging API for develop, and new feature branches should get the staging value by default. Which approach requires the LEAST duplicated configuration?
+A: Define API_URL once at the app level with the staging value, and add a branch override for the main branch with the production API URL
+B: Create a second Amplify app connected to the same repository for production, and define API_URL separately in each of the two apps
+C: Store both URLs in Systems Manager Parameter Store and have the browser call GetParameter at startup to read the value for its own hostname
+D: Add a customHttp.yml file to each branch that sets an API_URL response header, and read that header in the app when the first page loads
+K: A
+G: ## Environment variables in Amplify Hosting
+Amplify Hosting builds and deploys each connected branch separately. Environment variables are available to the build (for example `process.env.API_URL` in a React or Next.js build) and are set in the app's **Hosting > Environment variables** settings.
+- By default a variable applies to **all branches**, including branches connected later (for example through branch auto-detection for feature branches).
+- A **branch override** gives one branch a different value for the same variable. So you define the common value once and override only where it differs.
+Example: `API_URL = https://api-staging.example.com` for all branches, override `main` with `https://api.example.com`. A push to `main` builds with the production URL, any other branch builds with staging.
+Notes:
+- For a static SPA, values are compiled into the JavaScript bundle at build time, so they are visible to users: never put secrets there.
+- `customHttp.yml` (or custom headers in the console) sets HTTP response headers such as security headers; it is not a configuration mechanism for build values.
+W: App-level variable with a branch override: the staging value is the default for develop and every new feature branch, and only main carries an override, so each value is defined exactly once.
+X: B=Second Amplify app: it works, but build settings, domains, variables and access settings must be maintained in two apps, which is the duplication the team wants to avoid.
+C=Parameter Store from the browser: the browser would need AWS credentials to call GetParameter, which adds an identity setup and runtime dependency just to read a public URL that Amplify can inject at build time.
+D=customHttp.yml header: custom headers are response headers for security and caching; reading configuration from them is a workaround, and the files would be duplicated across branches and drift.
+T: In Amplify Hosting, set environment variables once at the app level and add branch overrides only for the branches whose values differ.
+V: AWS Amplify
+
+@ DVA-C03 D2 T2.1 applied use-case
+S: A video platform serves HLS videos through Amazon CloudFront from a private S3 bucket that uses origin access control. Each video has a playlist file and hundreds of segment files that the playlist references by relative URLs. Only signed-in subscribers may watch, the playlist files and URLs must not change, and CloudFront caching must keep working. How should the backend grant access after sign-in?
+A: Generate an S3 presigned GET URL for every segment and rewrite the playlist for each viewer, so that each segment request carries its own signature
+B: Issue CloudFront signed cookies with a custom policy for the video's path, signed with a private key whose public key is in a trusted key group
+C: Issue a CloudFront signed URL with a canned policy for the playlist file only, so the player inherits access to the segments that it references
+D: Add an AWS WAF rule to the distribution that allows only requests whose Referer header contains the platform's own domain name
+K: B
+G: ## Restricting content that CloudFront serves
+Origin access control (OAC) makes sure only CloudFront can read the bucket. To decide **which viewers** CloudFront serves, you add a **trusted key group** to the cache behavior. From then on CloudFront requires a valid signed URL or signed cookie for every request in that behavior.
+- The backend signs with a **private key**; the matching **public key** is uploaded to CloudFront and added to a key group. Key groups are the recommended signer: they are managed with IAM permissions and do not need the root user, unlike legacy CloudFront key pairs.
+## Signed URLs or signed cookies
+- **Signed URLs**: one signature per URL. Good for a single file, such as an installer download, or for clients that do not support cookies.
+- **Signed cookies**: the signature travels in cookies (`CloudFront-Policy`, `CloudFront-Signature`, `CloudFront-Key-Pair-Id`). Good for **many files**, such as all segments of an HLS video or a members area, and when you **do not want to change URLs**.
+## Canned or custom policy
+A canned policy has only an expiry time for one exact resource. A custom policy can add a start time, an IP range and a **wildcard resource** such as `https://d111.cloudfront.net/videos/123/*`, which is what lets one cookie cover the playlist and all segments.
+W: Signed cookies with a custom policy: one set of cookies with a wildcard resource for the video's path authorizes the playlist and every segment, the URLs stay unchanged, and CloudFront keeps caching the objects because the content is still served through the distribution.
+X: A=S3 presigned URL per segment: viewers would fetch segments directly from S3, bypassing CloudFront caching, the playlist must be rewritten per viewer, and OAC-protected buckets are meant to be read through CloudFront.
+C=Canned signed URL for the playlist: a canned policy covers only that one exact URL, and the segment requests carry no signature, so CloudFront rejects them with 403 once a key group protects the behavior.
+D=WAF Referer rule: the Referer header is set by the client and is easy to forge, so anyone could download the videos; it identifies a web page, not a signed-in subscriber.
+T: For many private files behind CloudFront without changing URLs, use signed cookies with a custom (wildcard) policy and a trusted key group; use signed URLs for single files.
+V: Amazon CloudFront, Amazon S3
+
+@ DVA-C03 D2 T2.1 advanced troubleshooting
+S: A Lambda function generates S3 presigned GET URLs with an expiry of 3 days for report downloads, using the SDK's default credentials. Users report that links stop working after a few hours with an error saying that the provided token has expired. Links must stay valid for 3 days, and security forbids long-term IAM user access keys. What should the developer do?
+A: Raise the URL expiry to 7 days, which is the maximum for SigV4 presigned URLs, so the links stay valid for at least the 3 days that are required
+B: Raise the maximum session duration of the function's execution role to 12 hours, so the credentials that sign the URLs last for long enough
+C: Serve the reports through CloudFront with origin access control and issue CloudFront signed URLs with a 3-day expiry using a trusted key group
+D: Sign the URLs with an IAM user's access keys that are stored in Secrets Manager and rotated automatically every 30 days by a rotation function
+K: C
+G: ## What limits an S3 presigned URL
+A presigned URL is a normal S3 request signed in advance with SigV4 by some IAM identity. S3 checks two things when the URL is used:
+- the expiry you asked for (`X-Amz-Expires`, up to 7 days with SigV4 from the SDK or CLI; 12 hours from the console), and
+- whether the **credentials that signed it are still valid**.
+If the signer used **temporary credentials** (an IAM role session, such as a Lambda execution role, an EC2 instance profile or STS `AssumeRole`), the URL stops working when that session expires, even if the requested expiry is longer. The URL contains `X-Amz-Security-Token`, and S3 answers `ExpiredToken`. Only long-term IAM user keys can back a URL for the full 7 days.
+## CloudFront signed URLs avoid the coupling
+A CloudFront signed URL is signed with a private key whose public key is in a **trusted key group** on the distribution. Its validity depends only on the policy (expiry, optional start time and IP range), not on any IAM session. The S3 bucket stays private with **origin access control**, so only CloudFront can read it. The private key should be stored securely, for example in AWS Secrets Manager, and read by the function.
+W: CloudFront signed URLs with a key group: the expiry is set in the signed policy and is independent of the Lambda role's temporary credentials, so links last 3 days, and no IAM user keys are involved.
+X: A=7-day expiry: a longer requested expiry does not help, because a URL signed with a role session still dies when that session expires, which is what is happening now.
+B=12-hour role session: the Lambda service manages the execution role's session, and even a 12-hour session is far shorter than the 3 days the links must work.
+D=IAM user keys in Secrets Manager: this would allow 7-day URLs, but it uses exactly the long-term IAM user access keys that security forbids, and rotating the keys invalidates links signed with the old ones.
+T: An S3 presigned URL is valid only as long as the credentials that signed it; for long-lived links without IAM user keys, use CloudFront signed URLs with a key group.
+V: Amazon S3, Amazon CloudFront, AWS Lambda
+
+@ DVA-C03 D2 T2.1 applied troubleshooting
+S: A backend issues S3 presigned PUT URLs so browsers upload profile pictures directly to a private bucket. The code passes ContentType: "image/jpeg" when it generates every URL. JPEG uploads work, but PNG uploads, which the browser sends with Content-Type: image/png, fail with 403 SignatureDoesNotMatch. The bucket's CORS rules allow PUT from the site. What is the fix?
+A: Add a CORS rule that lists image/png in AllowedHeaders, because the browser's preflight request for PNG files is rejected by S3 before the upload starts
+B: Increase the URL expiry for PNG files, because PNG images are larger and the upload is still running when the presigned URL reaches its expiry time
+C: Generate each URL with the content type of the actual file, validated against an allow-list, and send that exact Content-Type header with the PUT
+D: Switch the client to Signature Version 2 presigned URLs, which do not include request headers in the signature and accept any Content-Type
+K: C
+G: ## What a presigned PUT URL signs
+A presigned URL carries a SigV4 signature over the request that the backend described when it generated the URL: method, bucket, key, expiry and any **signed headers or parameters** it included. If the backend passes `ContentType` (or metadata, ACL, checksum, or encryption settings) to `generate_presigned_url` / `PutObjectCommand`, that value becomes part of the signature.
+When the browser then sends a request that differs, for example `Content-Type: image/png` instead of the signed `image/jpeg`, S3 computes a different signature and returns **403 SignatureDoesNotMatch**.
+## A safe upload pattern
+- The client tells the backend the file name and type.
+- The backend checks the type against an allow-list (`image/jpeg`, `image/png`), builds the key itself, and signs a PUT with that exact `ContentType` and a short expiry.
+- The client sends the PUT with the same `Content-Type` header.
+Presigned POST with a policy (for example `starts-with $Content-Type image/` and a `content-length-range`) is an alternative when you also want S3 to enforce a size limit.
+W: Sign the real content type: because the content type is part of the signature, the URL must be generated with the type that the browser will send; validating it against an allow-list still keeps uploads limited to images.
+X: A=CORS AllowedHeaders: a CORS problem shows up as a browser CORS error for every upload, and JPEG uploads with the same headers already succeed, so the 403 SignatureDoesNotMatch comes from the signature, not from CORS.
+B=Longer expiry: S3 checks the expiry when the request starts, and an expired URL returns AccessDenied with "Request has expired", not SignatureDoesNotMatch.
+D=Signature Version 2: SigV2 is deprecated for S3 and still signs the Content-Type value, so changing the signing version would not accept a different header and weakens security.
+T: Every header you pass when generating a presigned PUT (such as ContentType) must be sent unchanged by the client, or S3 returns SignatureDoesNotMatch.
+V: Amazon S3
+
+@ DVA-C03 D4 T4.2 advanced troubleshooting
+S: A Java API on Amazon EKS needs up to 2 minutes at startup to load a cache. Its liveness probe calls /health, which also checks the database, with initialDelaySeconds 10. During rollouts, new pods restart repeatedly before they ever become Ready, and during a 3-minute database failover every pod in the Deployment restarted at the same time. Which TWO changes fix these problems? (Select TWO)
+A: Add a startupProbe whose failureThreshold multiplied by periodSeconds covers the startup time, so liveness checks begin only after startup succeeds
+B: Make the liveness probe check only that the process itself responds, without calling the database or any other dependency outside the pod
+C: Move the database check to a readiness probe on every pod, so that all pods leave the Service endpoints whenever the database is unreachable
+D: Set restartPolicy to Never in the Deployment's pod template, so that failed liveness probes report the pod as unhealthy without restarting it
+E: Raise the liveness probe timeoutSeconds to 120, so a slow database response during startup or failover no longer counts as a failed probe
+K: A,B
+G: ## Three probes, three questions
+The kubelet runs probes against each container:
+- **Liveness**: "Is this process stuck?" On repeated failure the kubelet **restarts the container**. Use it for deadlocks that only a restart can fix.
+- **Readiness**: "Should this pod get traffic now?" On failure the pod is **removed from Service endpoints** (and from load balancer target groups that use IP targets through the AWS Load Balancer Controller), but it is not restarted.
+- **Startup**: "Has the app finished starting?" Until it succeeds, liveness and readiness probes are **disabled**. If it does not succeed within `failureThreshold x periodSeconds`, the container is restarted.
+## Common mistakes
+- A liveness probe that fires before a slow app is up restarts it forever (CrashLoopBackOff). Use a startup probe when startup time is long or unpredictable, for example `periodSeconds: 10`, `failureThreshold: 18` for up to 3 minutes.
+- A probe that checks an **external dependency** fails on every pod at once when that dependency has a problem. For liveness this restarts the whole fleet, which cannot fix the database and adds load. AWS EKS best practices advise against making liveness or readiness depend on factors outside the pod.
+W: A=Startup probe: liveness is disabled until the startup probe succeeds, so pods get the full 2 minutes to load the cache instead of being killed after 10 seconds.
+B=Liveness checks only the process: a database failover no longer makes every pod fail liveness at the same time, so the kubelet restarts a container only when that container itself is stuck.
+X: C=Database check in readiness: every pod would fail readiness together during the failover, removing all endpoints at once; EKS best practices advise against readiness checks that depend on an external database.
+D=restartPolicy Never: Deployments only accept restartPolicy Always, so the manifest would be rejected, and disabling restarts would also disable recovery from real deadlocks.
+E=Longer probe timeout: a 120-second timeout does not cover a 3-minute failover or the startup time reliably, and it delays detection of a real deadlock by minutes.
+T: Use a startup probe for slow starts, keep liveness about the process itself, and never let an external dependency decide whether every pod gets restarted.
+V: Amazon EKS
+
+@ DVA-C03 D4 T4.2 advanced troubleshooting
+S: An ECS service on Fargate runs behind an Application Load Balancer. After the team rebuilt the image on a minimal distroless base without a shell, tasks are marked UNHEALTHY and replaced every few minutes, although the target group shows the targets as healthy and logs show requests being served. The container definition's health check is ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]. What is the cause?
+A: The health check command runs inside the container, and the new image has no shell or curl, so the check always exits with an error and the task is marked unhealthy
+B: The ECS agent runs the check from outside the task over the network, and the task's security group does not allow port 8080 from its own subnet any longer
+C: ECS combines the container health check and the target group health check, and the stricter of the two marks the task unhealthy after the base image changes
+D: ECS ignores health checks in the container definition when the image has no HEALTHCHECK instruction, so the task falls back to an UNKNOWN status
+K: A
+G: ## Two different health checks
+An ECS service behind a load balancer can have two independent checks:
+- **Container health check** (`healthCheck` in the container definition): a **command that runs inside the container**, for example `["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]`. Exit code 0 means healthy. Parameters: `interval`, `timeout`, `retries`, `startPeriod`. If an essential container is `UNHEALTHY`, the task is unhealthy and the service scheduler replaces it.
+- **Target group health check**: the ALB sends HTTP requests to the task's IP and port from outside. It decides whether the ALB routes traffic to the target, and ECS also replaces tasks that the load balancer reports as unhealthy.
+## Why images matter for container checks
+Because the command runs inside the container, every binary it uses must be in the image. `CMD-SHELL` needs `/bin/sh`; `curl` must be installed. Minimal and distroless images often have neither, so the command cannot even start and the check fails every time.
+Fixes:
+- Ship a small health-check binary (or a health subcommand of the app) and use the `CMD` form without a shell, for example `["CMD", "/app/healthcheck"]`.
+- Or drop the container health check and rely on the target group check if that is sufficient.
+Also note: ECS only uses checks defined in the task definition; a `HEALTHCHECK` instruction in the Dockerfile is not monitored, and a definition in the task definition overrides it.
+W: Missing shell and curl inside the image: the container health check executes in the container itself, so with no /bin/sh or curl the command fails every time, ECS marks the essential container and the task UNHEALTHY, and the scheduler replaces them even though the ALB sees them as healthy.
+X: B=Check runs from outside: container health checks do not cross the network; they run inside the container against localhost, so security group rules have no effect on them.
+C=Combined stricter check: the two checks are evaluated separately; here the target group check passes, and the task is replaced because the container check alone reports UNHEALTHY.
+D=Ignored without HEALTHCHECK: it is the opposite: ECS uses the check from the container definition and does not need or monitor a Dockerfile HEALTHCHECK instruction, and the observed status is UNHEALTHY, not UNKNOWN.
+T: ECS container health checks run inside the container, so the image must contain every binary the command uses; minimal images need a CMD-form check or a bundled health binary.
+V: Amazon ECS, AWS Fargate, Elastic Load Balancing
+
+@ DVA-C03 D4 T4.2 applied use-case
+S: An application encrypts and decrypts data with AWS KMS at a high rate and was throttled last month. The developer wants the on-call SNS topic to be notified when usage reaches 70 percent of the KMS request-rate quota for the cryptographic operations and stays there for 5 minutes. Which solution meets this requirement?
+A: Create a CloudWatch alarm on the KMS usage metric in the AWS/Usage namespace with the expression m1/SERVICE_QUOTA(m1)*100 above 70, and send it to the topic
+B: Turn on Service Quotas Automatic Management in Notify Only mode for the account, and subscribe the on-call engineers to the email notifications
+C: Create an AWS Budgets usage budget for KMS requests with an alert at 70 percent of the quota value, and set the SNS topic as the alert recipient
+D: Enable the Trusted Advisor service limits check and configure the weekly Trusted Advisor notification email to go to the on-call distribution list
+K: A
+G: ## Usage metrics and the SERVICE_QUOTA function
+Many AWS services publish **usage metrics** to the CloudWatch `AWS/Usage` namespace (resource counts or API call rates, depending on the service). KMS, DynamoDB, EC2, ECR, Fargate, CloudWatch Logs and others integrate these metrics with **Service Quotas**.
+CloudWatch metric math has a function `SERVICE_QUOTA(m1)` that returns the current applied quota for the usage metric `m1`. That allows an alarm on utilization rather than on a hard-coded number:
+- `m1` = the usage metric (for KMS, the request count for the cryptographic operations quota)
+- `e1` = `m1/SERVICE_QUOTA(m1)*100`
+- alarm: `e1 > 70` for 5 consecutive 1-minute periods, action: SNS topic.
+If the quota is raised later, the alarm automatically follows the new value. The Service Quotas console can create the same kind of alarm for quotas that support it.
+## Other quota tools
+- **Service Quotas Automatic Management** monitors supported quotas and notifies at fixed 80 percent and 95 percent utilization (and can request increases in Notify and Auto-Adjust mode).
+- **Trusted Advisor** service limits checks run periodically and are aimed at resource limits, not per-second API rates.
+W: Alarm on usage divided by SERVICE_QUOTA: the alarm measures real utilization of the applied quota every minute, can use exactly 70 percent over 5 minutes, follows quota increases automatically, and notifies the existing SNS topic.
+X: B=Automatic Management Notify Only: its thresholds are fixed at 80 and 95 percent, so it cannot alert at 70 percent, and it delivers through its own channels rather than directly to the on-call topic.
+C=Budgets usage budget: budgets evaluate usage from billing data that refreshes a few times per day over a monthly or daily period, so they cannot detect a per-second request rate near the quota within 5 minutes.
+D=Trusted Advisor limits check: the check refreshes periodically, covers resource limits rather than the KMS request rate, and a weekly email is far too late for a 5-minute alert.
+T: To alert before hitting a quota, alarm on the AWS/Usage metric with m1/SERVICE_QUOTA(m1)*100 and send the alarm to SNS.
+V: Amazon CloudWatch, Service Quotas, AWS KMS, Amazon SNS
+
+@ DVA-C03 D4 T4.2 applied use-case
+S: A developer must email the team through an SNS topic whenever a CodeDeploy deployment in us-east-1 finishes, saying whether it failed or succeeded. The topic was created with the AWS CLI, still has its default access policy, and has a confirmed email subscription. The developer will use an Amazon EventBridge rule. Which TWO steps are required? (Select TWO)
+A: Use an event pattern with source aws.codedeploy, detail-type CodeDeploy Deployment State-change Notification and state FAILURE or SUCCESS
+B: Create a CloudTrail trail in the Region, because EventBridge receives CodeDeploy deployment events only for calls that CloudTrail records
+C: Match detail-type AWS API Call via CloudTrail with eventName CreateDeployment, so the rule fires for each deployment and reports its result
+D: Add a statement to the SNS topic's access policy that allows the events.amazonaws.com principal to call sns:Publish on this topic
+E: Move the rule to the default event bus in us-west-2, which is where AWS delivers developer tool events for all Regions of the account
+K: A,D
+G: ## Native service events
+Many AWS services emit **state-change events** to the default event bus of the Region where the resource lives, with no CloudTrail involvement:
+- CodeDeploy: source `aws.codedeploy`, detail-type `CodeDeploy Deployment State-change Notification`, `detail.state` such as `START`, `SUCCESS`, `FAILURE`, `STOP`. (Instance-level events use `CodeDeploy Instance State-change Notification`.)
+- CodePipeline: detail-type `CodePipeline Pipeline Execution State Change`, with `detail.state` such as `SUCCEEDED` or `FAILED`; stage and action variants exist too.
+Example pattern: `{"source":["aws.codedeploy"],"detail-type":["CodeDeploy Deployment State-change Notification"],"detail":{"state":["FAILURE","SUCCESS"]}}`
+Events of the type `AWS API Call via CloudTrail` describe API calls, such as `CreateDeployment`, at the moment they are made, so they cannot tell you the outcome.
+## Letting EventBridge publish to SNS
+For SNS targets EventBridge uses the topic's **resource-based policy** (or an IAM role on the target). The console adds the needed statement automatically when you choose a topic, but a topic created with the CLI or CloudFormation only has the default policy, which allows the owner account and not the service principal. EventBridge then counts the delivery as a `FailedInvocations`. Add:
+`{"Effect":"Allow","Principal":{"Service":"events.amazonaws.com"},"Action":"sns:Publish","Resource":"<topic-arn>"}`
+If the topic uses a customer managed KMS key, that key policy must also let EventBridge use it.
+W: A=Deployment state-change pattern: matching the CodeDeploy deployment state-change event on FAILURE and SUCCESS makes the rule fire exactly when deployments finish, with the result in the event.
+D=Topic policy for EventBridge: a CLI-created topic's default policy has no statement for events.amazonaws.com, so without this grant every match would end as a FailedInvocations count and no email would be sent.
+X: B=CloudTrail trail requirement: CodeDeploy state-change events are native service events delivered to EventBridge without any trail; trails matter only for API-call events.
+C=CreateDeployment API call event: that event fires when a deployment is requested, before it has a result, so it cannot report whether the deployment failed or succeeded.
+E=Rule in us-west-2: service events go to the default event bus of the Region where the deployment runs, so the rule belongs in us-east-1, not in another Region.
+T: Notify on deployment results with an EventBridge rule on the service's state-change event, and make sure the SNS topic policy lets events.amazonaws.com publish.
+V: Amazon EventBridge, AWS CodeDeploy, Amazon SNS
