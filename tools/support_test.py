@@ -1,7 +1,7 @@
 """Support page and its entry points (Playwright, local server).
 
 - support.html: KakaoPay opens as a link only on phones/tablets; computers (also touchscreen laptops) get a
-  non-link card with a QR code, because KakaoPay links give a 404 in desktop browsers. Empty urls show "coming soon".
+  non-link card with a QR code, because KakaoPay links give a 404 in desktop browsers. Ko-fi is a plain link.
 - English by default, even in Korean browsers; ?lang=ko or the toggle (remembered) switches to Korean.
   Methods with a link come first (Korean: KakaoPay before Ko-fi; English: Ko-fi before KakaoPay).
 - The header link, the bottom card and the mock exam results point to support.html.
@@ -55,8 +55,8 @@ with sync_playwright() as p:
     order = pg.eval_on_selector_all(".method", "els => els.map(e => e.dataset.method)")
     check("?lang=ko: KakaoPay first", order[:1] == ["kakaopay"], order)
     check("?lang=ko: Korean title", "후원" in pg.title())
-    check("empty url shows coming soon", pg.eval_on_selector("[data-method=kofi]", "e => e.tagName") == "DIV"
-          and "준비 중" in pg.inner_text("[data-method=kofi]"))
+    check("Ko-fi card links to the Ko-fi page", pg.eval_on_selector("[data-method=kofi]", "e => e.getAttribute('href')")
+          == "https://ko-fi.com/hyunhopark")
 
     pg = page(locale="en-US", viewport={"width": 1000, "height": 800}, user_agent=WIN)
     pg.goto(BASE + "support.html"); pg.wait_for_selector(".method")

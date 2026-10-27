@@ -66,8 +66,10 @@ Amazon Web Services, Palantir Technologies와 관련 없는 비공식 사이트�
 ## 후원
 
 모든 문제와 학습 가이드는 앞으로도 무료이며 유료 기능, 광고, 회원가입이 없습니다. 도움이 되셨다면
-[커피 한 잔으로 응원](https://hyunhp.github.io/cert-bank/support.html)해 주세요(국내는 카카오페이, 해외 결제 수단은 준비 중).
+[커피 한 잔으로 응원](https://hyunhp.github.io/cert-bank/support.html)해 주세요(국내는 카카오페이, 해외는 Ko-fi).
 틀린 답을 GitHub 이슈로 알려 주시는 것도 큰 도움이 됩니다.
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/F1K4299305)
 
 ## 관리자용
 
