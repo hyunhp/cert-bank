@@ -162,9 +162,9 @@ function injectStyles() {
 .mk th{color:var(--muted);font-weight:500}
 .mk .v-ready{color:var(--good)} .mk .v-border{color:var(--amber)} .mk .v-work{color:var(--bad)}
 .mkbar{position:sticky;top:0;z-index:15;background:var(--bg);border-bottom:1px solid var(--line);padding:calc(env(safe-area-inset-top,0px) + 8px) 0 8px;margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.mkbar .code{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:.82rem}
+.mkbar .code{font-family:"IBM Plex Mono","IBM Plex Sans KR",monospace;font-weight:600;font-size:.82rem}
 .mkbar .prog{font-size:.85rem;color:var(--muted)}
-.mkbar .timer{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:.95rem;margin-left:auto;font-variant-numeric:tabular-nums}
+.mkbar .timer{font-family:"IBM Plex Mono","IBM Plex Sans KR",monospace;font-weight:600;font-size:.95rem;margin-left:auto;font-variant-numeric:tabular-nums}
 .mkbar .timer.low{color:var(--bad)}
 .mkbar .btn{padding:6px 12px;font-size:.8rem}
 .mk .qnum{font-size:.8rem;color:var(--muted);margin-bottom:6px;display:flex;align-items:center;gap:8px}
@@ -173,7 +173,7 @@ function injectStyles() {
 .mk .selnote{font-size:.8rem;color:var(--amber);margin:-4px 0 10px;font-weight:600}
 .mk .nav{display:flex;justify-content:space-between;gap:8px;margin-top:12px}
 .mk .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(44px,1fr));gap:6px;margin:10px 0}
-.mk .cell{font:inherit;font-size:.82rem;font-family:"IBM Plex Mono",monospace;padding:8px 0;border-radius:7px;border:1px solid var(--line);background:var(--surface);color:var(--muted);cursor:pointer;position:relative}
+.mk .cell{font:inherit;font-size:.82rem;font-family:"IBM Plex Mono","IBM Plex Sans KR",monospace;padding:8px 0;border-radius:7px;border:1px solid var(--line);background:var(--surface);color:var(--muted);cursor:pointer;position:relative}
 .mk .cell.ans{background:var(--accent-bg);color:var(--accent-ink);border-color:var(--accent)}
 .mk .cell.flg::after{content:"";position:absolute;top:3px;right:3px;width:7px;height:7px;border-radius:50%;background:var(--amber)}
 .mk .cell.cur{outline:2px solid var(--ink);outline-offset:1px}
