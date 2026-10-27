@@ -187,7 +187,7 @@ T: Encrypt Bedrock resources with a customer managed key at creation time (kmsKe
 V: Amazon Bedrock Guardrails, AWS KMS
 
 @ DVA-C03 D2 T2.3 applied use-case
-S: A developer has created and published version 2 of an Amazon Bedrock guardrail with content filters and a sensitive information filter. A chat application calls the Converse API from AWS Lambda. The developer must apply the guardrail to both the user's message and the model's response and must show a friendly message whenever the guardrail intervenes. Which code change should the developer make?
+S: A developer has created and published version 2 of an Amazon Bedrock guardrail with content filters and denied topics, all set to block. A chat application calls the Converse API from AWS Lambda. The developer must apply the guardrail to both the user's message and the model's response and must show a friendly message whenever the guardrail intervenes. Which code change should the developer make?
 A: Pass guardrailConfig with guardrailIdentifier, guardrailVersion 2 and trace enabled on each Converse call, and check whether stopReason is guardrail_intervened
 B: Put the guardrail ARN and version in additionalModelRequestFields on each Converse call, and check whether the response body includes a guardrailAction key
 C: Associate the guardrail with the Lambda execution role by tagging the role with the guardrail ID, so that every Bedrock call from the role is evaluated
@@ -201,7 +201,8 @@ The guardrail evaluates the input before the model runs and the output before it
 ## Reading the result
 When the guardrail intervenes on a Converse call:
 - `stopReason` is `guardrail_intervened`.
-- The output message contains the blocked message configured in the guardrail (or masked text when a sensitive information filter anonymizes).
+- The output message contains the blocked message configured in the guardrail.
+- Careful: a sensitive information filter that masks (anonymizes) also sets `guardrail_intervened`, even though the masked answer is usable; with masking filters, read the trace to tell a block from a mask.
 - With trace enabled, `trace.guardrail` shows which policy acted.
 In Converse, `guardContent` content blocks can limit the evaluation to selected parts of a message; XML input tags are only for InvokeModel.
 W: guardrailConfig on each call: this is the documented way to apply a guardrail version to Converse, and stopReason guardrail_intervened is the signal for showing the friendly message.
@@ -267,13 +268,13 @@ D: Configure account-level guardrail enforcement with gr-7 version 3 in each Reg
 K: A
 G: ## Requiring a guardrail with IAM
 Bedrock publishes the condition key `bedrock:GuardrailIdentifier` for the inference actions behind `Converse`, `ConverseStream`, `InvokeModel` and `InvokeModelWithResponseStream`. Its value is the guardrail ARN with version, for example `arn:aws:bedrock:us-east-1:111122223333:guardrail/gr-7:3`.
-The documented pattern has two parts:
+The documented pattern has three statements:
 - an **Allow** for `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` with `StringEquals` on that key;
 - an **explicit Deny** for the same actions with `StringNotEquals`, so that no later Allow can override it;
 - plus an Allow for `bedrock:ApplyGuardrail` on the guardrail, which the call needs.
 Use `ArnLike` with `:*` to accept any numeric version.
 ## Known limits
-- APIs that call InvokeModel internally on your behalf (`RetrieveAndGenerate`, `InvokeAgent`) can fail under such a policy because some internal calls carry no guardrail.
+- APIs that call InvokeModel internally on your behalf (`RetrieveAndGenerate`, `InvokeAgent`, `InvokeInlineAgent`) can fail under such a policy because some internal calls carry no guardrail.
 - With InvokeModel, a caller can use input tags to limit which part of the prompt is evaluated, but the guardrail is always applied to the response.
 ## A different tool: guardrail enforcements
 Account-level and organization-level guardrail enforcements apply a designated guardrail version to all model invocations in an account or organization, layered on top of any guardrail the request names. They add protection; they do not make calls fail, and they are not scoped to one role.
@@ -296,7 +297,7 @@ With tool use, the Bedrock documentation lists fields that a guardrail passed in
 - tool call arguments the model generates: `output.message.content[].toolUse.input`;
 - tool results your application returns: `messages[].content[].toolResult`;
 - tool definitions: `toolConfig.tools[].toolSpec` description and input schema.
-It evaluates input prompts, system prompts, model text responses and `guardContent`.
+It does evaluate message text, model text responses and `guardContent` blocks (a system prompt only when it is wrapped in `guardContent`).
 ## Who runs the tool
 In Converse tool use the model only proposes a call (`stopReason` = `tool_use`); **your code** executes it. That is the place to add controls: validate the arguments, and send any free text through `ApplyGuardrail` (source `OUTPUT` for model-generated content) before it is written anywhere. The response's `outputs` field holds the masked text.
 W: ApplyGuardrail on the tool arguments: tool arguments are outside what guardrailConfig evaluates, so the application must screen them itself before acting, and the masked outputs keep PII out of tickets.
@@ -306,27 +307,28 @@ D=Higher strength: sensitive information filters have block, mask or detect acti
 T: Guardrails in guardrailConfig skip tool arguments, tool results and tool specs; screen tool inputs in your own code (for example with ApplyGuardrail) before executing the tool.
 V: Amazon Bedrock Guardrails, Amazon Bedrock
 
-@ DVA-C03 D2 T2.3 advanced troubleshooting
-S: A SaaS company hosts an agent on Amazon Bedrock AgentCore Runtime. To save cost, the backend reuses one runtimeSessionId per customer tenant for all of that tenant's users. Users of the same tenant report that the agent sometimes refers to files and details from a colleague's conversation. What should the developer change?
-A: Store each conversation in AgentCore Memory with the tenant ID as the actor ID, so that the agent separates users when it loads context at the start of each turn
-B: Generate a unique runtimeSessionId for each user conversation, map sessions to users in the backend, and refuse a request whose session belongs to another user
-C: Lower the session idle timeout to one minute so that the microVM terminates between users and its memory is sanitized before the next user is served
-D: Deploy a separate agent runtime for every user at sign-up, so that each user's requests run in a dedicated runtime ARN with its own execution role
-K: B
-G: ## How AgentCore Runtime isolates sessions
-Each `runtimeSessionId` gets its **own microVM** with isolated CPU, memory and filesystem. Context (in-memory state, files written to disk) persists across invocations **of the same session**, which is what makes multi-turn agents work. When a session ends, the microVM is terminated and its memory is sanitized.
-## What AgentCore does not do
-The documentation states that AgentCore **does not enforce session-to-user mappings**: your client backend must keep the relationship between users and their session IDs and manage the session lifecycle (for example, a maximum number of sessions per user).
-So isolation is exactly as good as the session IDs you send:
-- one session per user conversation gives each user a separate microVM;
-- one session shared by many users puts them all in the same microVM, with the same memory and files.
-The backend should create unguessable session IDs, store `sessionId -> userId`, and reject requests where the authenticated user does not own the session.
-W: Unique session per user conversation with a backend mapping: each user then gets a dedicated microVM, and the ownership check stops one user from presenting another user's session ID.
-X: A=AgentCore Memory keyed by tenant: Memory persists data across sessions; it does not separate the shared microVM, and a tenant-level actor ID would still mix colleagues' data.
-C=Short idle timeout: concurrent users of one session share it while it is active, and the next user reuses the same session ID anyway, so a timeout does not separate them.
-D=Runtime per user: separate runtimes are costly and unnecessary to manage; session IDs already provide per-session microVM isolation within one runtime.
-T: AgentCore Runtime isolates by runtimeSessionId (one microVM per session); your backend must issue one session per user conversation and enforce the user-to-session mapping.
-V: Amazon Bedrock AgentCore
+@ DVA-C03 D2 T2.3 advanced use-case
+S: An agent writes Python code to analyze CSV files that users upload to Amazon S3, and it runs that code with exec() inside its own AWS Lambda function. The function has internet access, and its role can also read every customer record in a DynamoDB table. Security warns that a prompt-injected request could make the generated code read those records and send them to an external server. What should the developer do?
+A: Run the generated code in a custom AgentCore Code Interpreter that uses the SANDBOX network mode and an execution role that can read only the S3 prefix of the uploads
+B: Run the generated code in a custom AgentCore Code Interpreter that uses the PUBLIC network mode and the Lambda function's role, so the code keeps its current data access
+C: Keep exec() in the function, but first send the generated code to ApplyGuardrail with the prompt attack filter set to High, and discard any code that the guardrail blocks
+D: Keep exec() in the function, but first reject any generated code that contains the strings boto3, requests or socket, so that it cannot call AWS APIs or open connections
+K: A
+G: ## Why model-generated code is a security boundary
+Code that a model writes from user input is untrusted: a prompt injection can turn "summarize this CSV" into "read the customer table and post it to my server". Running it with `exec()` gives it everything the host process has: the function's IAM role, its network access and its memory.
+## AgentCore Code Interpreter
+Amazon Bedrock AgentCore Code Interpreter runs agent-generated code (Python, JavaScript, TypeScript) in an isolated sandbox environment managed by AgentCore, separate from your application. When you create a custom Code Interpreter you choose:
+- **Network mode**: `SANDBOX` (access limited to Amazon S3), `PUBLIC` (public internet access) or `VPC` (network interfaces in your own subnets).
+- **Execution role**: the IAM role whose permissions define which AWS resources the code can reach.
+The agent starts a session, sends code with the Invoke API, reads the streamed results and stops the session when done.
+## Least privilege for the sandbox
+Give the execution role only what the task needs, for example `s3:GetObject` on `arn:aws:s3:::uploads-bucket/user-files/*`. Then even fully attacker-controlled code has no route to the internet and no permission on the DynamoDB table.
+W: SANDBOX Code Interpreter with a narrow role: the code runs outside the function in an isolated environment whose network is limited to S3 and whose role can read only the uploads, so injected code has neither the data nor a way out.
+X: B=PUBLIC mode with the function's role: the code is isolated from the function's process but still holds the role that reads every customer record and has an open path to the internet, which is the exact exfiltration route.
+C=ApplyGuardrail on the code: the prompt attack filter is a classifier for jailbreak and injection text in user prompts, not a code analyzer; harmful code can look ordinary, and code that passes still runs with the function's full role and network.
+D=String denylist: a denylist is easy to evade (for example __import__, importlib, urllib or a subprocess call to curl), and the code still runs in the same process with the same role and network access.
+T: Run model-generated code in an isolated sandbox such as AgentCore Code Interpreter with restricted network mode and a least-privilege execution role, never with exec() in the application's own process.
+V: Amazon Bedrock AgentCore, AWS Lambda, Amazon S3
 
 @ DVA-C03 D2 T2.3 advanced use-case
 S: A developer is building a customer-service agent on Amazon Bedrock AgentCore that calls the Converse API with tool use. One tool reads a signed-in user's records in a third-party CRM through OAuth 2.0, and another issues refunds. The agent must act with each user's own CRM permissions, its code must never hold long-lived CRM secrets, and refunds must not run without explicit human approval. Which measures meet these requirements? (Select TWO)
@@ -361,7 +363,7 @@ K: C
 G: ## Inbound and outbound authorization on a gateway
 An AgentCore Gateway sits between agents and tools, so it has two separate security settings:
 - **Inbound authorization**: who may call the gateway (list and invoke tools). Options are IAM (SigV4, with `bedrock-agentcore:InvokeGateway` scoped to the gateway ARN), a **JWT authorizer**, or offloaded modes in which the gateway itself makes no decision.
-- **Outbound authorization**: how the gateway authenticates to each target (gateway service role with SigV4, OAuth client credentials or authorization code, token exchange, API key).
+- **Outbound authorization**: how the gateway authenticates to each target (for example the gateway service role with SigV4, the caller's IAM credentials, OAuth client credentials or authorization code grants, token exchange, or an API key).
 ## JWT inbound authorizer
 `customJwtAuthorizer` takes the identity provider's **discovery URL** plus checks such as `allowedClients` (the `client_id` claim), `allowedAudience` (the `aud` claim), allowed scopes and required custom claims. Tokens from other clients or issuers are rejected before any tool runs.
 Tip from the documentation: JWT claims such as the subject are logged in CloudTrail, so avoid PII in them.
@@ -410,7 +412,7 @@ For an S3 destination, Bedrock writes as the **service principal** `bedrock.amaz
 - **SSE-KMS**: the key policy must allow the same service principal `kms:GenerateDataKey`, again with source conditions.
 ## CloudWatch Logs is different
 For a CloudWatch Logs destination you create an **IAM role** that trusts `bedrock.amazonaws.com` and allows `logs:CreateLogStream` and `logs:PutLogEvents`. The S3 destination uses no role.
-Large bodies (over 100 KB) and binary data always go to S3, even when CloudWatch Logs is the main destination.
+Bodies over 100 KB and binary data can be delivered only to S3; a CloudWatch Logs configuration can name an S3 location for that large data.
 W: A=Bucket policy for the Bedrock service principal: Bedrock writes log objects as bedrock.amazonaws.com, so without this statement every PutObject is denied.
 E=KMS key policy for GenerateDataKey: with SSE-KMS, each write needs a data key from the customer managed key, which the service principal cannot get until the key policy allows it.
 X: B=IAM role for S3 delivery: the role-based setup is used for the CloudWatch Logs destination; S3 delivery is authorized by the bucket policy, so a role does not fix the denied writes.
@@ -435,7 +437,7 @@ CloudWatch Logs always encrypts data at rest. You can instead associate a **cust
 ## Two independent gates
 A reader now needs both CloudWatch Logs read permission and KMS decrypt permission, so the key policy becomes a second, security-owned gate in addition to IAM.
 W: Customer managed key with a narrow key policy: engineers keep their Logs permissions but lack kms:Decrypt, so only the analyst can read events, and disabling the key makes the data unreadable.
-X: A=Export to an SSE-S3 bucket: the log group still holds readable prompts until retention expires, and SSE-S3 uses an AWS owned key that security cannot disable.
+X: A=Export to an SSE-S3 bucket: the log group still holds readable prompts until retention expires, and SSE-S3 uses keys that Amazon S3 manages, which security cannot disable.
 C=Asymmetric key: CloudWatch Logs supports only symmetric KMS keys, and signing-style verification is not how log encryption works.
 D=Deny in the shared policy with default encryption: it may block those engineers, but the default encryption key is not one security can disable, so the requirement for a kill switch on the data is not met.
 T: Use a symmetric customer managed key on the log group (logs service principal plus encryption context) and grant kms:Decrypt only to approved readers to add a key-based gate on sensitive logs.
