@@ -3,67 +3,70 @@
 # 1.2.3 ML inference (SageMaker AI endpoints), 1.2.4 RAG ingestion and retrieval (Bedrock Knowledge Bases, vector stores)
 
 @ SAP-C03 D1 T1.2 advanced use-case
-S: A company runs a shared generative AI platform account in its AWS Organization. Twelve product teams call the same Anthropic Claude model in Amazon Bedrock from that account through a common Lambda-based service. Finance now requires a monthly chargeback of Bedrock model costs per team, visible in AWS Cost Explorer and the Cost and Usage Report, with the least ongoing operational effort and no change to the model the teams use. Which solution meets these requirements?
-A: Create one application inference profile per team that wraps the model, tag each profile with the team, activate the tag for cost allocation, and invoke with the profile ARN
-B: Deploy one copy of the shared Lambda service per team, tag each function with the team, activate the tag for cost allocation, and let Bedrock charges follow the caller
-C: Enable model invocation logging to Amazon S3, run a nightly Athena query that sums input and output tokens per caller role, and allocate the bill by token share
-D: Purchase a separate Provisioned Throughput model unit for each team, tag each provisioned model with the team, and route each team's requests to its own unit
+S: A company fine-tuned a model in Amazon Bedrock in its central AI account and runs it on Provisioned Throughput purchased in that account. Applications in 25 workload accounts, all in one OU of AWS Organizations, must invoke this model. Security requires least privilege and no long-lived credentials, and accounts that join the OU later must get access without changes in the AI account. Which solution meets these requirements most cost-effectively?
+A: Create a role in the AI account that trusts the OU through an aws:PrincipalOrgPaths condition, allow only bedrock:InvokeModel on the provisioned model ARN, and have applications assume it
+B: Create Amazon Bedrock long-term API keys for an IAM user in the AI account, store one key in AWS Secrets Manager in each workload account, and rotate all of the keys manually every 90 days
+C: Share the custom model with every workload account, buy Provisioned Throughput for it in each of those accounts, and let each application invoke the provisioned copy in its own account
+D: In each workload account, attach an identity policy to the application role that allows bedrock:InvokeModel on the AI account's provisioned model ARN, and call that ARN directly from the application
 K: A
-G: ## Why Bedrock costs are hard to split
-On-demand Amazon Bedrock usage is billed to the account that calls the model, per model and per Region. When many teams share one account and one model, the bill shows a single line for that model, with nothing that identifies the team behind each request.
-## Application inference profiles
-An **inference profile** is a Bedrock resource that you invoke instead of the model ID.
-- **System-defined** profiles (for example `us.anthropic...`) are created by AWS for cross-Region inference.
-- **Application inference profiles** are created by you (`CreateInferenceProfile`) by copying a foundation model or a system-defined profile. They are taggable resources, so usage that flows through them carries your tags into billing.
-Example: create `team-payments` and `team-search` profiles that both point at the same Claude model, tag them `cost-center=payments` and `cost-center=search`, activate `cost-center` as a cost allocation tag, and pass the profile ARN as `modelId`. Cost Explorer can then group Bedrock charges by `cost-center`.
-W: Application inference profiles: each team gets a taggable resource that points to the same model, so the model and behaviour do not change. Once the tag is activated for cost allocation, Bedrock charges are split by team in Cost Explorer and the Cost and Usage Report without any custom reporting.
-X: B=Per-team Lambda copies with tags: cost allocation tags split the charges of the tagged resource itself, so they split only the Lambda cost; Bedrock usage is recorded against the model or inference profile that was invoked, not against the calling function's tags. It also turns one service into twelve deployments to operate.
-C=Invocation logs with Athena: this can estimate shares, but it is a custom pipeline that must be maintained and reconciled against the bill, and the result never appears in Cost Explorer or the Cost and Usage Report as required.
-D=Provisioned Throughput per team: it bills a fixed hourly commitment per model unit whether or not the team uses it, which multiplies cost for twelve teams. It changes the purchasing model just to get a tag, which is far from least effort.
-T: To split shared Bedrock spend by team, invoke through tagged application inference profiles and activate the tag for cost allocation.
-V: Amazon Bedrock, AWS Cost Explorer, AWS Billing
+G: ## Where a custom Bedrock model lives
+A fine-tuned (custom) model and the Provisioned Throughput that serves it are resources of the account that created them. The model units are billed to that account by the hour, so the cheapest design lets every consumer use the same provisioned capacity instead of buying more.
+## Cross-account access with a role
+Access across accounts needs a grant from the account that owns the resource. The standard way is an IAM role in the owning account:
+- The **permissions policy** allows only `bedrock:InvokeModel` (and the streaming variant if needed) on the provisioned model ARN, for example `arn:aws:bedrock:eu-west-1:111122223333:provisioned-model/abc123`.
+- The **trust policy** lets principals from the organization assume the role. The condition `aws:PrincipalOrgPaths` (with `ForAnyValue:StringLike`, for example `o-a1b2c3/r-ab12/ou-ab12-workloads/*`) matches every account in the OU, including accounts added later.
+- Workload applications call `sts:AssumeRole` and receive temporary credentials that expire automatically; their own role needs permission to assume it.
+W: Role in the AI account with an OU trust condition: callers get short-lived credentials from STS, the role can do nothing except invoke the one provisioned model, the OU path condition covers new accounts automatically, and all accounts share the Provisioned Throughput already paid for.
+X: B=Long-term Bedrock API keys: they are long-lived secrets copied into 25 accounts, which the security rule forbids, and every new account needs a key created and distributed from the AI account.
+C=Provisioned Throughput in every account: it multiplies the hourly model unit cost by 25 for the same model, and each new account would need its own share and purchase, so it is neither cost-effective nor change-free.
+D=Identity policy in the caller's account only: an identity policy cannot by itself grant access to a resource that another account owns; the owning account has to grant it, which is what the role in the AI account does. As written, the calls are denied.
+T: To share one account's Bedrock model or capacity with many accounts, put a narrowly scoped role in the owning account and trust the OU with aws:PrincipalOrgPaths.
+V: Amazon Bedrock, AWS IAM, AWS STS, AWS Organizations
 
 @ SAP-C03 D1 T1.2 advanced use-case
-S: A regulated company lets 60 workload accounts in its AWS Organization call Amazon Bedrock models directly. The security team has defined a standard Amazon Bedrock guardrail (PII masking, denied topics and content filters). Every model invocation in every workload account must use the standard guardrail, and application teams must not be able to weaken it or bypass it by calling a model without a guardrail. Which approach provides a preventive control with the least ongoing effort?
-A: Turn on Bedrock model invocation logging to a central S3 bucket, scan logs with a Lambda function for calls without a guardrail ID, and revoke the caller's IAM permissions
-B: Require every account to call models only through a Bedrock interface VPC endpoint, and add an endpoint policy that rewrites requests to attach the standard guardrail
-C: Deploy the guardrail with CloudFormation StackSets, and add an SCP denying guardrail changes except by the pipeline role and model invocation when bedrock:GuardrailIdentifier is absent
-D: Use an AWS Config custom rule that checks each account for the standard guardrail resource and runs an SSM Automation document to recreate it when it is missing or modified
-K: C
-G: ## How a Bedrock guardrail is applied
-An Amazon Bedrock guardrail is a resource in an account and Region. By default it is applied to a request only when the caller passes it, for example in the `guardrailConfig` of the Converse API or the guardrail headers of `InvokeModel`. A call that names no guardrail runs without one, so creating a guardrail does not by itself make it mandatory.
-## Making it mandatory with IAM
-Bedrock supports the condition key `bedrock:GuardrailIdentifier` on the model invocation actions. A deny statement that triggers when the key is missing (`Null` condition) blocks every call that does not attach a guardrail.
-To stop teams from attaching a weaker guardrail of their own, also deny `bedrock:CreateGuardrail`, `bedrock:UpdateGuardrail` and `bedrock:DeleteGuardrail` for everyone except the deployment role. Put both statements in a service control policy so they apply to all principals in member accounts, and deploy the standard guardrail itself to every account and Region with CloudFormation StackSets.
-W: StackSets plus an SCP: the standard guardrail exists in every account, the SCP blocks any model call that omits a guardrail, and only the pipeline role can create or change guardrails. The control is preventive and applies to new accounts automatically through the OU.
-X: A=Invocation log scanning: this is detective. Calls without a guardrail have already been processed by the model, and possibly returned PII, before the Lambda function reacts.
-B=Endpoint policy that rewrites requests: VPC endpoint policies only allow or deny requests; they cannot modify a request or attach a guardrail. Forcing all traffic through an endpoint also does not by itself require a guardrail.
-D=Config rule with remediation: it keeps the guardrail resource present, but it does nothing to force applications to pass the guardrail on each call, so unguarded invocations are still possible.
-T: Guardrails are opt-in per request; make them mandatory with an SCP on bedrock:GuardrailIdentifier and lock guardrail changes to the deployment pipeline.
-V: Amazon Bedrock, AWS Organizations, AWS CloudFormation
+S: An insurer receives 40,000 claim submissions per day in Amazon S3: PDF claim forms in many layouts from different brokers, photos of damage and recorded phone statements. A downstream claims system needs the policy number, incident date and claimed amount from each form as JSON in a fixed schema, plus a text description of each photo and a transcript summary of each statement. The company wants a managed generative AI service and little custom code when a broker adds a new form layout. Which solution meets these requirements?
+A: Create an Amazon Bedrock Data Automation project whose blueprints define the claim fields, invoke it asynchronously for each new S3 object, and store the JSON output it writes to S3
+B: Index all submissions in an Amazon Bedrock knowledge base, then have a Lambda function query the knowledge base for each field of every new submission and assemble the JSON record
+C: Use Amazon Textract for forms, Amazon Rekognition for photos and Amazon Transcribe for audio, and write a Lambda parser for each form layout that maps the output into the schema
+D: Fine-tune an Amazon Bedrock model on labelled claim forms whenever a broker adds a new layout, then invoke it from Lambda with each file's raw bytes to produce the JSON fields
+K: A
+G: ## Turning unstructured files into structured data
+Intelligent document processing extracts fields from documents, images, audio and video so that other systems can use them. Building it by hand usually means one service per file type plus custom mapping code per layout.
+## Amazon Bedrock Data Automation
+Bedrock Data Automation (BDA) is a managed, generative AI powered service for this job:
+- **Standard output** gives a ready-made result per modality, for example a description of an image or a transcript and summary of an audio file.
+- **Blueprints** define custom output: the fields you need, their types and natural-language instructions (for example "claimed amount, as a number"). A project can hold several document blueprints, and BDA matches each document to the blueprint that fits, so a new layout usually needs only a blueprint, not new parsing code.
+- A **project** bundles these settings. Applications call `InvokeDataAutomationAsync` with the input S3 object (for example from an EventBridge rule on S3 object creation), and BDA writes JSON results to an S3 output prefix.
+W: Bedrock Data Automation project: blueprints return the form fields in the fixed schema across layouts, standard output covers photo descriptions and statement transcripts and summaries, and the asynchronous API with S3 output needs only a small trigger, not per-layout code.
+X: B=Knowledge base queries per field: a knowledge base retrieves passages to ground answers across a document collection; it does not extract a fixed schema from one specific file, and dozens of queries per submission add cost and errors.
+C=Textract, Rekognition and Transcribe with per-layout parsers: it can work, but every new broker layout needs a new parser, which is the custom code the company wants to avoid, and three services' outputs must be stitched together.
+D=Fine-tuning per new layout: training a model for every layout is slow and costly, and a text model invoked with raw PDF, image and audio bytes does not by itself parse these formats into the schema.
+T: For managed extraction of structured fields from documents, images and audio, use Amazon Bedrock Data Automation projects with blueprints.
+V: Amazon Bedrock Data Automation, Amazon S3, Amazon EventBridge
 
 @ SAP-C03 D1 T1.2 advanced tradeoff
-S: A European insurer runs a claims assistant on Amazon Bedrock in eu-central-1. During month-end peaks, requests are throttled because the account's on-demand quota in that Region is exhausted. Policy requires that prompts and responses are processed only in EU Regions. An SCP in the organization denies all actions outside eu-central-1 and eu-west-1. The team wants more burst capacity without any capacity commitment and with minimal application change. Which actions should a solutions architect take? (Select TWO)
-A: Invoke the model through the EU geographic cross-Region inference profile instead of the single-Region model ID
-B: Invoke the model through the global cross-Region inference profile so requests can use capacity in any commercial Region
-C: Update the SCP so Bedrock invocation is allowed in every EU Region that the EU inference profile can route requests to
-D: Buy a one-month Provisioned Throughput commitment in eu-central-1 sized for the month-end peak and route all calls to it
-E: Deploy the application in a second AWS account in eu-central-1 and split users between both accounts by using weighted DNS
-K: A,C
-G: ## Cross-Region inference in Amazon Bedrock
-On-demand Bedrock quotas apply per account, per Region and per model. **Cross-Region inference** lets one request be served from any Region in a set, using system-defined inference profiles:
-- **Geographic profiles** (for example `eu.`, `us.`, `apac.` prefixes) route only among Regions in that geography, which keeps processing inside it.
-- **Global profiles** can route to any supported commercial Region worldwide for the most capacity.
-You call the profile ID instead of the model ID; there is no capacity commitment, and logs and data at rest stay in the source Region.
-## The SCP trap
-The request is processed in a destination Region chosen by Bedrock. If an SCP denies Bedrock actions in a destination Region of the profile, requests routed there fail. Region-restriction SCPs must therefore allow Bedrock invocation in all Regions of the geographic profile in use.
-W: A=EU geographic profile: it spreads requests across EU Regions only, which adds burst capacity, satisfies the EU processing rule and needs only a different model identifier in the application.
-C=Allow the profile's EU Regions in the SCP: cross-Region inference executes in the destination Region, so the current two-Region deny would make some routed requests fail; the SCP must permit Bedrock invocation in each EU Region of the profile.
-X: B=Global profile: it can route to Regions outside the EU, which breaks the processing-location requirement even though it gives the most capacity.
-D=Provisioned Throughput: even a one-month term is a capacity commitment billed every hour whether used or not, which the team explicitly rules out; sizing it for a peak of a few days also leaves it idle most of the month.
-E=Second account with weighted DNS: it doubles the quota but also doubles deployment, monitoring and identity work, and splitting users between accounts is a much larger change than switching the model identifier.
-T: For more Bedrock burst capacity within a data boundary, use the geographic cross-Region inference profile and make sure SCPs allow all of its destination Regions.
-V: Amazon Bedrock, AWS Organizations
+S: A company's document assistant calls an Anthropic Claude model in Amazon Bedrock through InvokeModel with Anthropic-specific request bodies, including tool definitions. Leadership has approved an Amazon Nova model as an automatic fallback when the primary model is throttled, wants either model swapped by configuration without redeploying code, and wants a single code path for both providers. Which actions should a solutions architect recommend? (Select TWO)
+A: Move the calls to the Converse API so that messages, inference parameters and tool definitions share one request and response format for both providers' models
+B: Keep the model IDs in AWS AppConfig, read them at run time, and when a call fails with a throttling exception, retry the same request with the fallback model ID
+C: Create an Amazon Bedrock intelligent prompt router that contains the Claude and Nova models, and invoke the router ARN so that throttled requests move to Nova
+D: Create one application inference profile that lists both the Claude and Nova models, and invoke its ARN so that Bedrock fails over from one model to the other
+E: Keep InvokeModel and add a Lambda function for each provider that converts the Anthropic request body into the other provider's format before each fallback call
+K: A,B
+G: ## Model-specific bodies versus the Converse API
+`InvokeModel` takes the request body in each provider's native format: Anthropic, Amazon Nova, Meta and others name messages, system prompts, tools and parameters differently, so switching providers means changing code.
+The **Converse API** (`Converse`, `ConverseStream`) uses one format for messages, system prompts, inference parameters (`maxTokens`, `temperature`) and tool use (`toolConfig`) for all models that support it. Changing the model is a change to the `modelId` value.
+## Fallback is application logic
+When a model's on-demand quota is exhausted, Bedrock returns a `ThrottlingException`. Nothing in Bedrock automatically retries a request on a model from another provider, so the application decides: retry with backoff, then call the fallback model. Keeping both model IDs in a runtime configuration store such as AWS AppConfig lets operations change them without a deployment.
+## Things that look like fallback but are not
+- **Intelligent prompt routing** chooses between models of the **same model family** by predicted response quality and cost per prompt; it is not cross-provider failover.
+- An **application inference profile** wraps **one** model or one system-defined profile, mainly for usage tracking and cost tags.
+W: A=Converse API: one request and response format, including tool definitions, works for both the Claude and Nova models, so a single code path serves both and switching is only a model ID change.
+B=Runtime configuration with throttling fallback: the application reads both model IDs from AppConfig, so either can be swapped without a deployment, and it catches the throttling exception to resend the request to the fallback model.
+X: C=Intelligent prompt router across providers: prompt routers route among models of the same family based on predicted quality, not across providers and not in response to throttling.
+D=Application inference profile with two models: an application inference profile copies a single model or system-defined profile; it cannot hold models from two providers or fail over between them.
+E=Per-provider conversion Lambda functions: they keep provider-specific formats in the code and add a conversion function to maintain for each provider, the opposite of one code path.
+T: Use the Converse API for a provider-neutral request format and implement cross-provider fallback in the application with model IDs held in runtime configuration.
+V: Amazon Bedrock, AWS AppConfig
 
 @ SAP-C03 D1 T1.2 advanced use-case
 S: A bank has 40 application accounts that want to use foundation models. The platform team must enforce a per-team monthly request budget and rate limit, log every prompt and response centrally in one account, allow only approved models, and be able to switch an approved model to another provider later without application teams changing code. Traffic must stay off the public internet. Which architecture meets these requirements?
@@ -85,25 +88,25 @@ D=Marketplace model on a SageMaker AI endpoint shared with RAM: SageMaker AI end
 T: Per-team quotas, central logging and model portability across many accounts point to a central generative AI gateway (API Gateway usage plans plus Converse API) in a shared account.
 V: Amazon Bedrock, Amazon API Gateway, AWS Lambda, AWS PrivateLink
 
-@ SAP-C03 D1 T1.2 applied tradeoff
-S: A media company must generate short summaries and keyword tags for 3 million archived articles stored in Amazon S3. The job runs once per quarter, results are needed within 48 hours, and no user waits for an individual response. The company already uses Amazon Bedrock on demand for interactive features and wants the lowest model cost with little custom code. Which approach should the solutions architect recommend?
-A: Queue every article in Amazon SQS and have Lambda functions call the Bedrock on-demand Converse API with exponential backoff until the queue is drained
-B: Buy Provisioned Throughput for the model for the quarterly run, then invoke it from an AWS Batch job that reads the articles from S3 in parallel
-C: Host an open-weight model on a SageMaker AI asynchronous inference endpoint, send each article as a request, and scale the endpoint to zero when the queue is empty
-D: Write the prompts to JSONL files in S3 and submit Amazon Bedrock batch inference jobs that read the files and write the model outputs back to S3
-K: D
-G: ## Bedrock inference options by latency need
-- **On-demand** (`InvokeModel`, `Converse`): synchronous, pay per token, subject to per-account request and token quotas.
-- **Provisioned Throughput**: reserved model units billed per hour for a commitment term; for steady high volume or custom models.
-- **Batch inference** (`CreateModelInvocationJob`): you place records in JSONL files in S3, Bedrock processes them asynchronously and writes results to S3. For supported models it is priced lower than on-demand (about half), and it runs under its own batch job quotas instead of competing with interactive traffic for the on-demand request and token quotas.
-## Fit for offline workloads
-When nobody waits for a single answer and the deadline is hours or days, batch inference removes throttling and retry code and lowers the per-token price. The interactive features keep their on-demand capacity.
-W: Bedrock batch inference: it is built for large offline jobs, needs only JSONL input and an S3 output location, runs asynchronously so a 48-hour window is enough to spread the work over several jobs, and is discounted against on-demand pricing for supported models.
-X: A=SQS and Lambda with on-demand calls: it pays full on-demand prices, competes with the interactive features for the same account quota and needs custom retry and throttling logic for millions of requests.
-B=Provisioned Throughput with AWS Batch: it adds an hourly commitment and a custom orchestration job for a quarterly workload, which costs more than a discounted managed batch job.
-C=SageMaker AI asynchronous endpoint: it means choosing, hosting and scaling a different model and managing GPU instances, which is more custom work than a managed batch job on the model already in use.
-T: Large, offline, deadline-in-hours generative AI jobs fit Bedrock batch inference: JSONL in S3 in, results in S3 out, at a lower price than on-demand.
-V: Amazon Bedrock, Amazon S3
+@ SAP-C03 D1 T1.2 advanced use-case
+S: A bank's on-premises applications must call Amazon Bedrock in eu-west-1 over its existing AWS Direct Connect connection, which reaches a shared services VPC through a transit gateway. Bedrock traffic must not traverse the internet, the applications must keep using the standard regional Bedrock runtime endpoint name in their SDKs, and any Bedrock invocation by the bank's application roles that does not come through the bank's own network path must be denied. Which solution meets these requirements?
+A: Create a bedrock-runtime interface endpoint with private DNS in the shared VPC, forward Bedrock names from on-premises DNS to a Route 53 Resolver inbound endpoint, and deny calls without that aws:SourceVpce
+B: Create a gateway VPC endpoint for Amazon Bedrock in the shared services VPC, add the transit gateway attachment routes to its prefix list, and deny invocation unless the aws:SourceVpc condition key matches the VPC
+C: Add a public virtual interface to the Direct Connect connection, advertise the Bedrock public prefixes to on-premises routers, and deny invocation unless aws:SourceIp is in the bank's public address range
+D: Create a bedrock-runtime interface endpoint in the shared VPC, keep public DNS resolution on premises, and add an endpoint policy that allows invocation only for the bank's application roles
+K: A
+G: ## Private access to Bedrock
+Amazon Bedrock is reached privately through **interface VPC endpoints** (AWS PrivateLink), for example `com.amazonaws.eu-west-1.bedrock-runtime` for inference. There is no gateway endpoint for Bedrock; gateway endpoints exist only for Amazon S3 and DynamoDB.
+## Making on-premises clients use the endpoint
+With **private DNS** enabled, the standard name `bedrock-runtime.eu-west-1.amazonaws.com` resolves to the endpoint's private IP addresses, but only for resolvers that use the VPC's DNS. On-premises DNS servers must **conditionally forward** that name to a **Route 53 Resolver inbound endpoint** in the VPC. Then SDKs keep the default endpoint name while traffic flows over Direct Connect and the transit gateway to the endpoint.
+## Denying every other path
+Requests that arrive through an interface endpoint carry the `aws:SourceVpce` condition key. An IAM policy or SCP statement that denies `bedrock:InvokeModel` (and related inference actions) when `aws:SourceVpce` does not equal the endpoint ID blocks the same roles from calling Bedrock through any other route. An endpoint policy, by contrast, controls only traffic that already uses that endpoint.
+W: Interface endpoint, Resolver inbound endpoint and aws:SourceVpce deny: private DNS plus conditional forwarding makes the standard name resolve to private IPs reached over Direct Connect, and the deny on aws:SourceVpce rejects any invocation by those roles that does not come through the endpoint.
+X: B=Gateway endpoint for Bedrock: gateway endpoints exist only for Amazon S3 and DynamoDB, and they cannot be reached from on-premises through a transit gateway anyway, so there is no endpoint to route to.
+C=Public virtual interface with aws:SourceIp: traffic stays off the internet, but it goes to Bedrock's public endpoints rather than the bank's VPC path, and an aws:SourceIp allow-list is a weaker control that does not prove the request used the bank's endpoint.
+D=Interface endpoint with public DNS and an endpoint policy: on-premises clients still resolve the public addresses and bypass the endpoint, and an endpoint policy only filters requests that already use the endpoint, so calls over other paths are not denied.
+T: For private on-premises access to Bedrock, combine an interface endpoint with private DNS, a Route 53 Resolver inbound endpoint, and a deny on aws:SourceVpce.
+V: Amazon Bedrock, AWS PrivateLink, Amazon Route 53 Resolver, AWS Direct Connect
 
 @ SAP-C03 D1 T1.2 advanced use-case
 S: A logistics company built a planning agent with the open-source LangGraph framework. Each user conversation can run multi-step tool calls for up to 3 hours, sessions must be strictly isolated from each other because they hold customer data in memory, and the team wants no servers or clusters to manage. The agent must keep using LangGraph and a model hosted outside Amazon Bedrock for some steps. Which hosting option meets these requirements?
