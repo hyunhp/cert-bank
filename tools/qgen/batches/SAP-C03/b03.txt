@@ -1,0 +1,458 @@
+# SAP-C03 b03: AI/ML operations (D3 T3.1 AI/ML cost, T3.2 AI/ML data transfer, T3.3 Bedrock chargeback,
+# D5 T5.2 AI/ML evaluation and output validation, T5.3 AI/ML monitoring)
+
+@ SAP-C03 D3 T3.1 advanced tradeoff
+S: A retailer must regenerate marketing descriptions for about two million catalog items every night with an Amazon Bedrock model. Results are needed before 07:00, nobody waits on an individual item, and traffic outside this job is a few thousand interactive requests per day. Finance wants the lowest inference cost without buying capacity that sits idle during the day. Which design meets these requirements?
+A: Purchase a six-month Provisioned Throughput commitment sized for the nightly peak, and route the interactive daytime requests to the same provisioned model to keep it busy
+B: Write the prompts as JSONL records to Amazon S3 each evening and submit a Bedrock batch inference job, then load the generated descriptions from the output prefix in S3
+C: Send the two million prompts on demand with the Priority service tier from an AWS Step Functions Map state so that the job always finishes well before the morning deadline
+D: Host an open-weight model on a SageMaker AI real-time endpoint with GPU instances and target tracking scaling, and send each catalog item as a separate synchronous request
+K: B
+G: ## Ways to pay for Amazon Bedrock inference
+- **On-demand**: pay per input and output token, no commitment. Each request is synchronous, and the account's requests-per-minute and tokens-per-minute quotas cap how fast a large job can run.
+- **Provisioned Throughput**: buy model units for a term (or without commitment, billed hourly). You pay for every hour whether it is used or not, so it suits steady, predictable traffic.
+- **Batch inference**: put many prompts into JSONL files in Amazon S3 and call `CreateModelInvocationJob`. Bedrock processes the records asynchronously and writes the results to an S3 output prefix. For supported models, batch is priced lower than on-demand for the same tokens.
+## When batch fits
+Batch inference is for large volumes where no user waits for a single answer: catalog enrichment, document summaries, classification backfills, nightly reports. The job runs in the background, and the pipeline picks up the output files when the job reaches `Completed`.
+Example: an EventBridge schedule at 22:00 starts a Step Functions workflow that writes `s3://catalog-genai/input/2026-11-20/*.jsonl`, submits the batch job, polls its status and loads `s3://catalog-genai/output/...` into the product database.
+W: Bedrock batch inference: the nightly job is large, asynchronous and deadline-based rather than latency-based, which is exactly the batch use case; it costs less per token than on-demand for supported models and needs no reserved capacity.
+X: A=Six-month Provisioned Throughput: capacity sized for a few night hours is paid for around the clock for the whole term, and a few thousand daytime requests cannot keep it busy, so most of the purchase sits idle.
+C=Priority tier on demand: Priority is a premium-priced tier for latency-sensitive requests, so it raises the cost of a job that has no per-request latency need, and two million synchronous calls still have to fit inside the on-demand quotas.
+D=Self-hosted GPU endpoint: running and scaling GPU instances adds hourly instance cost and operations work, and synchronous one-item requests waste the throughput that an asynchronous batch design gets for free.
+T: Large, latency-tolerant Bedrock workloads with a completion deadline belong in batch inference (JSONL in S3, asynchronous job, lower per-token price), not in on-demand calls or idle Provisioned Throughput.
+V: Amazon Bedrock, Amazon S3, AWS Step Functions
+
+@ SAP-C03 D3 T3.1 applied use-case
+S: An insurer's claims assistant calls an Amazon Bedrock model through the Converse API. Every request sends the same 30,000-token policy handbook and a fixed set of instructions, followed by a short question from the adjuster. Token costs and time to first response are both higher than planned, and the handbook changes only once a quarter. What should the solutions architect recommend?
+A: Move the adjuster's question to the start of each prompt and append the handbook after it, so that the model reads the most relevant text first and stops processing the handbook earlier
+B: Purchase Provisioned Throughput for the model, because requests on provisioned model units are not billed per input token and so the repeated handbook would no longer add any cost
+C: Put the handbook and instructions first in each prompt with a cache checkpoint after them, so Bedrock prompt caching reuses that prefix and only the short question is processed fresh
+D: Raise the `maxTokens` inference parameter and lower the temperature, so that each answer is complete in one pass and the adjusters do not need to send follow-up questions
+K: C
+G: ## What prompt caching does
+Many generative AI applications send the same long prefix on every call: a system prompt, a policy document, tool definitions or few-shot examples. Without caching, the model reprocesses those tokens every time, and you pay for them as input tokens every time.
+With **Amazon Bedrock prompt caching** (on supported models), you mark a **cache checkpoint** in the request, for example a `cachePoint` block in the Converse API. Bedrock caches the processed prompt up to that point:
+- Later requests that start with exactly the same prefix read it from the cache. Cached reads are billed at a reduced rate and the model skips that work, so time to first token drops.
+- The cache lives for a short time after the last use and is refreshed by each hit, so it pays off for steady traffic that reuses the prefix.
+- Each model has a minimum number of tokens per checkpoint; tiny prefixes are not cached.
+## Order matters
+The cache matches a **prefix**. Static content (instructions, the handbook) must come first and the changing part (the user's question) last. If anything in front of the checkpoint changes, the prefix no longer matches and nothing is reused.
+W: Static prefix plus cache checkpoint: the 30,000 identical tokens become a cached prefix that is read at a reduced price and without full reprocessing, so both token cost and latency fall while the answers stay the same.
+X: A=Question first, handbook after: putting the changing question in front breaks the shared prefix, so nothing can be cached, and the model still processes the whole prompt; models do not stop reading early because the question came first.
+B=Provisioned Throughput: Provisioned Throughput is billed per model unit per hour; it removes per-token billing but charges for reserved capacity around the clock, and the model still reprocesses the handbook on every request, so latency does not improve.
+D=Larger maxTokens: the output limit and temperature do not touch the input tokens that drive the cost, and a larger output limit can make answers longer and more expensive.
+T: When many requests share a long, stable prompt prefix, put it first and add a cache checkpoint so Bedrock prompt caching cuts input cost and latency.
+V: Amazon Bedrock
+
+@ SAP-C03 D3 T3.1 advanced tradeoff
+S: A media company uses one Amazon Bedrock model for two workloads. A customer-facing chat must keep its current response times. A back-office agent enriches archive articles in many steps, each step needs the previous result within a few minutes, and editors accept slower processing if it is cheaper. Both workloads use on-demand Standard today. Which change lowers cost while meeting both requirements?
+A: Send the enrichment agent's requests with the Flex service tier and keep the customer chat on the Standard tier, choosing the tier per request in each application's model call
+B: Move the enrichment agent to Bedrock batch inference jobs so that each step is written to Amazon S3 as one JSONL record and returned at the lower batch inference price
+C: Send both workloads with the Priority service tier, because faster processing finishes each agent step sooner and so reduces the number of tokens that are billed for the archive
+D: Purchase Provisioned Throughput for the chat workload and move the enrichment agent onto the same model units at night, so that both use capacity that is already paid for
+K: A
+G: ## Amazon Bedrock service tiers
+For supported models, an on-demand request can be sent in one of several service tiers, chosen per request:
+- **Standard**: the default tier, with everyday performance and the normal on-demand price.
+- **Priority**: preferential processing for latency-critical traffic at a premium price.
+- **Flex**: a lower price for workloads that can accept longer processing times, such as evaluations, summarization and multi-step agent workflows that are not user-facing.
+Because the tier is chosen on each call, one application (or one step of a workflow) can use Flex while another keeps Standard or Priority on the same model.
+## Flex versus batch
+Both reduce cost for latency-tolerant work, but they behave differently:
+- **Flex** is still a normal synchronous API call: the caller gets each result back on the request, so an agent can chain steps.
+- **Batch inference** is an asynchronous job over a file of records. Results arrive together when the job completes, which suits independent records, not chains where step 2 depends on step 1.
+W: Flex for the agent, Standard for chat: the agent tolerates slower responses but needs each step's result back synchronously, which Flex provides at a lower price, while the chat keeps its current latency on Standard.
+X: B=Batch inference for agent steps: a batch job processes a file of independent records and returns results when the whole job finishes, so a multi-step agent cannot get one step's answer within minutes to build the next prompt.
+C=Priority for everything: Priority costs more than Standard, and finishing sooner does not reduce the number of tokens billed, so the total bill rises.
+D=Provisioned Throughput for both: model units are billed every hour whether used or not, so buying them for a chat that runs fine on demand adds a fixed cost that the night-time agent traffic does not offset.
+T: Pick the Bedrock service tier per request: Flex for latency-tolerant synchronous work such as agent steps, Standard or Priority for interactive traffic, and batch only for independent records.
+V: Amazon Bedrock
+
+@ SAP-C03 D3 T3.1 applied use-case
+S: An internal help desk assistant on Amazon Bedrock uses the largest model of one model family for every prompt. An analysis of a month of logs shows that most prompts are simple how-to questions that a smaller model of the same family answers equally well, while a minority need complex reasoning. The team wants lower cost without hand-writing classification rules. What should the solutions architect recommend?
+A: Keep the largest model and send every request with the Priority service tier, so that responses arrive faster and each conversation needs fewer turns to reach an acceptable answer
+B: Buy Provisioned Throughput for the smaller model and send every prompt to it, accepting that complex questions get weaker answers in exchange for a fixed and predictable monthly bill
+C: Send the help desk prompts to a Bedrock batch inference job every few minutes, so that each prompt is billed at the batch price no matter which model ends up answering the question
+D: Use Amazon Bedrock Intelligent Prompt Routing with a router over the small and large models of that family, and invoke the router ARN in place of the single model ID
+K: D
+G: ## Matching model size to the request
+Larger models in a family cost more per token and are often slower. Many workloads have a mix: simple requests that a small model handles well and a smaller share that need the larger model. Sending everything to the largest model wastes money; sending everything to the smallest hurts quality.
+## Amazon Bedrock Intelligent Prompt Routing
+A **prompt router** sits in front of two models from the same family. For each request it predicts the response quality of each model and sends the request to the cheaper model when the expected quality is close enough, otherwise to the stronger one.
+- You use a default router or configure your own with the two models and a quality-difference threshold.
+- The application calls the router ARN in place of a model ID; the response shows which model answered, so you can measure the split.
+- No custom classifier, rules or extra service is needed.
+W: Intelligent Prompt Routing: it sends simple prompts to the smaller, cheaper model and complex ones to the larger model automatically, which lowers average cost per request while protecting quality, with only a model ID change in the application.
+X: A=Priority tier on the largest model: Priority adds a premium to every request on the most expensive model, so the bill rises; faster answers do not make questions simpler.
+B=Provisioned smaller model for all: it gives up quality on the complex questions the business still needs, and model units are billed every hour whether the help desk is busy or not.
+C=Batch every few minutes: batch jobs are asynchronous and return results when the job completes, which breaks an interactive help desk, and batch does not choose between models.
+T: For a mix of simple and complex prompts in one model family, let Bedrock Intelligent Prompt Routing pick the cheaper model when quality allows instead of always paying for the largest.
+V: Amazon Bedrock
+
+@ SAP-C03 D3 T3.1 advanced use-case
+S: A company serves a fine-tuned transformer model from a SageMaker AI real-time endpoint on GPU instances. Traffic is steady around the clock, will stay at this level for at least three years, and the response time must remain within the current SLO. The model architecture is supported by the AWS Neuron SDK. Which TWO actions reduce inference cost? (Select TWO)
+A: Purchase a SageMaker AI Savings Plan for the steady hourly instance usage, which applies to real-time inference instances across instance families and Regions
+B: Buy EC2 Instance Savings Plans for the GPU instance family, because SageMaker AI endpoint instances are billed as regular Amazon EC2 usage in the same account
+C: Compile the model with the Neuron SDK and benchmark it on Inferentia2 (`ml.inf2`) instances, moving the endpoint if latency stays within the SLO
+D: Switch the endpoint to Spot capacity with managed checkpointing, as SageMaker AI training jobs do, and keep one On-Demand instance for fallback
+E: Move the model to SageMaker Serverless Inference with the largest memory setting, so that the GPU instances are no longer billed when they are idle
+K: A,C
+G: ## SageMaker AI inference pricing levers
+SageMaker AI real-time endpoints bill per instance-hour for each instance behind the endpoint. For a steady, long-lived workload there are two big levers:
+- **Commit to usage**: a **SageMaker AI Savings Plan** gives a lower rate in exchange for a one- or three-year commitment to a dollar amount of SageMaker usage per hour. It applies to eligible SageMaker instance usage (including real-time inference) regardless of instance family, size or Region. EC2 Reserved Instances and EC2 or Compute Savings Plans do not cover SageMaker instances.
+- **Cheaper hardware per inference**: AWS Inferentia2 instances (`ml.inf2.*`) are built for inference. Models compiled with the **AWS Neuron SDK** often reach a lower cost per inference than general GPU instances. Always benchmark latency and accuracy before switching.
+## Options that do not apply
+- **Managed Spot** in SageMaker AI is a training feature (with checkpointing). Real-time endpoints run on On-Demand instances.
+- **Serverless Inference** runs on CPU-based capacity with a memory setting and no GPUs, and it targets intermittent traffic with idle periods, not a steady 24/7 load.
+W: A=SageMaker AI Savings Plan: three years of steady instance-hours is the ideal case for a usage commitment, and this plan type is the one that covers SageMaker inference instances.
+C=Neuron and Inferentia2: compiling a supported model for Inferentia2 can lower the cost per inference, and benchmarking first protects the latency SLO.
+X: B=EC2 Instance Savings Plans: SageMaker AI instances are billed by SageMaker, not as EC2 usage, so EC2 Instance Savings Plans and Reserved Instances give them no discount.
+D=Spot for endpoints: managed Spot capacity and checkpointing exist for training jobs; real-time endpoints do not run on Spot, and interruptions would break the SLO anyway.
+E=Serverless Inference: serverless endpoints do not offer GPUs and suit spiky or idle traffic; a model that needs accelerators and runs at a steady 24/7 load is the wrong fit.
+T: Steady SageMaker AI inference: commit with a SageMaker AI Savings Plan (EC2 plans do not apply) and test Inferentia2 with the Neuron SDK for a lower cost per inference.
+V: Amazon SageMaker AI, AWS Inferentia, AWS Savings Plans
+
+@ SAP-C03 D3 T3.2 advanced tradeoff
+S: A bank in Frankfurt runs a document assistant on an Amazon Bedrock model in eu-central-1. Regulators require that customer prompts and responses are processed only in EU Regions. Peak traffic now hits the on-demand throughput limit for the model. The bank wants more burst capacity without paying for idle reserved capacity. Which solution meets these requirements?
+A: Invoke the model through the global cross-Region inference profile, because prompts and responses stay encrypted in transit and logs remain in the eu-central-1 source Region
+B: Invoke the model through the EU geographic cross-Region inference profile from eu-central-1, so requests can be served in other EU Regions during peaks
+C: Buy Provisioned Throughput in eu-central-1 and in two other EU Regions, and add client-side logic that sends each request to the Region with the most unused model units
+D: Move the assistant's model calls to us-east-1, where more on-demand capacity is usually available, and keep the documents and logs stored in the eu-central-1 Region
+K: B
+G: ## Cross-Region inference profiles
+An **inference profile** is a Bedrock resource you call in place of a model ID. System-defined **cross-Region inference profiles** let Bedrock serve a request from a different Region when the source Region is busy, which raises the throughput you can reach with on-demand pricing.
+- **Geographic profiles** (for example the US, EU or APAC profiles, whose IDs start with a geography prefix such as `eu.`) route only among Regions in that geography.
+- **Global profiles** (IDs starting with `global.`) can route to supported commercial Regions anywhere in the world for the most capacity.
+## Data residency
+Routing means the prompt and response are processed in the destination Region. Data at rest that you configure, such as invocation logs, stays in the source Region, and traffic travels over the AWS network encrypted. The key residency question is therefore **where inference may run**:
+- An EU-only rule allows the EU geographic profile.
+- A global profile can process the request outside the EU, which breaks that rule even though logs stay in the source Region.
+W: EU geographic profile: it adds burst capacity from other EU Regions at on-demand rates while keeping processing inside the EU, which satisfies both the residency rule and the no-idle-capacity goal.
+X: A=Global profile: encryption in transit and source-Region logs do not change where inference runs; the global profile may process the prompt in a Region outside the EU, which the regulator forbids.
+C=Provisioned Throughput in three Regions: it would stay in the EU, but it pays hourly for reserved model units in three Regions, exactly the idle capacity the bank wants to avoid, plus custom routing code to maintain.
+D=Call models in us-east-1: the prompts and responses would be processed in the US, which breaks the residency rule regardless of where the documents and logs are stored.
+T: Cross-Region inference adds on-demand burst capacity; choose a geographic profile when processing must stay in a geography and a global profile only when it may run anywhere.
+V: Amazon Bedrock
+
+@ SAP-C03 D3 T3.2 applied definition
+S: A FinOps lead reviews a proposal to move a high-volume Amazon Bedrock workload in us-east-1 from direct model calls to a US geographic cross-Region inference profile. She asks how this change affects the bill and where data is kept. Which TWO statements are correct? (Select TWO)
+A: Tokens are billed at the price of the source Region that received the request, and Bedrock adds no separate routing or inter-Region data transfer charge for cross-Region inference
+B: Each request that Bedrock serves from another Region adds an inter-Region data transfer charge per GB on top of the token price, billed to the account that sent the request
+C: Data at rest that the workload configures, such as model invocation logs, stays in us-east-1 as the source Region even when the request is served in another US Region
+D: Model invocation logging must be enabled in every destination Region listed in the profile, otherwise requests that are served in those Regions are not recorded in any log
+E: The account must create VPC peering or Transit Gateway peering between the Regions in the profile so that rerouted requests travel privately between AWS Regions
+K: A,C
+G: ## How cross-Region inference is billed
+When you call a cross-Region inference profile, the request enters Bedrock in your **source Region** (the Region whose endpoint you called). Bedrock may serve it in another Region of the profile. AWS documents that:
+- The price is that of the **source Region**: tokens are billed as if the model had run there.
+- There is **no additional routing cost** for cross-Region inference, so there is no extra per-GB transfer line for the rerouted prompt and response.
+## Where data lives
+- Prompts and responses are processed in the destination Region and move over the AWS network, encrypted in transit.
+- Data at rest you configure, such as model invocation logs, stays in the source Region. You enable invocation logging once, in the source Region.
+- No customer networking is involved: the routing happens inside the Bedrock service, not through your VPCs.
+## Example
+An app in us-east-1 calls a `us.` profile. A peak request is served in us-west-2. The bill shows the us-east-1 token price, and the invocation log record lands in the us-east-1 log group.
+W: A=Source-Region price, no routing charge: cross-Region inference is billed at the source Region's token price with no added routing or transfer fee.
+C=Logs stay in the source Region: invocation logs and other configured data at rest remain in us-east-1 even when inference runs elsewhere.
+X: B=Per-GB inter-Region charge: Bedrock does not add a data transfer charge for requests it reroutes inside a cross-Region inference profile; the token price of the source Region is the whole charge.
+D=Logging in every destination Region: invocation logging is configured in the source Region and the records are written there; destination Regions do not need their own logging setup for these requests.
+E=VPC or Transit Gateway peering: the routing happens inside the Bedrock service between AWS Regions, so no customer network path between Regions is created or needed.
+T: Cross-Region inference is billed at the source Region's price with no routing fee, and configured data at rest such as invocation logs stays in the source Region.
+V: Amazon Bedrock
+
+@ SAP-C03 D3 T3.2 advanced troubleshooting
+S: An organization uses an SCP that denies all actions outside us-east-1 and us-west-2 by using the `aws:RequestedRegion` condition key. A team in us-east-1 switches its application from a foundation model ID to a US geographic cross-Region inference profile whose destination Regions include us-east-2. Calls through the profile now fail with access denied errors, while direct model calls still work. What should the solutions architect do?
+A: Replace the profile with a global cross-Region inference profile, because global profiles are evaluated only against the caller's Region and so are not affected by Region-based SCPs
+B: Create a Bedrock interface VPC endpoint in us-east-2 and route the application's traffic through it, so that requests served in that Region arrive from an allowed private network path
+C: Change the SCP to allow the Bedrock invoke actions in every Region of the profile, and grant IAM access to the profile and the model in each of those Regions
+D: Enable model invocation logging in us-east-2 and attach a resource-based policy to the profile, because Bedrock rejects rerouted requests that cannot be logged in their destination
+K: C
+G: ## Why cross-Region inference meets Region guardrails
+A cross-Region inference profile can serve a request in any of its destination Regions. AWS authorizes the invocation for the Regions the request may use, so both layers of permission must allow them:
+- **SCPs**: a Region-restriction SCP that denies requests outside a list of Regions blocks the profile if any destination Region is missing. The usual fix is an exception for the Bedrock invoke actions (such as `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream`) in the profile's Regions, keeping the deny for everything else.
+- **IAM**: the caller needs permission on the inference profile ARN and on the foundation model ARNs in each destination Region, not just in the source Region.
+## Keeping governance intact
+Allowing Bedrock invocation in a few more US Regions does not move stored data: invocation logs and other configured data at rest stay in the source Region. If data must stay in specific Regions, choose a profile whose destination Regions are all approved.
+W: Allow the profile's Regions in the SCP and IAM: the denial comes from the Region-restriction SCP blocking a destination Region of the profile, so a scoped exception for Bedrock invocation plus IAM grants on the profile and models in those Regions resolves it.
+X: A=Global profile: a global profile can route to even more Regions, so it widens the problem; Region guardrails must also make allowance for global inference rather than ignoring it.
+B=Endpoint in us-east-2: the application calls Bedrock in its source Region and Bedrock does the rerouting internally; a VPC endpoint in another Region does not change how the SCP evaluates the request.
+D=Logging in us-east-2: invocation logging is optional and kept in the source Region; it plays no part in authorization, and inference profiles do not take resource-based policies to fix SCP denials.
+T: Region-restriction SCPs and IAM policies must allow Bedrock invocation in every destination Region of a cross-Region inference profile, or calls through the profile are denied.
+V: Amazon Bedrock, AWS Organizations, AWS IAM
+
+@ SAP-C03 D3 T3.2 advanced use-case
+S: A logistics company calls a US geographic cross-Region inference profile from private subnets in us-east-1. Each request carries scanned delivery documents, and the monthly NAT gateway data processing charge for Bedrock traffic is now larger than the token bill. Security also wants Bedrock calls kept off the internet path. Which change addresses both concerns with the least effort?
+A: Create interface VPC endpoints for the Bedrock runtime in us-east-1 and in each destination Region of the profile, and join the Regions with Transit Gateway peering for the rerouted traffic
+B: Create a gateway VPC endpoint for Amazon Bedrock in us-east-1 and add it to the private route tables, because gateway endpoints carry Bedrock traffic without any hourly or data charge
+C: Move the application to public subnets with an internet gateway, so the documents reach the public Bedrock endpoint directly and the NAT gateway data processing charges stop
+D: Create an interface VPC endpoint for the Bedrock runtime in us-east-1 with private DNS enabled, and keep calling the profile there; Bedrock reroutes requests internally
+K: D
+G: ## Paying for the path to Bedrock
+Applications in private subnets reach AWS service endpoints in one of two ways:
+- Through a **NAT gateway** to the public endpoint: billed per hour plus a **per-GB data processing charge** on all traffic, so large payloads such as images or documents add up fast.
+- Through an **interface VPC endpoint** (AWS PrivateLink) for the service: billed per endpoint per AZ per hour plus a per-GB charge that is lower than NAT gateway processing, and the traffic never uses the internet path.
+Amazon Bedrock offers interface endpoints (for example for `bedrock-runtime`); gateway endpoints exist only for Amazon S3 and DynamoDB.
+## Cross-Region inference does not need extra networking
+With a cross-Region inference profile, the application still calls the Bedrock endpoint in its **source Region**. Bedrock decides where to serve the request and moves it over the AWS network itself. One interface endpoint in the source Region is therefore enough; no endpoints or peering in the destination Regions are needed.
+W: One interface endpoint in the source Region: it removes the NAT gateway from the Bedrock path, so the large documents are no longer billed at NAT processing rates, keeps the calls private, and works unchanged with the profile because Bedrock reroutes internally.
+X: A=Endpoints and peering in every Region: the application only talks to the source-Region endpoint, so endpoints in destination Regions and Transit Gateway peering add hourly and per-GB charges without ever carrying the rerouted requests.
+B=Gateway endpoint for Bedrock: gateway VPC endpoints exist only for Amazon S3 and DynamoDB; Bedrock is reached privately through interface endpoints.
+C=Public subnets: it removes the NAT charge but exposes the workload to the internet path that security wants to avoid, and gives instances public addresses for no other benefit.
+T: Bedrock traffic from private subnets is cheaper and private through an interface VPC endpoint in the source Region; cross-Region inference needs no networking in the destination Regions.
+V: Amazon Bedrock, AWS PrivateLink, Amazon VPC
+
+@ SAP-C03 D3 T3.3 advanced use-case
+S: Six business units share one AWS account that runs several applications on the same Amazon Bedrock model with on-demand pricing. Finance needs monthly Bedrock cost per business unit in Cost Explorer for chargeback, and each unit wants to see its own input and output token usage during the month. Which solution meets these requirements with the least operational effort?
+A: Tag the foundation model's ARN with a business-unit tag for each unit and activate the tag as a cost allocation tag, so that every model invocation is billed under the caller's unit
+B: Create an application inference profile per business unit with a business-unit tag, activate it as a cost allocation tag, and use invocation logs to report token counts
+C: Create a cost category that splits the monthly Bedrock charge across the six units by their share of Bedrock API calls, as counted in AWS CloudTrail management events
+D: Estimate each unit's share from the `InvocationLatency` metric of each application's Lambda functions, and publish the estimate as a monthly showback report
+K: B
+G: ## Why shared models are hard to charge back
+On-demand Bedrock usage is billed per model per Region in the account. If six units call the same model ID, the bill shows one line, and AWS-provided foundation models are not resources you can tag.
+## Application inference profiles
+An **application inference profile** is a Bedrock resource you create yourself from a foundation model (or a system cross-Region profile). It can carry **tags**, and applications invoke its ARN in place of the model ID.
+- Usage through the profile carries the profile's tags into billing data. After the tag key (for example `business-unit`) is **activated as a cost allocation tag**, Cost Explorer and the Cost and Usage Report can group Bedrock cost by unit.
+- One profile per unit (or per application, tagged with the unit) keeps the chargeback automatic once applications switch to the profile ARN.
+## Token showback
+**Model invocation logging** records each call with the model or profile identifier used, the caller identity and the input and output token counts. CloudWatch Logs Insights (or Athena on the S3 copy) can sum tokens per profile for an in-month view.
+W: Tagged application inference profiles: each unit's calls go through its own tagged profile, so activated cost allocation tags split the Bedrock bill by unit in Cost Explorer, and invocation logs give per-unit token counts during the month.
+X: A=Tag the foundation model: AWS-provided foundation models are not taggable resources in your account, and even a single shared tag could not tell the six callers apart.
+C=Cost category split by API calls: cost category split charges divide costs proportionally, evenly or by fixed percentages, not by CloudTrail counts, and call counts ignore the token sizes that actually drive cost.
+D=Estimate from latency: latency does not map to tokens or price, so the result is a guess rather than a chargeback, and it needs a custom pipeline to maintain.
+T: Charge back shared Bedrock models with one tagged application inference profile per unit (activate the tag for cost allocation) and use invocation logs for token showback.
+V: Amazon Bedrock, AWS Cost Explorer, AWS Billing and Cost Management
+
+@ SAP-C03 D5 T5.2 advanced comparison
+S: A legal-tech company must choose one of three Amazon Bedrock models for contract summaries. It has 800 real contracts with summaries written by its lawyers. Leadership wants scores for correctness, completeness and faithfulness to the source for every candidate within a week, but only two lawyers are available for review. Which approach meets these requirements?
+A: Run a programmatic automatic model evaluation job on each model with a built-in dataset and its accuracy and toxicity metrics, then pick the model with the best mean score
+B: Have the two lawyers grade every response of each model in a human-based model evaluation job, using a Likert scale for correctness, completeness and faithfulness
+C: Run an LLM-as-a-judge model evaluation job for each candidate on the 800-contract prompt dataset with reference summaries, scoring correctness, completeness and faithfulness
+D: Deploy all three models behind a weighted router in production for a week and compare the average `InvocationLatency` and `OutputTokenCount` of each model in CloudWatch
+K: C
+G: ## Amazon Bedrock Evaluations: three styles
+- **Programmatic (automatic) model evaluation**: computes metrics such as accuracy, robustness and toxicity with algorithmic scorers, on built-in or your own datasets. Fast and cheap, but these metrics do not judge qualities such as completeness or faithfulness well.
+- **LLM-as-a-judge model evaluation**: a generator model answers each prompt, and a separate **evaluator (judge) model** scores the answers with built-in quality metrics (correctness, completeness, faithfulness, helpfulness, coherence and others), responsible AI metrics, or custom metrics you define. It scales to hundreds or thousands of prompts and explains each score.
+- **Human-based evaluation**: your own work team rates outputs with methods such as thumbs up or down, Likert scales or ranking. Best for subjective or high-stakes judgments, but slow and limited by reviewer time.
+## Custom prompt datasets
+A prompt dataset is a JSONL file in Amazon S3. Each record holds the prompt and, optionally, a reference answer (ground truth) that metrics such as correctness can compare against. Using real contracts with lawyer-written summaries makes the scores reflect the actual task.
+W: LLM-as-a-judge on the company's own dataset: it produces correctness, completeness and faithfulness scores for every candidate across all 800 contracts within days, and the lawyers can spot-check a sample instead of grading everything.
+X: A=Programmatic metrics on a built-in dataset: generic public data does not represent contracts, and accuracy and toxicity scores do not measure completeness or faithfulness to a source document.
+B=Two lawyers grading everything: three models times 800 contracts is 2,400 long summaries, far more than two reviewers can rate carefully in a week.
+D=Production latency and token counts: these metrics measure speed and length, not whether a summary is correct or faithful, and they expose customers to untested models.
+T: For scaled quality scoring (correctness, completeness, faithfulness) on your own data, use an LLM-as-a-judge evaluation job; keep humans for samples and subjective calls.
+V: Amazon Bedrock
+
+@ SAP-C03 D5 T5.2 advanced troubleshooting
+S: A Bedrock knowledge base powers an employee benefits assistant. User reports show answers that are confidently wrong, and the team argues whether retrieval returns the wrong passages or the model ignores correct ones. The team has 300 questions with expected answers. Which TWO actions isolate the cause? (Select TWO)
+A: Run a retrieve-only RAG evaluation job on the knowledge base and review the context relevance and context coverage scores against the expected answers
+B: Run a retrieve-and-generate RAG evaluation job and review faithfulness and correctness, to see whether answers stay grounded in the passages returned
+C: Run a programmatic model evaluation job on the foundation model alone with a built-in question answering dataset and compare its accuracy to the published baseline
+D: Enable SageMaker AI Model Monitor data quality monitoring on the knowledge base so that drift in the retrieved passages is reported as constraint violations
+E: Double the chunk size and the number of retrieved results in the knowledge base, then compare the user complaint rate in the following month with this month's rate
+K: A,B
+G: ## Two places a RAG answer can go wrong
+A retrieval-augmented generation (RAG) answer is built in two steps:
+1. **Retrieval**: the knowledge base searches the vector store and returns passages.
+2. **Generation**: the model writes an answer from those passages.
+A wrong answer can come from either step. Fixing the wrong one (for example re-chunking when the model is the problem) wastes time.
+## Amazon Bedrock RAG evaluation
+Bedrock Evaluations can evaluate a knowledge base with a judge model and your dataset of questions (and optional expected answers):
+- **Retrieve only**: scores the retrieved passages, for example **context relevance** (are the passages about the question) and **context coverage** (do they contain the information in the expected answer).
+- **Retrieve and generate**: scores the final answers, for example **faithfulness** (is the answer supported by the retrieved text, the hallucination check), **correctness** and **completeness**.
+## Reading the results
+- Low context coverage: retrieval is the problem (chunking, embeddings, metadata filters).
+- High coverage but low faithfulness: the model is ignoring or going beyond the passages (prompt, model choice, guardrails).
+W: A=Retrieve-only evaluation: context relevance and coverage show whether the passages contain what the expected answer needs, which tests retrieval in isolation.
+B=Retrieve-and-generate evaluation: faithfulness and correctness show whether the model's answers stay grounded in what was retrieved, which tests the generation step.
+X: C=Model-only evaluation on public data: it never touches the knowledge base or the company's benefits documents, so it cannot say which step of this RAG pipeline fails.
+D=Model Monitor on a knowledge base: SageMaker AI Model Monitor analyzes data captured from SageMaker endpoints; it has no integration with Bedrock knowledge bases and does not judge answer quality.
+E=Change chunking and wait a month: it changes two settings blindly and measures with a slow, noisy signal, so it neither isolates the cause nor proves the fix.
+T: To tell retrieval faults from generation faults, run Bedrock RAG evaluations: retrieve-only (context relevance and coverage) and retrieve-and-generate (faithfulness, correctness).
+V: Amazon Bedrock
+
+@ SAP-C03 D5 T5.2 advanced use-case
+S: A company releases prompt-template and model changes for a Bedrock-based support assistant through AWS CodePipeline. Last month a new template went live and reduced answer correctness, which was found only after customer complaints. The company wants the pipeline to stop any release whose quality scores fall below the current production baseline. What should the solutions architect add?
+A: A manual approval stage where a product owner chats with the new version in staging for ten minutes and approves the release if the answers look reasonable
+B: A post-deployment CloudWatch alarm on `InvocationClientErrors` and `InvocationLatency` that rolls the release back when either metric breaches its threshold for an hour
+C: An Amazon Bedrock guardrail with denied topics and content filters on the new version, failing the stage if the guardrail blocks any test prompt during deployment
+D: A stage that runs a Bedrock evaluation job on a fixed golden dataset, reads the scores from the job output in S3, and fails the stage if a score is below the baseline
+K: D
+G: ## Quality gates for generative AI releases
+Traditional pipelines gate on unit tests and error rates. For generative AI, a change to a prompt template, model version or retrieval setting can keep every request "successful" while making the answers worse. The gate must therefore measure answer quality.
+## Building the gate with Bedrock Evaluations
+- Keep a versioned **golden dataset** (JSONL in S3) of representative prompts with reference answers.
+- In the pipeline, a stage (for example AWS CodeBuild, or a Step Functions workflow) calls `CreateEvaluationJob` for the candidate configuration, typically an LLM-as-a-judge job with metrics such as correctness and faithfulness.
+- The stage waits for the job to complete, reads the result files from the S3 output location and compares each metric with the stored production baseline.
+- If a score falls below the threshold, the stage fails and the release stops before customers see it. If it passes, the new scores can become the next baseline.
+Example: baseline correctness 0.86, candidate 0.79, threshold "no drop greater than 0.02": the pipeline stops and links the evaluation report in the failure message.
+W: Automated evaluation stage: it scores every candidate release on the same golden dataset with the same metrics and blocks regressions automatically, catching the kind of correctness drop that slipped through last month.
+X: A=Ten-minute manual chat: a few hand-picked conversations are not a repeatable measurement and would likely miss a drop in correctness across many question types.
+B=Error and latency alarms: a worse template still returns valid, fast responses, so client errors and latency stay normal while quality falls, and the check runs only after customers are affected.
+C=Guardrail as a gate: guardrails filter harmful or off-topic content at runtime; they do not score correctness, so a less accurate template passes untouched.
+T: Gate generative AI releases on quality: run a Bedrock evaluation job against a golden dataset in the pipeline and fail the stage when scores fall below the baseline.
+V: Amazon Bedrock, AWS CodePipeline, AWS CodeBuild
+
+@ SAP-C03 D5 T5.2 applied use-case
+S: A hospital group plans to use an Amazon Bedrock model to draft patient discharge instructions. Its clinical governance board requires that licensed nurses on staff judge clinical appropriateness and tone of two candidate models before launch, and patient data must not be shown to anyone outside the organization. Which approach meets these requirements?
+A: Run an LLM-as-a-judge evaluation job with a custom metric for clinical appropriateness, and have the judge model's scores signed off by the board in place of any nurse review
+B: Run a programmatic model evaluation job with the toxicity and robustness metrics, and treat the absence of toxic responses as proof of clinical appropriateness and tone
+C: Run a human-based model evaluation job in Bedrock that compares the two models, with a private work team of the hospital's own nurses and rating methods such as Likert scales
+D: Send the drafts to a public crowd workforce through Amazon Augmented AI, so that many independent raters score clinical appropriateness quickly and at a low cost per item
+K: C
+G: ## When humans must judge
+Automated metrics and judge models scale well, but some decisions need people: clinical appropriateness, legal tone, brand voice, or any case where a governance body requires named experts to sign off.
+## Human-based evaluation in Amazon Bedrock
+- You create a **human-based model evaluation job** for one model or to compare two models on the same prompts.
+- You bring your **own work team**: a private workforce of people you invite (for example the hospital's nurses), so the prompts and outputs are seen only by them.
+- You define the metrics (for example "clinical appropriateness", "tone") and a rating method per metric: thumbs up or down, Likert scale for a single response or for comparing two responses, choice buttons or ordinal ranking.
+- Results are summarized per model and metric so the board can compare candidates.
+## Public workforces
+The Amazon Mechanical Turk public workforce reached end of support in 2026, and a public crowd would in any case break the rule that patient data stays inside the organization. Private or vendor workforces remain options for Ground Truth and Augmented AI.
+W: Human-based evaluation with a private nurse team: it is the only option where the required experts make the judgment, the two models are compared on the same prompts, and data is shown only to the hospital's own staff.
+X: A=Judge model instead of nurses: an LLM-as-a-judge custom metric can support the review, but the board explicitly requires licensed nurses to make the judgment, so model scores cannot replace them.
+B=Toxicity and robustness metrics: the absence of toxic language says nothing about whether discharge instructions are clinically appropriate or well pitched for patients.
+D=Public crowd through Augmented AI: anonymous crowd workers are not licensed nurses, and sending patient drafts outside the organization breaks the data rule; the Mechanical Turk public workforce is also no longer available.
+T: When governance requires domain experts to judge outputs, use a Bedrock human-based evaluation job with your own private work team.
+V: Amazon Bedrock
+
+@ SAP-C03 D5 T5.2 advanced comparison
+S: A company runs its own fine-tuned model on a SageMaker AI endpoint and is considering a move to an Amazon Bedrock model. The architecture board wants both candidates scored on the same 1,000 prompts with the same judge model and metrics, without moving the self-hosted model into Bedrock first. Which approach meets these requirements with the least effort?
+A: Import the self-hosted model into Bedrock with Custom Model Import, wait for the import to finish, and then run the same LLM-as-a-judge evaluation job against both models in Bedrock
+B: Generate the self-hosted model's answers to the prompts, add them to the prompt dataset as its responses, and run Bedrock LLM-as-a-judge jobs for both with the same judge and metrics
+C: Turn on SageMaker AI Model Monitor model quality monitoring on the endpoint and compare its accuracy metrics with the `InvocationLatency` metric of the Bedrock model in CloudWatch
+D: Run SageMaker Clarify on the self-hosted model and a programmatic Bedrock evaluation job on the other, then compare the bias report with the accuracy score in a spreadsheet
+K: B
+G: ## Evaluating models that do not run in Bedrock
+Amazon Bedrock Evaluations can score responses that were produced elsewhere. With **bring your own inference responses**, each record of the prompt dataset contains the prompt and the response your own system already generated (plus an identifier for that source). The evaluation job then skips generation and only runs the judge model on those responses. This works for LLM-as-a-judge model evaluation and for RAG evaluation.
+## Fair comparison
+To compare two candidates, keep everything else fixed:
+- the same prompts (and reference answers, if used),
+- the same evaluator (judge) model,
+- the same metrics, built-in or custom.
+Then the only difference between the jobs is the model that produced the answers.
+Example: a script sends the 1,000 prompts to the SageMaker AI endpoint and writes the answers into `responses-selfhosted.jsonl`; one job evaluates those responses and a second job lets the Bedrock candidate generate its own answers, both judged by the same evaluator with correctness and helpfulness.
+W: Bring your own inference responses: the self-hosted answers are scored by the same judge model and metrics as the Bedrock candidate, giving a like-for-like comparison without moving the model.
+X: A=Custom Model Import first: it adds an import project the board wanted to avoid, and only works for supported architectures; Bedrock can already judge responses produced elsewhere.
+C=Model Monitor versus latency: Model Monitor tracks production metrics against ground truth over time, and latency is not a quality score, so the two numbers are not comparable.
+D=Clarify versus programmatic score: a bias report and an accuracy score measure different things with different methods, so the board would not get the same judge and metrics for both.
+T: To compare a model outside Bedrock with Bedrock models, add its responses to the dataset and run the same LLM-as-a-judge evaluation (bring your own inference responses).
+V: Amazon Bedrock, Amazon SageMaker AI
+
+@ SAP-C03 D5 T5.3 applied use-case
+S: A trading-support chatbot calls three different Amazon Bedrock models depending on the request type. The SLO says that 90 percent of calls to each model must complete within 4 seconds, and the on-call team wants to be paged when any one model breaks it. A dashboard on the average of `InvocationLatency` looks healthy while users complain. What should the solutions architect configure?
+A: CloudWatch alarms on the p90 statistic of `InvocationLatency` for each `ModelId` dimension, with a 4-second threshold and an SNS topic that pages the on-call team
+B: One CloudWatch alarm on the average of `InvocationLatency` across all models, with the threshold lowered to 2 seconds so that it fires before most users notice the delay
+C: An alarm on the `Invocations` metric of each model, because rising request counts are the main reason for slow responses and fire before the latency degrades for users
+D: AWS CloudTrail data events for each model, with an EventBridge rule that pages the team whenever a single invocation event shows a response time of over 4 seconds
+K: A
+G: ## Bedrock runtime metrics
+Amazon Bedrock publishes metrics to CloudWatch in the `AWS/Bedrock` namespace, with a `ModelId` dimension so each model (or inference profile) can be watched separately. Useful ones:
+- `InvocationLatency`: time from request to complete response.
+- `Invocations`, `InvocationThrottles`, `InvocationClientErrors`, `InvocationServerErrors`.
+- `InputTokenCount`, `OutputTokenCount`.
+## Why averages hide pain
+An average mixes many fast calls with a few slow ones. If 85 percent of calls take 1 second and 15 percent take 9 seconds, the average is 2.2 seconds, which looks fine, but 15 percent of users wait 9 seconds and the "90 percent within 4 seconds" SLO is broken.
+A **percentile statistic** such as `p90` answers the SLO question directly: "90 percent of calls were at or below this value."
+## Per-model alarms
+Different models have different speeds. An alarm per `ModelId` shows which model broke the SLO; an aggregate hides a slow model behind faster ones.
+W: p90 alarm per model: the p90 statistic matches the SLO definition exactly, and one alarm per `ModelId` pages the team for the specific model that breaks it.
+X: B=Lower average across models: an average still hides a slow tail, and mixing three models lets a fast model mask a slow one, so the alarm is both noisy and blind to the real breach.
+C=Invocations count: request volume can rise without any slowdown and latency can degrade without more traffic, so a count is not a latency SLO indicator.
+D=CloudTrail data events: CloudTrail records API activity, not a per-call response time to alarm on, and paging on single events would be noisy compared with a percentile over a period.
+T: Alarm on percentile latency (for example p90 of `InvocationLatency`) per `ModelId` to enforce generative AI latency SLOs; averages hide slow tails.
+V: Amazon Bedrock, Amazon CloudWatch, Amazon SNS
+
+@ SAP-C03 D5 T5.3 advanced use-case
+S: A payments company serves a fraud model from a SageMaker AI real-time endpoint with data capture enabled. Confirmed fraud labels arrive about 30 days after each transaction. The risk team wants an early warning when incoming transaction features shift away from the training data, and later a measured accuracy figure when labels exist. Which TWO actions meet these requirements? (Select TWO)
+A: Create a data quality monitoring schedule from a baseline of the training data, so captured requests are compared with its statistics and violations reach CloudWatch
+B: Create a model quality monitoring schedule that merges the captured predictions with the ground-truth labels uploaded to Amazon S3 once the fraud outcomes are confirmed
+C: Create a CloudWatch alarm on the endpoint's `ModelLatency` metric, because feature drift makes the model run more slowly and so latency rises before accuracy falls
+D: Enable Amazon Bedrock model invocation logging for the endpoint and run a Logs Insights query each week that compares the latest inputs with the training dataset
+E: Run SageMaker Clarify bias analysis once on the training data before deployment, because a balanced training set prevents feature drift from occurring in production
+K: A,B
+G: ## Two kinds of drift
+- **Data drift**: the inputs change (new merchant types, different amounts). It can be detected immediately because it needs only the inputs.
+- **Model quality drift**: the predictions get worse. Measuring it needs the true outcome (ground truth), which here arrives about 30 days later.
+## SageMaker AI Model Monitor
+Model Monitor works on data captured from an endpoint (requests and responses written to S3) and runs on a schedule:
+- **Data quality monitor**: a baseline job computes statistics and constraints (`statistics.json`, `constraints.json`) from the training data; each run compares captured inputs against them and reports violations, such as a shifted distribution or missing values.
+- **Model quality monitor**: merges captured predictions with **ground-truth labels** you upload to S3 and computes metrics such as accuracy, precision, recall or AUC against a baseline.
+- Bias drift and feature attribution drift monitors use SageMaker Clarify.
+All monitors can publish CloudWatch metrics, so alarms and EventBridge rules can start an investigation or a retraining pipeline.
+W: A=Data quality monitor: it compares live inputs with the training baseline on every run, giving the early warning without waiting for labels.
+B=Model quality monitor with delayed labels: once the confirmed outcomes are uploaded, it joins them to the captured predictions and reports the real accuracy against the baseline.
+X: C=ModelLatency alarm: latency measures how long the container takes to respond; a fraud model gets no slower when transaction patterns shift, so drift would go unnoticed.
+D=Bedrock invocation logging: it records Bedrock model calls and has nothing to do with a SageMaker AI endpoint; a hand-written weekly query would also replace the built-in statistical comparison.
+E=One-time Clarify run: a pre-deployment bias check says nothing about how production data changes later; drift has to be monitored continuously.
+T: Watch inputs now with a Model Monitor data quality schedule and accuracy later with a model quality schedule that merges delayed ground-truth labels.
+V: Amazon SageMaker AI, Amazon CloudWatch
+
+@ SAP-C03 D5 T5.3 advanced use-case
+S: A platform team hosts twelve AI agents built with different open-source frameworks on Amazon Bedrock AgentCore Runtime. Leadership wants one place to compare agents by session latency, token usage and tool-call error rate, and to drill into a slow session to see which model or tool call took the time. Which approach meets these requirements with the least custom code?
+A: Enable AWS CloudTrail data events for AgentCore in each account and build an Amazon Athena view that reconstructs every agent session from the API calls made by the agents
+B: Ask each agent team to write latency and token figures to a shared DynamoDB table at the end of each session, and build a BI dashboard on a nightly export of that table
+C: Enable CloudWatch Transaction Search, instrument each agent with AWS Distro for OpenTelemetry, and use AgentCore Observability in CloudWatch to compare agents and inspect traces
+D: Attach SageMaker AI Model Monitor schedules to the agents' runtime endpoints, so that latency, token and tool errors are reported as monitoring violations per agent
+K: C
+G: ## What agent monitoring needs
+Model metrics alone do not describe an agent. One agent request is a chain of model calls and tool calls, and the questions operators ask are about the chain:
+- How long do sessions take end to end, and which step is slow?
+- How many tokens does each agent spend per session?
+- How often do tool calls fail or time out?
+## Amazon Bedrock AgentCore Observability
+AgentCore Observability is built on Amazon CloudWatch and OpenTelemetry:
+- Agents on AgentCore Runtime emit runtime metrics automatically.
+- For traces and spans, enable **CloudWatch Transaction Search** and instrument the agents with **AWS Distro for OpenTelemetry (ADOT)**; common agent frameworks emit OpenTelemetry spans for model and tool calls, so the framework choice does not matter.
+- The CloudWatch generative AI observability pages show agents, sessions, traces and spans with latency, token usage and error data, so you can compare agents and drill from a slow session to the span that caused it.
+CloudWatch alarms can then watch these metrics like any others.
+W: Transaction Search, ADOT and AgentCore Observability: standard instrumentation gives every agent the same metrics and traces in CloudWatch, providing the cross-agent comparison and the drill-down to individual model and tool spans without custom pipelines.
+X: A=CloudTrail and Athena: CloudTrail records management API activity, not the internal steps, timings and token counts of each agent session, so sessions cannot be rebuilt from it.
+B=Custom DynamoDB reporting: twelve teams writing their own figures creates inconsistent data and custom code everywhere, and end-of-session totals cannot show which step inside a session was slow.
+D=Model Monitor on agents: Model Monitor analyzes data captured from SageMaker AI endpoints against a baseline; it does not monitor AgentCore Runtime agents or their tool calls.
+T: Monitor agent performance with AgentCore Observability: Transaction Search plus OpenTelemetry (ADOT) instrumentation gives per-agent metrics and step-level traces in CloudWatch.
+V: Amazon Bedrock AgentCore, Amazon CloudWatch, AWS Distro for OpenTelemetry
+
+@ SAP-C03 D5 T5.3 applied troubleshooting
+S: A company enabled Amazon Bedrock model invocation logging in us-east-1 for its US applications. A new application in eu-central-1 calls the EU geographic cross-Region inference profile. Auditors find no log records for the new application, although its requests succeed and some are served in other EU Regions. What should the solutions architect do?
+A: Enable model invocation logging in every EU Region listed in the profile, because each record is written in the Region that actually served the request and not where it started
+B: Add the EU profile's ARN to the us-east-1 logging configuration, so that requests from every Region that use this inference profile are written to the existing US log group
+C: Turn on AWS CloudTrail data events for Bedrock in eu-central-1, because invocation logging does not record requests that are made through cross-Region inference profiles
+D: Enable model invocation logging in eu-central-1 with an S3 bucket or log group destination there, because logging is a per-Region setting and records stay in the source Region
+K: D
+G: ## Model invocation logging is Regional
+Amazon Bedrock model invocation logging is an account setting **per Region**. Enabling it in us-east-1 records calls made to the us-east-1 Bedrock endpoint only. Each Region where applications call Bedrock needs its own configuration with its own destination (S3, CloudWatch Logs, or both).
+## Cross-Region inference and logs
+With a cross-Region inference profile the request is made in the **source Region** (here eu-central-1). Even when Bedrock serves it in another EU Region, the log records are written in the source Region, together with the other configured data at rest. So the fix is one configuration in eu-central-1; the destination Regions need nothing.
+## Checklist when logs are missing
+- Is logging enabled in the Region the application calls?
+- Can Bedrock write to the destination (bucket policy for S3, IAM role for CloudWatch Logs)?
+- Are the right data types selected (text, image, embeddings)?
+W: Logging in the source Region: the new application calls eu-central-1, where logging was never enabled; turning it on there captures all its requests, including those served in other EU Regions.
+X: A=Logging in every destination Region: records are written in the source Region, so enabling logging in the destination Regions does not capture these requests and adds needless configuration.
+B=Profile ARN in us-east-1: the logging configuration is not a list of profiles or models; it covers calls made in its own Region, and sending EU application logs to the US could also break residency rules.
+C=CloudTrail data events: invocation logging does record requests made through inference profiles; CloudTrail would show API activity, not the prompt and response content that auditors expect.
+T: Bedrock invocation logging must be enabled in each Region where applications call Bedrock; with cross-Region inference the records stay in the source Region.
+V: Amazon Bedrock, Amazon CloudWatch, Amazon S3
+
+@ SAP-C03 D5 T5.3 advanced troubleshooting
+S: An image-tagging model runs on a SageMaker AI Serverless Inference endpoint. Requests arrive in bursts with quiet periods of 20-40 minutes between them. The p99 end-to-end latency is often several seconds above the SLO for the first requests after a quiet period, while the endpoint's `ModelLatency` stays steady and `ModelSetupTime` shows values at those moments. What should the solutions architect do?
+A: Increase the endpoint's memory size to the maximum value, because the setup time is the model running slowly on too little memory and more memory lowers `ModelLatency` for every request
+B: Configure Provisioned Concurrency for the serverless endpoint, sized for the first burst, so that initialized capacity is ready when requests resume after a quiet period
+C: Lower the maximum concurrency setting of the endpoint, so that fewer containers are started at once and each request is sent to a container that is already warm
+D: Enable data capture and a Model Monitor data quality schedule, because the delays come from unusual input images that the model takes longer to set up for processing
+K: B
+G: ## Reading SageMaker AI endpoint latency
+SageMaker AI publishes endpoint metrics to CloudWatch that split where time goes:
+- `ModelLatency`: time the model container takes to process the request.
+- `OverheadLatency`: time SageMaker adds around the container (routing, auth, payload handling).
+- For **Serverless Inference**, `ModelSetupTime`: time to launch new compute and load the model when no warm capacity is available, which is a **cold start**.
+If end-to-end latency spikes while `ModelLatency` is flat and `ModelSetupTime` has values at the same moments, the delay is cold starts, not slow inference.
+## Fixing cold starts on serverless endpoints
+Serverless endpoints scale down when idle. **Provisioned Concurrency** keeps a chosen number of instances initialized and ready, so requests after a quiet period are served without setup time. You pay for the provisioned capacity while it is configured, and it can be scheduled with Application Auto Scaling around known busy hours. If traffic becomes steady, a real-time endpoint may be cheaper.
+W: Provisioned Concurrency: the metrics prove the extra time is cold-start setup after idle periods, and keeping initialized capacity ready removes that setup time for the first burst while the endpoint stays serverless.
+X: A=Maximum memory: memory affects processing speed, which `ModelLatency` shows is already fine; it does not stop the endpoint from scaling down and paying setup time after quiet periods.
+C=Lower maximum concurrency: fewer allowed concurrent invocations cause throttling during bursts and do nothing to keep capacity warm through a 30-minute quiet period.
+D=Model Monitor data quality: unusual inputs would show up in `ModelLatency`, not in `ModelSetupTime`; Model Monitor detects drift, not cold starts.
+T: On SageMaker AI Serverless Inference, latency spikes with steady `ModelLatency` and non-zero `ModelSetupTime` mean cold starts; fix them with Provisioned Concurrency.
+V: Amazon SageMaker AI, Amazon CloudWatch
