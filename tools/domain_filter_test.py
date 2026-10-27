@@ -73,6 +73,19 @@ with sync_playwright() as p:
     pg.click(".lseg[data-level='foundational']"); pg.click(".chip[data-code='AIF-C01']"); pg.wait_for_selector(".qcard")
     check("switching exam clears filter", "d=" not in pg.evaluate("location.hash"))
 
+    # a version that reorganised its tasks: shared questions take their task from exam-shared-tasks.json
+    tmap = jload("data", "exam-shared-tasks.json")
+    NEW = next((e for e in {e for v in tmap.values() for e in v}), None)
+    if NEW:
+        nqs = jload("data", f"{NEW}.json")
+        def ntask(q): return q["taskId"] if q["examCodes"][0] == NEW else tmap.get(q["id"], {}).get(NEW)
+        def ndom(q): return q["domainCode"] if q["examCodes"][0] == NEW else dmap.get(q["id"], {}).get(NEW)
+        d1 = collections.Counter(ntask(q) for q in nqs if ndom(q) == "D1")
+        pg.goto(BASE + f"?x=5#exam={NEW}&d=D1"); pg.wait_for_selector(".qcard"); pg.wait_for_selector("#taskRow .fchip[data-t]")
+        tchips = {t: int(c) for t, c in pg.eval_on_selector_all("#taskRow .fchip[data-t]", "els => els.map(e => [e.dataset.t, (e.querySelector('.cnt') || {}).textContent])") if t}
+        check(f"{NEW}: task chips count shared questions under their new task", tchips == {t: n for t, n in d1.items() if t}, (tchips, dict(d1)))
+        check(f"{NEW}: every D1 question has a task", None not in d1, d1.get(None))
+
     # accuracy: five wrong answers in D4 flag the domain
     pg.goto(BASE + f"?x=4#exam={EXAM}&d=D4"); pg.wait_for_selector(".qcard")
     pg.click("#sequentialBtn"); pg.wait_for_selector(".qcard")

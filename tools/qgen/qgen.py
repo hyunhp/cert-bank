@@ -10,6 +10,10 @@ Sharing rules (tools/qgen/shares.json): {"MLA-C02": {"from": "MLA-C01", "exclude
 question of the source exam (except the listed ids) also a question of the target exam, in the same domain code
 (the two exam versions keep the same domains). `share` applies a rule to the published pool; ingest applies all
 rules too, so re-ingesting a source batch never drops the target exam.
+When the new version reorganises its tasks, the rule lists the shared questions with their new task instead:
+{"SAP-C03": {"from": "SAP-C02", "tasks": {"Q001023": "T1.4", ...}, "exclude": [...]}}. Only listed questions are
+shared; the domain comes from the task (T1.4 -> D1) and the task goes to data/exam-shared-tasks.json
+({qid: {exam: task}}), which the site and `plan` read for shared questions.
 
 Batch source format (one block per question, blocks start with '@'):
     @ AIB-C01 D2 T2.2 advanced use-case [+SOA-C03:D3 ...]
@@ -94,13 +98,39 @@ def share_rules():
     return json.loads(SHARES_PATH.read_text(encoding="utf-8")) if SHARES_PATH.exists() else {}
 
 
-def apply_shares(qid, exam_codes, shared, dom_in, rules):
-    """Add the target exams of matching sharing rules (same domain code as in the source exam)."""
+TASKMAP_PATH = DATA / "exam-shared-tasks.json"
+def task_map():
+    return json.loads(TASKMAP_PATH.read_text(encoding="utf-8")) if TASKMAP_PATH.exists() else {}
+
+
+def save_task_map(tmap):
+    tmap = {k: v for k, v in sorted(tmap.items()) if v}
+    TASKMAP_PATH.write_text(json.dumps(tmap, indent=1, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+
+
+def apply_shares(qid, exam_codes, shared, dom_in, rules, tmap):
+    """Add the target exams of matching sharing rules: same domain code as in the source exam, or, for a rule
+    with a task list, the listed task (and its domain) of that question."""
     for dst, r in rules.items():
         src = r["from"]
-        if src in exam_codes and dst not in exam_codes and qid not in set(r.get("exclude", [])):
+        if src not in exam_codes or qid in set(r.get("exclude", [])):
+            continue
+        if "tasks" in r:                  # the rule decides domain and task, even if the block names dst itself
+            task = r["tasks"].get(qid)
+            if not task:
+                continue
+            if dst not in exam_codes:
+                exam_codes.append(dst)
+            shared[dst] = "D" + task[1:].split(".")[0]
+            tmap.setdefault(qid, {})[dst] = task
+        elif dst not in exam_codes:
             exam_codes.append(dst)
             shared[dst] = dom_in(src)
+
+
+def task_of(q, exam, tmap):
+    """Task id of a question in an exam: its own task, or the task a sharing rule gave it there."""
+    return q.get("taskId") if q["examCodes"][0] == exam else tmap.get(q["id"], {}).get(exam)
 
 
 def domain_of(q, exam, dmap):
@@ -121,7 +151,8 @@ def plan(code, quiet=False):
     tgt = target(code)
     by_dom = collections.Counter(domain_of(q, code, dmap) for q in qs)
     same_tasks = {code, SPECS[code].get("tasksFrom")}   # a newer version may reuse the older version's task ids
-    by_task = collections.Counter(q.get("taskId") for q in qs if q["examCodes"][0] in same_tasks)
+    tmap = task_map()
+    by_task = collections.Counter(q.get("taskId") if q["examCodes"][0] in same_tasks else task_of(q, code, tmap) for q in qs)
     multi = sum(1 for q in qs if len(q["correctKeys"]) > 1)
     rows = []
     for d in spec["domains"]:
@@ -527,6 +558,7 @@ def ingest(items, state):
     files = {e: load_exam(e) for e in EXAMS}
     dmap = domain_map()
     rules = share_rules()
+    tmap = task_map()
     # current answer-position counts per exam (for balancing)
     pos = {e: collections.Counter(k for q in files[e] for k in q["correctKeys"]) for e in EXAMS}
     added = updated = 0
@@ -562,7 +594,8 @@ def ingest(items, state):
             next_num += 1
         exam_codes = [i["exam"]] + sorted(i["shared"])
         shared = dict(i["shared"])
-        apply_shares(qid, exam_codes, shared, lambda src: i["dom"] if src == i["exam"] else i["shared"][src], rules)
+        tmap.pop(qid, None)
+        apply_shares(qid, exam_codes, shared, lambda src: i["dom"] if src == i["exam"] else i["shared"][src], rules, tmap)
         q = {
             "stem": i["stem"], "choices": choices, "correctKeys": correct,
             "explanation": prev["explanation"] if keep_rich else explanation(i, layout), "difficulty": i["diff"], "scenarioType": i["scen"],
@@ -588,6 +621,7 @@ def ingest(items, state):
         files[e].sort(key=lambda x: x["id"])
         save_exam(e, files[e])
     (DATA / "exam-domains.json").write_text(json.dumps(dict(sorted(dmap.items())), indent=1) + "\n", encoding="utf-8", newline="\n")
+    save_task_map(tmap)
     STATE.write_text(json.dumps(state, indent=1, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     print(f"ingested: {added} new, {updated} updated")
     # keep the site's download index (counts + cache-busting hashes) in step with data/
@@ -601,15 +635,24 @@ def share(dst):
     rule = share_rules().get(dst)
     if not rule:
         sys.exit(f"no sharing rule for {dst} in {SHARES_PATH.relative_to(ROOT)}")
-    src, exclude = rule["from"], set(rule.get("exclude", []))
+    src, exclude, tasks = rule["from"], set(rule.get("exclude", [])), rule.get("tasks")
     files = {e: load_exam(e) for e in EXAMS}
     dmap = domain_map()
+    tmap = task_map()
     have = {q["id"] for q in files[dst]}
+    if tasks:
+        missing = sorted(set(tasks) - {q["id"] for q in files[src]})
+        if missing:
+            sys.exit(f"{dst} task list names questions that are not in {src}: {missing[:10]}")
     added = 0
     for q in files[src]:
-        if q["id"] in exclude or q["id"] in have:
+        if q["id"] in exclude or q["id"] in have or (tasks is not None and q["id"] not in tasks):
             continue
-        dom = domain_of(q, src, dmap)
+        if tasks is not None:
+            dom = "D" + tasks[q["id"]][1:].split(".")[0]
+            tmap.setdefault(q["id"], {})[dst] = tasks[q["id"]]
+        else:
+            dom = domain_of(q, src, dmap)
         for e in EXAMS:                      # keep examCodes identical in every file that holds the question
             for x in files[e]:
                 if x["id"] == q["id"] and dst not in x["examCodes"]:
@@ -621,6 +664,7 @@ def share(dst):
         files[e].sort(key=lambda x: x["id"])
         save_exam(e, files[e])
     (DATA / "exam-domains.json").write_text(json.dumps(dict(sorted(dmap.items())), indent=1) + "\n", encoding="utf-8", newline="\n")
+    save_task_map(tmap)
     print(f"shared: {added} questions of {src} now also in {dst} ({len(exclude)} excluded)")
     sys.path.insert(0, str(ROOT / "tools"))
     import build_data_index

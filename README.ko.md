@@ -9,7 +9,7 @@ Amazon Web Services, Palantir Technologies와 관련 없는 비공식 사이트�
 
 | | 내용 | 링크 |
 |---|---|---|
-| **문제은행** | 상세 해설이 달린 객관식 문항 5,800여 개 | [열기](https://hyunhp.github.io/cert-bank/) |
+| **문제은행** | 상세 해설이 달린 객관식 문항 6,300여 개 | [열기](https://hyunhp.github.io/cert-bank/) |
 | **학습 가이드** | 시험별 Day 단위 학습 계획: 핵심 개념, 시험 포인트, 확인 문제 2개, 한 줄 요약 | [열기](https://hyunhp.github.io/cert-bank/study.html) |
 
 ## 사용 방법
@@ -41,6 +41,7 @@ Amazon Web Services, Palantir Technologies와 관련 없는 비공식 사이트�
 | | | MLA-C01 Machine Learning Engineer | 395 | 28 |
 | | | MLA-C02 Machine Learning Engineer (new, GA 2027-01-14) | 469 | – |
 | | Professional | SAP-C02 Solutions Architect | 396 | 35 |
+| | | SAP-C03 Solutions Architect (new, from 2026-11-17) | 508 | – |
 | | | DOP-C02 DevOps Engineer | 395 | 35 |
 | | | AIP-C01 Generative AI Developer | 405 | 35 |
 | | Specialty | ANS-C01 Advanced Networking | 395 | 28 |

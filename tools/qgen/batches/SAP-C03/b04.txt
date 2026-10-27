@@ -1,0 +1,435 @@
+# SAP-C03 batch 04: Domain 1 new skills (1.1.3, 1.1.5, 1.1.10, 1.1.12, 1.3.3, 1.3.5, 1.5.1, 1.5.2, 1.5.7)
+
+@ SAP-C03 D1 T1.1 advanced use-case
+S: A retailer captures website clickstream events (about 40,000 JSON records per second) in an Amazon Kinesis Data Streams stream that other consumers already read. Analysts query the history with Amazon Athena and complain that queries scan terabytes of JSON and cost too much. The company wants the stored data in a columnar format, partitioned by event date and country, available to Athena within 15 minutes, and wants no servers or custom code to manage. Which solution meets these requirements?
+A: Add an Amazon Data Firehose stream that reads from the Kinesis stream, converts records to Parquet by using a Glue Data Catalog table schema, and uses dynamic partitioning
+B: Add a Lambda consumer on the Kinesis stream that writes each batch as a JSON object to S3 under date and country prefixes, and run a Glue crawler every 15 minutes
+C: Keep the raw JSON in S3 and run an Athena CTAS query every 15 minutes that rewrites the full history into Parquet partitioned by event date and country
+D: Launch a long-running Amazon EMR cluster with Spark Structured Streaming that reads the stream and writes Parquet partitions to S3 for Athena queries
+K: A
+G: ## Why the storage format drives Athena cost
+Athena charges by the amount of data scanned. Two things cut that amount sharply:
+- **Columnar formats** such as Apache Parquet or ORC store each column separately and compress well, so a query that reads 3 of 60 fields reads only those 3 columns.
+- **Partitioning** puts data in prefixes such as `s3://lake/clicks/dt=2026-10-27/country=DE/`. A query with `WHERE dt = '2026-10-27'` skips every other prefix.
+## Amazon Data Firehose as the serverless loader
+Firehose can use a Kinesis data stream as its source, so it becomes one more consumer next to the existing ones. It buffers records by size or time (up to 900 seconds) and can:
+- **Convert record format**: JSON in, Parquet or ORC out, using the schema of a table in the AWS Glue Data Catalog.
+- **Partition dynamically**: extract keys such as `event_date` and `country` from each record and write them into the S3 prefix.
+Nothing is provisioned or patched; Firehose scales with the stream.
+W: Firehose with format conversion and dynamic partitioning: it reads the existing stream as another consumer, writes compressed Parquet into date and country prefixes within the buffer interval, and needs no code or servers, so Athena scans far less data.
+X: B=Lambda writing JSON with a crawler: the data stays in JSON, so Athena still scans whole records, and the team now owns consumer code, error handling and many small files that slow queries down.
+C=Repeated CTAS over the full history: each run rescans and rewrites all the raw JSON, so cost grows with every day of history; it reduces query cost only by spending more on the conversion itself.
+D=Long-running EMR streaming cluster: it can produce the same Parquet layout, but the company must size, patch and pay for a cluster around the clock, which breaks the no-servers requirement.
+T: To land a Kinesis stream in S3 as partitioned Parquet without code, add a Firehose consumer with record format conversion (Glue schema) and dynamic partitioning.
+V: Amazon Kinesis Data Streams, Amazon Data Firehose, AWS Glue, Amazon Athena
+
+@ SAP-C03 D1 T1.1 advanced troubleshooting
+S: An AWS Lambda function processes an Amazon Kinesis Data Streams stream through an event source mapping with default settings. Order must be preserved per partition key (customer ID). Twice this month a single malformed record caused the function to fail repeatedly, and its shard stopped making progress until the record expired. During daily peaks the iterator age also climbs for an hour, although each invocation takes only 2 seconds and the stream has enough shards for the write rate. Which TWO changes fix both problems? (Select TWO)
+A: Set BisectBatchOnFunctionError, a low MaximumRetryAttempts, and an on-failure destination so failing records are isolated, recorded, and skipped
+B: Raise ParallelizationFactor on the event source mapping so several batches from each shard are processed concurrently while keeping order per partition key
+C: Raise the reserved concurrency of the function so that Lambda can run more invocations against each shard at the same time during daily peaks
+D: Increase the stream retention period to 7 days so that a blocked shard keeps its records until the operations team can fix the malformed record
+E: Register the function as an enhanced fan-out consumer so it receives a dedicated read throughput per shard that removes processing delays at peak
+K: A,B
+G: ## How Lambda reads a Kinesis shard
+An event source mapping polls each shard and, by default, runs **one batch per shard at a time**. Records of a shard are processed in order, and a failing batch is retried until it succeeds or the records expire from the stream. That is why one bad record can block a whole shard: everything behind it waits.
+## Settings that control failure handling
+- `BisectBatchOnFunctionError` splits a failing batch in two and retries each half, narrowing down to the bad record.
+- `MaximumRetryAttempts` and `MaximumRecordAgeInSeconds` bound how long Lambda keeps retrying.
+- An **on-failure destination** (for example an SQS queue or SNS topic) receives details of the discarded records so they can be inspected and replayed.
+## Settings that control throughput
+`ParallelizationFactor` (1 to 10) lets Lambda process up to 10 batches from one shard at the same time. Lambda still sends all records with the same partition key to the same batch sequence, so ordering per key is kept. Example: 20 shards with a factor of 5 allow up to 100 concurrent invocations.
+W: A=Bisect, bounded retries and on-failure destination: the poison record is isolated and sent to the destination after a few attempts, so the shard moves on instead of stalling until the record ages out.
+B=ParallelizationFactor: the bottleneck is one batch per shard, not the stream or the function duration; processing several batches per shard in parallel raises throughput while keeping per-customer order.
+X: C=More reserved concurrency: concurrency is capped by the event source mapping at one batch per shard by default, so extra reserved concurrency is never used and iterator age does not improve.
+D=Longer retention: records would stay in the stream longer, which only extends how long a poison record blocks its shard; it fixes neither the stall nor the lag.
+E=Enhanced fan-out: it gives the consumer its own 2 MB per second read pipe per shard and lower read latency, but the delay here comes from serial processing, and failures still block the shard.
+T: Kinesis plus Lambda: contain poison records with bisect, bounded retries and an on-failure destination; add throughput per shard with ParallelizationFactor, which keeps per-key order.
+V: AWS Lambda, Amazon Kinesis Data Streams, Amazon SQS
+
+@ SAP-C03 D1 T1.1 applied troubleshooting
+S: A logistics company stores IoT telemetry in S3 under prefixes such as device_type=X/year=2026/month=10/day=27/hour=14/. The Glue Data Catalog table now has more than 2 million partitions. Athena queries that filter on a single day spend most of their run time in query planning, and data written in the last hour is not visible until a scheduled Glue crawler finishes adding the new partitions. The company wants faster planning and immediate visibility with the least operational effort. What should a solutions architect do?
+A: Run MSCK REPAIR TABLE after every hourly upload so that Athena loads all new partitions into the Glue Data Catalog before analysts query
+B: Enable partition projection on the table and define the ranges and the S3 location template for the partition keys in the table properties
+C: Increase the Glue crawler frequency to every 5 minutes and enable incremental crawls that add only new folders to the existing table
+D: Create an Athena workgroup with a higher data scan limit and enable query result reuse so repeated queries return cached results faster
+K: B
+G: ## How Athena finds partitions
+For a partitioned table, Athena normally asks the AWS Glue Data Catalog for the partitions that match the query filter. With millions of partitions, that lookup alone can dominate planning time. New partitions also have to be registered (by a crawler, `ALTER TABLE ADD PARTITION` or `MSCK REPAIR TABLE`) before Athena sees them.
+## Partition projection
+With partition projection, Athena computes partition values and locations from rules in the table properties instead of reading them from the catalog:
+- `projection.enabled = true`
+- a type and range per key, for example `projection.day.type = integer`, `projection.day.range = 1,31`, or an `enum` list for `device_type`
+- `storage.location.template = s3://telemetry/device_type=${device_type}/year=${year}/...`
+Because the partitions are calculated, there is no catalog lookup for them and nothing to register: data under a new prefix is queryable as soon as it is written.
+W: Partition projection: Athena derives the matching prefixes from the query filter and the projection rules, which removes the large catalog lookup and makes new hourly prefixes visible immediately, with no crawler or repair job to run.
+X: A=MSCK REPAIR after each upload: it scans the whole table location and gets slower as prefixes grow, and the catalog still holds millions of partitions that Athena must look up during planning.
+C=Faster incremental crawls: new data still waits up to the crawler interval, crawler runs cost more, and the partition count that slows planning keeps growing.
+D=Workgroup limits and result reuse: scan limits only cap cost, and result reuse helps only identical repeated queries; neither changes how partitions are found or when new data appears.
+T: Athena tables with huge or predictable partition sets: use partition projection so partitions are calculated, not looked up or registered.
+V: Amazon Athena, AWS Glue, Amazon S3
+
+@ SAP-C03 D1 T1.1 advanced use-case
+S: A company has 150 accounts in AWS Organizations across us-east-1, eu-west-1 and ap-southeast-2, and adds new accounts every month. Each workload publishes custom order events to the default event bus in its own account and Region. The integration team needs every event whose detail-type is OrderPlaced delivered to a single custom event bus in a central account in us-east-1, including events from accounts created later, without running any forwarding code. Which TWO actions should a solutions architect take? (Select TWO)
+A: Add a resource-based policy on the central event bus that allows events:PutEvents from any principal whose aws:PrincipalOrgID matches the organization
+B: Use a service-managed CloudFormation StackSet with automatic deployment to create a rule in each account and Region that targets the central bus ARN
+C: Create an EventBridge global endpoint in each workload account that names the central account's event bus in us-east-1 as its primary event bus
+D: Share the central event bus with the organization through AWS Resource Access Manager so that member accounts can publish to it as a local bus
+E: Create an archive on each default event bus and schedule a daily replay that sends the archived OrderPlaced events to the central bus in us-east-1
+K: A,B
+G: ## Moving events between buses
+In Amazon EventBridge, a **rule** on one event bus can use another event bus as its target, including a bus in a different account and a different Region. The event is delivered as is, and rules on the receiving bus process it like any other event. This is the native forwarding mechanism; no Lambda function is needed.
+## Two permissions are involved
+- The **receiving bus** must allow the sender. Its resource-based policy can allow `events:PutEvents` for a list of accounts or, more simply, for the whole organization with the `aws:PrincipalOrgID` condition, so new accounts are covered automatically.
+- The **sending rule** uses an IAM role that is allowed to call `events:PutEvents` on the target bus ARN.
+## Deploying the rule everywhere
+A service-managed CloudFormation StackSet targeted at the organization (or OUs) with automatic deployment creates the rule and role in every listed Region of every account, including accounts that join later.
+W: A=Organization-wide bus policy: one statement with aws:PrincipalOrgID authorizes every current and future member account to put events on the central bus.
+B=StackSet-deployed forwarding rules: each account and Region gets a rule that matches detail-type OrderPlaced and targets the central bus ARN directly, and automatic deployment covers new accounts with no forwarding code.
+X: C=Global endpoint to a central bus: global endpoints provide Regional failover between two event buses of the same account for the publisher; they are not a way to aggregate many accounts into one central bus.
+D=RAM share of the event bus: event buses are not shared through AWS Resource Access Manager; cross-account delivery is authorized by the bus resource policy.
+E=Archive and daily replay: replay sends archived events back to the bus they were archived from, not to another account's bus, and a daily batch is not continuous delivery.
+T: Cross-account and cross-Region event aggregation: allow the organization on the central bus policy and deploy rules that target that bus ARN from every account and Region with StackSets.
+V: Amazon EventBridge, AWS CloudFormation, AWS Organizations
+
+@ SAP-C03 D1 T1.1 advanced tradeoff
+S: A payments platform publishes events from its producers to a custom EventBridge event bus in us-east-1, where rules invoke consumers. A Regional disruption last year stopped event ingestion for 40 minutes. The company now runs consumers in both us-east-1 and us-west-2 and wants producers to keep publishing during a Regional event-ingestion problem, with automatic failover, without changing which endpoint producers call during an incident and without building custom health-check logic. Which solution best meets these requirements?
+A: Add a rule on the us-east-1 bus that forwards every event to a custom bus in us-west-2, and run identical consumer rules on both event buses
+B: Create a Route 53 failover record that points to the two Regional EventBridge service endpoints and configure the producer SDKs to use that DNS name
+C: Create an EventBridge global endpoint with the us-east-1 bus as primary and a us-west-2 bus as secondary, a Route 53 health check, and event replication
+D: Archive all events on the us-east-1 bus and, after a failure, replay the archive into a us-west-2 bus while producers are reconfigured to publish there
+K: C
+G: ## EventBridge global endpoints
+A **global endpoint** sits in front of two custom event buses with the same name in two Regions, a primary and a secondary.
+- Producers call `PutEvents` with the endpoint ID instead of a Regional bus.
+- A **Route 53 health check** (usually driven by a CloudWatch alarm on the primary Region's EventBridge metrics) decides where events go. When it fails, EventBridge sends new events to the secondary Region automatically.
+- **Event replication** additionally copies events to the secondary bus while the primary is healthy, so consumers there stay warm and can be processed idempotently.
+Rules and targets must exist in both Regions; the endpoint only routes the ingestion.
+## Why forwarding alone is not failover
+A rule that forwards events from Region A to Region B helps only after events have reached Region A. If ingestion in Region A fails, producers that call Region A cannot publish at all.
+W: Global endpoint with health check and replication: producers keep one endpoint ID, and EventBridge shifts ingestion to us-west-2 when the health check fails, using a managed Route 53 health check rather than custom logic.
+X: A=Forwarding rule to us-west-2: events already in us-east-1 get copied, but when us-east-1 ingestion fails the producers still call us-east-1 and their PutEvents calls fail, so nothing reaches the forwarding rule.
+B=Route 53 record over service endpoints: AWS service endpoints rely on TLS certificates for their own hostnames, so a custom DNS name in front of them breaks the request, and the company would be maintaining the health logic itself.
+D=Archive and replay after failure: replay sends events back to the bus that archived them, it needs a person to act during the incident, and producers must be reconfigured, which the company wants to avoid.
+T: Publisher-side Regional failover for EventBridge is a global endpoint (two same-named buses, a Route 53 health check, optional replication); forwarding rules only copy events that already arrived.
+V: Amazon EventBridge, Amazon Route 53, Amazon CloudWatch
+
+@ SAP-C03 D1 T1.1 advanced use-case
+S: A company runs 35 HTTP microservices on an Amazon EKS cluster with pods on both EC2 nodes and AWS Fargate. Each service is currently exposed through its own Kubernetes Service of type LoadBalancer, which created 35 load balancers. The company wants to cut that cost by routing by host and path behind as few load balancers as possible, attach an AWS WAF web ACL, terminate TLS with ACM certificates, and keep each team managing its own Kubernetes manifests. Which solution meets these requirements?
+A: Install the AWS Load Balancer Controller and let each team create Ingress resources with the same group.name annotation, target-type ip, and a WAF ACL annotation
+B: Deploy an NGINX ingress controller behind a single Network Load Balancer and associate the WAF web ACL and the ACM certificates with that Network Load Balancer
+C: Keep the per-service load balancers but switch them to Network Load Balancers with TLS listeners, and protect each one with a security group allowing only proxy IPs
+D: Put an Amazon API Gateway HTTP API in front of the cluster with one route per service and a VPC link that points directly at each pod IP address
+K: A
+G: ## Ingress on Amazon EKS
+The **AWS Load Balancer Controller** watches Kubernetes objects and creates AWS load balancers for them:
+- A Service of type `LoadBalancer` gets a **Network Load Balancer**.
+- An `Ingress` gets an **Application Load Balancer** with host- and path-based rules.
+## Sharing one ALB across teams
+By default each Ingress gets its own ALB. The `alb.ingress.kubernetes.io/group.name` annotation creates an **IngressGroup**: all Ingresses with the same group name are merged into one ALB, while each team still owns its own Ingress manifest. Other annotations add features:
+- `alb.ingress.kubernetes.io/target-type: ip` registers pod IPs directly, which is required for pods on Fargate (there is no node to forward to).
+- `alb.ingress.kubernetes.io/wafv2-acl-arn` associates a WAF web ACL, and ACM certificates are attached to the HTTPS listener.
+W: Load Balancer Controller with an IngressGroup: all teams' Ingresses merge into one ALB with host and path rules, target-type ip reaches pods on EC2 and Fargate alike, and the ALB supports both AWS WAF and ACM certificates.
+X: B=NGINX behind a Network Load Balancer: AWS WAF cannot be associated with a Network Load Balancer, so the web ACL requirement fails, and the company now operates the NGINX proxy fleet itself.
+C=Per-service Network Load Balancers: the number of load balancers and their cost stay the same, and NLBs do not support WAF or host and path routing.
+D=HTTP API with pod-IP integrations: pod IPs change on every reschedule, and HTTP API VPC links target load balancers or Cloud Map services, not individual pod addresses, so routes would break constantly.
+T: Many HTTP services on EKS behind one ALB with WAF: AWS Load Balancer Controller Ingresses sharing an IngressGroup, with target-type ip for Fargate pods.
+V: Amazon EKS, AWS Load Balancer Controller, Elastic Load Balancing, AWS WAF
+
+@ SAP-C03 D1 T1.1 applied comparison
+S: A company is moving an MQTT broker fleet for 2 million industrial sensors to EC2 instances in an Auto Scaling group. Sensors connect over TCP port 8883 with mutual TLS that the broker software itself must terminate, because the broker reads the client certificate. Customer firewalls allow outbound traffic only to a fixed list of IP addresses, connections stay open for days, and the brokers must see the sensors' source IP addresses. Which ingress option fits best?
+A: An Application Load Balancer with an HTTPS listener in mutual TLS verify mode, forwarding the client certificate to the brokers in an HTTP header
+B: An Amazon API Gateway WebSocket API with a VPC link integration that forwards each sensor message to the broker fleet through the private network
+C: A Gateway Load Balancer with GENEVE encapsulation that distributes sensor connections across the brokers registered as virtual appliance targets
+D: An internet-facing Network Load Balancer with an Elastic IP per Availability Zone and a TCP listener on port 8883 that passes TLS to the brokers
+K: D
+G: ## Layer 4 versus layer 7 ingress
+- A **Network Load Balancer (NLB)** works at layer 4. A TCP listener forwards the byte stream unchanged, so TLS (including client certificates) is negotiated end to end with the target. It supports long-lived connections (the TCP idle timeout is 350 seconds by default and configurable, and MQTT keep-alive packets keep a flow active), millions of requests per second, client source IP preservation (always on for instance targets), and one static IP per Availability Zone; internet-facing NLBs can use your own **Elastic IP addresses**.
+- An **Application Load Balancer (ALB)** works at layer 7 for HTTP, HTTPS and gRPC. It terminates TLS itself, and its IP addresses change over time, so it cannot be allowlisted by IP on its own.
+- A **Gateway Load Balancer** inserts third-party virtual appliances (firewalls, IDS) into a traffic path using GENEVE; it is not an application front door.
+## Example
+Sensor connects to `203.0.113.10:8883` (an Elastic IP on the NLB in one AZ), the TCP listener passes the TLS handshake to a broker, and the broker validates the client certificate.
+W: NLB with Elastic IPs and a TCP listener: it passes the TLS session untouched so the broker terminates mutual TLS, keeps long-lived connections, preserves source IPs, and gives fixed addresses for customer firewall rules.
+X: A=ALB with mutual TLS: the ALB, not the broker, would terminate TLS, it accepts only HTTP-based protocols rather than raw MQTT over TCP, and its IP addresses are not fixed for allowlisting.
+B=WebSocket API with VPC link: API Gateway speaks HTTP and WebSocket, not raw MQTT over TCP, it terminates TLS itself, and a WebSocket connection is limited to 2 hours, not days.
+C=Gateway Load Balancer: it is designed to insert inspection appliances transparently into routed traffic, not to accept client connections on a listener port for an application fleet.
+T: Raw TCP, end-to-end TLS, static IPs and source IP preservation point to a Network Load Balancer; HTTP routing and WAF point to an ALB.
+V: Elastic Load Balancing, Amazon EC2
+
+@ SAP-C03 D1 T1.1 advanced use-case
+S: A trading company is building a browser dashboard that must push order status changes to the specific trader who placed each order within one second. Order events are produced by backend services into an SQS queue. Traders connect from browsers that cannot accept inbound connections, about 30,000 traders are online at peak, and the company wants a serverless design with no servers that hold connections. Which design meets these requirements?
+A: Expose a REST API that browsers poll every second, with a Lambda function that reads pending updates for the caller from a DynamoDB table keyed by trader ID
+B: Use an API Gateway WebSocket API that stores connection IDs by trader in DynamoDB on $connect, and a Lambda consumer that posts updates via the @connections API
+C: Create one Amazon SNS topic per trader with an HTTPS subscription to each trader's browser, and publish each order update to the topic of its trader
+D: Run an Application Load Balancer with sticky sessions in front of a Lambda function that keeps WebSocket connections open and streams updates to each trader
+K: B
+G: ## How API Gateway WebSocket APIs work
+A WebSocket API keeps a persistent two-way connection between the client and API Gateway. API Gateway holds the connection; your backend stays stateless.
+- Route `$connect` runs when a client connects. A Lambda function can authenticate the user and store the **connection ID** with the user identity, for example in DynamoDB (`traderId -> connectionId`).
+- Route `$disconnect` runs when the connection closes (best effort), so the mapping can be cleaned up.
+- Any backend with IAM permission can send a message to one client by calling the **@connections** management API: `POST https://{api-id}.execute-api.{region}.amazonaws.com/{stage}/@connections/{connectionId}`. A `410 Gone` response means the client is no longer connected.
+## Example flow
+Order service writes to SQS, a Lambda function reads the event, looks up the trader's connection IDs in DynamoDB, and posts the update to each of them. The browser receives it within milliseconds without polling.
+W: WebSocket API with a connection table and @connections: API Gateway holds the 30,000 open connections, and a stateless Lambda consumer pushes each update to only the right trader within the latency target, with no servers.
+X: A=One-second polling: 30,000 browsers calling every second produce constant requests and cost even when nothing changes, and updates can still arrive up to a full polling interval late.
+C=SNS topic per trader with HTTPS subscriptions: SNS HTTPS subscriptions need a reachable, confirmed web endpoint, and browsers cannot accept inbound connections, so messages cannot be delivered.
+D=ALB with a WebSocket-holding Lambda: Lambda targets behind an ALB handle request and response invocations; a function cannot keep WebSocket connections open for clients, so the push channel does not exist.
+T: Server-to-client push to specific users without servers: API Gateway WebSocket API, a connection-ID store such as DynamoDB, and backend calls to the @connections API.
+V: Amazon API Gateway, AWS Lambda, Amazon DynamoDB, Amazon SQS
+
+@ SAP-C03 D1 T1.1 applied troubleshooting
+S: A live auction site uses an Amazon API Gateway WebSocket API to push bid updates to browsers. Users report two problems: some lose updates after sitting on a quiet auction page for a while, and everyone watching long auctions is disconnected at exactly the same session age even while bids are flowing. Server logs show no errors and the service quotas for connections are not reached. Which TWO changes should a solutions architect recommend? (Select TWO)
+A: Have the client send a small heartbeat message on a route at an interval shorter than the 10-minute idle timeout so quiet connections stay open
+B: Raise the API Gateway idle connection timeout setting on the WebSocket stage from 10 minutes to 8 hours in the stage settings for long auctions
+C: Add client logic that detects a closed connection and reconnects automatically, since connections end at the 2-hour maximum duration regardless of traffic
+D: Enable API Gateway stage caching with a long TTL so that browsers reconnecting after a drop receive the bids they missed from the cache
+E: Switch the WebSocket API to an edge-optimized endpoint type so CloudFront keeps connections alive past the API Gateway connection limits
+K: A,C
+G: ## WebSocket connection limits in API Gateway
+API Gateway WebSocket APIs have two fixed connection limits:
+- **Idle timeout: 10 minutes.** A connection with no messages in either direction for 10 minutes is closed.
+- **Maximum connection duration: 2 hours.** Every connection is closed after 2 hours, even when it is busy.
+These are not stage settings you can raise.
+## Designing around them
+- **Heartbeats**: the client sends a tiny message (for example `{"action":"ping"}` on a custom route) every few minutes, which resets the idle timer.
+- **Reconnect logic**: the client listens for the close event, reconnects with back-off, and asks the backend for the state it missed (for example, the latest bid from DynamoDB), because messages sent while disconnected are not queued.
+W: A=Client heartbeat: a message every few minutes counts as activity and prevents the 10-minute idle timeout on quiet auction pages.
+C=Automatic reconnect: the simultaneous drops happen at the 2-hour maximum connection duration, which cannot be raised, so clients must reconnect and resync their state.
+X: B=Raise the idle timeout: the 10-minute idle timeout and 2-hour duration are fixed limits of WebSocket APIs, and there is no stage setting that extends them to hours.
+D=Stage caching for missed bids: caching applies to REST API responses, not WebSocket messages, and a cache would not replay pushes that a disconnected client never received.
+E=Edge-optimized endpoint: WebSocket APIs are Regional, and moving traffic through CloudFront would not change the API Gateway idle and duration limits on the connection.
+T: API Gateway WebSocket connections close after 10 idle minutes and after 2 hours in any case: send heartbeats and build reconnect-and-resync into the client.
+V: Amazon API Gateway
+
+@ SAP-C03 D1 T1.3 advanced use-case
+S: An insurer has a core policy system on premises that exposes only a SOAP/XML web service reachable over AWS Direct Connect. New mobile and partner apps need a JSON REST API with request validation, per-partner API keys and throttling. The SOAP service cannot change and the company wants to avoid writing and running transformation code where configuration can do the job. Which solution meets these requirements?
+A: Create an API Gateway HTTP API with parameter mapping to rewrite JSON bodies into SOAP envelopes, and use a VPC link to reach the on-premises service
+B: Create an API Gateway REST API with non-proxy HTTP integrations, mapping templates that convert JSON to SOAP XML and back, and a private integration via a VPC link
+C: Place an Application Load Balancer in front of the SOAP service with listener rules that rewrite JSON request bodies into XML and attach usage plans to the ALB
+D: Use CloudFront with a CloudFront Function that converts JSON request bodies into SOAP envelopes before forwarding them to the on-premises origin
+K: B
+G: ## Transforming payloads in API Gateway
+API Gateway has two API types for HTTP clients, and they differ in how much they can change a request:
+- **REST APIs** support **mapping templates** (Velocity Template Language) on non-proxy integrations. A template can read JSON fields with `$input.path('$.policyId')` and emit a SOAP envelope; a response template turns the XML reply back into JSON. REST APIs also offer request validators, API keys and usage plans for per-client throttling and quotas.
+- **HTTP APIs** are simpler and cheaper. Their **parameter mapping** can change headers, query strings and paths, but not rewrite the request body, and they have no usage plans or API keys.
+## Reaching on-premises backends
+A **private integration** uses a VPC link to a load balancer in the VPC, whose targets can be on-premises IP addresses reached over Direct Connect.
+W: REST API with mapping templates and private integration: configuration alone converts JSON to SOAP and back, request validators and usage plans with API keys cover the partner controls, and the VPC link reaches the unchanged SOAP service over Direct Connect.
+X: A=HTTP API parameter mapping: parameter mapping cannot rewrite the body into a SOAP envelope, and HTTP APIs offer no API keys or usage plans for per-partner throttling.
+C=ALB rewriting bodies: ALB listener rules route and can return fixed responses or redirects, but they cannot transform request bodies, and usage plans belong to API Gateway, not ALB.
+D=CloudFront Function conversion: CloudFront Functions can read and change headers, URLs and cookies but have no access to the request body, so they cannot build the SOAP envelope.
+T: Configuration-only JSON-to-XML translation with API keys and throttling in front of a legacy service is an API Gateway REST API with mapping templates and a private integration.
+V: Amazon API Gateway, AWS Direct Connect, Elastic Load Balancing
+
+@ SAP-C03 D1 T1.3 advanced use-case
+S: A manufacturer runs dozens of legacy Java applications that exchange fixed-width text messages through a self-managed Apache ActiveMQ broker using JMS over OpenWire. The company wants to retire the broker hardware and let new cloud microservices react to these messages as JSON events routed by EventBridge rules. The legacy applications may change only their broker connection URL. Which solution meets these requirements with the least custom infrastructure?
+A: Migrate the broker to Amazon MQ for ActiveMQ and add a Lambda event source mapping on the queue that parses each message into JSON and calls PutEvents
+B: Replace the broker with Amazon SQS FIFO queues and modify the legacy applications to use the AWS SDK so that EventBridge rules can read the queues directly
+C: Migrate to Amazon MSK and use a Kafka Connect connector to translate OpenWire traffic from the applications into Kafka records that feed EventBridge
+D: Point the applications at an Amazon SNS topic with raw message delivery and use an EventBridge input transformer to parse the fixed-width text into JSON
+K: A
+G: ## Amazon MQ as a migration path
+**Amazon MQ** is a managed broker for **Apache ActiveMQ** and **RabbitMQ**. It speaks the same wire protocols (OpenWire, AMQP, STOMP, MQTT, WebSocket) and APIs such as JMS, so existing clients usually need only a new broker URL and credentials. That is why it fits lift-and-shift of messaging, while SQS and SNS fit new cloud-native code.
+## Bridging to event-driven services
+AWS Lambda supports Amazon MQ queues as an **event source mapping**: Lambda polls the queue and invokes the function with batches of messages. The function can parse the fixed-width layout (for example columns 1-10 = order ID, 11-18 = date) into JSON and publish it with `PutEvents` to an event bus, where rules route each event type to the right microservice.
+EventBridge **input transformers** only reshape JSON events that already exist; they cannot parse text formats.
+W: Amazon MQ plus a Lambda event source mapping: the legacy applications keep JMS over OpenWire and change only the URL, and a small function translates each message into a JSON event for EventBridge, with no broker hardware to run.
+X: B=SQS FIFO with SDK changes: SQS does not speak OpenWire, so every legacy application would need code changes, which the constraint forbids, and EventBridge rules do not read from SQS queues.
+C=MSK with Kafka Connect: Kafka brokers do not accept OpenWire clients, and Kafka Connect does not translate a JMS client protocol, so the applications would have to be rewritten as Kafka producers.
+D=SNS with an input transformer: SNS has no JMS or OpenWire endpoint, and an input transformer only rearranges JSON fields; it cannot parse fixed-width text.
+T: Legacy JMS clients that can change only the broker URL go to Amazon MQ; a Lambda event source mapping on the queue then transforms messages into events for modern consumers.
+V: Amazon MQ, AWS Lambda, Amazon EventBridge
+
+@ SAP-C03 D1 T1.3 advanced use-case
+S: A bank operates in a country where no AWS Region or Local Zone exists, and regulators require customer data to stay inside the bank's own data center. The bank wants to run new services with the same AWS APIs, tools and console it uses in the cloud, including EC2 instances, EBS volumes, a managed PostgreSQL database, and containers on Amazon EKS, while AWS handles hardware monitoring and replacement. The data center has a reliable connection to the nearest Region. Which solution fits?
+A: Install Amazon EKS Anywhere on the bank's VMware vSphere cluster and run PostgreSQL in containers managed by a Kubernetes operator on the same cluster
+B: Use AWS Local Zones attached to the nearest Region, placing EC2, EBS and RDS for PostgreSQL in the Local Zone subnet that is closest to the country
+C: Order AWS Outposts racks for the data center, then run EC2, EBS, Amazon RDS for PostgreSQL on Outposts, and EKS worker nodes on the Outposts subnets
+D: Register the bank's own servers with Amazon ECS Anywhere and Systems Manager, and run PostgreSQL and the services as ECS tasks on those servers
+K: C
+G: ## Hybrid compute options
+- **AWS Outposts** puts AWS-owned, AWS-managed racks (or servers) in your data center. They extend a VPC from the parent Region: you create Outposts subnets and launch EC2, EBS, and services such as Amazon RDS (MySQL, PostgreSQL, SQL Server), Amazon ECS and Amazon EKS on them, using the normal AWS APIs. AWS monitors and replaces the hardware. Outposts needs a **service link** connection back to the parent Region.
+- **AWS Local Zones** are AWS-owned facilities in metro areas. Data there is not in your data center.
+- **Amazon EKS Anywhere** and **Amazon ECS Anywhere** run container orchestration on hardware you own and maintain; they do not provide managed AWS databases or EBS.
+## Picking one
+"Data must stay in my building" plus "same AWS services and APIs, managed hardware" points to Outposts.
+W: Outposts racks: AWS-managed hardware stays in the bank's data center, RDS for PostgreSQL, EC2, EBS and EKS nodes run there with the same APIs and console, and the reliable link to the Region provides the required service link.
+X: A=EKS Anywhere on vSphere: the bank keeps owning and maintaining the hardware and must operate PostgreSQL itself, and EKS Anywhere provides no EC2, EBS or managed database APIs.
+B=Local Zone near the country: Local Zones are AWS facilities, so data would leave the bank's own data center, and no Local Zone exists in this country.
+D=ECS Anywhere on owned servers: it orchestrates containers only; there is no managed RDS, EBS or EC2 API on those servers, and the bank keeps maintaining the hardware.
+T: Data must stay on premises but workloads need native AWS services and APIs with AWS-managed hardware: AWS Outposts.
+V: AWS Outposts, Amazon RDS, Amazon EKS, Amazon EC2
+
+@ SAP-C03 D1 T1.3 applied comparison
+S: A visual effects studio in Los Angeles runs its main workloads in us-west-2. Artists in the Los Angeles office use remote workstations and render nodes that need single-digit millisecond latency to their desks; from us-west-2 latency is around 20 ms. Demand spikes for a few weeks per project, and the studio has no data center space and does not want to commit to on-premises hardware. Which approach should a solutions architect recommend?
+A: Order an AWS Outposts rack for the Los Angeles office and run the workstations and render nodes on it during project peaks before returning the rack
+B: Opt in to the Los Angeles Local Zone, add a subnet there to the existing us-west-2 VPC, and run the workstations and render nodes in it
+C: Keep the instances in us-west-2 and put AWS Global Accelerator in front of them so artist traffic uses the AWS backbone with lower latency
+D: Deploy the workstations in an AWS Wavelength Zone in Los Angeles so artist traffic is carried by the carrier's 5G network to the instances
+K: B
+G: ## AWS Local Zones
+A **Local Zone** is an extension of a parent Region placed in a large metro area, for example `us-west-2-lax-1a` for Los Angeles. You:
+- **opt in** to the Local Zone group for the account,
+- create a **subnet in the Local Zone** inside an existing VPC of the parent Region,
+- launch supported resources (such as EC2 instances, EBS volumes, some FSx and ELB features) there with normal pay-as-you-go pricing.
+Workloads in the Local Zone sit close to local users, giving single-digit millisecond latency, while the rest of the VPC stays in the parent Region.
+## Compared with the alternatives
+- **Outposts** is hardware installed in your own facility, with a multi-year term commitment.
+- **Wavelength** places compute inside telecom carriers' 5G networks, for mobile devices on that carrier.
+- **Global Accelerator** improves the path to a Region but cannot remove the physical distance.
+W: Los Angeles Local Zone: instances run in an AWS facility in the same metro area for single-digit millisecond latency, scale up and down on demand for project peaks, and need no data center space or hardware commitment.
+X: A=Outposts rack in the office: the studio has no data center space, and Outposts is ordered for a multi-year term rather than borrowed for a few weeks of peak demand.
+C=Global Accelerator to us-west-2: it optimizes the network path and gives static IPs, but the instances remain hundreds of kilometers away, so latency cannot drop to single digits.
+D=Wavelength Zone: Wavelength serves devices on a carrier's 5G network; artists in an office network on wired connections would not gain from it.
+T: Low latency to users in a specific metro with elastic, pay-as-you-go capacity and no hardware: a Local Zone subnet in the parent Region's VPC.
+V: AWS Local Zones, Amazon EC2, Amazon VPC
+
+@ SAP-C03 D1 T1.3 advanced tradeoff
+S: A defense contractor must run containerized applications on bare-metal servers in a classified site that is air-gapped: no network path to any AWS Region is permitted. It wants Kubernetes with the same Amazon EKS Kubernetes distribution it uses in the cloud, lifecycle tooling for cluster creation and upgrades, and the option of a paid AWS support subscription. Which solution meets these requirements?
+A: Amazon EKS Hybrid Nodes, joining the bare-metal servers as worker nodes to an EKS cluster whose control plane runs in the nearest AWS Region
+B: Amazon ECS Anywhere, registering the bare-metal servers as external instances and running the applications as ECS tasks under a Regional cluster
+C: AWS Outposts racks installed in the classified site, with EKS local clusters running both the Kubernetes control plane and the worker nodes
+D: Amazon EKS Anywhere on the bare-metal servers, installed from a local registry with the air-gapped procedure, and an EKS Anywhere Enterprise Subscription
+K: D
+G: ## Kubernetes outside the Region
+- **Amazon EKS Anywhere** is software that creates and operates Kubernetes clusters on your own infrastructure (VMware vSphere, bare metal, Nutanix, CloudStack) using **EKS Distro**, the same Kubernetes distribution as Amazon EKS. The control plane runs on your hardware, and EKS Anywhere supports **air-gapped** installs with images served from a local registry. Paid support comes from an **EKS Anywhere Enterprise Subscription**.
+- **Amazon EKS Hybrid Nodes** attach on-premises machines as worker nodes to an EKS cluster whose control plane stays in an AWS Region, so they need continuous private connectivity to that Region.
+- **Amazon ECS Anywhere** runs ECS tasks on external instances, which connect outbound to the ECS and Systems Manager endpoints in a Region.
+- **AWS Outposts** requires a service link to its parent Region, even for EKS local clusters, which only tolerate temporary disconnections.
+## The deciding constraint
+"No path to a Region, ever" rules out every option whose control plane or management connection lives in a Region.
+W: EKS Anywhere air-gapped: the whole cluster, control plane included, runs on the contractor's bare metal with EKS Distro and EKS Anywhere lifecycle tooling, needs no Region connectivity, and can be backed by the Enterprise Subscription.
+X: A=EKS Hybrid Nodes: the control plane stays in the Region and the nodes must keep a network path to it, which the air-gap forbids.
+B=ECS Anywhere: it is not Kubernetes, and the agents on external instances must reach Regional ECS and Systems Manager endpoints to receive tasks.
+C=Outposts with EKS local clusters: local clusters survive temporary loss of the link, but an Outpost still needs its service link to the parent Region to operate, which the site does not allow.
+T: Fully disconnected Kubernetes on your own hardware with the EKS distribution is EKS Anywhere; Hybrid Nodes, ECS Anywhere and Outposts all depend on a link to a Region.
+V: Amazon EKS Anywhere, Amazon EKS, Amazon ECS Anywhere, AWS Outposts
+
+@ SAP-C03 D1 T1.5 advanced use-case
+S: A media company keeps 400 TB of viewing data in S3 as Hive-style partitioned Parquet tables. A privacy law now requires deleting a viewer's rows within 72 hours of a request, auditors want to query tables as they were on a past date, and engineers want to add columns without rewriting data. Data engineers use Spark on Amazon EMR, and analysts use Amazon Athena and Amazon Redshift. Which approach meets these requirements with the least custom code?
+A: Keep the Parquet layout and run a nightly EMR job that rewrites every partition containing requested viewers, keeping a dated copy of each table for audits
+B: Load all viewing data into Amazon Redshift tables, delete rows there, and use Redshift snapshots restored to new clusters for the auditors' historic queries
+C: Convert the tables to Apache Iceberg tables registered in the Glue Data Catalog, use DELETE statements for requests and time travel queries for audits
+D: Store each viewer's events as separate S3 objects under a viewer ID prefix and use S3 Lifecycle rules to expire the prefixes named in deletion requests
+K: C
+G: ## From data lake to lakehouse
+Plain Parquet files in S3 are immutable: to delete one viewer's rows you must rewrite whole files or partitions yourself, and there is no record of what the table looked like before.
+**Open table formats** such as **Apache Iceberg** add a metadata layer over Parquet files:
+- **Row-level changes**: `DELETE`, `UPDATE` and `MERGE INTO` write new data or delete files and a new snapshot, with ACID guarantees.
+- **Time travel**: each commit is a snapshot, so in Athena `SELECT ... FOR TIMESTAMP AS OF TIMESTAMP '2026-06-30 00:00:00 UTC'` returns the table as it was (Spark has an equivalent `TIMESTAMP AS OF` clause).
+- **Schema and partition evolution**: columns can be added or renamed without rewriting data.
+## Engines on one copy of data
+Iceberg tables registered in the **AWS Glue Data Catalog** can be read and written by Spark on EMR and Athena, and queried from Amazon Redshift, all on the same S3 data. Old snapshots must later be expired so deleted rows are physically removed.
+W: Iceberg tables in the Glue Data Catalog: engines run standard DELETE statements for privacy requests, auditors use time travel, columns are added through schema evolution, and EMR, Athena and Redshift share one copy without custom rewrite jobs.
+X: A=Nightly partition rewrites with dated copies: it is custom code, and keeping a full dated copy of 400 TB for audits multiplies storage while still lacking real point-in-time queries.
+B=Move everything into Redshift: deletes work, but EMR Spark users lose the open S3 data, and restoring snapshots to new clusters for each audit question is slow and costly.
+D=One object prefix per viewer: billions of tiny objects make every analytic query slow and expensive, and Lifecycle rules act on age, not on a list of requested viewers within 72 hours.
+T: Row-level deletes, time travel and schema evolution on S3 data shared by several engines call for an open table format such as Apache Iceberg in the Glue Data Catalog.
+V: Amazon S3, Apache Iceberg, AWS Glue, Amazon Athena, Amazon EMR, Amazon Redshift
+
+@ SAP-C03 D1 T1.5 advanced use-case
+S: A healthcare company's data lake has 900 tables in S3 cataloged in the Glue Data Catalog, and analysts query it with Amazon Athena. In the 40 claims tables, analysts in each region may see only rows for their own region; PII columns in any table must be hidden from everyone except a compliance group, and new tables arrive weekly. Today access is managed with IAM and S3 bucket policies per prefix, which cannot express these rules. Which solution meets the requirements with the least ongoing administration?
+A: Create one Athena workgroup per analyst region with a query result location and a per-query data scan limit, and allow each group to use only its own workgroup
+B: Register the S3 locations with Lake Formation, grant access with LF-Tags on databases and columns, and use data filters for row-level restriction by region
+C: Write S3 bucket policies with s3:prefix and s3:ExistingObjectTag conditions that block reading the PII columns and the rows of other regions
+D: Create Athena views per region that omit the PII columns, and use IAM policies so each regional analyst group can query only its own views
+K: B
+G: ## Why S3 permissions are too coarse
+S3 bucket policies and IAM decide whether a principal can read an **object**. A Parquet object holds many rows and columns, so S3 cannot hide one column or some rows inside it.
+## AWS Lake Formation permissions
+Lake Formation adds table, column, row and cell permissions on top of the Glue Data Catalog. After you **register** an S3 location, integrated engines such as Athena get temporary credentials from Lake Formation and enforce what it allows.
+- **LF-Tags** (tag-based access control): tag databases, tables or columns, for example `classification=pii`, and grant permissions on tag expressions. Tables inherit the tags of their database and columns inherit the tags of their table, so a new table needs only its PII columns tagged; the grants themselves do not change.
+- **Data filters** are defined per table: a row filter such as `region = 'emea'` plus column inclusion or exclusion, granted to principals.
+W: Lake Formation with LF-Tags and data filters: tag-based grants hide PII columns across all 900 tables and cover new ones once their columns are tagged, data filters restrict each region's rows in the claims tables, and Athena enforces both.
+X: A=Workgroups per region: workgroups separate query history, result locations and cost controls; they do not restrict which rows or columns of a table a user can read.
+C=Bucket policies with prefix and object tag conditions: S3 controls access to whole objects, so it cannot remove columns or rows inside a Parquet file, and the policies grow with every new table.
+D=Athena views per region: Athena runs a view with the caller's own permissions on the base tables and their S3 data, so analysts who can use the views can also query the base tables directly, and every new table needs new views.
+T: Column, row and tag-based permissions for a data lake belong in Lake Formation (LF-Tags plus data filters), not in S3 or IAM policies.
+V: AWS Lake Formation, AWS Glue, Amazon Athena, Amazon S3
+
+@ SAP-C03 D1 T1.5 advanced use-case
+S: An e-commerce company already produces clickstream events to an Amazon MSK cluster used by several microservices. Business users want Amazon Redshift dashboards that reflect these events within about 10 seconds. The company wants to avoid staging the data in S3, avoid running additional ETL infrastructure, and keep SQL as the only transformation layer. Which solution meets these requirements?
+A: Use AWS DMS with the MSK cluster as the source endpoint and Redshift as the target endpoint, running a full-load-and-CDC task that copies new records
+B: Create an Amazon AppFlow flow with the MSK topic as the source and Redshift as the destination, configured to run on a schedule every minute
+C: Run an AWS Glue streaming job that reads the topic and writes micro-batches to S3, then load them with a Redshift COPY command every 10 seconds
+D: Configure Redshift streaming ingestion with an external schema mapped to the MSK cluster and an auto-refreshing materialized view over the topic
+K: D
+G: ## Redshift streaming ingestion
+Amazon Redshift can read directly from **Kinesis Data Streams** and **Amazon MSK** (and other Kafka sources) without staging in S3:
+1. Create an **external schema** that points to the stream or Kafka cluster, with an IAM role that can read it.
+2. Create a **materialized view** that selects from the topic, usually parsing the payload with `JSON_PARSE` into columns.
+3. Turn on **auto refresh** (or refresh on a schedule). Redshift pulls new records into the view with latency of seconds.
+Downstream SQL views and dashboards query the materialized view like a table.
+## Other services in this space
+- **AWS DMS** migrates and replicates databases; Kafka is supported as a target, not a source.
+- **Amazon AppFlow** moves data from SaaS applications such as Salesforce or ServiceNow; it does not read Kafka topics.
+- **AWS Glue streaming** works, but adds a job and an S3 staging step.
+W: Streaming ingestion from MSK: Redshift reads the existing topic directly into a materialized view within seconds, with no S3 staging and no extra ETL service, and all shaping is done in SQL.
+X: A=DMS from MSK: DMS can write to Kafka but cannot use it as a source, and it is built for database replication, not event streams.
+B=AppFlow from MSK: AppFlow connects SaaS applications and some AWS services; it has no Kafka or MSK source connector, and a one-minute schedule misses the latency target.
+C=Glue streaming to S3 then COPY: it adds the S3 staging and the separate ETL job the company wants to avoid, and frequent tiny COPY loads add latency and overhead.
+T: Kafka or Kinesis into Redshift in seconds with SQL only: Redshift streaming ingestion into an auto-refreshing materialized view.
+V: Amazon Redshift, Amazon MSK
+
+@ SAP-C03 D1 T1.5 applied tradeoff
+S: A sales organization wants to combine Salesforce and ServiceNow data with 30 TB of order history in S3. A complex Apache Spark job joins the data once each night and runs for about 90 minutes; nothing else uses compute during the day. The team has no developers to maintain API integration code, wants to pay for Spark only while it runs, and does not want to tune or patch clusters. Which design is most cost-effective with the least operational effort?
+A: Write AWS Lambda functions that page through the Salesforce and ServiceNow APIs nightly, and run Spark on a persistent EMR cluster with On-Demand instances
+B: Use scheduled Amazon AppFlow flows to land Salesforce and ServiceNow data in S3, and run the nightly Spark job on an Amazon EMR Serverless application
+C: Stream Salesforce and ServiceNow changes into Kinesis Data Streams with custom producers, and run Spark Structured Streaming on an EMR cluster all day
+D: Use AWS DMS to replicate Salesforce and ServiceNow into S3, and submit the nightly Spark job to an EMR cluster that the team resizes before each run
+K: B
+G: ## Ingesting SaaS data without code
+**Amazon AppFlow** is a managed integration service with connectors for SaaS applications such as Salesforce, ServiceNow, Zendesk and SAP. A flow can run on demand, on a schedule or on an event, can pull only changed records, can map and filter fields, and writes to destinations such as S3 (for example in Parquet) or Amazon Redshift. There is no code to write or host.
+## Running Spark only when needed
+**Amazon EMR Serverless** runs Spark and Hive jobs without clusters. You create an application, submit a job, and EMR Serverless provisions and scales workers for that job, then releases them; you pay for the vCPU, memory and storage used while it runs. For one 90-minute nightly job, a persistent cluster would sit idle for more than 22 hours a day.
+W: AppFlow plus EMR Serverless: scheduled flows pull the SaaS data into S3 without integration code, and the nightly Spark job runs on capacity that exists only during the job, with no cluster to size or patch.
+X: A=Lambda API code with a persistent cluster: the team must write and maintain pagination, retry and authentication code it has no developers for, and the always-on cluster is idle most of the day.
+C=Kinesis with all-day streaming Spark: custom producers are integration code, and a continuously running cluster costs far more than a 90-minute batch job that only needs nightly freshness.
+D=DMS from SaaS applications: DMS replicates databases and does not have Salesforce or ServiceNow source endpoints, and manually resizing an EMR cluster each night is the cluster tuning the team wants to avoid.
+T: SaaS-to-S3 ingestion without code is AppFlow; occasional Spark batches without cluster management are EMR Serverless.
+V: Amazon AppFlow, Amazon EMR Serverless, Amazon S3
+
+@ SAP-C03 D1 T1.5 advanced use-case
+S: A grocery retailer and a consumer goods brand want to measure how many of the brand's ad-exposed customers bought its products at the retailer. Each company keeps its customer data in S3 in its own AWS account. Legal teams require that neither party can see the other's row-level data, that only aggregated counts above a minimum group size can be returned, and that the retailer controls which queries are allowed on its table. Which solution meets these requirements?
+A: Share the retailer's table with the brand's account through AWS Lake Formation cross-account grants with a data filter that excludes the name and email columns
+B: Publish the retailer's dataset as a private product on AWS Data Exchange for the brand, with subscription terms that forbid copying of row-level data
+C: Replicate both datasets into a shared account with hashed email addresses and give both teams Athena access with a view that returns only aggregates
+D: Create an AWS Clean Rooms collaboration, configure each table with an aggregation analysis rule and minimum thresholds, and run the overlap query there
+K: D
+G: ## AWS Clean Rooms
+AWS Clean Rooms lets several parties analyze their combined data **without sharing or copying raw rows** to each other. Each member keeps its data in its own account (for example in S3 with a Glue table) and associates a **configured table** with a **collaboration**.
+- **Analysis rules** set by the data owner control what queries may do: an **aggregation** rule allows only aggregate functions (such as `COUNT DISTINCT`) on allowed columns and join keys, and enforces **minimum aggregation thresholds** so small groups that could identify people are suppressed. A **list** rule allows only overlap lists; a **custom** rule allows only approved queries.
+- Members are given roles such as who can query and who receives results.
+- Cryptographic computing for Clean Rooms can keep data encrypted during the analysis when policies require it.
+## Example
+Join on hashed email, `SELECT COUNT(DISTINCT customer_id)` grouped by product category, returning only groups of at least 100 customers.
+W: Clean Rooms collaboration with aggregation rules: data stays in each account, the retailer's analysis rule limits queries to aggregates with minimum group sizes, and neither party ever sees the other's rows.
+X: A=Lake Formation cross-account grant: the brand would read the retailer's remaining rows directly; data filters hide columns or rows but do not restrict queries to aggregates above a threshold.
+B=Private Data Exchange product: the brand receives a copy of the dataset, so row-level data leaves the retailer's control and contract terms do not technically prevent misuse.
+C=Shared account with hashed emails: anyone with access to the shared account can read both sides' rows, and hashing does not stop re-identification by joining on the hashed values.
+T: Joint analysis between companies where nobody may see the other's rows and only thresholded aggregates come out: AWS Clean Rooms with analysis rules.
+V: AWS Clean Rooms, Amazon S3, AWS Glue
+
+@ SAP-C03 D1 T1.5 advanced use-case
+S: A central data platform account owns a governed data lake: S3 data is registered with AWS Lake Formation and cataloged in the Glue Data Catalog. Twelve business-unit accounts in the same AWS Organization need to query selected databases with Amazon Athena in their own accounts, without copying data, while the platform team keeps central control of table and column permissions. Which TWO actions should a solutions architect take? (Select TWO)
+A: In the platform account, grant Lake Formation permissions on the selected databases and tables (by name or LF-Tags) to each business-unit account
+B: In each business-unit account, have the data lake administrator create resource links to the shared databases and grant local analyst roles access
+C: In each business-unit account, run a Glue crawler against the platform account's S3 buckets to build a local copy of the tables in the account's catalog
+D: Replicate the governed S3 buckets to each business-unit account with S3 Replication and register the replicas with the business units' Lake Formation
+E: Add a Glue Data Catalog resource policy that allows glue:* for the organization and a bucket policy granting s3:GetObject to all business-unit accounts
+K: A,B
+G: ## Lake Formation cross-account sharing
+Lake Formation can grant permissions on catalog resources to **another AWS account** (or an organization or OU). Behind the scenes it shares the database or table through AWS Resource Access Manager; inside an organization with RAM sharing enabled no manual acceptance is needed. The data never moves: queries in the consumer account read the producer's S3 data through Lake Formation credentials.
+Granting can be done by **named resource** or, at scale, by **LF-Tags**.
+## What the consumer account does
+The consumer's **data lake administrator** receives the grant and decides which local principals get it:
+- create a **resource link** (a pointer in the local catalog) to the shared database or table, so services such as Athena can see it in the account's own catalog,
+- grant local roles `DESCRIBE` on the resource link and `SELECT` on the target shared tables.
+The producer still controls the maximum: consumers can pass on only what they were granted.
+W: A=Cross-account Lake Formation grants: the platform account shares only the chosen databases, tables and columns with each business-unit account, keeping central control without copying data.
+B=Resource links and local grants: the business-unit data lake administrator makes the shared databases visible in the local catalog for Athena and delegates access to its analyst roles within the limits of the grant.
+X: C=Crawler over the producer's buckets: it creates a separate, unmanaged copy of the metadata outside Lake Formation governance, so the platform team loses control of column permissions.
+D=S3 Replication to each account: it copies the data twelve times, multiplying storage and spreading governance, which the requirement to avoid copies rules out.
+E=Broad catalog and bucket policies: allowing glue:* and s3:GetObject to every account bypasses Lake Formation fine-grained permissions and exposes all tables and columns.
+T: Share a governed data lake across accounts with Lake Formation grants from the producer and resource links plus local grants in each consumer; no data is copied.
+V: AWS Lake Formation, AWS Glue, Amazon Athena, AWS Resource Access Manager

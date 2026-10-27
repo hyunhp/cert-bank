@@ -1,12 +1,21 @@
 # TODO
 
-## AWS exam versions (checked 2026-10-23) — next action after 2026-10-27
+## AWS exam versions (checked 2026-10-27)
 Notices live in `data/exam-specs.json` ("update"), shown above the section filters and in mock setup.
-- SAP-C02 -> SAP-C03: last C02 day 2026-11-16, C03 from 2026-11-17 (5 restructured domains, adds GenAI/agentic AI,
-  resilience, DevSecOps, post-quantum crypto per secondary sources). DVA-C02 -> DVA-C03: last C02 day 2026-11-30,
-  C03 from 2026-12-01 (adds AI security, Bedrock, containers per secondary sources). Full exam guides with task
-  statements are published when registration opens on 2026-10-27: then add SAP-C03 / DVA-C03 as new exams (specs,
-  tasks, retag still-valid C02 questions, write the gap) and retire the C02 notices.
+- SAP-C02 -> SAP-C03: DONE 2026-10-27 from the official guide (docs.aws.amazon.com, 2026-10-27): 5 domains
+  25/25/15/15/20, 18 tasks, 65 scored + 10 unscored, passing 720 (time not in the guide; 180 min assumed).
+  All 396 SAP-C02 questions classified against the C03 skills: 388 shared with their new task (shares.json "tasks"
+  rule, data/exam-shared-tasks.json), 8 excluded (Service Catalog, Migration Hub, Snowball Edge, VMware Cloud on
+  AWS, Well-Architected Tool). 13 updated in SAP-C02/f02 (AWS Transform MGN, Security Hub CSPM, re-keyed discovery
+  and AWS Batch questions). 120 new in batches/SAP-C03/b01-b06 (AI/ML integration, responsible AI and post-quantum,
+  AI cost/evaluation/monitoring, and every skill that had no question), each reviewed and deduplicated across
+  batches. Pool 508. Open: SAP-C03 study guide; after 2026-11-16 decide whether to hide SAP-C02.
+  Bedrock Guardrails org-level enforcement (AWS Organizations Bedrock policy) is GA since 2026-04: no question
+  covers it yet, and no existing key is contradicted by it.
+- DVA-C02 -> DVA-C03: NEXT. Last C02 day 2026-11-30, C03 from 2026-12-01. Official guide published 2026-10-27
+  (developer-associate-03): same 4 domains, weights 30/26/22/22, 50 scored + 15 unscored, passing 720; new Task 2.3
+  (AI service security) and Task 3.2 (automated testing). Same method as SAP-C03 (classify, share with tasks, write
+  the gap).
 - MLA-C01 -> MLA-C02: DONE 2026-10-23. MLA-C02 registered (same four domains, 28/24/24/24; same twelve tasks, so
   `tasksFrom: MLA-C01`); `tools/qgen/shares.json` shares 389 MLA-C01 questions (6 excluded: SageMaker Neo / model
   compression, removed in C02) and 80 new GenAI questions in batches/MLA-C02/b01-b04 (vector stores and RAG data,
