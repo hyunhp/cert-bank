@@ -70,6 +70,8 @@ Everything here is free and stays free: no paywall, no ads, no sign-up. If the s
 [buy a coffee](https://hyunhp.github.io/cert-bank/support.html) (KakaoPay in Korea, Ko-fi from anywhere else).
 Reporting a wrong answer as a GitHub issue helps just as much.
 
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/F1K4299305)
+
 ## For maintainers
 
 The site is static (GitHub Pages, no build step). Working notes, data formats, rules and test commands are in

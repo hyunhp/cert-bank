@@ -69,6 +69,8 @@ Amazon Web Services, Palantir Technologies와 관련 없는 비공식 사이트�
 [커피 한 잔으로 응원](https://hyunhp.github.io/cert-bank/support.html)해 주세요(국내는 카카오페이, 해외는 Ko-fi).
 틀린 답을 GitHub 이슈로 알려 주시는 것도 큰 도움이 됩니다.
 
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/F1K4299305)
+
 ## 관리자용
 
 정적 사이트입니다(GitHub Pages, 빌드 단계 없음). 작업 메모·데이터 형식·규칙·테스트 명령은

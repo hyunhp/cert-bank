@@ -16,7 +16,8 @@ Open work items are in `TODO.md` — read it at the start of a session.
 Study guide: `study.html` + `js/study.js` read `data/study/<EXAM>.json` (day-by-day plans, edited directly,
 not through qgen) and mark terms from `data/glossary.json` with tap/hover popovers (EN + KO). See
 `tools/study/README.md` for the glossary rules and the planned (unbuilt) backend design.
-Donations: `support.html` holds the only copy of the payment links (`METHODS`; empty url = "coming soon").
+Donations: `support.html` holds the payment links (`METHODS`; empty url = "coming soon"); the only other copy is the
+Ko-fi badge in the Support section of `README.md` / `README.ko.md` (update all three if the Ko-fi page changes).
 KakaoPay links only open in the phone app (404 in desktop browsers): the card shows `assets/kakaopay-qr.svg` and is a
 link only on phones/tablets (user-agent check, not pointer type). If the
 link changes, regenerate it (`segno.make(url, error="m").save(path, scale=1, border=2)`).
