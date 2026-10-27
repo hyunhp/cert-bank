@@ -34,6 +34,10 @@ page header and the mock exam results all point to it.
 - After editing `js/mock.js` or `js/study.js` run `python3 tools/stamp_version.py` (versions the script URL so a
   cached page and a new script, or the reverse, never meet).
 - Never paste tokens into files or chat; push with the local git credential (gh auth / SSH).
+- `main` takes changes only through a PR (branch, PR, merge via the REST API). Owner rule (2026-10-27): once all
+  tests pass, merge without asking when nothing needs the owner's eye (bug fixes, small UI/text/doc edits), then
+  report. Ask before merging bulk question adds or deletions, payment-link changes, data deletion, or anything not
+  verifiable from the session (e.g. ko-fi.com and the live site are blocked by the network policy).
 
 ## Batch format (see tools/qgen/qgen.py docstring)
 ```
