@@ -113,16 +113,17 @@ def apply_shares(qid, exam_codes, shared, dom_in, rules, tmap):
     with a task list, the listed task (and its domain) of that question."""
     for dst, r in rules.items():
         src = r["from"]
-        if src not in exam_codes or dst in exam_codes or qid in set(r.get("exclude", [])):
+        if src not in exam_codes or qid in set(r.get("exclude", [])):
             continue
-        if "tasks" in r:
+        if "tasks" in r:                  # the rule decides domain and task, even if the block names dst itself
             task = r["tasks"].get(qid)
             if not task:
                 continue
-            exam_codes.append(dst)
+            if dst not in exam_codes:
+                exam_codes.append(dst)
             shared[dst] = "D" + task[1:].split(".")[0]
             tmap.setdefault(qid, {})[dst] = task
-        else:
+        elif dst not in exam_codes:
             exam_codes.append(dst)
             shared[dst] = dom_in(src)
 
