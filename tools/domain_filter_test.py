@@ -118,6 +118,19 @@ with sync_playwright() as p:
     pg.once("dialog", lambda d: d.accept())
     pg.click("#domainRow [data-resetstats]"); pg.wait_for_timeout(300)
     check("reset stats clears the flag", pg.locator("#domainRow .fchip.weak").count() == 0)
+    # the section panel folds away, shows the active filter while folded, and stays folded after a reload
+    pg.click("#domainRow .fchip[data-d='D4']"); pg.wait_for_selector(".qcard")
+    pg.click("#filterToggle")
+    check("fold hides the section chips", pg.locator("#domainRow").is_hidden() and pg.get_attribute("#filterToggle", "aria-expanded") == "false")
+    check("folded header names the filter", pg.inner_text("#filterSum").startswith("D4"))
+    pg.reload(); pg.wait_for_selector(".qcard")
+    check("fold survives reload", pg.locator("#domainRow").is_hidden())
+    pg.click("#filterToggle")
+    check("unfold shows the section chips", pg.locator("#domainRow .fchip[data-d='D4']").is_visible())
+    # phone width: exam chips are two-column tiles, and a new version is marked with a badge, not "(new)"
+    pg.click(".lseg[data-level='associate']")
+    check("new-version chip has a badge", pg.locator(".chip[data-code='DVA-C03'] .new").count() == 1 and "(new)" not in pg.inner_text(".chip[data-code='DVA-C03']"))
+    check("no horizontal overflow at phone width", pg.evaluate("document.documentElement.scrollWidth <= innerWidth"))
     # mock exam: "this section only" from the active filter, and from a link
     pg.goto(BASE + f"?x=7#exam={EXAM}&d=D4"); pg.wait_for_selector(".qcard")
     pg.click("#mockBtn"); pg.wait_for_selector("#mkDomain")
