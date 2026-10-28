@@ -29,7 +29,7 @@ try:
     btns=pg.query_selector_all(".bookmark-btn")[:3]
     ids=[x.get_attribute("data-qid") for x in btns]
     for x in btns: x.click()
-    pg.click(".bookmarks-chip"); pg.wait_for_function("document.querySelectorAll('.qcard').length===3", timeout=20000)
+    pg.click("#bmIcon"); pg.wait_for_function("document.querySelectorAll('.qcard').length===3", timeout=20000)
     check("tools visible in bookmark view", pg.is_visible("#bmTools"))
     check("3 cards", len(pg.query_selector_all(".qcard"))==3)
     pg.click("#bmCopyLink"); pg.wait_for_timeout(300)
@@ -56,7 +56,7 @@ try:
     check("tools visible when empty", pg3.is_visible("#bmTools"))
     pg3.set_input_files("#bmImportFile", path); pg3.wait_for_function("document.querySelectorAll('.qcard').length===3", timeout=20000)
     check("imported cards", len(pg3.query_selector_all(".qcard"))==3)
-    check("chip count", "3" in pg3.inner_text(".bookmarks-chip"))
+    check("chip count", "3" in pg3.inner_text("#bmIcon"))
     # re-import is idempotent
     pg3.set_input_files("#bmImportFile", path); pg3.wait_for_timeout(500)
     check("idempotent import", len(pg3.query_selector_all(".qcard"))==3)

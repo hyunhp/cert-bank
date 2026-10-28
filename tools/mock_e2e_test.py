@@ -101,7 +101,7 @@ with sync_playwright() as p:
     ok("seen count reduced by 20", f"{pool_n - 20} not yet seen" in pg.inner_text(".mk"), pg.inner_text(".meta"))
     pg.click('[data-act="exit"]'); pg.wait_for_selector(".qcard")
     ok("exit returns to bank", not pg.evaluate("document.querySelector('.wrap').hidden") and pg.evaluate("location.hash") == "#exam=SAA-C03")
-    ok("bookmark count updated", pg.inner_text(".bookmarks-chip .cnt") == "1", pg.inner_text("#chipRow")[:60])
+    ok("bookmark count updated", pg.inner_text("#bmIcon .cnt") == "1", pg.inner_text("#bmIcon"))
 
     # multi-answer question + timer auto-submit via injected state
     multi = [q for q in data["AIP-C01"].values() if len(q["correctKeys"]) > 1][0]
