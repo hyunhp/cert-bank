@@ -177,7 +177,15 @@ function injectStyles() {
 .mk .cell.ans{background:var(--accent-bg);color:var(--accent-ink);border-color:var(--accent)}
 .mk .cell.flg::after{content:"";position:absolute;top:3px;right:3px;width:7px;height:7px;border-radius:50%;background:var(--amber)}
 .mk .cell.cur{outline:2px solid var(--ink);outline-offset:1px}
-.mk .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:.78rem;color:var(--muted)}
+.mk .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:.78rem;color:var(--muted);align-items:center}
+.mk .legend .sw{display:inline-block;width:12px;height:12px;border-radius:3px;border:1px solid var(--line);background:var(--surface);vertical-align:-2px;margin-right:4px;position:relative}
+.mk .legend .sw.ans{background:var(--accent-bg);border-color:var(--accent)}
+.mk .legend .sw.cur{outline:2px solid var(--ink);outline-offset:1px}
+.mk .legend .sw.flg::after{content:"";position:absolute;top:1px;right:1px;width:5px;height:5px;border-radius:50%;background:var(--amber)}
+/* Results: review choices as one even row, then the two way-out buttons side by side. */
+.mk .btnrow.reviewrow{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
+.mk .btnrow.exitrow{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+.mk .btnrow.reviewrow .btn,.mk .btnrow.exitrow .btn{padding-inline:8px;text-align:center}
 .mk .confirm{border:1px solid var(--bad-line);background:var(--bad-bg);border-radius:10px;padding:12px;margin-top:10px;font-size:.9rem}
 .mk .score{font-size:2.4rem;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
 .mk .verdict{font-weight:700;font-size:1.05rem;margin:4px 0}
@@ -504,7 +512,7 @@ function renderGrid(confirming) {
     <div class="mkbar"><span class="code">${state.exam}</span><span class="prog">${n - unanswered}/${n}<span class="lbl"> answered</span></span>
       <span class="timer${left !== null && left < 300 ? " low" : ""}">${left !== null ? fmtTime(left) : "untimed"}</span></div>
     <div class="panel"><b>Review</b>
-      <div class="legend"><span>■ answered</span><span>□ unanswered</span><span style="color:var(--amber)">● flagged</span></div>
+      <div class="legend"><span><i class="sw ans"></i>answered</span><span><i class="sw"></i>unanswered</span><span><i class="sw flg"></i>flagged</span><span><i class="sw cur"></i>current</span></div>
       <div class="grid">${state.ids.map((id, i) => `<button class="cell${(state.answers[id] || []).length ? " ans" : ""}${state.flags.includes(id) ? " flg" : ""}${i === state.cur ? " cur" : ""}" data-go="${i}" type="button">${i + 1}</button>`).join("")}</div>
       <div class="btnrow"><button class="btn ghost" data-act="back">Return to question ${state.cur + 1}</button><button class="btn" data-act="ask">Submit exam</button></div>
       ${confirming ? `<div class="confirm">${unanswered ? `<b>${unanswered} unanswered</b> question${unanswered > 1 ? "s" : ""} will be marked wrong. ` : ""}Submit now? You can't change answers afterwards.
@@ -544,12 +552,12 @@ function renderResults() {
         return `<div class="dom${p !== null && p < 70 ? " weak" : ""}"><div class="top"><span>${d.code} ${esc(d.name)}</span><span>${t ? `${c}/${t} · ${p}%` : "—"}</span></div><div class="bar"><div class="fill" style="width:${p || 0}%"></div></div></div>`;
       }).join("")}
     </div>
-    <div class="btnrow">
-      <button class="btn" data-review="incorrect"${wrong ? "" : " disabled"}>Review incorrect (${wrong})</button>
-      <button class="btn ghost" data-review="flagged"${nflag ? "" : " disabled"}>Review flagged (${nflag})</button>
-      <button class="btn ghost" data-review="all">Review all</button>
+    <div class="btnrow reviewrow">
+      <button class="btn" data-review="incorrect"${wrong ? "" : " disabled"}>Incorrect (${wrong})</button>
+      <button class="btn ghost" data-review="flagged"${nflag ? "" : " disabled"}>Flagged (${nflag})</button>
+      <button class="btn ghost" data-review="all">All (${total})</button>
     </div>
-    <div class="btnrow"><button class="btn ghost" data-act="new">New mock exam</button><button class="btn ghost" data-act="exit">Back to question bank</button></div>
+    <div class="btnrow exitrow"><button class="btn ghost" data-act="new">New mock exam</button><button class="btn ghost" data-act="exit">Question bank</button></div>
     <p class="support">${(navigator.language || "").toLowerCase().startsWith("ko")
       ? `도움이 되셨나요? 후원은 선택이며, 모든 문제는 계속 무료입니다. <a href="support.html">☕ Support this site</a>`
       : `Found this useful? Support is optional, and all questions stay free. <a href="support.html">☕ Support this site</a>`}</p>
@@ -593,7 +601,7 @@ async function renderReview() {
           const cls = want.has(k) ? "correct" : got.has(k) ? "incorrect" : "dim";
           return `<div class="choice locked ${cls}${got.has(k) ? " picked" : ""}"><span class="bubble"></span><span><span class="key">${LETTERS[j]}.</span> ${esc(c ? c.text : "")}${got.has(k) ? ' <span class="yours">· your answer</span>' : ""}</span></div>`;
         }).join("")}</div>
-        <div class="explain show ${ok ? "" : "wrong"}" id="mk-explain-${esc(id)}"><div class="ans-line">Answer: ${letters}</div>${qb.explainHtml ? qb.explainHtml(q.explanation) : `<div class="exp-body">${esc(q.explanation)}</div>`}</div>
+        <div class="explain show ${ok ? "" : "wrong"}" id="mk-explain-${esc(id)}"><div class="ans-line">Answer: ${letters}</div>${qb.explainHtml ? qb.explainHtml(q.explanation, Object.fromEntries(state.order[id].map((k, j) => [k, LETTERS[j]]))) : `<div class="exp-body">${esc(q.explanation)}</div>`}</div>
         <div class="remarks"><span class="tags">#${i + 1} · ${esc(id)}</span>
           <button class="bookmark-foot${bm ? " active" : ""}" data-bm="${esc(id)}" type="button" aria-label="Bookmark this question" title="Bookmark this question">${bm ? "★" : "☆"}</button></div>
       </div>`;
