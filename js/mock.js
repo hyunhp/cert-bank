@@ -377,6 +377,11 @@ function showError(err) {
   };
 }
 
+// Same store as the question bank's notice: closed in either place, closed in both.
+const KEY_NOTICE = "aws_qbank_notice_closed_v1";
+function noticeClosed(exam, text) { try { return (JSON.parse(localStorage.getItem(KEY_NOTICE)) || {})[exam] === text; } catch (e) { return false; } }
+function closeNotice(exam, text) { try { const m = JSON.parse(localStorage.getItem(KEY_NOTICE)) || {}; m[exam] = text; localStorage.setItem(KEY_NOTICE, JSON.stringify(m)); } catch (e) {} }
+
 async function renderSetup(extra) {
   const spec = specs[setupExam];
   const docs = await docsFor(setupExam);
@@ -401,7 +406,7 @@ async function renderSetup(extra) {
     <h2>Mock Exam</h2>
     <p class="sub">${setupDomain ? `Timed, answers hidden until you submit. Only questions from ${setupDomain} · ${esc(domName)}; ones you haven't seen in earlier mock exams come first.`
       : `Timed, answers hidden until you submit. Questions follow the ${spec.weightsAssumed ? "domains equally (official weights are not published)" : "official domain weights"}, and ones you haven't seen in earlier mock exams come first.`}</p>
-    ${spec.update ? `<p class="examnotice" role="note">${esc(spec.update)}</p>` : ""}
+    ${spec.update && !noticeClosed(setupExam, spec.update) ? `<div class="examnotice closable" role="note">${esc(spec.update)}<button class="noticeclose" data-act="closenotice" type="button" aria-label="Close this notice" title="Close">×</button></div>` : ""}
     <div class="panel">
       <select id="mkExam" aria-label="Certification">${opts}</select>
       <select id="mkDomain" aria-label="Section">${domOpts}</select>
@@ -429,6 +434,7 @@ async function renderSetup(extra) {
     if (act === "exit") exit();
     else if (act === "start") startExam(root.dataset.mode, root.querySelector("#mkTimed").checked);
     else if (act === "resetseen") { const s = loadSeen(); delete s[setupExam]; save(KEY_SEEN, s); renderSetup(); }
+    else if (act === "closenotice") { closeNotice(setupExam, spec.update); t.closest(".examnotice").remove(); }
   };
   root.querySelector("#mkTimed").onchange = (e) => { setupTimed = e.target.checked; };
   root.querySelector("#mkExam").onchange = (e) => { setupExam = e.target.value; setupDomain = null; renderSetup(); };
