@@ -194,6 +194,8 @@ function injectStyles() {
 .mk .yours{font-size:.75rem;font-weight:600;color:var(--muted);white-space:nowrap}
 .mk .rvhead .ok{color:var(--good);font-weight:700} .mk .rvhead .no{color:var(--bad);font-weight:700}
 @media (max-width:480px){.mk .modes{grid-template-columns:1fr}}
+.mk select + select{margin-top:8px}
+@media (max-width:520px){.mkbar{gap:8px}.mkbar .prog .lbl{display:none}}
 `;
   document.head.appendChild(s);
 }
@@ -451,7 +453,7 @@ async function renderExam() {
   const choiceByKey = new Map((q.choices || []).map(c => [c.key, c]));
   const left = state.timed ? (state.deadline - Date.now()) / 1000 : null;
   root.innerHTML = `<div class="mk">
-    <div class="mkbar"><span class="code">${state.exam}</span><span class="prog">${answered}/${n} answered</span>
+    <div class="mkbar"><span class="code">${state.exam}</span><span class="prog">${answered}/${n}<span class="lbl"> answered</span></span>
       <span class="timer${left !== null && left < 300 ? " low" : ""}">${left !== null ? fmtTime(left) : "untimed"}</span>
       <button class="btn ghost" data-act="grid">Review</button><button class="btn" data-act="grid">Finish</button></div>
     <div class="qcard">
@@ -493,7 +495,7 @@ function renderGrid(confirming) {
   const unanswered = state.ids.filter(id => !(state.answers[id] || []).length).length;
   const left = state.timed ? (state.deadline - Date.now()) / 1000 : null;
   root.innerHTML = `<div class="mk">
-    <div class="mkbar"><span class="code">${state.exam}</span><span class="prog">${n - unanswered}/${n} answered</span>
+    <div class="mkbar"><span class="code">${state.exam}</span><span class="prog">${n - unanswered}/${n}<span class="lbl"> answered</span></span>
       <span class="timer${left !== null && left < 300 ? " low" : ""}">${left !== null ? fmtTime(left) : "untimed"}</span></div>
     <div class="panel"><b>Review</b>
       <div class="legend"><span>■ answered</span><span>□ unanswered</span><span style="color:var(--amber)">● flagged</span></div>

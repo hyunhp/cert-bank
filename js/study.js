@@ -17,7 +17,7 @@ const STUDY_EXAMS = [
 ].map(([code, name, level, vendor]) => [code, name, level, vendor || "aws"]);
 const VENDORS = [["aws", "AWS"], ["palantir", "Palantir"]];
 const vendorOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[3];
-const shortName = name => name.replace(/ – (Associate|Professional|Specialty)$/, "");
+const shortName = name => name.replace(/ – (Associate|Professional|Specialty)( \(new\))?$/, "");
 const LEVELS = [["foundational", "Foundational"], ["associate", "Associate"], ["professional", "Professional"], ["specialty", "Specialty"]];
 const levelOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[2];
 // Exams with a published guide (listed in exams-index.json); all of them if the index is missing.
