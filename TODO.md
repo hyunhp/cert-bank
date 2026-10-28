@@ -135,10 +135,14 @@ Annotated in explain batches AIB-C01/e17, AIF-C01/e15, AIP-C01/e17-e18, MLA-C01/
 SAP-C02/e16. Next re-check: around 2027-01 (after the Q4 availability update).
 
 ## 2. Reveal frame cost (no action needed)
-Profiling (4x CPU) shows the ~100 ms frame is one ~45-70 ms Layout on any reveal, independent of list size and of
-diagrams (`injectStyles` is not the cause); it is the explanation text layout itself. `.explain{contain:layout style}`
-already cut it ~25 %. `loading_perf_test.py` "no long frames on reveal" (100 ms limit) can still flake when the
-company network needs re-authentication.
+Profiling (4x CPU) shows the ~100 ms frame is one ~45-70 ms Layout on any reveal, independent of list size; it is the
+explanation text layout itself (`.explain{contain:layout style}` already cut it ~25 %). Re-measured 2026-10-28 with an
+in-page click (Playwright's `pg.click()` adds its own scrolling/hit-testing to the measured frames, ~30 ms of noise):
+plain reveals 17-67 ms, diagram reveals 50-150 ms (big SVG + icons + getBBox label measurement; varies with machine
+load). Diagram styles are now injected during the idle warm-up and the diagram renders one frame after the text
+(small gain); `content-visibility` on cards and splitting edge drawing into another frame did not help.
+`loading_perf_test.py` now clicks in-page, allows 100 ms for plain and 200 ms for diagram reveals, re-measures once on
+fresh cards after a failed round (one-off VM spikes), and checks the warm-up directly (sprite + styles present).
 
 ## Tooling notes
 - `tools/diagrams/build_assets.py` reuses icons already in `assets/aws-icons.svg` when the icon pack is missing, so
