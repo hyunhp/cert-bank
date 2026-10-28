@@ -61,7 +61,10 @@ function injectStyles() {
   document.head.appendChild(s);
 }
 
+// Also injects the diagram styles: the page warms this up while idle, so the style recalculation a new
+// <style> element causes does not land on the first reveal of a diagram question.
 export function loadSprite(url) {
+  injectStyles();
   if (!spritePromise) {
     spritePromise = fetch(url)
       .then(r => { if (!r.ok) throw new Error("sprite " + r.status); return r.text(); })
