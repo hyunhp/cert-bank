@@ -49,7 +49,7 @@ with sync_playwright() as p:
         pg.goto(BASE+"#bookmarks"); pg.reload(); pg.wait_for_timeout(800)
         pg.goto(BASE+"#exam=SAA-C03"); pg.wait_for_selector(".qcard")
         pg.locator(".qcard .bookmark-btn").first.click()
-        pg.locator('.chip[data-code="__bookmarks__"], .bookmarks-chip').first.click(); pg.wait_for_timeout(300)
+        pg.click('#bmIcon'); pg.wait_for_timeout(300)
         ok(f"[{scheme}] bookmarks label", "Bookmarks" in pg.inner_text("#examBarCode"))
         pg.locator(".qcard .bookmark-btn").first.click()
         ok(f"[{scheme}] no page errors", not errs); 
