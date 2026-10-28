@@ -1,0 +1,468 @@
+# DVA-C03 batch 01: D2 T2.3 security risks of using and integrating AI services (2.3.1 access, 2.3.2 data privacy, 2.3.3 input/output filtering, 2.3.4 agent interactions, 2.3.5 sensitive content in logs)
+
+@ DVA-C03 D2 T2.3 advanced use-case
+S: A Lambda function in us-east-1 calls Anthropic Claude models on Amazon Bedrock, and its execution role allows inference through any inference profile. A new data residency rule says this role's requests may be processed only in US Regions: US geographic inference profiles stay allowed, but global cross-Region inference profiles must be blocked, even if someone later adds broader Bedrock permissions to the role. What should the developer do?
+A: Add a Deny for bedrock:InvokeModel* on all resources with a StringEquals condition listing every commercial AWS Region outside the US as the value of aws:RequestedRegion
+B: Add a Deny for bedrock:InvokeModel* on all resources with a StringEquals condition that matches the value unspecified in the aws:RequestedRegion condition key
+C: Rewrite the role's Allow statement to list only the US geographic inference profile ARNs and their models, and remove every global inference profile ARN from the policy
+D: Create an interface VPC endpoint for bedrock-runtime in us-east-1 with private DNS enabled, so that every inference request from the function is processed in that Region
+K: B
+G: ## How Bedrock authorizes a global cross-Region inference call
+A **global** inference profile (ID prefix `global.`) can route a request to any supported commercial Region worldwide; a **geographic** profile such as `us.` stays inside one geography. For a global profile, Bedrock evaluates IAM for three resources:
+- the inference profile in the source Region, `arn:aws:bedrock:us-east-1:<account>:inference-profile/global.<model>`;
+- the foundation model in the source Region;
+- the Region-agnostic global foundation model, `arn:aws:bedrock:::foundation-model/<model>` (no Region, no account).
+For that last evaluation Bedrock sets the global condition key `aws:RequestedRegion` to the literal value `unspecified`, not to the Region that ends up serving the request.
+## Blocking global routing
+The Bedrock user guide documents two ways to disable global cross-Region inference for a role: leave out one of the three required Allow statements, or add an **explicit Deny** with `"StringEquals": {"aws:RequestedRegion": "unspecified"}`. Only the explicit Deny survives later changes, because a Deny always overrides an Allow.
+It also warns that ordinary Region-deny conditions that list Region names (for example `us-west-2`) do not match the global foundation model evaluation, so they do not stop global routing. The same detail matters for SCPs that block unused Regions: they must allow `unspecified` (or exempt the inference profile) if global inference is wanted.
+W: Deny on aws:RequestedRegion unspecified: every global profile call needs the Region-agnostic model evaluation that carries this value, so the explicit Deny blocks global routing permanently while geographic US profiles keep working.
+X: A=Deny listing non-US Regions: the global model evaluation carries unspecified, not a Region name, so a list of Region names never matches it and global calls still succeed.
+C=Allow only US profiles: it blocks global profiles today, but it is only an absence of Allow; anyone who later adds broader Bedrock permissions re-enables global routing.
+D=Interface endpoint in us-east-1: the endpoint changes only the network path into the source Region; Bedrock still routes a global profile request to other Regions behind it.
+T: Block global cross-Region inference with an explicit Deny on bedrock:InvokeModel* where aws:RequestedRegion equals unspecified; Region-name lists do not catch it.
+V: Amazon Bedrock, AWS IAM, AWS Lambda
+
+@ DVA-C03 D2 T2.3 applied use-case
+S: A team runs a containerized service on Amazon ECS that calls Amazon Bedrock over HTTPS with a third-party HTTP client that accepts only a bearer token, not SigV4 signing. The security team forbids IAM users and long-lived credentials, wants every token to expire within 12 hours, and wants the token's permissions to match the ECS task role. What should the developer do?
+A: Create a long-term Amazon Bedrock API key with a one-day expiration in the console, store it in AWS Secrets Manager, and rotate it daily with a Lambda rotation function
+B: Generate short-term Amazon Bedrock API keys in the service with the Bedrock token generator library from the task role credentials, and call it before each request
+C: Create an IAM user with the AmazonBedrockLimitedAccess policy, issue it an access key pair, and exchange the key pair for a bearer token at container startup
+D: Call AWS STS AssumeRole for the task role at startup and send the returned session token in the Authorization header as the Bedrock bearer token
+K: B
+G: ## Two kinds of Amazon Bedrock API keys
+Amazon Bedrock API keys let a client authenticate with `Authorization: Bearer <key>` (or the `AWS_BEARER_TOKEN_BEDROCK` environment variable) instead of SigV4.
+- **Short-term key**: generated from the credentials of an existing IAM principal, for example with the `aws-bedrock-token-generator` library (`provide_token()` in Python). It lasts up to 12 hours or the remaining session duration, whichever is shorter, can be used only in the Region where it was generated, and **inherits the permissions of the principal** that generated it.
+- **Long-term key**: an IAM service-specific credential for `bedrock.amazonaws.com`. Creating one **creates or uses an IAM user** with attached policies, and it lasts until its configured expiration. AWS recommends long-term keys only for exploration and tells you to switch to short-term credentials for applications with greater security requirements.
+## Refreshing in a long-running process
+A token generated once at startup stops working when it expires. The Bedrock documentation notes that generating a token is inexpensive and can be done for each API call, so the generator always builds the key from the role's current, automatically refreshed credentials.
+W: Short-term keys from the token generator: they are derived from the task role, carry exactly its permissions, expire within 12 hours, and involve no IAM user, which meets every requirement.
+X: A=Long-term key in Secrets Manager: a long-term key is tied to an IAM user and is the long-lived credential type the team forbids; storing and rotating it does not change what it is.
+C=IAM user access keys: an IAM user with permanent access keys breaks both rules, and Bedrock bearer tokens are not produced by trading an access key pair at startup.
+D=STS session token as bearer: a session token is one part of a SigV4 credential set, not a Bedrock API key. Bedrock rejects it in the Authorization header.
+T: For production, use short-term Bedrock API keys generated from an IAM role (up to 12 hours, same permissions as the role); long-term keys create IAM users and are for exploration only.
+V: Amazon Bedrock, Amazon ECS, AWS IAM
+
+@ DVA-C03 D2 T2.3 advanced troubleshooting
+S: A developer accidentally pushed two Amazon Bedrock API keys to a public repository: a long-term key created for a test IAM user and a short-term key generated from the developer's assumed-role session, which is still valid for several hours. Both keys must stop working immediately without disrupting other Bedrock users in the account. Which actions should the developer take? (Select TWO)
+A: Deactivate or delete the long-term key's service-specific credential on the IAM user with UpdateServiceSpecificCredential or DeleteServiceSpecificCredential
+B: Rotate the test IAM user's access key pair, because the long-term API key is derived from that user's active access key and stops working once it is replaced
+C: Attach a policy to the role that made the short-term key that denies the bedrock and bedrock-mantle CallWithBearerToken actions, or revoke its sessions
+D: Generate a new short-term key from the same role, because generating a fresh token invalidates every earlier token that was issued for that role session
+E: Disable model invocation logging and delete the CloudTrail trail so that the leaked key values are no longer stored in any log destination
+K: A,C
+G: ## How each key type is revoked
+A **long-term** Bedrock API key is an IAM service-specific credential attached to an IAM user. It is independent of that user's access keys and is managed with its own APIs:
+- `UpdateServiceSpecificCredential` with `Status=Inactive` disables it at once (reversible).
+- `ResetServiceSpecificCredential` issues a new value; `DeleteServiceSpecificCredential` removes it.
+A **short-term** key is a pre-signed value that inherits the credentials and expiration of the session that generated it; it cannot be deactivated, reset or deleted on its own. The documented ways to stop it early are:
+- invalidate the session that generated it, with a Deny on `*` conditioned on `aws:TokenIssueTime` earlier than now;
+- attach a policy to that identity denying `bedrock:CallWithBearerToken` **and** `bedrock-mantle:CallWithBearerToken` (the actions that control API key use on the `bedrock` and `bedrock-mantle` endpoints; denying only the first leaves the Mantle endpoint open).
+The same Deny attached to the IAM user of a long-term key also blocks that key. These controls affect the whole session or identity, not just one key.
+## Limiting blast radius
+`bedrock:CallWithBearerToken` can be scoped with the condition key `bedrock:bearerTokenType` (`SHORT_TERM` or `LONG_TERM`), and `iam:CreateServiceSpecificCredential` with `iam:ServiceSpecificCredentialAgeDays` caps how long new long-term keys can live.
+W: A=Deactivate or delete the service-specific credential: this is the documented revocation path for a long-term key and affects only that one credential.
+C=Deny the CallWithBearerToken actions or revoke the sessions: a short-term key cannot be deleted, so blocking API key use on both Bedrock endpoints for that role, or invalidating the session it came from, cuts it off before expiry.
+X: B=Rotate the user's access keys: a long-term API key is a separate service-specific credential, not derived from the access key pair, so it keeps working after rotation.
+D=Generate a new short-term key: issuing a new token does not invalidate earlier ones; each stays valid until its own expiry.
+E=Disable logging and delete the trail: removing logs does not revoke anything, so both keys keep working, and deleting audit trails destroys the evidence of how the leaked keys were used.
+T: Revoke a long-term Bedrock API key through its service-specific credential; stop a short-term key by denying the CallWithBearerToken actions or invalidating the session it came from.
+V: Amazon Bedrock, AWS IAM, AWS CloudTrail
+
+@ DVA-C03 D2 T2.3 applied troubleshooting
+S: A developer deploys an application to a new AWS account and calls a third-party foundation model on Amazon Bedrock for the first time with InvokeModel. The execution role allows bedrock:InvokeModel on the model ARN, the account has a valid payment method, and the model is supported in the Region. A few early calls succeed, then every call returns AccessDeniedException. What is the most likely fix?
+A: Open the Model access page in the Amazon Bedrock console, submit an access request for the model, and wait for AWS to approve the request before retrying
+B: Enable cross-Region inference for the model and call it through a geographic inference profile so that capacity in another Region is used for the request
+C: Grant the role aws-marketplace:Subscribe, aws-marketplace:Unsubscribe and aws-marketplace:ViewSubscriptions, then invoke the model again from that role
+D: Create an interface VPC endpoint for bedrock-runtime, because first-time access to third-party models is only allowed from traffic that stays within a VPC
+K: C
+G: ## Automatic model access
+Access to many serverless foundation models on Amazon Bedrock is enabled by default, given the right AWS Marketplace permissions; there is no per-model access request to submit for them. For a **third-party** model, the first invocation in an account starts an AWS Marketplace subscription in the background:
+- During setup (up to about 15 minutes) calls may succeed temporarily.
+- If a prerequisite is missing, the subscription fails and later calls return `AccessDeniedException`.
+## Prerequisites
+- The principal that makes the first call needs `aws-marketplace:Subscribe`, `aws-marketplace:Unsubscribe` and `aws-marketplace:ViewSubscriptions`.
+- The account needs a valid payment method for Marketplace purchases.
+- Anthropic models also need the one-time first-time-use form (`PutUseCaseForModelAccess`).
+After the missing permission is granted, the subscription can take up to 2 minutes to complete.
+## Controlling access the other way
+Because access is on by default, an organization that wants to review a model's license first blocks it with an SCP or IAM deny and lifts the deny after approval.
+W: Marketplace permissions for the calling role: the pattern of a few successes followed by AccessDeniedException is a failed background subscription, and these three actions are the documented prerequisite the role is missing.
+X: A=Manual model access request: access is enabled by default once the Marketplace prerequisites are met, so there is no approval queue to wait in; the failure comes from the subscription that the first invocation started.
+B=Cross-Region inference profile: routing to more Regions adds capacity, but the account still has no Marketplace subscription, so every Region denies the call the same way.
+D=Interface VPC endpoint: PrivateLink changes the network path only. Model access does not depend on whether the request arrives through a VPC endpoint.
+T: First use of a third-party Bedrock model subscribes the account through AWS Marketplace; without aws-marketplace Subscribe/Unsubscribe/ViewSubscriptions on the caller, calls fail with AccessDeniedException.
+V: Amazon Bedrock, AWS Marketplace, AWS IAM
+
+@ DVA-C03 D2 T2.3 applied use-case
+S: An AWS Lambda function in private subnets with no NAT gateway or internet gateway must call the Amazon Bedrock Converse API. The compliance team requires that prompt traffic never uses a public network path, and the developer does not want to change the SDK client configuration in code. What should the developer configure?
+A: A gateway VPC endpoint for Amazon Bedrock added to the private subnets' route tables, with an endpoint policy that allows the bedrock:InvokeModel action for the function role
+B: A NAT gateway in a public subnet with a route from the private subnets, and a security group on the function that allows outbound HTTPS only to Bedrock IP ranges
+C: An interface VPC endpoint for com.amazonaws.region.bedrock, because that one endpoint serves the control plane and the runtime inference APIs together
+D: An interface VPC endpoint for com.amazonaws.region.bedrock-runtime with private DNS enabled, and a security group that allows HTTPS from the function
+K: D
+G: ## Amazon Bedrock has several API endpoints
+Bedrock splits its APIs across separate service endpoints, and each needs its own interface endpoint (AWS PrivateLink):
+- `bedrock`: control plane (create guardrails, logging configuration, custom models).
+- `bedrock-runtime`: inference (`InvokeModel`, `Converse`, `ApplyGuardrail`).
+- `bedrock-agent` and `bedrock-agent-runtime`: Agents and Knowledge Bases.
+- `bedrock-mantle`: the OpenAI-compatible Mantle endpoint.
+An interface endpoint places elastic network interfaces with private IPs in your subnets. Traffic from the function to Bedrock then stays on the AWS network, with no internet gateway, NAT device or public IP.
+## Private DNS
+With **private DNS enabled**, the standard name `bedrock-runtime.<region>.amazonaws.com` resolves to the endpoint's private IPs inside the VPC, so the SDK needs no `endpoint_url` change. Without it, code must point at the `vpce-...` DNS name.
+The endpoint's security group must allow inbound TCP 443 from the function's security group.
+W: bedrock-runtime interface endpoint with private DNS: Converse is a runtime API, so this endpoint carries it privately, and private DNS lets the unchanged SDK resolve the default hostname to the endpoint.
+X: A=Gateway endpoint: gateway endpoints exist only for Amazon S3 and DynamoDB. Bedrock is reached through interface endpoints (PrivateLink).
+B=NAT gateway: a NAT gateway sends traffic out through an internet gateway to the public service endpoint, which is the path the compliance team rules out, and it also contradicts the no-NAT design.
+C=bedrock control plane endpoint: the bedrock endpoint serves control plane APIs only. Converse calls go to bedrock-runtime and would still fail without a route.
+T: Private inference calls to Amazon Bedrock need an interface endpoint for bedrock-runtime (separate from bedrock); enable private DNS to keep SDK code unchanged.
+V: Amazon Bedrock, AWS PrivateLink, Amazon VPC, AWS Lambda
+
+@ DVA-C03 D2 T2.3 advanced use-case
+S: An application VPC reaches Amazon Bedrock through an interface endpoint for bedrock-runtime. Security wants to prevent data exfiltration: from this VPC only the application role in the company's account may run inference, and only against one approved inference profile and its model ARNs, even if someone brings credentials from another AWS account. What should the developer change?
+A: Attach a custom endpoint policy that allows bedrock:InvokeModel only for the application role as principal and only on the approved inference profile and model ARNs
+B: Restrict the endpoint security group to the application instances' security group, and remove every other inbound rule on port 443 from the endpoint's network interfaces
+C: Add a resource-based policy to the approved foundation model that allows only the application role, and attach it to every Region the profile can use
+D: Attach an identity policy to the application role that denies bedrock:InvokeModel on all other resources, and keep the endpoint's default full-access policy
+K: A
+G: ## Three layers decide whether a call through an endpoint succeeds
+1. **Network**: the endpoint security group decides which IPs can open a connection. It cannot see who signed the request or which API is called.
+2. **Endpoint policy**: a resource-based policy on the interface endpoint. Every request through the endpoint must be allowed by it. The default policy allows full access to the service.
+3. **Identity policy** of the caller (and SCPs).
+## Why the endpoint policy stops exfiltration
+Identity policies only constrain principals in your account. Credentials from another account, used on a host in your VPC, are governed by that other account's policies, so your identity policy never applies. The endpoint policy applies to **every** request through the endpoint, regardless of whose credentials sign it. Example:
+`{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111122223333:role/app"},"Action":["bedrock:InvokeModel","bedrock:InvokeModelWithResponseStream"],"Resource":[<profile ARN>,<model ARNs>]}`
+Anything not allowed here is refused at the endpoint.
+W: Custom endpoint policy: it applies to all traffic through the endpoint, so foreign credentials, other actions and unapproved models are all denied, while the approved role and resources keep working.
+X: B=Security group only: a security group filters by network source and port; a host already allowed to connect can still sign requests with another account's credentials for any model.
+C=Resource policy on a foundation model: foundation models are AWS-owned resources and you cannot attach your own resource-based policy to them, so this control does not exist.
+D=Identity deny with default endpoint policy: the deny constrains only this role. Credentials from another account bypass it, and the default endpoint policy lets them through.
+T: Use a VPC endpoint policy to limit which principals, actions and Bedrock resources are reachable through the endpoint; identity policies alone cannot stop foreign credentials.
+V: Amazon Bedrock, AWS PrivateLink, AWS IAM
+
+@ DVA-C03 D2 T2.3 applied definition
+S: A legal team reviewing a new customer-support feature asks the developer whether the third-party company that built the foundation model, called through Amazon Bedrock's bedrock-runtime endpoint, can read the customers' prompts and the model's responses. Which statement is accurate according to the Amazon Bedrock documentation?
+A: Model providers can read prompts and responses for their own models unless the account sets a customer managed KMS key on every request it sends to Bedrock
+B: Model providers can read prompts only when a cross-Region inference profile is used, because the request then leaves the AWS Region where the call was made
+C: Models run in Bedrock-owned model deployment accounts that providers cannot access, so providers have no access to Bedrock logs or to prompts and completions
+D: Model providers receive prompts and responses through model invocation logging, so the developer must keep invocation logging disabled to protect customers
+K: C
+G: ## Where a Bedrock model actually runs
+For each model provider, in each Region, Amazon Bedrock uses a **model deployment account** that the Bedrock service team owns and operates. After a provider delivers a model, Bedrock makes a deep copy of the provider's inference software into that account. The provider has **no access** to these accounts, so it cannot see Bedrock logs or customer prompts and completions.
+## Related controls a developer still owns
+- Encryption in transit: Bedrock requires TLS 1.2 (TLS 1.3 recommended).
+- Network path: interface endpoints (PrivateLink) keep calls off the internet.
+- Model invocation logging is off by default; when enabled it writes to **your** CloudWatch Logs group or S3 bucket in your own account and Region.
+- Some models require AWS (not the provider) to retain traffic for abuse detection; the data retention settings and the abuse detection page document which ones. Retained data is not shared with model providers.
+W: Model deployment accounts: providers have no access to the accounts where their models run, which is why they cannot see prompts, completions or Bedrock logs.
+X: A=Customer managed key per request: Bedrock has no per-request KMS setting for inference, and provider isolation does not depend on one; it comes from the deployment account design.
+B=Only with cross-Region inference: cross-Region routing sends the request to another AWS Region's Bedrock deployment, still inside AWS and still outside any provider's reach.
+D=Providers read invocation logs: invocation logs are delivered only to destinations in your own account and Region; disabling them has nothing to do with provider access.
+T: Bedrock runs each provider's model in a Bedrock-owned deployment account that the provider cannot access, so providers never see your prompts, completions or logs.
+V: Amazon Bedrock
+
+@ DVA-C03 D2 T2.3 applied use-case
+S: A developer creates an Amazon Bedrock guardrail whose denied topics and blocked messages contain confidential product codenames. Security requires that the guardrail configuration be encrypted with a customer managed AWS KMS key that the security team controls and audits. The developer's role creates the guardrail, and an application role uses it on Converse calls. What should the developer do?
+A: Keep the guardrail's default AWS-provided encryption, and let the security team audit guardrail use through the CloudTrail events for each Converse call
+B: Set kmsKeyId on CreateGuardrail to the customer managed key, allow the creator role Decrypt, GenerateDataKey, DescribeKey and CreateGrant, and the app role Decrypt
+C: Pass the customer managed key ARN in the guardrailConfig of every Converse request, so that Bedrock decrypts the guardrail definition with that key at inference time
+D: Turn on SSE-KMS with the customer managed key on the S3 bucket that receives model invocation logs, since Bedrock stores guardrail definitions alongside those logs
+K: B
+G: ## Encrypting Amazon Bedrock resources with your own key
+By default Bedrock encrypts a guardrail with a key that AWS provides and controls. To meet a "we control the key" requirement you supply a **customer managed key** when you create the resource, for example:
+- Guardrails: `kmsKeyId` on `CreateGuardrail`.
+- Model customization jobs and custom models: `customModelKmsKeyId`.
+- Agents: `customerEncryptionKeyArn`.
+- Knowledge base data source ingestion: `kmsKeyArn`.
+## Key policy for a guardrail
+The Bedrock documentation gives two sets of permissions:
+- **Creators** (create or update the guardrail): `kms:Decrypt`, `kms:GenerateDataKey`, `kms:DescribeKey`, `kms:CreateGrant`.
+- **Users** (call inference with the guardrail): `kms:Decrypt`.
+Every use of the key appears in CloudTrail, and disabling the key cuts off use of the encrypted resource, which gives the security team both control and an audit trail.
+W: kmsKeyId on CreateGuardrail with the documented grants: the guardrail is encrypted with the security team's key, the creator can write it, the application can decrypt it at inference, and every key use is logged.
+X: A=Default encryption with CloudTrail auditing: the security team can see the calls but does not own the key, cannot change its policy and cannot disable it, so the customer-controlled key requirement is not met.
+C=Key in guardrailConfig: guardrailConfig carries only the guardrail identifier, version and trace setting; encryption is fixed when the guardrail is created, not chosen per request.
+D=SSE-KMS on the logging bucket: guardrail definitions are stored by Bedrock, not in your invocation log bucket, so encrypting that bucket leaves the guardrail on the default key.
+T: Encrypt Bedrock resources with a customer managed key at creation time (kmsKeyId for guardrails) and grant creators Decrypt, GenerateDataKey, DescribeKey and CreateGrant, and users Decrypt.
+V: Amazon Bedrock Guardrails, AWS KMS
+
+@ DVA-C03 D2 T2.3 applied use-case
+S: A developer has created and published version 2 of an Amazon Bedrock guardrail with content filters and denied topics, all set to block. A chat application calls the Converse API from AWS Lambda. The developer must apply the guardrail to both the user's message and the model's response and must show a friendly message whenever the guardrail intervenes. Which code change should the developer make?
+A: Pass guardrailConfig with guardrailIdentifier, guardrailVersion 2 and trace enabled on each Converse call, and check whether stopReason is guardrail_intervened
+B: Put the guardrail ARN and version in additionalModelRequestFields on each Converse call, and check whether the response body includes a guardrailAction key
+C: Associate the guardrail with the Lambda execution role by tagging the role with the guardrail ID, so that every Bedrock call from the role is evaluated
+D: Wrap the user message in amazon-bedrock-guardrails-guardContent XML tags inside the text block, and parse those tags out of the model response on return
+K: A
+G: ## Attaching a guardrail to an inference call
+A guardrail is not attached to a model or an IAM role; the application names it on each request. (Central teams can also enforce a guardrail for a whole account or organization, which then applies in addition.)
+- **Converse / ConverseStream**: the `guardrailConfig` parameter holds `guardrailIdentifier` (ID or ARN), `guardrailVersion` (a number or `DRAFT`) and optionally `trace` (`enabled`).
+- **InvokeModel**: the same values go in request headers (`X-Amzn-Bedrock-GuardrailIdentifier`, `X-Amzn-Bedrock-GuardrailVersion`, `X-Amzn-Bedrock-Trace`).
+The guardrail evaluates the input before the model runs and the output before it is returned.
+## Reading the result
+When the guardrail intervenes on a Converse call:
+- `stopReason` is `guardrail_intervened`.
+- The output message contains the blocked message configured in the guardrail.
+- Careful: a sensitive information filter that masks (anonymizes) also sets `guardrail_intervened`, even though the masked answer is usable; with masking filters, read the trace to tell a block from a mask.
+- With trace enabled, `trace.guardrail` shows which policy acted.
+In Converse, `guardContent` content blocks can limit the evaluation to selected parts of a message; XML input tags are only for InvokeModel.
+W: guardrailConfig on each call: this is the documented way to apply a guardrail version to Converse, and stopReason guardrail_intervened is the signal for showing the friendly message.
+X: B=additionalModelRequestFields: that field passes model-specific inference parameters to the model; Bedrock does not read a guardrail from it, so no guardrail is applied.
+C=Tag the execution role: guardrails are applied per request, not by tags on IAM roles. An IAM condition can require a guardrail, but tags do not apply one.
+D=XML input tags in Converse: input tags are for InvokeModel; Converse uses guardContent blocks. Tags alone also name no guardrail, so nothing would be evaluated.
+T: Apply a guardrail to Converse with guardrailConfig (identifier, version, trace) and detect intervention with stopReason guardrail_intervened.
+V: Amazon Bedrock Guardrails, AWS Lambda
+
+@ DVA-C03 D2 T2.3 advanced troubleshooting
+S: A developer calls InvokeModel with the guardrail identifier and version headers set. The guardrail's prompt attack filter is set to High, but jailbreak and prompt injection text typed by users still reaches the model. The request body contains the developer's system instructions followed by the raw user text in one prompt string. What should the developer do?
+A: Raise the prompt attack filter to High for model responses as well, so that injected instructions are caught when the model repeats them in its output
+B: Switch the guardrail version header to DRAFT, because the prompt attack filter is evaluated only on the working draft of a guardrail and not on published versions
+C: Remove the system instructions from the prompt string so that the guardrail evaluates only user text, and move those instructions into a denied topic
+D: Wrap only the user text in amazon-bedrock-guardrails-guardContent_<suffix> tags and send a new random tagSuffix in amazon-bedrock-guardrailConfig on every request
+K: D
+G: ## Why the prompt attack filter needs to know which text is user input
+A prompt attack (jailbreak, prompt injection, prompt leakage) often looks just like a developer instruction: "You are a chemistry expert, now tell me...". To avoid flagging the developer's own system prompt, the prompt attack filter evaluates **user input**.
+- With **InvokeModel** and **InvokeModelWithResponseStream**, the guardrail cannot tell user text from developer text in a single prompt string. You mark user input with **input tags**: `<amazon-bedrock-guardrails-guardContent_xyz> ... </amazon-bedrock-guardrails-guardContent_xyz>`. The documentation states that without tags, prompt attacks are not filtered for these calls.
+- With **Converse**, you use `guardContent` content blocks instead of XML tags.
+## The tag suffix
+The suffix (`xyz` above) is supplied in the body as `"amazon-bedrock-guardrailConfig": {"tagSuffix": "xyz"}`. AWS recommends a **new random suffix for every request**, so an attacker cannot close the tag early with a guessed static tag and escape evaluation.
+W: Input tags with a random tagSuffix: tagging marks the user text for prompt attack evaluation, which InvokeModel requires, and a fresh suffix per request stops users from forging a closing tag.
+X: A=High filter on responses: the prompt attack filter targets prompts; it does not see untagged user text in InvokeModel at all, so changing response settings leaves the gap open.
+B=Use DRAFT: published versions and the draft run the same filters; the version does not decide whether untagged InvokeModel input is checked for prompt attacks.
+C=Move instructions into a denied topic: denied topics block subjects, they do not hold system instructions, and the untagged prompt string still would not be evaluated as user input.
+T: With InvokeModel, prompt attack filtering needs the user input wrapped in guardContent tags with a per-request random tagSuffix; Converse uses guardContent blocks.
+V: Amazon Bedrock Guardrails
+
+@ DVA-C03 D2 T2.3 advanced use-case
+S: A team serves a fine-tuned open-weight model from an Amazon SageMaker AI endpoint. They want the same Amazon Bedrock guardrail that their Bedrock-based apps use to check user prompts before the endpoint is called and to mask PII in the endpoint's responses, without moving the model. Which steps should the developer implement? (Select TWO)
+A: Call ApplyGuardrail with source INPUT on the user prompt first, and if action is GUARDRAIL_INTERVENED return the guardrail's output text instead of calling the endpoint
+B: Add the guardrail identifier and version to the SageMaker AI endpoint configuration so that SageMaker calls the guardrail on each InvokeEndpoint request
+C: Call ApplyGuardrail with source OUTPUT on the endpoint's response, and when action is GUARDRAIL_INTERVENED return the masked text from outputs instead
+D: Grant the application role bedrock:InvokeModel on the guardrail ARN, because ApplyGuardrail is authorized as a model invocation that uses the guardrail
+E: Call ApplyGuardrail once after the endpoint responds, sending the prompt and response together, so that only one guardrail call is billed per turn
+K: A,C
+G: ## ApplyGuardrail: guardrails without a Bedrock model call
+`ApplyGuardrail` (bedrock-runtime) evaluates any text against a guardrail and **does not invoke a foundation model**. That makes it usable with models hosted elsewhere, such as SageMaker AI endpoints or third-party APIs, and at any point in an application flow.
+Request: `POST /guardrail/{guardrailIdentifier}/version/{guardrailVersion}/apply` with
+- `source`: `INPUT` for user content going to a model, `OUTPUT` for model responses;
+- `content`: the text blocks to evaluate.
+Response:
+- `action`: `GUARDRAIL_INTERVENED` or `NONE`;
+- `outputs`: the configured blocked message when content is blocked, the text with masking applied when PII was anonymized, or empty when nothing happened;
+- `assessments`: which policies acted.
+## Permissions
+The caller needs `bedrock:ApplyGuardrail` on the guardrail ARN (and `kms:Decrypt` if the guardrail uses a customer managed key).
+W: A=ApplyGuardrail on the input first: checking the prompt with source INPUT before calling the endpoint means blocked prompts never reach the model, and the guardrail's own message is returned.
+C=ApplyGuardrail on the output: evaluating the response with source OUTPUT applies the same masking rules, and the outputs field holds the masked text to return.
+X: B=Guardrail in the endpoint configuration: SageMaker AI endpoint configurations have no guardrail setting; Bedrock guardrails are applied by Bedrock APIs, not by SageMaker.
+D=InvokeModel on the guardrail: ApplyGuardrail is its own action, bedrock:ApplyGuardrail. Granting InvokeModel neither authorizes it nor makes sense for a guardrail resource.
+E=One combined call after the response: by then the endpoint has already processed a malicious prompt, and sending the prompt as OUTPUT mixes the two sides so the input checks are not applied as intended.
+T: Use ApplyGuardrail with source INPUT before and source OUTPUT after a non-Bedrock model to reuse one guardrail; it needs bedrock:ApplyGuardrail and invokes no model.
+V: Amazon Bedrock Guardrails, Amazon SageMaker AI
+
+@ DVA-C03 D2 T2.3 advanced use-case
+S: A platform team wants every Converse and InvokeModel call made by an application role to use guardrail `gr-7` at numeric version 3. Calls with no guardrail, another guardrail or another version must fail, even if developers later add broader Bedrock permissions to the role. How should the developer enforce this?
+A: Deny bedrock:InvokeModel and InvokeModelWithResponseStream in the role policy when bedrock:GuardrailIdentifier is not the gr-7:3 ARN, and allow ApplyGuardrail on gr-7
+B: Add a statement to the role that allows bedrock:InvokeModel only when aws:RequestTag/guardrail equals gr-7:3, and require the application to add that tag to each request
+C: Create an AWS Config rule that checks each InvokeModel event in CloudTrail for the guardrail header, and revoke the role's active sessions when a call arrives without it
+D: Configure account-level guardrail enforcement with gr-7 version 3 in each Region, so that Bedrock rejects any inference call whose request names another guardrail or none
+K: A
+G: ## Requiring a guardrail with IAM
+Bedrock publishes the condition key `bedrock:GuardrailIdentifier` for the inference actions behind `Converse`, `ConverseStream`, `InvokeModel` and `InvokeModelWithResponseStream`. Its value is the guardrail ARN with version, for example `arn:aws:bedrock:us-east-1:111122223333:guardrail/gr-7:3`.
+The documented pattern has three statements:
+- an **Allow** for `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` with `StringEquals` on that key;
+- an **explicit Deny** for the same actions with `StringNotEquals`, so that no later Allow can override it;
+- plus an Allow for `bedrock:ApplyGuardrail` on the guardrail, which the call needs.
+Use `ArnLike` with `:*` to accept any numeric version.
+## Known limits
+- APIs that call InvokeModel internally on your behalf (`RetrieveAndGenerate`, `InvokeAgent`, `InvokeInlineAgent`) can fail under such a policy because some internal calls carry no guardrail.
+- With InvokeModel, a caller can use input tags to limit which part of the prompt is evaluated, but the guardrail is always applied to the response.
+## A different tool: guardrail enforcements
+Account-level and organization-level guardrail enforcements apply a designated guardrail version to all model invocations in an account or organization, layered on top of any guardrail the request names. They add protection; they do not make calls fail, and they are not scoped to one role.
+W: Explicit deny on bedrock:GuardrailIdentifier: an explicit deny wins over any later allow, so calls without exactly gr-7 version 3 fail no matter what other permissions are added.
+X: B=Request tags: Bedrock inference calls do not carry request tags for this purpose, and a client-supplied tag would not prove a guardrail was applied.
+C=AWS Config remediation: Config evaluates resource configuration, not individual API calls, and any detective control acts after the unguarded call has already returned content.
+D=Account-level enforcement: an enforced guardrail is applied to every invocation in the account in addition to any guardrail in the request; it does not reject calls, and it covers all principals rather than this one role.
+T: Enforce a specific guardrail version with an explicit Deny on bedrock:GuardrailIdentifier for the inference actions, plus Allow on bedrock:ApplyGuardrail.
+V: Amazon Bedrock Guardrails, AWS IAM
+
+@ DVA-C03 D2 T2.3 advanced troubleshooting
+S: A support assistant uses the Converse API with tool use. The model calls a create_ticket tool whose arguments include the customer's message, and the application executes the tool and writes a ticket. A guardrail with a sensitive information filter set to mask EMAIL and PHONE is passed in guardrailConfig, and chat replies are masked correctly, but tickets still contain email addresses and phone numbers. How should the developer fix this?
+A: Change the sensitive information filter action from mask to block, because masking applies only to chat text while blocking also covers the tool arguments
+B: Wrap the toolSpec description and input schema in guardContent blocks, so that the guardrail also evaluates the arguments that the model generates for the tool
+C: Before executing the tool, pass the toolUse input text to ApplyGuardrail with the same guardrail and write the masked output to the ticket instead of the raw arguments
+D: Raise the sensitive information filter strength to High for EMAIL and PHONE, because the default strength misses PII that appears inside JSON arguments
+K: C
+G: ## What a guardrail in guardrailConfig does not see
+With tool use, the Bedrock documentation lists fields that a guardrail passed in `guardrailConfig` does **not** evaluate, for any policy (content, prompt attack, denied topics, words, sensitive information):
+- tool call arguments the model generates: `output.message.content[].toolUse.input`;
+- tool results your application returns: `messages[].content[].toolResult`;
+- tool definitions: `toolConfig.tools[].toolSpec` description and input schema.
+It does evaluate message text, model text responses and `guardContent` blocks (a system prompt only when it is wrapped in `guardContent`).
+## Who runs the tool
+In Converse tool use the model only proposes a call (`stopReason` = `tool_use`); **your code** executes it. That is the place to add controls: validate the arguments, and send any free text through `ApplyGuardrail` (source `OUTPUT` for model-generated content) before it is written anywhere. The response's `outputs` field holds the masked text.
+W: ApplyGuardrail on the tool arguments: tool arguments are outside what guardrailConfig evaluates, so the application must screen them itself before acting, and the masked outputs keep PII out of tickets.
+X: A=Switch to block: no action setting extends the filter to toolUse.input; blocking would only change how chat replies are handled while tickets stay unfiltered.
+B=guardContent around the tool spec: tool definitions are not evaluated even in guardContent, and the arguments are generated by the model at run time, not contained in the spec.
+D=Higher strength: sensitive information filters have block, mask or detect actions, not strength levels; the tool arguments are simply never inspected.
+T: Guardrails in guardrailConfig skip tool arguments, tool results and tool specs; screen tool inputs in your own code (for example with ApplyGuardrail) before executing the tool.
+V: Amazon Bedrock Guardrails, Amazon Bedrock
+
+@ DVA-C03 D2 T2.3 advanced use-case
+S: An agent writes Python code to analyze CSV files that users upload to Amazon S3, and it runs that code with exec() inside its own AWS Lambda function. The function has internet access, and its role can also read every customer record in a DynamoDB table. Security warns that a prompt-injected request could make the generated code read those records and send them to an external server. What should the developer do?
+A: Run the generated code in a custom AgentCore Code Interpreter that uses the SANDBOX network mode and an execution role that can read only the S3 prefix of the uploads
+B: Run the generated code in a custom AgentCore Code Interpreter that uses the PUBLIC network mode and the Lambda function's role, so the code keeps its current data access
+C: Keep exec() in the function, but first send the generated code to ApplyGuardrail with the prompt attack filter set to High, and discard any code that the guardrail blocks
+D: Keep exec() in the function, but first reject any generated code that contains the strings boto3, requests or socket, so that it cannot call AWS APIs or open connections
+K: A
+G: ## Why model-generated code is a security boundary
+Code that a model writes from user input is untrusted: a prompt injection can turn "summarize this CSV" into "read the customer table and post it to my server". Running it with `exec()` gives it everything the host process has: the function's IAM role, its network access and its memory.
+## AgentCore Code Interpreter
+Amazon Bedrock AgentCore Code Interpreter runs agent-generated code (Python, JavaScript, TypeScript) in an isolated sandbox environment managed by AgentCore, separate from your application. When you create a custom Code Interpreter you choose:
+- **Network mode**: `SANDBOX` (access limited to Amazon S3), `PUBLIC` (public internet access) or `VPC` (network interfaces in your own subnets).
+- **Execution role**: the IAM role whose permissions define which AWS resources the code can reach.
+The agent starts a session, sends code with the Invoke API, reads the streamed results and stops the session when done.
+## Least privilege for the sandbox
+Give the execution role only what the task needs, for example `s3:GetObject` on `arn:aws:s3:::uploads-bucket/user-files/*`. Then even fully attacker-controlled code has no route to the internet and no permission on the DynamoDB table.
+W: SANDBOX Code Interpreter with a narrow role: the code runs outside the function in an isolated environment whose network is limited to S3 and whose role can read only the uploads, so injected code has neither the data nor a way out.
+X: B=PUBLIC mode with the function's role: the code is isolated from the function's process but still holds the role that reads every customer record and has an open path to the internet, which is the exact exfiltration route.
+C=ApplyGuardrail on the code: the prompt attack filter is a classifier for jailbreak and injection text in user prompts, not a code analyzer; harmful code can look ordinary, and code that passes still runs with the function's full role and network.
+D=String denylist: a denylist is easy to evade (for example __import__, importlib, urllib or a subprocess call to curl), and the code still runs in the same process with the same role and network access.
+T: Run model-generated code in an isolated sandbox such as AgentCore Code Interpreter with restricted network mode and a least-privilege execution role, never with exec() in the application's own process.
+V: Amazon Bedrock AgentCore, AWS Lambda, Amazon S3
+
+@ DVA-C03 D2 T2.3 advanced use-case
+S: A developer is building a customer-service agent on Amazon Bedrock AgentCore that calls the Converse API with tool use. One tool reads a signed-in user's records in a third-party CRM through OAuth 2.0, and another issues refunds. The agent must act with each user's own CRM permissions, its code must never hold long-lived CRM secrets, and refunds must not run without explicit human approval. Which measures meet these requirements? (Select TWO)
+A: Store the CRM integration user's password as a runtime environment variable, and have the tool request a token with it so that all users share one well-scoped identity
+B: Add a system prompt instruction that the agent must always ask the user for approval before it calls the refund tool, and log each refund that the model decides to run
+C: Configure an AgentCore Identity OAuth credential provider with the authorization code (user federation) flow, and obtain the user's CRM token from the token vault in the tool
+D: Use the OAuth client credentials grant with an admin-scoped CRM app, and filter the returned records in the tool code so that each user only sees their own records
+E: When the model returns a toolUse for the refund tool, pause the loop and run the refund only after a human approves it, returning a denied toolResult if rejected
+K: C,E
+G: ## Agent identity: acting for the user, not as a superuser
+**AgentCore Identity** manages credentials for agents. An OAuth 2.0 credential provider supports:
+- **Authorization code grant (3-legged, `USER_FEDERATION`)**: the user consents once, and AgentCore stores the resulting access and refresh tokens in its **token vault**. The agent requests a token for that user (for example with the `@requires_access_token` decorator) and calls the CRM with the user's own scopes.
+- **Client credentials grant (2-legged, M2M)**: the agent acts as itself, with the app's permissions, not a user's.
+The documentation states the design keeps long-term secrets and refresh tokens out of the agent's reach.
+## Human in the loop for sensitive tools
+In Converse tool use the model only returns a `toolUse` request with `stopReason` = `tool_use`; the **application** decides whether and when to execute it. A confirmation step in that loop is deterministic: the refund runs only after approval, and a rejection is sent back as a `toolResult` so the model can tell the user. A prompt instruction, by contrast, depends on the model obeying it, which a prompt injection can defeat.
+W: C=Authorization code flow with the token vault: the CRM sees the actual user's token and scopes, and the agent code never stores the long-lived secrets or refresh tokens.
+E=Application-enforced approval: because the application, not the model, executes tools, gating the refund call on a human decision guarantees nothing runs without approval.
+X: A=Shared integration password: one shared identity cannot apply each user's CRM permissions, and a password in an environment variable is exactly the long-lived secret the agent must not hold.
+B=Prompt instruction: the model may skip or be talked out of the instruction, and logging only records refunds after they have been issued.
+D=Client credentials with filtering: the agent acts with admin scope and relies on its own code to filter; a bug or injected instruction exposes other users' records.
+T: Use AgentCore Identity user-delegated OAuth (token vault) so agents act with each user's permissions, and enforce human approval for sensitive tools in the application's tool loop, not in the prompt.
+V: Amazon Bedrock AgentCore, Amazon Bedrock
+
+@ DVA-C03 D2 T2.3 applied use-case
+S: A developer exposes internal REST APIs as MCP tools through an Amazon Bedrock AgentCore Gateway. Only the company's own agent applications, which sign in through the corporate Amazon Cognito user pool with a specific app client, may list or call the tools. What should the developer configure on the gateway?
+A: Outbound authorization with an API key credential provider, so that the gateway sends its key to each REST API and rejects callers that do not present the same key
+B: A resource-based policy on each REST API target that allows only the gateway's service role to call it, leaving the gateway's inbound authorization set to none
+C: A custom JWT inbound authorizer with the user pool's OIDC discovery URL and the agent app client ID in allowed clients, so tokens from other clients are rejected
+D: An AWS WAF web ACL on the gateway with a rule that allows requests only from the IP address ranges of the company's AgentCore Runtime agent sessions
+K: C
+G: ## Inbound and outbound authorization on a gateway
+An AgentCore Gateway sits between agents and tools, so it has two separate security settings:
+- **Inbound authorization**: who may call the gateway (list and invoke tools). Options are IAM (SigV4, with `bedrock-agentcore:InvokeGateway` scoped to the gateway ARN), a **JWT authorizer**, or offloaded modes in which the gateway itself makes no decision.
+- **Outbound authorization**: how the gateway authenticates to each target (for example the gateway service role with SigV4, the caller's IAM credentials, OAuth client credentials or authorization code grants, token exchange, or an API key).
+## JWT inbound authorizer
+`customJwtAuthorizer` takes the identity provider's **discovery URL** plus checks such as `allowedClients` (the `client_id` claim), `allowedAudience` (the `aud` claim), allowed scopes and required custom claims. Tokens from other clients or issuers are rejected before any tool runs.
+Tip from the documentation: JWT claims such as the subject are logged in CloudTrail, so avoid PII in them.
+W: JWT inbound authorizer with allowed clients: inbound authorization is what controls access to the gateway, and validating issuer and client ID admits only the company's agent app.
+X: A=Outbound API key: outbound settings govern how the gateway calls targets; they do nothing to stop an arbitrary caller from reaching the gateway.
+B=Target policies with no inbound auth: the targets would accept every request the gateway forwards, and with no inbound check anyone who can reach the gateway can use the tools.
+D=WAF IP allow list: agent sessions do not have stable, dedicated IP ranges to list, and network origin does not prove the caller is the approved app client.
+T: Control who can use an AgentCore Gateway with inbound authorization (IAM or a JWT authorizer with allowed clients and audiences); outbound authorization only covers gateway-to-target calls.
+V: Amazon Bedrock AgentCore, Amazon Cognito
+
+@ DVA-C03 D2 T2.3 applied use-case
+S: Amazon Bedrock model invocation logging delivers full prompts and responses to a CloudWatch Logs log group. Prompts sometimes contain credit card numbers and US Social Security numbers. Support engineers query the log group with CloudWatch Logs Insights and must not see these values, while the compliance team must be able to view them. Which solution meets these requirements?
+A: Create a metric filter on the log group that matches card and SSN patterns, and alarm whenever a match occurs so that the support team stops querying the group
+B: Add a subscription filter that streams events to a Lambda function that redacts them into a second log group, and grant support engineers access only to that copy
+C: Turn off text data delivery in the invocation logging configuration, and ask the compliance team to reconstruct prompts from the application's own debug log output
+D: Attach a data protection policy with managed data identifiers for card numbers and SSNs to the log group, and grant logs:Unmask only to the compliance team role
+K: D
+G: ## CloudWatch Logs data protection policies
+A **data protection policy** on a log group (or the whole account) uses **managed data identifiers** (credit card numbers, SSNs, AWS secret keys, health identifiers and many more) or custom identifiers to find sensitive values as events are **ingested**.
+- Matches are **masked at every egress point**: console, `GetLogEvents`, CloudWatch Logs Insights, metric filters and subscription filters.
+- Only principals with the IAM permission **`logs:Unmask`** can view the original values.
+- An **audit** statement can send findings reports to CloudWatch Logs, S3 or Firehose, and the `LogEventsWithFindings` metric supports alarms.
+- Events ingested **before** the policy existed are not masked.
+## Why this fits invocation logs
+Bedrock invocation logs contain the input and output bodies verbatim. Masking in CloudWatch Logs keeps one log group, one retention setting and one access path, and the unmask permission decides who sees the raw values.
+W: Data protection policy plus logs:Unmask: values are masked for every reader by default, including Logs Insights queries, and only the compliance role can unmask them.
+X: A=Metric filter and alarm: a metric filter only counts matches; the values remain visible to anyone who queries the log group.
+B=Subscription filter copy: the original group still holds unmasked data, and a custom redaction function adds code and a second copy that must be secured.
+C=Disable text delivery: compliance loses the very data it needs, and moving prompts to application debug logs spreads the sensitive values to a less controlled place.
+T: Mask sensitive values in Bedrock invocation logs with a CloudWatch Logs data protection policy and grant logs:Unmask only to the people who need raw data.
+V: Amazon CloudWatch Logs, Amazon Bedrock
+
+@ DVA-C03 D2 T2.3 applied troubleshooting
+S: A developer configures Amazon Bedrock model invocation logging to deliver to an Amazon S3 bucket in the same account and Region. The bucket uses SSE-KMS with a customer managed key and has ACLs disabled. No log objects ever appear in the bucket. Which changes should the developer make? (Select TWO)
+A: Add a bucket policy allowing the bedrock.amazonaws.com service principal s3:PutObject on the log prefix, with aws:SourceAccount and aws:SourceArn conditions
+B: Create an IAM role that trusts bedrock.amazonaws.com with s3:PutObject on the bucket, and specify that role in the S3 section of the logging configuration
+C: Re-enable bucket ACLs and grant the Bedrock log delivery group write access, because Bedrock writes invocation logs to S3 through ACL grants
+D: Move the bucket to a central logging account, because Bedrock delivers invocation logs to S3 only when the bucket is outside the account that invokes models
+E: Add a statement to the KMS key policy allowing the bedrock.amazonaws.com service principal kms:GenerateDataKey, with aws:SourceAccount and aws:SourceArn conditions
+K: A,E
+G: ## How Bedrock writes invocation logs to S3
+Model invocation logging (off by default) is configured per account and Region with `PutModelInvocationLoggingConfiguration`. Destinations must be in the **same account and Region**.
+For an S3 destination, Bedrock writes as the **service principal** `bedrock.amazonaws.com`, so the bucket must allow it:
+- **Bucket policy**: `s3:PutObject` on `arn:aws:s3:::bucket/prefix/AWSLogs/<account>/BedrockModelInvocationLogs/*`, with `aws:SourceAccount` and `aws:SourceArn` conditions to prevent confused-deputy use. (The console can attach this automatically.)
+- **ACLs disabled**, so that the bucket policy takes effect.
+- **SSE-KMS**: the key policy must allow the same service principal `kms:GenerateDataKey`, again with source conditions.
+## CloudWatch Logs is different
+For a CloudWatch Logs destination you create an **IAM role** that trusts `bedrock.amazonaws.com` and allows `logs:CreateLogStream` and `logs:PutLogEvents`. The S3 destination uses no role.
+Bodies over 100 KB and binary data can be delivered only to S3; a CloudWatch Logs configuration can name an S3 location for that large data.
+W: A=Bucket policy for the Bedrock service principal: Bedrock writes log objects as bedrock.amazonaws.com, so without this statement every PutObject is denied.
+E=KMS key policy for GenerateDataKey: with SSE-KMS, each write needs a data key from the customer managed key, which the service principal cannot get until the key policy allows it.
+X: B=IAM role for S3 delivery: the role-based setup is used for the CloudWatch Logs destination; S3 delivery is authorized by the bucket policy, so a role does not fix the denied writes.
+C=Re-enable ACLs: the documentation requires ACLs to be disabled so the bucket policy applies; Bedrock does not use ACL grants for log delivery.
+D=Central account bucket: invocation logging supports only destinations in the same account and Region, so moving the bucket would break delivery entirely.
+T: For S3 invocation logs, allow bedrock.amazonaws.com in the bucket policy (s3:PutObject) and, with SSE-KMS, in the key policy (kms:GenerateDataKey), both with source conditions.
+V: Amazon Bedrock, Amazon S3, AWS KMS
+
+@ DVA-C03 D2 T2.3 advanced use-case
+S: Bedrock model invocation logs, which contain full prompts, go to a CloudWatch Logs log group. Many engineers have broad CloudWatch Logs read permissions through a shared read-only policy. Security wants only a security analyst role to be able to read the events, and wants a key it can disable to make the data unreadable. What should the developer do?
+A: Set a one-day retention period on the log group and export the events daily to an S3 bucket encrypted with SSE-S3 whose bucket policy allows only the security analyst role to read
+B: Encrypt the log group with a symmetric customer managed key that allows the logs service principal for this log group, and grants kms:Decrypt via CloudWatch Logs only to the analyst
+C: Encrypt the log group with an asymmetric customer managed KMS key, and give the public key to the engineers so they can verify events while the analyst role keeps the private key
+D: Keep the default CloudWatch Logs encryption, and add a deny for GetLogEvents, FilterLogEvents and StartQuery on this log group to the engineers' shared read-only IAM policy
+K: B
+G: ## Encrypting a log group with your own key
+CloudWatch Logs always encrypts data at rest. You can instead associate a **customer managed KMS key** with a log group (`associate-kms-key`, or `kmsKeyId` on `CreateLogGroup`). Points to know:
+- Only **symmetric** keys are supported.
+- The key policy must allow the service principal `logs.<region>.amazonaws.com` (`kms:Encrypt`, `Decrypt`, `ReEncrypt*`, `GenerateDataKey*`, `Describe*`), ideally limited with the encryption context condition `kms:EncryptionContext:aws:logs:arn` set to the log group ARN.
+- Principals that read or write encrypted events (`GetLogEvents`, `FilterLogEvents`, `StartQuery`) also need KMS permissions such as `kms:Decrypt`, which the documentation shows scoped with `kms:ViaService` = `logs.<region>.amazonaws.com`.
+- Only data ingested after association uses the key. If the key is later **disabled** or access is revoked, CloudWatch Logs can no longer return that data.
+## Two independent gates
+A reader now needs both CloudWatch Logs read permission and KMS decrypt permission, so the key policy becomes a second, security-owned gate in addition to IAM.
+W: Customer managed key with a narrow key policy: engineers keep their Logs permissions but lack kms:Decrypt, so only the analyst can read events, and disabling the key makes the data unreadable.
+X: A=Export to an SSE-S3 bucket: the log group still holds readable prompts until retention expires, and SSE-S3 uses keys that Amazon S3 manages, which security cannot disable.
+C=Asymmetric key: CloudWatch Logs supports only symmetric KMS keys, and signing-style verification is not how log encryption works.
+D=Deny in the shared policy with default encryption: it may block those engineers, but the default encryption key is not one security can disable, so the requirement for a kill switch on the data is not met.
+T: Use a symmetric customer managed key on the log group (logs service principal plus encryption context) and grant kms:Decrypt only to approved readers to add a key-based gate on sensitive logs.
+V: Amazon CloudWatch Logs, AWS KMS, Amazon Bedrock
+
+@ DVA-C03 D2 T2.3 applied use-case
+S: A developer must let the support team trace which end user triggered each Amazon Bedrock Converse call in model invocation logs, so that abusive users can be identified. The users' email addresses are personal data that must not be written to the logs. All calls are made from one Lambda execution role. What should the developer do?
+A: Put a pseudonymous user ID in the requestMetadata field of each Converse call, and keep the mapping from that ID to the user's email in the application database
+B: Add the user's email address to the system prompt of each Converse call, so that it appears in the logged request body next to the user's message
+C: Create an application inference profile for each user, tagged with the user's email address, and call Converse with that user's profile ARN as the modelId of each request
+D: Rely on the identity.arn field in each invocation log entry, because Bedrock records the end user who originated the Lambda request as the calling identity
+K: A
+G: ## What an invocation log entry contains
+Each Bedrock model invocation log record (same format in CloudWatch Logs and S3) includes:
+- `timestamp`, `accountId`, `region`, `requestId`, `operation`, `modelId`;
+- `identity.arn`: the IAM or STS principal that signed the request (here, the Lambda execution role, the same for every user);
+- `requestMetadata`: key-value pairs the application passes on the call;
+- `input` and `output`: the request and response bodies and token counts.
+## requestMetadata
+`Converse` accepts `requestMetadata`, a map of up to 16 string pairs that Bedrock documents as "key-value pairs that you can use to filter invocation logs". It is the place for correlation values such as a tenant or user ID.
+## Keeping personal data out
+Anything you put in the request, metadata, tags or names can end up in logs. Use an opaque ID (for example a random UUID or a pairwise pseudonymous identifier) and keep the lookup table in your own access-controlled store. The same advice appears in AgentCore Gateway documentation for JWT subject claims, which are logged in CloudTrail.
+W: Pseudonymous ID in requestMetadata: each log record carries a filterable user ID, the email never reaches the logs, and only the application can resolve the ID to a person.
+X: B=Email in the system prompt: it puts the email into the logged input body on every call, which is exactly what must not happen, and it also sends the personal data to the model.
+C=Per-user profiles tagged with email: AWS advises against personal data in tags, and creating a profile per user does not scale and still exposes the email in resource metadata.
+D=identity.arn: the field shows the signing principal, which is the shared Lambda role, so every record looks the same and no end user is identified.
+T: Correlate Bedrock invocation logs to end users with an opaque ID in requestMetadata, never with personal data in prompts, tags or names.
+V: Amazon Bedrock, Amazon CloudWatch Logs, AWS Lambda

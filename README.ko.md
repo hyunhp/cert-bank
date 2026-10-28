@@ -36,6 +36,7 @@ Amazon Web Services, Palantir Technologies와 관련 없는 비공식 사이트�
 | | | AIB-C01 AI Business Strategist | 445 | 14 |
 | | Associate | SAA-C03 Solutions Architect | 395 | 28 |
 | | | DVA-C02 Developer | 395 | 28 |
+| | | DVA-C03 Developer (new, from 2026-12-01) | 470 | – |
 | | | SOA-C03 CloudOps Engineer | 395 | 28 |
 | | | DEA-C01 Data Engineer | 395 | 28 |
 | | | MLA-C01 Machine Learning Engineer | 395 | 28 |

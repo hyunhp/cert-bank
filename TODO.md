@@ -12,10 +12,16 @@ Notices live in `data/exam-specs.json` ("update"), shown above the section filte
   batches. Pool 508. Open: SAP-C03 study guide; after 2026-11-16 decide whether to hide SAP-C02.
   Bedrock Guardrails org-level enforcement (AWS Organizations Bedrock policy) is GA since 2026-04: no question
   covers it yet, and no existing key is contradicted by it.
-- DVA-C02 -> DVA-C03: NEXT. Last C02 day 2026-11-30, C03 from 2026-12-01. Official guide published 2026-10-27
-  (developer-associate-03): same 4 domains, weights 30/26/22/22, 50 scored + 15 unscored, passing 720; new Task 2.3
-  (AI service security) and Task 3.2 (automated testing). Same method as SAP-C03 (classify, share with tasks, write
-  the gap).
+- DVA-C02 -> DVA-C03: DONE 2026-10-27 from the official guide (docs.aws.amazon.com, developer-associate-03, 2026-10-27):
+  same 4 domains 30/26/22/22, 12 tasks (new T2.3 AI service security; C02 T2.3 merged into T2.2, T3.2+T3.3 into
+  T3.2, T3.4 became T3.3), 50 scored + 15 unscored, passing 720 (time not in the guide; 130 min assumed). Last C02 day
+  2026-11-30; C03 exam and registration from 2026-12-01. All 395 DVA-C02 questions classified: 390 shared with their
+  C03 task (shares.json "tasks"), 5 excluded (Amazon Q Developer, CodeGuru Profiler, App Runner: not in the C03
+  in-scope list). 80 new in batches/DVA-C03/b01-b04 (AI service security; Kiro and Bedrock integration; AI tools for
+  tests, CI/CD, troubleshooting and optimization; container builds/deploys, signed URLs, probes, alerts), each
+  reviewed and deduplicated across batches. Pool 470. Kiro facts checked only via raw.githubusercontent.com
+  (kirodotdev README/demo repo): kiro.dev and aws.amazon.com are blocked here; re-check the Kiro questions
+  (b02, b03) if Kiro docs become reachable. Open: DVA-C03 study guide; after 2026-12-01 decide whether to hide DVA-C02.
 - MLA-C01 -> MLA-C02: DONE 2026-10-23. MLA-C02 registered (same four domains, 28/24/24/24; same twelve tasks, so
   `tasksFrom: MLA-C01`); `tools/qgen/shares.json` shares 389 MLA-C01 questions (6 excluded: SageMaker Neo / model
   compression, removed in C02) and 80 new GenAI questions in batches/MLA-C02/b01-b04 (vector stores and RAG data,
