@@ -48,7 +48,7 @@ with sync_playwright() as p:
             ok("reload resumes on same question", pg.inner_text(".qnum").startswith("Question 7 of 20"))
             ok("answers survive reload", state(pg)["answers"].get(qid) == keys)
         pg.click('[data-act="next"]')
-    ok("progress counter", "17/20 answered" in pg.inner_text(".mkbar"))
+    ok("progress counter", pg.inner_text(".mkbar .prog").startswith("17/20"))   # "answered" is hidden at phone width
     ok("previous works", True)
     pg.click('[data-act="grid"]'); pg.wait_for_selector(".grid")
     ok("grid shows 17 answered", pg.locator(".cell.ans").count() == 17)

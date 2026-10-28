@@ -24,7 +24,7 @@ with sync_playwright() as p:
         ok(f"[{scheme}] top button hidden at top", not vis("#toTop"))
         pg.mouse.wheel(0,3000); pg.wait_for_timeout(500)
         ok(f"[{scheme}] bar shown after scroll", vis("#examBar"))
-        ok(f"[{scheme}] bar shows SAP-C02", pg.inner_text("#examBarCode")=="SAP-C02" and "Professional" in pg.inner_text("#examBarName"))
+        ok(f"[{scheme}] bar shows SAP-C02", pg.inner_text("#examBarCode")=="SAP-C02" and pg.inner_text("#examBarName")=="Solutions Architect")
         chip_top=pg.evaluate("document.getElementById('chipRow').getBoundingClientRect().bottom")
         ok(f"[{scheme}] chip row scrolled away (not sticky)", chip_top<0)
         ok(f"[{scheme}] top button shown", vis("#toTop"))
