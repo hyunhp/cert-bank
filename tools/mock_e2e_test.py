@@ -67,6 +67,14 @@ with sync_playwright() as p:
     pg.click('[data-review="incorrect"]'); pg.wait_for_selector(".rv")
     ok("review incorrect lists 8", pg.locator(".rv").count() == 8)
     ok("review shows explanation + answer", pg.locator(".rv .ans-line").count() == 8)
+    # options are shuffled in a mock exam: the "why each option" entries must use the letters shown on screen
+    rv = pg.evaluate("""[...document.querySelectorAll('.rv')].map(c => ({
+        ans: c.querySelector('.ans-line').textContent.replace('Answer:', '').split(',').map(s => s.trim()),
+        opts: [...c.querySelectorAll('.opts li')].map(li => li.textContent.trim())}))""")
+    rich = [c for c in rv if c["opts"]]
+    ok("review explanations name the shown letters",
+       rich and all(sorted(o[2] for o in c["opts"] if "(correct)" in o) == sorted(c["ans"]) for c in rich), rv[:2])
+    ok("review option entries in shown order", rich and all([o[2] for o in c["opts"]] == sorted(o[2] for o in c["opts"]) for c in rich))
     pg.click('[data-filter="flagged"]')
     ok("review flagged lists 2", pg.locator(".rv").count() == 2)
     pg.click('[data-filter="all"]')
