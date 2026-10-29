@@ -31,8 +31,25 @@ of April 17, 2026", page updated 2026-03-19) and https://learn.microsoft.com/en-
 | Domains | D1 identities and governance 20-25%, D2 storage 15-20%, D3 compute 20-25%, D4 virtual networking 15-20%, D5 monitor and maintain 10-15%; `exam-specs.json` stores the midpoints |
 | Item types | The real exam may include interactive components (labs, case studies); this bank only has multiple choice |
 
+### AI-901 Microsoft Azure AI Fundamentals (added 2026-10-29)
+Sources: https://learn.microsoft.com/en-us/credentials/certifications/resources/study-guides/ai-901 ("Skills measured as
+of April 15, 2026", page updated 2026-07-13) and https://learn.microsoft.com/en-us/credentials/certifications/azure-ai-fundamentals/
+("The English language version of this certification was updated on April 15, 2026"). AI-901 replaces AI-900 (retired
+2026-06-30).
+
+| Item | Value |
+|---|---|
+| Length | Not on the exam page; Learn's exam-duration page gives Fundamentals exams 45 minutes |
+| Questions | Not published. This bank assumes 45 (mock length only) |
+| Pass mark | Scaled score 700 or greater |
+| Domains | D1 Identify AI concepts and capabilities 40-45%, D2 Implement AI solutions by using Microsoft Foundry 55-60%; `exam-specs.json` stores the midpoints |
+| Audience | Beginning AI developers: conceptual AI knowledge plus basic Python and familiarity with Azure resources |
+| Preview features | "Most questions cover features that are general availability (GA). The exam may contain questions on Preview features if those features are commonly used." Key answers stay on GA features; when a feature is preview, say so in the explanation |
+
 ## Codes and task ids
 - `AZ-900` (Azure Fundamentals), vendor `azure`, level `foundational`.
+- `AI-901` (Azure AI Fundamentals), vendor `azure`, level `foundational`; tasks T1.1-T1.3 and T2.1-T2.4 are the guide's 7
+  skill groups in order.
 - `AZ-104` (Azure Administrator – Associate), vendor `azure`, level `associate`; tasks T1.1-T5.2 are the guide's 15 skill
   groups in order.
 - Domains D1-D3 follow the study guide's order and names exactly.
@@ -52,6 +69,18 @@ of April 17, 2026", page updated 2026-03-19) and https://learn.microsoft.com/en-
 - Region pairs: Microsoft's own page warns that deploying into a pair does not by itself give high availability or
   failover; never imply automatic failover from pairing alone. Many newer regions are nonpaired and use
   availability zones.
+- AI-901 is a fundamentals exam for beginning developers: stems mix concepts (responsible AI, workloads, how generative
+  models work) with light hands-on Foundry scenarios (deploy a model, write a prompt, a small Python client, a single agent,
+  Content Understanding analyzers). Use current names checked on Learn: Microsoft Foundry (formerly Azure AI Foundry),
+  Foundry Tools (formerly Azure AI services), Azure Speech / Azure Language / Azure Content Understanding in Foundry
+  Tools, Foundry Agent Service. Keep code to a few lines; never test SDK syntax trivia Learn does not show.
+  Checked during the AI-901 reviews (2026-10-29): "Guardrails (previously content filters)"; roles Foundry User (formerly
+  Azure AI User), do not use Azure AI Developer or Cognitive Services* roles for Foundry projects; agents use agents +
+  conversations + responses (classic threads/messages/runs deprecated, retire 2027-03-31); Azure Language key phrases,
+  sentiment/opinion mining and summarization are "legacy" (retire 2029-03-31; PII, language detection, NER are core);
+  Language Studio retires 2027-03-20; Image Analysis v3.2/v4.0 and Custom Vision retire 2028-09-25 (never key them);
+  dall-e-3 retired 2026-03-04, GPT-image-2 is GA while GPT-image-1/1-mini/1.5 are limited-access preview; Realtime API
+  with gpt-realtime and Voice Live API are GA, gpt-audio chat completions uses a preview API version.
 - AZ-900 is a fundamentals exam: stems test choosing and describing services, not CLI flags or portal clicks.
 - AZ-104 is an administrator exam: stems are hands-on scenarios (configure, troubleshoot, interpret). Concrete settings,
   role names, `az`/PowerShell commands, ARM/Bicep snippets and portal blades are fine when each detail is checked on
