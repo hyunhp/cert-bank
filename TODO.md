@@ -91,8 +91,10 @@ written in parallel by subtopic and each independently reviewed against Learn; r
 of published or sibling questions and simplified over-deep ones to fundamentals level. Lesson: parallel writers in the
 same task drift into the same scenarios (Spot for rendering, month-end scale-up); ingest reviewed batches as they
 finish and tell the remaining reviewers what was just published.
-Next: AZ-900 study guide (data/study/AZ-900.json + study.js STUDY_EXAMS), then AZ-104 (skills measured updated
-2026-04-17).
+AZ-900 study guide DONE 2026-10-29: 14 days (D1 3, D2 6, D3 4, final), two writers + independent Learn review
+(10 fixes). Glossary: only 8 vendor-neutral terms tagged AZ-900; most existing definitions name AWS services, so
+Azure-specific terms (resource group, management group, Azure RBAC, Microsoft Entra ID ...) still need drafting + review.
+Next: AZ-104 (skills measured updated 2026-04-17).
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's

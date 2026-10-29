@@ -51,7 +51,7 @@ Amazon Web Services, Palantir Technologies or Microsoft, and no real exam questi
 | Palantir | Associate | PLTR-DE Data Engineer | 400 | 17 |
 | | | PLTR-AIE AI Engineer | 400 | 17 |
 | | | PLTR-APD Application Developer | 400 | 17 |
-| Azure | Foundational | AZ-900 Azure Fundamentals | 225 | – |
+| Azure | Foundational | AZ-900 Azure Fundamentals | 225 | 14 |
 
 Some questions belong to more than one exam. Palantir publishes no section weights, so its sections count equally;
 Azure publishes weight ranges, and the mock exam uses their midpoints.
