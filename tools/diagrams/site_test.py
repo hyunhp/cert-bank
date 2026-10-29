@@ -2,7 +2,7 @@
 and check the diagram renders with no page errors and no horizontal overflow at 390 px.
     python3 tools/diagrams/site_test.py
 """
-import re
+import re, sys
 import functools, http.server, threading, json, glob
 from playwright.sync_api import sync_playwright
 import pathlib
@@ -51,4 +51,4 @@ with sync_playwright() as p:
     print("page errors / console errors:", errs)
     b.close()
 srv.shutdown()
-print("FAILS:",fails)
+print("FAILS:",fails); sys.exit(1 if fails else 0)
