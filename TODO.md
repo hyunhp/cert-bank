@@ -215,6 +215,17 @@ load). Diagram styles are now injected during the idle warm-up and the diagram r
 `loading_perf_test.py` now clicks in-page, allows 100 ms for plain and 200 ms for diagram reveals, re-measures once on
 fresh cards after a failed round (one-off VM spikes), and checks the warm-up directly (sprite + styles present).
 
+## 3. First-load latency (measured 2026-10-29)
+Playwright, 390x844, 4x CPU, gzip like GitHub Pages; "first card" = navigation to first question card.
+Before: 4G (9 Mbps/85 ms) 1.1-1.5 s, slow 3G (1.6 Mbps/150 ms) 2.8-2.9 s. Causes: the Google Fonts stylesheet was
+render-blocking (the page script and every data fetch waited ~0.8 s on 3G), and the exam file and the domain/task files
+(exam-specs/-domains/-tasks/-shared-tasks) were fetched one after the other. Fixed (fonts non-blocking with preconnect,
+display=swap fallback; exam file + meta in parallel): 4G 0.9-1.2 s, 3G 2.35 s (SAP-C03, 509 questions, 2.9 s: 132 KB gzip
+exam file). Remaining cost grows with pool size: the exam file (~0.26 KB gzip per question) and all cards render at once
+(~130 ms long task at 4x CPU for 500 cards; `content-visibility:auto` keeps layout cheap). Revealing an answer before the
+idle prefetch of `data/explanations/<EXAM>.json` (up to 331 KB gzip) finishes waits 1.5-2.2 s on slow 3G. Ideas if pools
+pass ~700: render the first ~50 cards then the rest on idle, or split explanation files per domain.
+
 ## Tooling notes
 - `tools/diagrams/build_assets.py` reuses icons already in `assets/aws-icons.svg` when the icon pack is missing, so
   it works on any PC; only brand-new icons need the pack (path as first argument).
