@@ -16,8 +16,9 @@ const STUDY_EXAMS = [
   ["ANS-C01", "Advanced Networking – Specialty", "specialty"], ["SCS-C03", "Security – Specialty", "specialty"],
   ["PLTR-DE", "Data Engineer – Associate", "associate", "palantir"], ["PLTR-AIE", "AI Engineer – Associate", "associate", "palantir"],
   ["PLTR-APD", "Application Developer – Associate", "associate", "palantir"],
+  ["AZ-900", "Azure Fundamentals", "foundational", "azure"],
 ].map(([code, name, level, vendor]) => [code, name, level, vendor || "aws"]);
-const VENDORS = [["aws", "AWS"], ["palantir", "Palantir"]];
+const VENDORS = [["aws", "AWS"], ["palantir", "Palantir"], ["azure", "Azure"]];
 const vendorOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[3];
 const isNewVersion = name => / \(new\)$/.test(name);
 const shortName = name => name.replace(/ – (Associate|Professional|Specialty)( \(new\))?$/, "");
