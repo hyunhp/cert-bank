@@ -51,6 +51,7 @@ Amazon Web Services, Palantir Technologies, Microsoft와 관련 없는 비공식
 | | | PLTR-AIE AI Engineer | 400 | 17 |
 | | | PLTR-APD Application Developer | 400 | 17 |
 | Azure | Foundational | AZ-900 Azure Fundamentals | 225 | 14 |
+| | Associate | AZ-104 Azure Administrator | 250 | 32 |
 
 여러 시험에 공통으로 쓰이는 문항이 있어 시험별 합계는 전체 고유 문항 수보다 많습니다. Palantir는 섹션 비중을
 공개하지 않아 모든 섹션을 같은 비중으로 다루고, Azure는 비중을 범위로 공개해 모의고사는 그 중간값을 씁니다.

@@ -94,7 +94,12 @@ finish and tell the remaining reviewers what was just published.
 AZ-900 study guide DONE 2026-10-29: 14 days (D1 3, D2 6, D3 4, final), two writers + independent Learn review
 (10 fixes). Glossary: only 8 vendor-neutral terms tagged AZ-900; most existing definitions name AWS services, so
 Azure-specific terms (resource group, management group, Azure RBAC, Microsoft Entra ID ...) still need drafting + review.
-Next: AZ-104 (skills measured updated 2026-04-17).
+AZ-104 DONE 2026-10-29: registered (5 domains, midpoint weights, 50 questions assumed, 100 min), 250 questions in
+b01-b15 (one batch per skill group so parallel writers could not collide; each independently reviewed against Learn, ~110
+fixes incl. 3 wrong keys and ~15 cross-batch duplicates), study guide 32 days. Five explanations had markdown tables
+(converted, e01; qgen check now rejects tables); ``` fences now render as code blocks (29 older DVA explanations used them).
+Azure glossary: 16 Azure terms for AZ-900 (az-* ids, separate from the AWS-worded entries).
+Next Azure candidates: AZ-305 / AZ-500 / AI-102 successors — check Learn for current exams before planning.
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's

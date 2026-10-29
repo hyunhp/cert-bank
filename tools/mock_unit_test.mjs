@@ -17,13 +17,15 @@ for (const exam of Object.keys(specs).filter(k => !k.startsWith("_"))) {
     ok(`${exam} n=${n} unique`, new Set(ids).size === ids.length);
     const byId = new Map(docs.map(q => [q.id, q]));
     const cnt = {}; ids.forEach(id => { const d = domainOf(byId.get(id), exam, map); cnt[d] = (cnt[d] || 0) + 1; });
+    // weights are relative (Azure stores the midpoints of published ranges, which need not add up to 100)
+    const total = spec.domains.reduce((s, o) => s + o.weight, 0);
     for (const d of spec.domains) {
       const supply = docs.filter(q => domainOf(q, exam, map) === d.code).length;
-      const expect = n * d.weight / 100;
+      const expect = n * d.weight / total;
       const got = cnt[d.code] || 0;
       // exact weight within rounding, unless the pool itself is short for this domain (then all of it is used);
       // when other domains are short the shortfall is redistributed, so a domain may exceed its weight (pilot pools)
-      const othersShort = spec.domains.some(o => o.code !== d.code && docs.filter(q => domainOf(q, exam, map) === o.code).length < n * o.weight / 100);
+      const othersShort = spec.domains.some(o => o.code !== d.code && docs.filter(q => domainOf(q, exam, map) === o.code).length < n * o.weight / total);
       ok(`${exam} n=${n} ${d.code} weight`, Math.abs(got - expect) <= 1 || (supply < expect && got === supply) || (othersShort && got >= Math.floor(expect) && got <= supply), `${got} vs ${expect.toFixed(1)} (supply ${supply})`);
       if (supply < expect) console.log(`  note: ${exam} ${d.code} pool (${supply}) is smaller than one full exam needs (${expect.toFixed(1)})`);
     }
