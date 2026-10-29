@@ -9,10 +9,11 @@ Notices live in `data/exam-specs.json` ("update"), shown above the section filte
   AWS, Well-Architected Tool). 13 updated in SAP-C02/f02 (AWS Transform MGN, Security Hub CSPM, re-keyed discovery
   and AWS Batch questions). 120 new in batches/SAP-C03/b01-b06 (AI/ML integration, responsible AI and post-quantum,
   AI cost/evaluation/monitoring, and every skill that had no question), each reviewed and deduplicated across
-  batches. Pool 508, now 505 (2026-10-29: the 3 Migration Evaluator questions excluded, see section 1). SAP-C03 study guide DONE 2026-10-29 (38 days, below). Open: after 2026-11-16 decide whether to
+  batches. Pool 508, then 505 (2026-10-29: the 3 Migration Evaluator questions excluded, see section 1), now 509. SAP-C03 study guide DONE 2026-10-29 (38 days, below). Open: after 2026-11-16 decide whether to
   hide SAP-C02.
-  Bedrock Guardrails org-level enforcement (AWS Organizations Bedrock policy) is GA since 2026-04: no question
-  covers it yet, and no existing key is contradicted by it.
+  Bedrock Guardrails org-level enforcement (AWS Organizations Bedrock policy, GA 2026-04): DONE 2026-10-29, 4 questions
+  in batches/SAP-C03/b07 (Q006460-Q006463: per-Region management-account guardrail + version + resource policy, member
+  ApplyGuardrail permission, declarative-policy inheritance, model exclusions and selective guarding), reviewed. Pool 509.
 - DVA-C02 -> DVA-C03: DONE 2026-10-27 from the official guide (docs.aws.amazon.com, developer-associate-03, 2026-10-27):
   same 4 domains 30/26/22/22, 12 tasks (new T2.3 AI service security; C02 T2.3 merged into T2.2, T3.2+T3.3 into
   T3.2, T3.4 became T3.3), 50 scored + 15 unscored, passing 720 (time not in the guide; 130 min assumed). Last C02 day
