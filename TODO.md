@@ -98,7 +98,10 @@ AZ-104 DONE 2026-10-29: registered (5 domains, midpoint weights, 50 questions as
 b01-b15 (one batch per skill group so parallel writers could not collide; each independently reviewed against Learn, ~110
 fixes incl. 3 wrong keys and ~15 cross-batch duplicates), study guide 32 days. Five explanations had markdown tables
 (converted, e01; qgen check now rejects tables); ``` fences now render as code blocks (29 older DVA explanations used them).
-Azure glossary: 16 Azure terms for AZ-900 (az-* ids, separate from the AWS-worded entries).
+Azure glossary: 36 Azure terms (az-* ids, separate from the AWS-worded entries). 2026-10-29: +20 for AZ-104 (NSG, peering,
+SAS, private/service endpoints, LRS..GZRS, service tags, UDR, Recovery Services vault, KQL, scale/availability sets, Bicep,
+Bastion, DCR, SSPR, Key Vault, gateway transit, private DNS zone, ExpressRoute; 7 also tagged AZ-900), Learn-reviewed
+(7 fixes). AZ-104 now 38 tagged terms (31 of 32 days marked), AZ-900 31.
 Next Azure exams (checked on Learn 2026-10-29; every guide says "A score of 700 or greater is required to pass"):
 - Retired: AI-102 (2026-06-30, successor AI-103), AI-900 (2026-06-30, successor AI-901), AZ-204 (2026-07-31) and
   AZ-500 (certification retired 2026-08-31); Learn names no successor for AZ-204/AZ-500 (the retirement posts are on
