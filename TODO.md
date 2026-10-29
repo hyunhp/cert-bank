@@ -79,6 +79,25 @@ Test noise fixed 2026-10-22: `bookmark_backup_test` "toast shown" (the test read
 records toasts as they appear) and `diagrams/check.py` (5 layout errors fixed in `tools/diagrams/src`). All suites
 should pass; a failure is real. Playwright here: `pip install playwright==1.56.0` (matches /opt/pw-browsers chromium-1194).
 
+## Microsoft Azure (started 2026-10-29)
+Owner chose Azure as the third vendor (2026-10-29); learn.microsoft.com is allowed in the environment's network
+settings. Rules and checked facts: `tools/qgen/AZURE.md`. AZ-900 registered (vendor `azure`, 3 domains, weights are
+the midpoints of the published ranges, 45 questions assumed). Pilot: 60 questions (20 per domain, b01-b03).
+Next after the pilot: AZ-900 to its 225 target, then AZ-104 (skills measured updated 2026-04-17), study guides.
+
+## Future: other certifications (researched 2026-10-29, not started)
+Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
+network settings (only docs.aws.amazon.com, learn.microsoft.com and cloud.google.com/learn pages are reachable now).
+- Palantir Foundry Aware: the entry-level exam of the 2026 framework. Format, cost and proctoring not confirmed
+  (community posts conflict); learn.palantir.com / certification.palantir.com are blocked here.
+- Google Cloud: Generative AI Leader (50-60 multiple choice, 90 min; pairs with AIF/AIB), Associate Cloud Engineer,
+  Professional Cloud Architect. Exam pages reachable; guide PDFs (services.google.com) and docs are blocked.
+- Databricks Certified Data Engineer Associate (45 multiple choice, 90 min, revised 2026-05-04; pairs with
+  DEA-C01 / PLTR-DE). Needs databricks.com and docs.databricks.com.
+- HashiCorp Terraform Associate 004 (live 2026-01-08; multiple choice incl. multi-select). Needs
+  developer.hashicorp.com.
+- Out of scope (hands-on, not multiple choice): Kubernetes CKA/CKAD, Palantir Specialist.
+
 ## Palantir (started 2026-10-14)
 State 2026-10-15: PLTR-AIE 400, PLTR-DE 400 (b01-b50 each), PLTR-APD 400 (b01-b50: pilot + six rounds + capstone). Rules and checked facts in
 `tools/qgen/PALANTIR.md`.
