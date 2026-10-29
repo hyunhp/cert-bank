@@ -74,6 +74,8 @@ with sync_playwright() as p:
     check("star again returns to the exam", pg.eval_on_selector("#chipRow .chip.active", "e => e.dataset.code") == "SAP-C03" and pg.get_attribute("#bmIcon", "aria-pressed") == "false")
     nav = pg.evaluate("(() => { const t = document.getElementById('vendorRow').getBoundingClientRect(), s = document.getElementById('bmIcon').getBoundingClientRect(); return [t.right, s.left]; })()")
     check("tab line stops before the star", nav[0] <= nav[1], nav)
+    ov = pg.eval_on_selector("#vendorRow", "e => [e.scrollHeight, e.clientHeight, e.scrollWidth, e.clientWidth]")
+    check("tab row has nothing to scroll (no stray scrollbar on Windows)", ov[0] <= ov[1] and ov[2] <= ov[3], ov)
 
     pg.goto(BASE + "#exam=PLTR-APD"); pg.reload(); pg.wait_for_selector(".qcard")
     check("PLTR-APD chip selectable", pg.eval_on_selector("#chipRow .chip.active", "e => e.dataset.code") == "PLTR-APD")
