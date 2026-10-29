@@ -229,6 +229,10 @@ def rich_checks(f, entries, where, errors):
         m = LETTER_REF.search(f.get(k, ""))
         if m:
             errors.append(f"{where}: {k}: refers to an option by letter ({m.group(0)!r}); name the option instead")
+    # The site renders "## " headings, "- " lists, **bold**, `code` and ``` fences, but no tables (they show as raw text).
+    for k in ("G", "W", "X", "T"):
+        if re.search(r"^\s*\|.*\|\s*$", f.get(k, ""), re.M):
+            errors.append(f"{where}: {k}: contains a markdown table, which the site does not render; use a bullet list")
 
 
 def why_by_key(f, keys, where, errors):
