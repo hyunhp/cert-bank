@@ -9,7 +9,7 @@ Notices live in `data/exam-specs.json` ("update"), shown above the section filte
   AWS, Well-Architected Tool). 13 updated in SAP-C02/f02 (AWS Transform MGN, Security Hub CSPM, re-keyed discovery
   and AWS Batch questions). 120 new in batches/SAP-C03/b01-b06 (AI/ML integration, responsible AI and post-quantum,
   AI cost/evaluation/monitoring, and every skill that had no question), each reviewed and deduplicated across
-  batches. Pool 508. SAP-C03 study guide DONE 2026-10-29 (38 days, below). Open: after 2026-11-16 decide whether to
+  batches. Pool 508, now 505 (2026-10-29: the 3 Migration Evaluator questions excluded, see section 1). SAP-C03 study guide DONE 2026-10-29 (38 days, below). Open: after 2026-11-16 decide whether to
   hide SAP-C02.
   Bedrock Guardrails org-level enforcement (AWS Organizations Bedrock policy) is GA since 2026-04: no question
   covers it yet, and no existing key is contradicted by it.
@@ -138,13 +138,15 @@ Re-check 2026-10-22 (AWS "Service Availability Updates" of 2026-06-30 and 2026-0
   Connect, email to SES; SMS/voice/push APIs continue as AWS End User Messaging).
 - Also closed 2026-10-29: WorkSpaces Secure Browser, Chime SDK SIP media application, standalone Infrastructure
   Composer console (end of support 2026-12-07; the VS Code Toolkit experience stays). Not mentioned in the bank.
-Found 2026-10-29 (C03 study-guide review, docs.aws.amazon.com), NOT yet applied to the question bank:
-- AWS X-Ray SDKs and daemon in maintenance mode since 2026-02-25 (security fixes only; migrate to OpenTelemetry/ADOT).
-  "X-Ray SDK" appears 18 times in 10 bank files and in the DVA-C02 study guide: add an availability note where an
-  explanation recommends the SDK for new instrumentation.
-- AWS Copilot CLI end of support 2026-06-12 (still named in the DVA-C03 guide; the DVA-C03 study guide notes it).
-- AWS Migration Evaluator: not in the SAP-C03 in-scope list and its docs pages return 404; AWS Transform assessments
-  now build the TCO business case. 36 mentions in 4 bank files and SAP-C02 study day 28: confirm its status first.
+Found 2026-10-29 (C03 study-guide review, docs.aws.amazon.com) — DONE the same day:
+- AWS X-Ray SDKs and daemon in maintenance mode since 2026-02-25 (security fixes only; AWS recommends OpenTelemetry/ADOT).
+  Note added to the 8 questions that mention the SDK (explain batches SAA-C03/e14, AIP-C01/e19, SOA-C03/e14,
+  DVA-C02/e14, SAP-C02/e17) and to DVA-C02 study days 22 and 25.
+- AWS Copilot CLI end of support 2026-06-12: no question mentions it; the DVA-C03 study guide (day 20) notes it.
+- AWS Migration Evaluator is still live (AWS Transform assessments import its Quick Insights files) but its docs URLs
+  are gone and SAP-C03 does not list it in scope; AWS Transform assessments build the TCO business case. The 3
+  questions keyed to it (Q001176, Q001177, Q003045) stay in SAP-C02 with a note (SAP-C02/e17) and were excluded from
+  SAP-C03 (shares.json + `qgen share SAP-C03`, which now also removes newly excluded ids). SAP-C02 study day 28 notes it.
 Annotated in explain batches AIB-C01/e17, AIF-C01/e15, AIP-C01/e17-e18, MLA-C01/e14, SOA-C03/e13, DEA-C01/e14,
 SAP-C02/e16. Next re-check: around 2027-01 (after the Q4 availability update).
 

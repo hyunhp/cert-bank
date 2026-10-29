@@ -10,6 +10,7 @@ Sharing rules (tools/qgen/shares.json): {"MLA-C02": {"from": "MLA-C01", "exclude
 question of the source exam (except the listed ids) also a question of the target exam, in the same domain code
 (the two exam versions keep the same domains). `share` applies a rule to the published pool; ingest applies all
 rules too, so re-ingesting a source batch never drops the target exam.
+Adding an already-shared id to "exclude" and running `share` takes it out of the target exam again.
 When the new version reorganises its tasks, the rule lists the shared questions with their new task instead:
 {"SAP-C03": {"from": "SAP-C02", "tasks": {"Q001023": "T1.4", ...}, "exclude": [...]}}. Only listed questions are
 shared; the domain comes from the task (T1.4 -> D1) and the task goes to data/exam-shared-tasks.json
@@ -660,12 +661,24 @@ def share(dst):
         files[dst].append(q)
         dmap.setdefault(q["id"], {})[dst] = dom
         added += 1
+    # An id added to "exclude" after it was shared leaves the target exam again (its home exam keeps it).
+    removed = [q["id"] for q in files[dst] if q["id"] in exclude and q["examCodes"][0] != dst]
+    for qid in removed:
+        for e in EXAMS:
+            for x in files[e]:
+                if x["id"] == qid and dst in x["examCodes"]:
+                    x["examCodes"].remove(dst)
+        dmap.get(qid, {}).pop(dst, None)
+        tmap.get(qid, {}).pop(dst, None)
+    files[dst] = [q for q in files[dst] if q["id"] not in removed]
+    dmap = {k: v for k, v in dmap.items() if v}
     for e in EXAMS:
         files[e].sort(key=lambda x: x["id"])
         save_exam(e, files[e])
     (DATA / "exam-domains.json").write_text(json.dumps(dict(sorted(dmap.items())), indent=1) + "\n", encoding="utf-8", newline="\n")
     save_task_map(tmap)
-    print(f"shared: {added} questions of {src} now also in {dst} ({len(exclude)} excluded)")
+    print(f"shared: {added} questions of {src} now also in {dst} ({len(exclude)} excluded"
+          + (f"; removed from {dst}: {', '.join(removed)}" if removed else "") + ")")
     sys.path.insert(0, str(ROOT / "tools"))
     import build_data_index
     build_data_index.build()

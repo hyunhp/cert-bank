@@ -42,7 +42,7 @@ Amazon Web Services, Palantir Technologies와 관련 없는 비공식 사이트�
 | | | MLA-C01 Machine Learning Engineer | 395 | 28 |
 | | | MLA-C02 Machine Learning Engineer (new, GA 2027-01-14) | 469 | – |
 | | Professional | SAP-C02 Solutions Architect | 396 | 35 |
-| | | SAP-C03 Solutions Architect (new, from 2026-11-17) | 508 | 38 |
+| | | SAP-C03 Solutions Architect (new, from 2026-11-17) | 505 | 38 |
 | | | DOP-C02 DevOps Engineer | 395 | 35 |
 | | | AIP-C01 Generative AI Developer | 405 | 35 |
 | | Specialty | ANS-C01 Advanced Networking | 395 | 28 |
