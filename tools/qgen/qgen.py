@@ -69,8 +69,12 @@ NUM_WORD = {2: "TWO", 3: "THREE"}
 
 
 def load_exam(code):
-    """Questions of one exam with their explanations merged back in (stored apart, see save_exam)."""
-    qs = json.loads((DATA / f"{code}.json").read_text(encoding="utf-8"))
+    """Questions of one exam with their explanations merged back in (stored apart, see save_exam).
+    A newly registered exam has no file yet: it starts empty and its first ingest creates the files."""
+    path = DATA / f"{code}.json"
+    if not path.exists():
+        return []
+    qs = json.loads(path.read_text(encoding="utf-8"))
     exp_path = DATA / "explanations" / f"{code}.json"
     if exp_path.exists():
         exp = json.loads(exp_path.read_text(encoding="utf-8"))

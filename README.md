@@ -2,8 +2,8 @@
 
 **[Open the site →](https://hyunhp.github.io/cert-bank/)** · [한국어](README.ko.md)
 
-Free, original practice material for AWS and Palantir certifications. Unofficial: not affiliated with Amazon Web
-Services or Palantir Technologies, and no real exam questions (no dumps).
+Free, original practice material for AWS, Palantir and Microsoft Azure certifications. Unofficial: not affiliated with
+Amazon Web Services, Palantir Technologies or Microsoft, and no real exam questions (no dumps).
 
 ## What's here
 
@@ -15,11 +15,11 @@ Services or Palantir Technologies, and no real exam questions (no dumps).
 ## How to use
 
 **Question Bank**
-1. Pick a vendor (AWS or Palantir), a level, then an exam.
+1. Pick a vendor (AWS, Palantir or Azure), a level, then an exam.
 2. Optionally narrow to one exam section (domain).
 3. Click a question to see the answer and why each option is right or wrong. Many explanations include an
    architecture diagram.
-4. ☆ bookmarks a question; the ★ button next to the AWS / Palantir tabs lists them all.
+4. ☆ bookmarks a question; the ★ button next to the vendor tabs lists them all.
 5. 📝 **Mock Exam** gives a timed test with the real exam's length and section weights.
 
 **Study Guide**
@@ -51,8 +51,10 @@ Services or Palantir Technologies, and no real exam questions (no dumps).
 | Palantir | Associate | PLTR-DE Data Engineer | 400 | 17 |
 | | | PLTR-AIE AI Engineer | 400 | 17 |
 | | | PLTR-APD Application Developer | 400 | 17 |
+| Azure | Foundational | AZ-900 Azure Fundamentals (new, growing) | 60 | – |
 
-Some questions belong to more than one exam. Palantir publishes no section weights, so its sections count equally.
+Some questions belong to more than one exam. Palantir publishes no section weights, so its sections count equally;
+Azure publishes weight ranges, and the mock exam uses their midpoints.
 
 ## Your data
 
@@ -61,7 +63,7 @@ sent to a server. To move bookmarks to another browser or device, use the backup
 
 ## Accuracy
 
-Content is checked against official AWS and Palantir documentation. Services that AWS has closed to new customers
+Content is checked against official AWS, Palantir and Microsoft Learn documentation. Services that AWS has closed to new customers
 are marked as such in explanations and study notes, because exams may still mention them. Found a mistake? Please
 [open an issue](https://github.com/hyunhp/cert-bank/issues) with the question id (for example `Q001234`) or the
 exam and day.

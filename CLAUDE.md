@@ -1,7 +1,7 @@
 # cert-bank (formerly aws_qbank) — working notes for Claude Code
 
 Static GitHub Pages site with original certification practice questions, grouped by vendor
-(AWS, Palantir). The repo was renamed from `aws_qbank` on 2026-10-14; Pages now serves https://hyunhp.github.io/cert-bank/ and the old address no longer redirects. No build step: `index.html`, `js/*.js`, `data/*.json`, `diagrams/*.json`.
+(AWS, Palantir, Microsoft Azure). The repo was renamed from `aws_qbank` on 2026-10-14; Pages now serves https://hyunhp.github.io/cert-bank/ and the old address no longer redirects. No build step: `index.html`, `js/*.js`, `data/*.json`, `diagrams/*.json`.
 Explanations live apart from the questions: `data/<EXAM>.json` has none, `data/explanations/<EXAM>.json` is `{id: text}`
 (qgen `load_exam`/`save_exam` merge and split them; the site fetches them on first reveal).
 Section filter chips (domain/task, `#exam=X&d=D4&t=T4.1`), per-domain accuracy (localStorage only, not in the bookmark
@@ -12,6 +12,7 @@ Vendors: `exam-specs.json` gives each exam a `vendor`; `index.html` has `EXAMS` 
 vendor. Keep the `aws_qbank_*` localStorage keys: renaming them would wipe every user's bookmarks and history.
 Palantir exams publish a percent pass mark (`passingPct`) and no domain weights (`weightsAssumed`, equal weights).
 **Before any `PLTR-*` work read `tools/qgen/PALANTIR.md`** (official facts and writing rules).
+**Before any `AZ-*` (Microsoft Azure) work read `tools/qgen/AZURE.md`**; facts are checked on learn.microsoft.com only.
 Open work items are in `TODO.md` — read it at the start of a session.
 Study guide: `study.html` + `js/study.js` read `data/study/<EXAM>.json` (day-by-day plans, edited directly,
 not through qgen) and mark terms from `data/glossary.json` with tap/hover popovers (EN + KO). See
