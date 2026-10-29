@@ -9,7 +9,8 @@ Notices live in `data/exam-specs.json` ("update"), shown above the section filte
   AWS, Well-Architected Tool). 13 updated in SAP-C02/f02 (AWS Transform MGN, Security Hub CSPM, re-keyed discovery
   and AWS Batch questions). 120 new in batches/SAP-C03/b01-b06 (AI/ML integration, responsible AI and post-quantum,
   AI cost/evaluation/monitoring, and every skill that had no question), each reviewed and deduplicated across
-  batches. Pool 508. Open: SAP-C03 study guide; after 2026-11-16 decide whether to hide SAP-C02.
+  batches. Pool 508. SAP-C03 study guide DONE 2026-10-29 (38 days, below). Open: after 2026-11-16 decide whether to
+  hide SAP-C02.
   Bedrock Guardrails org-level enforcement (AWS Organizations Bedrock policy) is GA since 2026-04: no question
   covers it yet, and no existing key is contradicted by it.
 - DVA-C02 -> DVA-C03: DONE 2026-10-27 from the official guide (docs.aws.amazon.com, developer-associate-03, 2026-10-27):
@@ -21,7 +22,8 @@ Notices live in `data/exam-specs.json` ("update"), shown above the section filte
   tests, CI/CD, troubleshooting and optimization; container builds/deploys, signed URLs, probes, alerts), each
   reviewed and deduplicated across batches. Pool 470. Kiro facts checked only via raw.githubusercontent.com
   (kirodotdev README/demo repo): kiro.dev and aws.amazon.com are blocked here; re-check the Kiro questions
-  (b02, b03) if Kiro docs become reachable. Open: DVA-C03 study guide; after 2026-12-01 decide whether to hide DVA-C02.
+  (b02, b03) if Kiro docs become reachable. DVA-C03 study guide DONE 2026-10-29 (30 days, below). Open: after
+  2026-12-01 decide whether to hide DVA-C02.
 - MLA-C01 -> MLA-C02: DONE 2026-10-23. MLA-C02 registered (same four domains, 28/24/24/24; same twelve tasks, so
   `tasksFrom: MLA-C01`); `tools/qgen/shares.json` shares 389 MLA-C01 questions (6 excluded: SageMaker Neo / model
   compression, removed in C02) and 80 new GenAI questions in batches/MLA-C02/b01-b04 (vector stores and RAG data,
@@ -38,6 +40,11 @@ Notices live in `data/exam-specs.json` ("update"), shown above the section filte
 - No ads (owner decision 2026-10-22: AdSense considered and dropped; the support page and README promise "no ads").
 
 ## Study guide (started 2026-10-22) — terse handoff
+- SAP-C03 (38 days, 5 domains) and DVA-C03 (30 days) — DONE 2026-10-29. Plans cover every skill of the official C03
+  guides (docs.aws.amazon.com, read 2026-10-29); five writers drew on the reviewed C03 batches and the C02 guides, then
+  four independent reviewers checked each claim against docs.aws.amazon.com (35 fixes, e.g. Migration Evaluator ->
+  AWS Transform assessment, Aurora Serverless v2 scales to 0 ACU, Cognito email MFA). Glossary tags extended (SAP-C03
+  37 terms, DVA-C03 27). C02 guides left unchanged.
 Rules/design: `tools/study/README.md`. Private owner notes (routines, artifact links): owner's private doc "cert-bank 학습 가이드 이관 인계 메모" (source of truth) + local copy `.handoff/SESSION.md`
 (git-ignored, local only; ask owner if missing).
 Phases:
@@ -131,6 +138,13 @@ Re-check 2026-10-22 (AWS "Service Availability Updates" of 2026-06-30 and 2026-0
   Connect, email to SES; SMS/voice/push APIs continue as AWS End User Messaging).
 - Also closed 2026-10-29: WorkSpaces Secure Browser, Chime SDK SIP media application, standalone Infrastructure
   Composer console (end of support 2026-12-07; the VS Code Toolkit experience stays). Not mentioned in the bank.
+Found 2026-10-29 (C03 study-guide review, docs.aws.amazon.com), NOT yet applied to the question bank:
+- AWS X-Ray SDKs and daemon in maintenance mode since 2026-02-25 (security fixes only; migrate to OpenTelemetry/ADOT).
+  "X-Ray SDK" appears 18 times in 10 bank files and in the DVA-C02 study guide: add an availability note where an
+  explanation recommends the SDK for new instrumentation.
+- AWS Copilot CLI end of support 2026-06-12 (still named in the DVA-C03 guide; the DVA-C03 study guide notes it).
+- AWS Migration Evaluator: not in the SAP-C03 in-scope list and its docs pages return 404; AWS Transform assessments
+  now build the TCO business case. 36 mentions in 4 bank files and SAP-C02 study day 28: confirm its status first.
 Annotated in explain batches AIB-C01/e17, AIF-C01/e15, AIP-C01/e17-e18, MLA-C01/e14, SOA-C03/e13, DEA-C01/e14,
 SAP-C02/e16. Next re-check: around 2027-01 (after the Q4 availability update).
 
