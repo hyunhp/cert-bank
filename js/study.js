@@ -7,9 +7,11 @@ const STUDY_EXAMS = [
   ["CLF-C02", "Cloud Practitioner", "foundational"], ["AIF-C01", "AI Practitioner", "foundational"],
   ["AIB-C01", "AI Business Strategist", "foundational"],
   ["SAA-C03", "Solutions Architect – Associate", "associate"], ["DVA-C02", "Developer – Associate", "associate"],
+  ["DVA-C03", "Developer – Associate (new)", "associate"],
   ["SOA-C03", "CloudOps Engineer – Associate", "associate"], ["DEA-C01", "Data Engineer – Associate", "associate"],
   ["MLA-C01", "Machine Learning Engineer – Associate", "associate"],
-  ["SAP-C02", "Solutions Architect – Professional", "professional"], ["DOP-C02", "DevOps Engineer – Professional", "professional"],
+  ["SAP-C02", "Solutions Architect – Professional", "professional"],
+  ["SAP-C03", "Solutions Architect – Professional (new)", "professional"], ["DOP-C02", "DevOps Engineer – Professional", "professional"],
   ["AIP-C01", "Generative AI Developer – Professional", "professional"],
   ["ANS-C01", "Advanced Networking – Specialty", "specialty"], ["SCS-C03", "Security – Specialty", "specialty"],
   ["PLTR-DE", "Data Engineer – Associate", "associate", "palantir"], ["PLTR-AIE", "AI Engineer – Associate", "associate", "palantir"],
@@ -17,6 +19,7 @@ const STUDY_EXAMS = [
 ].map(([code, name, level, vendor]) => [code, name, level, vendor || "aws"]);
 const VENDORS = [["aws", "AWS"], ["palantir", "Palantir"]];
 const vendorOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[3];
+const isNewVersion = name => / \(new\)$/.test(name);
 const shortName = name => name.replace(/ – (Associate|Professional|Specialty)( \(new\))?$/, "");
 const LEVELS = [["foundational", "Foundational"], ["associate", "Associate"], ["professional", "Professional"], ["specialty", "Specialty"]];
 const levelOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[2];
@@ -156,7 +159,7 @@ function renderExamRow() {
   $("#levelRow").innerHTML = levels.map(([l, label]) =>
     `<button class="lseg" aria-pressed="${l === level}" data-level="${l}">${label}<span class="cnt">${exams.filter(e => e[2] === l).length}</span></button>`).join("");
   $("#examRow").innerHTML = exams.filter(e => e[2] === level).map(([code, name]) =>
-    `<button class="chip${code === current.exam ? " active" : ""}" data-exam="${code}" title="${esc(name)}">${code}<span class="nm">${esc(shortName(name))}</span></button>`).join("");
+    `<button class="chip${code === current.exam ? " active" : ""}" data-exam="${code}" title="${esc(name)}"><span class="cd">${code}${isNewVersion(name) ? `<span class="new">NEW</span>` : ""}</span><span class="nm">${esc(shortName(name))}</span></button>`).join("");
 }
 
 function dayListHTML(guide, progress) {
