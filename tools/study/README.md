@@ -25,7 +25,7 @@ answer, explain}], recap}]}`
   only through `StudyStore` in `js/study.js`.
 
 ## Glossary (`data/glossary.json`)
-`{"terms": [{id, term, full, match, en, ko, exams}]}` — 268 terms (2026-10-22, incl. Palantir Foundry/AIP terms), 1-2 marked terms on most days; days that explain their own terms stay unmarked by design.
+`{"terms": [{id, term, full, match, en, ko, exams}]}` — 330 terms (2026-10-29, incl. Palantir Foundry/AIP and 36 Azure `az-*` terms), 1-2 marked terms on most days; days that explain their own terms stay unmarked by design.
 - A term is marked only in the exams listed in `exams`, only at its first appearance in a day, and only in
   concept bodies, exam points and the recap (never headings or quiz text: tapping a choice answers it).
 - `match` lists exact, case-sensitive surface forms; matching is whole-word (not next to letters, digits or

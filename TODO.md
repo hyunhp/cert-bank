@@ -98,8 +98,20 @@ AZ-104 DONE 2026-10-29: registered (5 domains, midpoint weights, 50 questions as
 b01-b15 (one batch per skill group so parallel writers could not collide; each independently reviewed against Learn, ~110
 fixes incl. 3 wrong keys and ~15 cross-batch duplicates), study guide 32 days. Five explanations had markdown tables
 (converted, e01; qgen check now rejects tables); ``` fences now render as code blocks (29 older DVA explanations used them).
-Azure glossary: 16 Azure terms for AZ-900 (az-* ids, separate from the AWS-worded entries).
-Next Azure candidates: AZ-305 / AZ-500 / AI-102 successors — check Learn for current exams before planning.
+Azure glossary: 36 Azure terms (az-* ids, separate from the AWS-worded entries). 2026-10-29: +20 for AZ-104 (NSG, peering,
+SAS, private/service endpoints, LRS..GZRS, service tags, UDR, Recovery Services vault, KQL, scale/availability sets, Bicep,
+Bastion, DCR, SSPR, Key Vault, gateway transit, private DNS zone, ExpressRoute; 7 also tagged AZ-900), Learn-reviewed
+(7 fixes). AZ-104 now 38 tagged terms (31 of 32 days marked), AZ-900 31.
+Next Azure exams (checked on Learn 2026-10-29; every guide says "A score of 700 or greater is required to pass"):
+- Retired: AI-102 (2026-06-30, successor AI-103), AI-900 (2026-06-30, successor AI-901), AZ-204 (2026-07-31) and
+  AZ-500 (certification retired 2026-08-31); Learn names no successor for AZ-204/AZ-500 (the retirement posts are on
+  techcommunity.microsoft.com, blocked here).
+- Live: AI-901 Azure AI Fundamentals (skills as of 2026-04-15; AI concepts 40-45%, Microsoft Foundry solutions 55-60%;
+  45 min per the exam-duration page); AI-103 Developing AI Apps and Agents on Azure (2026-04-16; 5 domains, 120 min,
+  interactive items); AZ-305 (2026-04-17; 4 domains, requires AZ-104, case studies); DP-900 (2026-07-21, 45 min);
+  SC-900 (2026-10-21, 45 min). New: AI-500 multi-agent expert (no skills list yet), AZ-401 agentic DevOps (beta).
+- Recommended order: AI-901 (pairs with AIF-C01, no labs), then AI-103 (pairs with AIP-C01/MLA-C02), then AZ-305
+  or SC-900/DP-900. Not started; wait for the owner's go.
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
