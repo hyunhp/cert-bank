@@ -1,0 +1,99 @@
+# SAP-C03 batch 07: organization-wide Amazon Bedrock Guardrails enforcement with AWS Organizations Amazon Bedrock policies (skills 2.5.1, 2.3.4)
+
+@ SAP-C03 D2 T2.5 advanced use-case
+S: A company has 180 AWS accounts in AWS Organizations. Application teams in the Workloads OU build generative AI features on Amazon Bedrock in us-east-1 and eu-west-1, and many teams already pass their own guardrails in requests. The responsible AI board requires that every model inference call from accounts in the Workloads OU is also checked by one centrally approved set of content filters and denied topics. Administrators of member accounts must not be able to change or remove this control, accounts moved into the OU later must be covered automatically, and applications must not need code changes. Which solution meets these requirements with the least operational overhead?
+A: In the management account, create the guardrail in both Regions, publish a numeric version of each, add a resource-based policy that allows organization members to call ApplyGuardrail, enable the Amazon Bedrock policy type, and attach a Bedrock policy with a block for each Region to the Workloads OU
+B: Attach an SCP to the Workloads OU that denies bedrock:InvokeModel and bedrock:InvokeModelWithResponseStream when the bedrock:GuardrailIdentifier condition key does not match the approved guardrail ARN, and share that guardrail with all member accounts through its resource-based policy
+C: Use CloudFormation StackSets with service-managed permissions and automatic deployment to create the guardrail and a numeric version in every Workloads account in both Regions, then call PutEnforcedGuardrailConfiguration in each account and Region from a custom resource
+D: Deploy an AWS Config conformance pack to the Workloads OU with a custom rule that detects Bedrock invocations made without the approved guardrail, and attach an AWS Systems Manager Automation remediation that adds the guardrail to the calling application's configuration
+K: A
+G: ## Three ways to make sure a guardrail runs
+Amazon Bedrock Guardrails can be applied at three levels, and all of them can be active at once:
+- **Request level**: the application names a guardrail in `Converse`/`InvokeModel` (`guardrailConfig` or the `X-Amzn-Bedrock-GuardrailIdentifier` header).
+- **Account-level enforcement**: an account administrator calls `PutEnforcedGuardrailConfiguration` in each Region, and that guardrail version applies to every inference call from that account.
+- **Organization-level enforcement**: the management account attaches an AWS Organizations **Amazon Bedrock policy** (policy type `BEDROCK_POLICY`) to the root, an OU or an account. Every account below inherits it, and Bedrock applies the referenced guardrail to the inputs and outputs of every `InvokeModel`, `InvokeModelWithResponseStream`, `Converse` and `ConverseStream` call.
+When several levels apply, the result is a **union** of the guardrails, with the most restrictive control winning where two guardrails set the same control. Team guardrails therefore keep working and the central one is added on top.
+## What an organization-level policy needs
+- The guardrail must be **owned by the management account** and must live in the Region the policy block names. Guardrails are Regional, so two Regions need two guardrails and two Region blocks (`"us-east-1": {...}`, `"eu-west-1": {...}`).
+- The `identifier` is the guardrail ARN plus a **numeric version** such as `:1`; `DRAFT` is not accepted. A version is immutable, so members cannot alter it.
+- The guardrail needs a **resource-based policy** that lets organization members call `bedrock:ApplyGuardrail`, because the calls run in member accounts.
+- The `BEDROCK_POLICY` type must be enabled in the organization before the policy is created and attached.
+## Example
+A policy attached to the Workloads OU covers an account the moment it is moved into that OU. A member account administrator cannot detach it, because only the management account (or a delegated administrator) manages Organizations policies.
+W: Organizations Bedrock policy: one policy attached to the OU enforces the management account's versioned guardrail on every inference call in both Regions, adds to the teams' own guardrails as a union, follows accounts that join the OU, and cannot be changed from member accounts; applications change nothing.
+X: B=SCP on the guardrail condition key: an SCP can only allow or deny. It would make every call that does not name the approved guardrail fail, so every application must change its code to pass that guardrail, and it does not add the central guardrail on top of a team's own guardrail in the same request.
+C=Account-level enforcement through StackSets: it would apply a guardrail, but account-level enforcement is a setting the member account owns, so its administrators can replace or delete it, and the company has to run guardrails, versions and custom resources in 180 accounts and two Regions.
+D=AWS Config with remediation: AWS Config evaluates resource configurations, not individual model invocations, so it cannot see or block a single unguarded call; at best it detects drift after the fact and still relies on changing application settings.
+T: To add a guardrail to every Bedrock call across many accounts, use an Organizations Amazon Bedrock policy that references a versioned, Regional guardrail owned by the management account and shared with ApplyGuardrail permission.
+V: Amazon Bedrock, AWS Organizations
+
+@ SAP-C03 D2 T2.3 advanced troubleshooting
+S: A company attached an Amazon Bedrock policy to the organization root that enforces a baseline guardrail with denied topics for weapons and self-harm. Later, the Regulated OU received its own Amazon Bedrock policy that uses @@assign to set the identifier to a stricter guardrail that masks account numbers. Tests in a Regulated account now show account numbers masked, but prompts about weapons are no longer blocked. Both guardrails are healthy and correctly shared. What explains this, and how should the company fix it?
+A: Amazon Bedrock policies are combined like SCPs, so each account must satisfy both guardrails, and the weapons topic is skipped only because the stricter guardrail's version is newer; publish a new version of the baseline guardrail so both versions match
+B: An SCP attached to the Regulated OU overrides policies inherited from the root, so only the OU-level guardrail reaches its accounts; remove the SCP's explicit deny for bedrock:ApplyGuardrail on the baseline guardrail ARN in the management account
+C: Amazon Bedrock policies are declarative, so inheritance resolves one effective policy per account and the OU's @@assign replaced the root's identifier; add the baseline denied topics to the stricter guardrail, publish a version, and confirm with DescribeEffectivePolicy
+D: The enforced guardrails are combined as a union in which the most restrictive control wins, so the masking filter outranks the denied topics; move the weapons topic into a sensitive information filter with a custom regex so that both controls are of the same type
+K: C
+G: ## Declarative policies resolve to one effective policy
+AWS Organizations has two families of policies that behave differently when attached at several levels:
+- **Authorization policies** (SCPs, RCPs) are evaluated separately at every level. An action must be allowed by the SCPs at the root, at each OU and at the account, so stacked SCPs all apply.
+- **Management policies**, including declarative types such as **Amazon Bedrock policies**, are merged. Organizations applies inheritance operators (`@@assign` and the others) to the policies an account inherits and produces **one effective policy** for that account.
+When a parent and a child both set the same value, such as the guardrail `identifier` for `us-east-1`, the operators decide which single value survives. A child `@@assign` replaces the parent's value. It is **not** a union of every guardrail attached in the tree.
+## Union applies to levels, not to attachments
+The union rule ("most restrictive control wins") is about guardrails enforced at different **levels**: the organization's effective guardrail, an account-level enforced guardrail and the guardrail named in the request. Several Bedrock policy attachments are first resolved into one organization-level guardrail.
+## How to check
+Call `DescribeEffectivePolicy` with the member account ID as the target. Here it would show only the stricter guardrail's ARN for the Region, which explains why the weapons topic is missing.
+W: One effective policy: the OU-level `@@assign` overwrote the root's identifier, so the Regulated accounts enforce only the stricter guardrail. Building the baseline denied topics into that guardrail, publishing a numeric version, and checking `DescribeEffectivePolicy` restores both sets of controls.
+X: A=Combined like SCPs: Bedrock policies are not evaluated level by level like SCPs, and version numbers of different guardrails are unrelated; aligning version numbers does not bring back a guardrail that the effective policy no longer references.
+B=SCP override: SCPs never remove or replace management policies inherited from the root, and the stem says both guardrails are correctly shared; the missing topic comes from how the two Bedrock policies were merged.
+D=Most restrictive wins: the union rule never drops a control that only one guardrail has, it only picks the stricter setting when both guardrails configure the same control, and the stricter guardrail simply has no weapons topic.
+T: Multiple Amazon Bedrock policy attachments resolve into one effective policy per account (a child @@assign replaces the parent's guardrail), so each guardrail referenced lower in the tree must contain the baseline controls; verify with DescribeEffectivePolicy.
+V: AWS Organizations, Amazon Bedrock
+
+@ SAP-C03 D2 T2.5 applied troubleshooting
+S: A platform team created a guardrail with numeric version 2 in the management account in us-east-1, enabled the Amazon Bedrock policy type, and attached a Bedrock policy that references the guardrail to the Analytics OU. Since then, Bedrock inference calls from member accounts in that OU fail. AWS CloudTrail in the member accounts shows AccessDenied errors for ApplyGuardrail calls against the management account's guardrail ARN. Member roles have permissions scoped to specific Bedrock resources. Which TWO actions will resolve the errors? (Select TWO)
+A: Add a resource-based policy to the guardrail in the management account that grants bedrock:ApplyGuardrail to the organization's member accounts
+B: Change the policy's identifier to the guardrail's DRAFT version so that member accounts evaluate the working copy instead of a published version
+C: Grant the member account roles bedrock:ApplyGuardrail on the management account's guardrail ARN in their identity-based IAM policies
+D: Use StackSets to create an identical guardrail with the same name and version in each Analytics account so that the ARN resolves locally
+E: Register an Analytics account as a delegated administrator for Amazon Bedrock policies so member accounts can read the referenced guardrail
+K: A,C
+G: ## Whose call is it?
+With organization-level enforcement the guardrail lives in the **management account**, but the inference call, and the guardrail evaluation that comes with it, run as the **calling role in the member account**. This is a cross-account call, so, as with any cross-account access, both sides must allow it:
+- **Resource side**: the guardrail needs a **resource-based policy** that grants `bedrock:ApplyGuardrail` to the member accounts or the whole organization (for example with an `aws:PrincipalOrgID` condition).
+- **Identity side**: the member account roles need `bedrock:ApplyGuardrail` on the management account's guardrail ARN, for example `arn:aws:bedrock:us-east-1:111122223333:guardrail/abc123`. Roles with tightly scoped Bedrock permissions often lack it.
+## Diagnosing
+CloudTrail records `ApplyGuardrail` calls; `AccessDenied` there points at one of these two permissions. AWS suggests testing by calling `ApplyGuardrail` from a scoped-down member role against the shared guardrail before attaching the policy. An identifier that cannot be used also makes model inference fail, which is why the applications stopped working instead of running unguarded.
+W: A=Guardrail resource-based policy: without a statement that lets organization members call ApplyGuardrail on the management account's guardrail, every cross-account evaluation is denied on the resource side.
+C=Member role permission: the calling roles are scoped to specific resources, so they also need an identity-based allow for bedrock:ApplyGuardrail on the management account's guardrail ARN before the cross-account call succeeds.
+X: B=DRAFT version: the policy's identifier must reference a numeric version; DRAFT is not accepted, and switching versions does nothing about the missing ApplyGuardrail permissions.
+D=Local copies of the guardrail: a guardrail ARN contains the owning account ID, so a copy in a member account has a different ARN, and the policy can only reference a guardrail owned by the management account.
+E=Delegated administrator: a delegated administrator can manage Organizations policies on the management account's behalf, but it grants no runtime permission to apply a guardrail; the AccessDenied comes from missing ApplyGuardrail permissions.
+T: An organization-enforced guardrail is a cross-account resource: share it with a resource-based policy granting ApplyGuardrail to the organization and give member roles ApplyGuardrail on its ARN.
+V: Amazon Bedrock, AWS Organizations, AWS CloudTrail, AWS IAM
+
+@ SAP-C03 D2 T2.5 advanced tradeoff
+S: A company enforces a guardrail on all accounts through an Amazon Bedrock policy. Its RAG applications call Amazon Titan and Cohere embedding models to index millions of document chunks, and the security team does not want the guardrail to process those calls. Every other model, including models the company adopts later, must be covered without editing the policy. User and assistant messages must always be fully evaluated, even if a developer wraps only part of a message in guard content tags. System prompts are approved by the platform team, which tags only the variable parts. Which policy configuration meets these requirements?
+A: Set included_models to the five chat models in use today and leave excluded_models empty, set messages to comprehensive so every message is checked, and set system to selective so only the tagged parts of system prompts are evaluated
+B: Set included_models to ALL and list the embedding model IDs in excluded_models, set messages to comprehensive so every message is checked, and set system to selective so only the tagged parts of system prompts are evaluated
+C: Set included_models to ALL and list the embedding model IDs in excluded_models, set messages to selective so only tagged message content is checked, and set system to comprehensive so whole system prompts are evaluated
+D: Set included_models to ALL and leave excluded_models empty, set messages to comprehensive so every message is checked, and add an SCP that denies ApplyGuardrail calls for the embedding model IDs in every member account
+K: B
+G: ## Scoping which models are guarded
+The optional `model_enforcement` block of an Amazon Bedrock policy has two lists:
+- `included_models`: the models to enforce on. `["ALL"]` (or an empty list) means every model, including ones adopted later.
+- `excluded_models`: models carved out of enforcement. If a model appears in both lists, it is **excluded**.
+AWS recommends included lists when only a few specific models should be guarded, and `ALL` plus an excluded list for broad enforcement with exceptions, such as embedding models like `amazon.titan-embed-text-v2:0` or `cohere.embed-english-v3`.
+## Selective content guarding
+Bedrock APIs let a caller mark parts of the input with guard content tags so the guardrail evaluates only those parts. The policy's `selective_content_guarding` decides whether to trust those tags, separately for:
+- `system` (system prompts): `selective` evaluates only tagged content and evaluates **nothing** if there are no tags.
+- `messages` (user and assistant turns): `selective` evaluates only tagged content, but evaluates **everything** if there are no tags.
+- `comprehensive` evaluates all content regardless of tags; it is the default for both and the safer choice when callers should not decide what is checked.
+## Example
+`"messages": {"@@assign": "comprehensive"}` stops a developer from wrapping one harmless sentence in a tag to keep the rest of a user message unchecked, while `"system": {"@@assign": "selective"}` lets the platform team skip guardrail charges on the fixed, approved parts of its system prompts.
+W: ALL with exclusions, comprehensive messages, selective system: ALL covers future models automatically, the excluded list removes only the embedding models, comprehensive ignores developer tags on messages, and selective honors the platform team's tags on system prompts.
+X: A=Explicit include list: listing today's five chat models means any model adopted later is unguarded until someone edits the policy, which breaks the requirement to cover future models automatically.
+C=Selective messages: with messages set to selective the guardrail evaluates only what callers tag, so a developer who tags one part of a message leaves the rest unchecked, the exact bypass the security team wants to prevent.
+D=SCP on ApplyGuardrail: an SCP cannot scope guardrail enforcement by model, and denying ApplyGuardrail would make guarded calls fail instead of skipping them; the exclusion belongs in the policy's model_enforcement block.
+T: Use included_models ALL plus excluded_models for broad enforcement with exceptions, and set selective content guarding to comprehensive wherever callers must not decide what gets checked.
+V: Amazon Bedrock, AWS Organizations
