@@ -7,7 +7,7 @@
 - The header link, the bottom card and the mock exam results point to support.html.
     python3 tools/support_test.py
 """
-import functools, http.server, pathlib, threading
+import functools, http.server, pathlib, sys, threading
 from playwright.sync_api import sync_playwright
 
 ROOT = str(pathlib.Path(__file__).resolve().parents[1])
@@ -90,4 +90,4 @@ with sync_playwright() as p:
         check(f"{url or 'index'}: header pills same height", len(hs) >= 2 and len(set(hs)) == 1, hs)
     check("no page errors", not errs, errs)
     b.close()
-print(f"{ok}/{ok + fail} passed")
+print(f"{ok}/{ok + fail} passed"); sys.exit(1 if fail else 0)

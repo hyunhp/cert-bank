@@ -5,7 +5,7 @@
 - Palantir exams: 70% pass mark and equal (assumed) domain weights are stated in the mock exam.
     python3 tools/vendor_tabs_test.py
 """
-import functools, http.server, json, pathlib, threading
+import functools, http.server, json, pathlib, sys, threading
 from playwright.sync_api import sync_playwright
 
 ROOT = str(pathlib.Path(__file__).resolve().parents[1])
@@ -65,6 +65,16 @@ with sync_playwright() as p:
     check("#exam= link sets vendor", pg.eval_on_selector(".vtab[aria-selected='true']", "e => e.dataset.vendor") == "palantir")
     check("#exam= link selects exam", pg.eval_on_selector("#chipRow .chip.active", "e => e.dataset.code") == "PLTR-DE")
 
+    # Star icon: opens the bookmark view with the exam's level kept; pressed again it goes back to that exam.
+    pg.goto(BASE + "#exam=SAP-C03"); pg.reload(); pg.wait_for_selector(".qcard")
+    pg.click("#bmIcon"); pg.wait_for_function("location.hash === '#bookmarks'")
+    check("star pressed in bookmark view", pg.get_attribute("#bmIcon", "aria-pressed") == "true")
+    check("bookmark view keeps the exam's level", pg.eval_on_selector(".lseg[aria-pressed='true']", "e => e.dataset.level") == "professional")
+    pg.click("#bmIcon"); pg.wait_for_function("location.hash === '#exam=SAP-C03'")
+    check("star again returns to the exam", pg.eval_on_selector("#chipRow .chip.active", "e => e.dataset.code") == "SAP-C03" and pg.get_attribute("#bmIcon", "aria-pressed") == "false")
+    nav = pg.evaluate("(() => { const t = document.getElementById('vendorRow').getBoundingClientRect(), s = document.getElementById('bmIcon').getBoundingClientRect(); return [t.right, s.left]; })()")
+    check("tab line stops before the star", nav[0] <= nav[1], nav)
+
     pg.goto(BASE + "#exam=PLTR-APD"); pg.reload(); pg.wait_for_selector(".qcard")
     check("PLTR-APD chip selectable", pg.eval_on_selector("#chipRow .chip.active", "e => e.dataset.code") == "PLTR-APD")
     pg.goto(BASE + "#mock=PLTR-AIE"); pg.reload(); pg.wait_for_selector("#mockRoot .mk")
@@ -77,5 +87,14 @@ with sync_playwright() as p:
     check("result states 70% pass mark", "official pass mark is 70% correct" in res, res[:400])
     check("result has no AWS scaled-score note", "/1000" not in res and "AWS scaled" not in res)
     check("no page errors", not errs, errs)
+
+    # 320 px phones: all four levels fit without scrolling and a NEW badge does not push the count to its own line.
+    sm = b.new_context(viewport={"width": 320, "height": 800}).new_page()
+    sm.route("**/fonts.googleapis.com/**", lambda r: r.abort())
+    sm.goto(BASE + "#exam=SAA-C03"); sm.wait_for_selector(".qcard")
+    lev = sm.eval_on_selector("#levelRow", "l => [l.scrollWidth, l.clientWidth]")
+    check("320px: level row fits", lev[0] <= lev[1], lev)
+    off = sm.eval_on_selector_all("#chipRow .chip", "cs => cs.filter(c => Math.abs(c.querySelector('.cnt').getBoundingClientRect().top - c.querySelector('.code').getBoundingClientRect().top) > 4).map(c => c.dataset.code)")
+    check("320px: counts on the code line", not off, off)
     b.close()
-print(f"{ok}/{ok + fail} passed")
+print(f"{ok}/{ok + fail} passed"); sys.exit(1 if fail else 0)

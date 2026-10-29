@@ -8,7 +8,7 @@
   question bank to the day's domain. No horizontal overflow on a phone-sized viewport.
     python3 tools/study_test.py
 """
-import functools, hashlib, http.server, json, pathlib, threading
+import functools, hashlib, http.server, json, pathlib, sys, threading
 from playwright.sync_api import sync_playwright
 
 ROOT = str(pathlib.Path(__file__).resolve().parents[1])
@@ -204,4 +204,4 @@ with sync_playwright() as p:
     check("question bank links to study guide", pg.get_attribute(".studylink", "href") == "study.html")
     check("no page errors", not errs, errs)
     b.close()
-print(f"{ok}/{ok + fail} passed")
+print(f"{ok}/{ok + fail} passed"); sys.exit(1 if fail else 0)
