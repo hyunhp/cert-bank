@@ -111,7 +111,14 @@ Next Azure exams (checked on Learn 2026-10-29; every guide says "A score of 700 
   interactive items); AZ-305 (2026-04-17; 4 domains, requires AZ-104, case studies); DP-900 (2026-07-21, 45 min);
   SC-900 (2026-10-21, 45 min). New: AI-500 multi-agent expert (no skills list yet), AZ-401 agentic DevOps (beta).
 - Recommended order: AI-901 (pairs with AIF-C01, no labs), then AI-103 (pairs with AIP-C01/MLA-C02), then AZ-305
-  or SC-900/DP-900. Not started; wait for the owner's go.
+  or SC-900/DP-900.
+AI-901 DONE 2026-10-29: registered (2 domains, midpoint weights 42.5/57.5, 45 questions assumed, 45 min), 225 questions in
+b01-b09 (one batch per skill group or half of one, 38 multi-answer), each independently reviewed against Learn (~110 fixes:
+~20 near-duplicates across batches, fundamentals depth for SDK/API trivia in b07-b09, preview paths replaced by GA ones,
+e.g. gpt-audio chat completions -> gpt-realtime). Reviewed batches were ingested as they finished and later reviewers
+were told what had just been published, which caught most cross-batch overlap. Open: AI-901 study guide and glossary
+terms; Foundry changes fast (agents classic retire 2027-03-31, Azure Language legacy features 2029-03-31, Language
+Studio 2027-03-20, Image Analysis/Custom Vision 2028-09-25), re-check with section 1.
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
