@@ -86,7 +86,13 @@ the midpoints of the published ranges, 45 questions assumed). Pilot DONE 2026-10
 domain, 9 multi-answer), each batch reviewed against Learn (17 fixes, incl. 3 near-duplicates across batches rewritten).
 Note: the AZ-900 Learn training unit still says region pairs fail over automatically; the reliability docs say they
 do not, and the bank follows the reliability docs (AZURE.md).
-Next after the pilot: AZ-900 to its 225 target, then AZ-104 (skills measured updated 2026-04-17), study guides.
+AZ-900 at target DONE 2026-10-29: 225 questions (b01-b11, 35 multi-answer, every task 18-22). b04-b11 (165) were
+written in parallel by subtopic and each independently reviewed against Learn; reviewers replaced ~25 near-duplicates
+of published or sibling questions and simplified over-deep ones to fundamentals level. Lesson: parallel writers in the
+same task drift into the same scenarios (Spot for rendering, month-end scale-up); ingest reviewed batches as they
+finish and tell the remaining reviewers what was just published.
+Next: AZ-900 study guide (data/study/AZ-900.json + study.js STUDY_EXAMS), then AZ-104 (skills measured updated
+2026-04-17).
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
