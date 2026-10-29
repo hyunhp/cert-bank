@@ -1,7 +1,8 @@
 # Study guide (`study.html`)
 
-Day-by-day study plans for the 12 AWS exams, imported in 2026-10 from the old study-tracker pages
-(`extract.py`, one-off). `data/study/<EXAM>.json` is now the source of truth; edit it directly
+Day-by-day study plans: 12 AWS exams imported in 2026-10 from the old study-tracker pages (`extract.py`,
+one-off), then CLF-C02, the three Palantir exams, and SAP-C03 / DVA-C03 (2026-10-29, written from the C03 exam
+guides and independently fact-checked). `data/study/<EXAM>.json` is now the source of truth; edit it directly
 (no qgen batches: these are teaching notes, not question-bank items).
 
 ## Data

@@ -18,7 +18,7 @@ Amazon Web Services, Palantir Technologies와 관련 없는 비공식 사이트�
 1. 회사(AWS 또는 Palantir) → 등급 → 시험 순으로 고릅니다.
 2. 필요하면 특정 섹션(도메인)만 골라 풀 수 있습니다.
 3. 문항을 누르면 정답과 보기별 정답·오답 이유가 나옵니다. 많은 해설에 아키텍처 다이어그램이 함께 있습니다.
-4. ☆를 누르면 북마크되고, ⭐ Bookmarks 탭에서 다시 볼 수 있습니다.
+4. ☆를 누르면 북마크되고, AWS / Palantir 탭 옆 ★ 버튼에서 모아 볼 수 있습니다.
 5. 📝 **Mock Exam**은 실제 시험과 같은 문항 수·섹션 비중으로 시간을 재며 푸는 모의고사입니다.
 
 **학습 가이드**
@@ -36,13 +36,13 @@ Amazon Web Services, Palantir Technologies와 관련 없는 비공식 사이트�
 | | | AIB-C01 AI Business Strategist | 445 | 14 |
 | | Associate | SAA-C03 Solutions Architect | 395 | 28 |
 | | | DVA-C02 Developer | 395 | 28 |
-| | | DVA-C03 Developer (new, from 2026-12-01) | 470 | – |
+| | | DVA-C03 Developer (new, from 2026-12-01) | 470 | 30 |
 | | | SOA-C03 CloudOps Engineer | 395 | 28 |
 | | | DEA-C01 Data Engineer | 395 | 28 |
 | | | MLA-C01 Machine Learning Engineer | 395 | 28 |
 | | | MLA-C02 Machine Learning Engineer (new, GA 2027-01-14) | 469 | – |
 | | Professional | SAP-C02 Solutions Architect | 396 | 35 |
-| | | SAP-C03 Solutions Architect (new, from 2026-11-17) | 508 | – |
+| | | SAP-C03 Solutions Architect (new, from 2026-11-17) | 508 | 38 |
 | | | DOP-C02 DevOps Engineer | 395 | 35 |
 | | | AIP-C01 Generative AI Developer | 405 | 35 |
 | | Specialty | ANS-C01 Advanced Networking | 395 | 28 |
@@ -57,7 +57,7 @@ Amazon Web Services, Palantir Technologies와 관련 없는 비공식 사이트�
 ## 내 데이터
 
 북마크, 모의고사 기록, 섹션별 정답률, 학습 진도는 **이 브라우저에만** 저장되며 서버로 보내지 않습니다. 다른
-브라우저나 기기로 북마크를 옮기려면 Bookmarks 탭의 백업 링크나 파일을 쓰세요.
+브라우저나 기기로 북마크를 옮기려면 북마크 목록(★)의 백업 링크나 파일을 쓰세요.
 
 ## 정확성
 

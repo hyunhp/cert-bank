@@ -19,7 +19,7 @@ Services or Palantir Technologies, and no real exam questions (no dumps).
 2. Optionally narrow to one exam section (domain).
 3. Click a question to see the answer and why each option is right or wrong. Many explanations include an
    architecture diagram.
-4. ☆ bookmarks a question; find it later under ⭐ Bookmarks.
+4. ☆ bookmarks a question; the ★ button next to the AWS / Palantir tabs lists them all.
 5. 📝 **Mock Exam** gives a timed test with the real exam's length and section weights.
 
 **Study Guide**
@@ -37,13 +37,13 @@ Services or Palantir Technologies, and no real exam questions (no dumps).
 | | | AIB-C01 AI Business Strategist | 445 | 14 |
 | | Associate | SAA-C03 Solutions Architect | 395 | 28 |
 | | | DVA-C02 Developer | 395 | 28 |
-| | | DVA-C03 Developer (new, from 2026-12-01) | 470 | – |
+| | | DVA-C03 Developer (new, from 2026-12-01) | 470 | 30 |
 | | | SOA-C03 CloudOps Engineer | 395 | 28 |
 | | | DEA-C01 Data Engineer | 395 | 28 |
 | | | MLA-C01 Machine Learning Engineer | 395 | 28 |
 | | | MLA-C02 Machine Learning Engineer (new, GA 2027-01-14) | 469 | – |
 | | Professional | SAP-C02 Solutions Architect | 396 | 35 |
-| | | SAP-C03 Solutions Architect (new, from 2026-11-17) | 508 | – |
+| | | SAP-C03 Solutions Architect (new, from 2026-11-17) | 508 | 38 |
 | | | DOP-C02 DevOps Engineer | 395 | 35 |
 | | | AIP-C01 Generative AI Developer | 405 | 35 |
 | | Specialty | ANS-C01 Advanced Networking | 395 | 28 |
@@ -57,7 +57,7 @@ Some questions belong to more than one exam. Palantir publishes no section weigh
 ## Your data
 
 Bookmarks, mock exam history, section scores and study progress are saved **only in your browser**. Nothing is
-sent to a server. To move bookmarks to another browser or device, use the backup link or file on the Bookmarks tab.
+sent to a server. To move bookmarks to another browser or device, use the backup link or file in the bookmark list (★).
 
 ## Accuracy
 
