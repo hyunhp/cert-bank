@@ -97,6 +97,13 @@ of April 16, 2026") and https://learn.microsoft.com/en-us/credentials/certificat
   Language Studio retires 2027-03-20; Image Analysis v3.2/v4.0 and Custom Vision retire 2028-09-25 (never key them);
   dall-e-3 retired 2026-03-04, GPT-image-2 and the GPT-image-2.5 models are GA while GPT-image-1/1-mini/1.5 are limited-access preview; Realtime API
   with gpt-realtime and Voice Live API are GA, gpt-audio chat completions uses a preview API version.
+  Checked during the AI-103 reviews (2026-10-30): Azure OpenAI On Your Data retired 2026-10-14; Foundry portal workflows
+  retire 2026-12-01 (use Microsoft Agent Framework; Python/.NET not labelled preview); Connected Agents not in the new
+  Agent Service, a2a tool (A2A v1.0) GA; Memory, agent guardrails, Task Adherence/Intent Resolution/Task Completion
+  evaluators, the agent Monitor tab metrics, AI Red Teaming Agent and Sora 2 are preview; Foundry IQ knowledge bases are
+  GA in Search REST 2026-04-01 only with minimal extractive retrieval (query planning/answer synthesis preview); model
+  router GA (session affinity and routing metadata preview); Translator text API 2026-06-06 GA with NMT or LLM choice;
+  LLM Speech GA; Content Understanding pro mode existed only in a retired preview API; capacity units per TPM vary by model.
 - AI-103 is a developer associate exam: stems are build/configure/troubleshoot scenarios in Microsoft Foundry (models,
   agents, RAG with Azure AI Search, evaluation, tracing, guardrails, Content Understanding, Speech, Language,
   Translator). Short code (Python SDK, REST) and settings are fine when shown on Learn. Apply every AI-901 naming and

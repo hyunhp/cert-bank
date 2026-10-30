@@ -26,7 +26,7 @@ V: Foundry Agent Service, file search, web search
 
 @ AI-103 D2 T2.2 applied troubleshooting
 S: A Python chat app calls a Foundry prompt agent with openai.responses.create(input=user_text) for each message the user types. Single questions work, but a follow-up such as "And what about the second option?" gets a reply that ignores the earlier turns. How should the developer track the conversation?
-A: Attach the memory search tool to the agent, so every turn is stored as long-term memory and recalled on the next request from the same user
+A: Upload each finished turn as a text file to a vector store on the agent, so file search retrieves the earlier turns on the next request
 B: Create a new agent version for each user session and copy the previous turns into its instructions before sending the next message
 C: Create a conversation once per chat session with openai.conversations.create(), and pass conversation=conversation.id on every responses.create call
 D: Set tool_choice to auto on each request, so the agent can decide on its own whether it needs to look back at the earlier messages in the session
@@ -41,10 +41,8 @@ A response created without a conversation is a single, independent turn. To keep
 `conversation = openai.conversations.create()`
 `openai.responses.create(conversation=conversation.id, input="Compare the two plans")`
 `openai.responses.create(conversation=conversation.id, input="And what about the second option?")`
-## Short-term versus long-term memory
-The conversation is the agent's short-term, in-session memory. Memory in Foundry Agent Service (currently **preview**) is a separate long-term store that extracts user preferences and summaries across sessions; it doesn't replace passing the conversation.
 W: Conversation per session: a conversation object stores every item of the exchange, and passing its id on each responses.create call gives the agent the earlier turns, which is how Learn's quickstart keeps multi-turn history.
-X: A=Memory search tool: Foundry memory is a preview, long-term store that distills preferences and summaries across sessions; it isn't the mechanism for replaying the turns of the current chat.
+X: A=Turns in a vector store: file search retrieves chunks that look relevant, not the ordered turns of this chat, and an agent-level vector store is shared by every user's conversations.
 B=Agent version per session: versions are immutable snapshots of the agent definition. Rewriting instructions with chat history every turn misuses versioning and still loses tool-call items.
 D=tool_choice auto: tool_choice controls whether the model calls tools. It has nothing to do with conversation history, which the app must pass explicitly.
 T: Keep multi-turn context in Foundry Agent Service by creating a conversation and passing its id on every responses.create call.
@@ -78,76 +76,76 @@ T: Migrating to the current Foundry Agent Service API means threads become conve
 V: Foundry Agent Service, Responses API
 
 @ AI-103 D2 T2.2 advanced troubleshooting
-S: A retail prompt agent has a function tool create_return with the parameters order_id and reason. Traces show the model sometimes calls it without order_id, and sometimes adds an extra refund_amount argument that the backend rejects. Which TWO changes to the function definition address both problems? (Select TWO)
-A: Add "required": ["order_id", "reason"] to the parameters schema, so the definition states which arguments every call must include
-B: Set strict to true and "additionalProperties": false, so the model's arguments must follow the schema exactly with no extra fields
-C: Set tool_choice to none for requests that might create a return, so the model describes the return in text and the app collects the fields
-D: Remove the parameters schema and describe order_id and reason in the agent instructions, so the model reads the rules from the system prompt
-E: Rename the function to createReturnWithOrderIdAndReason, so the function name itself tells the model which arguments it has to send
-K: A,B
-G: ## A function tool is a JSON schema contract
-With function calling, you describe each function with a **name**, a **description** and a **parameters** JSON schema. The model never runs the function: it returns a `function_call` item with arguments, your app executes the function and sends back a `function_call_output`.
-The schema is what keeps arguments valid. Learn's troubleshooting table for function calling says:
-- "Required fields are missing" -> the schema doesn't enforce required properties; add a `"required": [...]` array and, where supported, set `strict: true`
-- "Function called with wrong parameters" -> improve the description and parameter descriptions
-## Example
-`"parameters": {"type": "object", "properties": {"order_id": {"type": "string"}, "reason": {"type": "string"}}, "required": ["order_id", "reason"], "additionalProperties": false}` with `strict=True`.
-Note: the Microsoft Copilot harness (preview) for prompt agents rejects `strict: true`; for default prompt agents strict mode is supported.
-W: A=required array: listing order_id and reason as required tells the model that every call must include them, which fixes the missing-argument calls.
-B=strict with no additional properties: strict mode makes the generated arguments follow the schema, and additionalProperties false rules out invented fields such as refund_amount.
-X: C=tool_choice none: this stops the model from calling any tool, so returns could no longer be created through the function at all.
-D=Rules in instructions only: removing the schema takes away the structured contract; prose instructions are weaker than a validated schema for argument shape.
-E=Longer function name: a descriptive name helps tool selection, but it doesn't enforce required arguments or block extra ones.
-T: Enforce function arguments in the schema itself: a required array plus strict mode with additionalProperties false.
+S: A prompt agent has a function tool generate_audit_report. The app runs the function whenever the model asks for it, but the report job takes about 25 minutes, and submitting the function_call_output afterward fails because the run has expired. Short functions on the same agent work. What should the developer change?
+A: Make generate_audit_report start the job and return a job ID and status right away, and add a second function that the agent can call to check the job
+B: Set tool_choice to required on the follow-up request, so that the expired run is reopened and accepts the late function_call_output for the report
+C: Send the request with streaming turned on, so that the run stays connected while the report job runs and the late function output is still accepted
+D: Create a new agent version with a longer timeout setting on the function tool, so that the agent keeps the run open until the audit report is ready
+K: A
+G: ## Function tools run in your app, on the run's clock
+With function calling, the model returns a `function_call` item, your app runs the function, and the app submits a `function_call_output` so the agent can finish its answer. That loop has a time limit. Learn's function calling page warns: "Runs expire 10 minutes after creation. Submit your tool outputs before they expire."
+## Learn's troubleshooting row
+- Symptom: tool outputs fail due to expiration
+- Cause: the run expired
+- Resolution: "Return tool outputs promptly. For slow operations, return a status and poll separately."
+## The start-and-check pattern
+Split the slow work into two quick functions:
+- `start_audit_report(period)` starts the job in your backend and returns at once, for example `{"job_id": "rpt-881", "status": "running"}`
+- `get_report_status(job_id)` returns `running`, or `done` with a link to the report
+The agent can tell the user the report is being prepared, and a later turn (or the app itself) checks the status. Every function output is then submitted well within the run's lifetime.
+W: Start and check: Learn's fix for expired runs is to return outputs promptly and, for slow operations, return a status and poll separately, so a job ID now and a status function later keep every output inside the run's lifetime.
+X: B=tool_choice required: tool_choice only says whether the model must call a tool; it can't revive an expired run or extend its lifetime.
+C=Streaming: streaming changes how output is delivered to the client, not how long a run accepts tool outputs, so the late output still fails.
+D=Timeout on the function tool: a function tool definition has a name, description, parameters and strict flag; there's no per-tool timeout that keeps a run open for 25 minutes.
+T: Function outputs must be submitted before the run expires; for slow work, return a job ID and status at once and check the job with a separate call.
 V: Foundry Agent Service, function calling
 
 @ AI-103 D2 T2.2 applied troubleshooting
-S: A developer adds a function tool get_order_status to a prompt agent. The first response's output contains an item of type function_call with call_id and arguments, but the app prints response.output_text, which is empty, and the user never gets an answer. What is missing?
-A: An mcp_approval_response item that approves the function call, sent in the same conversation with approve set to true and the call's id
-B: A tool_choice value of required, so that the model completes the function call and writes the final answer within the same response
-C: A project connection for the function tool, so that Foundry can reach the order system and run get_order_status on the server side
-D: Running get_order_status in the app and sending a function_call_output item with the same call_id in a new responses.create call
-K: D
-G: ## Function calling is a client-side loop
-Function tools run in **your** application, not in Foundry. Learn describes the pattern:
-1. Define function tools (name, description, parameters).
-2. Create the agent with those definitions.
-3. Send a prompt; the model may return `function_call` items.
-4. **Execute and return**: your app runs the function and submits the output back.
-5. The agent uses the output to produce the final answer.
-## What the follow-up call looks like
-`input_list.append(FunctionCallOutput(type="function_call_output", call_id=item.call_id, output=json.dumps(result)))`
-`openai.responses.create(input=input_list, conversation=conversation.id)`
-If the model asked for several functions in one response, handle each item and return all the outputs in a single `responses.create` call. Learn also notes that outputs must be submitted promptly (runs expire 10 minutes after creation).
-W: Execute and return output: Learn's troubleshooting row "agent returns function call but no final answer" is caused by not returning tool output; the app must run the function and send a function_call_output with the matching call_id to continue.
-X: A=MCP approval response: approval requests and responses belong to the MCP tool. A function call isn't waiting for approval; it's waiting for your app to run it.
-B=tool_choice required: this forces the model to call a tool, which it already did. It can't make Foundry execute code that only exists in your app.
-C=Project connection: connections store credentials for server-side tools such as OpenAPI or MCP. Function tools are executed by the client, so no connection runs them.
-T: With function tools, your app runs the function and sends a function_call_output with the same call_id; only then does the agent produce its final answer.
-V: Foundry Agent Service, function calling, Responses API
+S: A product manager wants to reword the description of a prompt agent's function tool lookup_warranty and then try the agent in the Foundry portal playground. She can't find a way to edit the function definition in the portal, and in the playground the agent never gets warranty data back from the function. What should the developer tell her?
+A: The portal doesn't add, remove or update function definitions and doesn't run your functions; update the definition with the SDK or REST API and test the function loop from code
+B: Function tools need a project connection before the portal can edit them; create a connection to the warranty system so the playground runs lookup_warranty on the server side
+C: Function tools work only in hosted agents; repackage the prompt agent as a hosted agent container so the portal can show, edit and run its function definitions
+D: The playground runs functions only when tool_choice is required; set that option in the playground settings and the portal then executes lookup_warranty for her
+K: A
+G: ## Function tools and the Foundry portal
+A function tool is defined by a name, a description and a parameters schema, but the code behind it lives in **your application**. Foundry never executes it: the model returns a `function_call` item, and your app runs the function and submits a `function_call_output`.
+Learn's function calling page states two portal limits:
+- "You can run agents with function tools in the Microsoft Foundry portal. However, the portal doesn't support adding, removing, or updating function definitions on an agent. Use the SDK or REST API to configure function tools."
+- Troubleshooting row "Function not visible in Foundry portal": "Portal doesn't execute function calls." Resolution: "Test function calling via SDK or REST API."
+## What to do
+1. Change the description in the agent definition from code (for example by creating a new agent version with the updated `FunctionTool`).
+2. Test with a small script that sends a prompt, runs `lookup_warranty` when the model asks for it, and returns the output.
+Clear function and parameter descriptions also matter: Learn's fix for "function called with wrong parameters" is to improve the description fields.
+W: SDK or REST, test from code: Learn says the portal can't add, remove or update function definitions and doesn't execute function calls, so the change and the test both belong in code.
+X: B=Project connection: connections store credentials for server-side tools such as OpenAPI or MCP; a function tool always runs in the client app, so a connection can't make the portal run it.
+C=Hosted agents only: prompt agents support function tools (Learn's samples create prompt agents with FunctionTool); the limit is the portal, not the agent type.
+D=tool_choice required: this only forces the model to request a tool call; the portal still has no code to execute lookup_warranty.
+T: Configure function tools with the SDK or REST API and test them from code; the Foundry portal neither edits function definitions nor runs your functions.
+V: Foundry Agent Service, function calling
 
-@ AI-103 D2 T2.2 applied comparison
-S: A manufacturer's data team already maintains an Azure AI Search index of two million product manuals with vector fields, a semantic configuration and nightly updates. A new Foundry agent must answer engineers' questions from that content with source citations. Which retrieval approach should the developer use?
-A: Download the manuals again, upload them to a vector store in the project, and attach the file search tool to the agent with that vector store
-B: Add the Azure AI Search tool to the agent with a project connection to the search service and the existing index name in the tool settings
-C: Add the web search tool with the manuals' public download site, so the agent finds the same documents and cites the pages that it opens
-D: Give the agent the code interpreter tool and an exported JSON copy of the index, so the agent can query the documents with Python code
-K: B
-G: ## Two retrieval tools in Foundry Agent Service
-- **File search**: you upload files; Foundry parses, chunks, embeds and stores them in a **vector store** (Microsoft-managed in basic setup, your own Azure AI Search and Blob Storage in standard setup). Best for documents you upload directly or that users provide.
-- **Azure AI Search tool**: connects the agent to an **existing** Azure AI Search index through a project connection. The agent queries the index and answers with inline citations.
-Learn's file search page states it directly: to "search existing Azure AI Search indexes", use the Azure AI Search tool.
-## Azure AI Search tool settings
-- `project_connection_id` and `index_name` (required)
-- `query_type` (default `vector_semantic_hybrid`; also `simple`, `vector`, `semantic`, `vector_simple_hybrid`)
-- `top_k` (default 5) and `filter` (applied to every query)
-The index needs searchable text fields, vector fields, a retrievable content field and a retrievable URL (and optionally title) field for citation links.
-W: Azure AI Search tool: the content already lives in a maintained index with vectors and semantic ranking, and this tool queries that index directly with citations, so nothing has to be copied or re-indexed.
-X: A=File search re-upload: this duplicates two million manuals into a separate vector store that the data team's nightly updates would never reach.
-C=Web search: public web results depend on what Bing has indexed and bypass the team's curated index, its semantic configuration and its update schedule.
-D=Code interpreter over an export: code interpreter runs Python in a sandbox; it isn't a search engine and a static export goes stale after the next nightly update.
-T: Use the Azure AI Search tool for content already in an Azure AI Search index, and file search for files you upload to a vector store.
-V: Foundry Agent Service, Azure AI Search
+@ AI-103 D2 T2.2 applied use-case
+S: A benefits agent uses file search over an HR handbook. Employees should also be able to upload their own payslips during a chat and ask questions about them, and one employee's payslip must never be searchable in another employee's chat. How should the developer organize the vector stores?
+A: Keep the handbook in a vector store attached to the agent, and put each chat's uploaded payslips in a vector store attached to that conversation
+B: Add every uploaded payslip to the agent's handbook vector store, and add an instruction that tells the model to use only the current user's payslip
+C: Attach a second vector store that holds all payslips to the agent next to the handbook store, so that handbook and payslip searches stay apart
+D: Create a new agent version per employee whose vector store holds the handbook and that employee's payslips, and route each chat by employee
+K: A
+G: ## Where file search looks
+File search reads from **vector stores**. Adding a file parses, chunks, embeds and stores it for hybrid (keyword plus semantic) search. Learn: "You can attach vector stores to both agents and conversations. Currently, you can attach at most one vector store to an agent and at most one vector store to a conversation."
+- **Agent-level vector store**: content every conversation should see, such as a handbook
+- **Conversation-level vector store**: files a user brings to one chat; other conversations don't search it
+## Lifecycle details worth knowing
+- Conversation vector stores created with conversation helpers expire by default seven days after they were last active; requests on that conversation then fail until you recreate and reattach the store.
+- If a conversation's vector store still has files processing, the run waits up to 60 seconds for them; that fallback doesn't apply to the agent's vector store, so poll new agent-level files until processing completes.
+- Limits: up to 10,000 files per vector store, 512 MB per file.
+## Example
+Handbook store `vs_handbook` on the agent; when an employee uploads a payslip, the app creates `vs_chat_4711` with that file and attaches it to the employee's conversation.
+W: Agent store plus conversation store: the handbook is shared through the agent's vector store, while each conversation's own vector store keeps a payslip searchable only in the chat where it was uploaded.
+X: B=Everything in the agent store: every conversation searches the agent's vector store, so payslips would be retrievable in other chats; an instruction doesn't enforce isolation.
+C=Second agent store: an agent can have at most one vector store attached, and a shared payslip store would still be searchable from every employee's chat.
+D=Agent version per employee: versions snapshot the agent definition; one per employee duplicates the handbook everywhere and is far more work than the conversation store built for this.
+T: Attach shared content to the agent's vector store and per-chat uploads to the conversation's vector store; each can hold one vector store.
+V: Foundry Agent Service, file search
 
 @ AI-103 D2 T2.2 applied troubleshooting
 S: A legal research agent uses the Azure AI Search tool. The index has retrievable content, title and url fields, and the agent's answers are accurate, but they never include citations to the source documents. According to Learn's troubleshooting guidance, what should the developer do first?
@@ -200,7 +198,7 @@ V: Foundry Agent Service, Azure AI Search
 @ AI-103 D2 T2.2 advanced use-case
 S: A bank's security team forbids API keys for the Azure AI Search connection that a Foundry agent uses with the Azure AI Search tool. The agent must authenticate keylessly. Which TWO steps are required? (Select TWO)
 A: Create the project connection to the search service with authentication type AAD (Microsoft Entra ID) instead of ApiKey
-B: Assign Search Index Data Contributor and Search Service Contributor on the search service to the Foundry account's system-assigned managed identity
+B: Assign Search Index Data Contributor and Search Service Contributor on the search service to the Foundry managed identity that calls the index
 C: Store the search admin key in Azure Key Vault and reference the secret from an ApiKey connection, so no key appears in application code
 D: Assign Search Index Data Reader on the search service to every end user who chats with the agent, so queries run under each user's identity
 E: Assign the Foundry User role on the search service to the agent's model deployment, so the model can call the index directly at runtime
@@ -210,18 +208,18 @@ The tool reaches the index through a **project connection** (category `Cognitive
 - **ApiKey**: stores the search admin key in the connection
 - **AAD** (Microsoft Entra ID): no key; Foundry authenticates with a managed identity
 ## Keyless setup on Learn
-For keyless authentication, Learn says to use the **system-assigned managed identity of the Foundry account** that contains the project and assign it these roles on the search service:
+For keyless authentication, assign these roles on the search service to the Foundry managed identity that calls the index (Learn's setup steps use the system-assigned managed identity of the Foundry account that contains the project; its troubleshooting table refers to the project's managed identity):
 - **Search Index Data Contributor**
 - **Search Service Contributor**
 Learn also notes that private virtual networking with this tool requires Microsoft Entra managed identity authentication; key-based authentication isn't supported there.
 ## Example
 `"properties": {"category": "CognitiveSearch", "target": "https://contoso-search.search.windows.net", "authType": "AAD"}`
 W: A=AAD connection: a connection with authType AAD stores no key and makes Foundry authenticate to the search service with Microsoft Entra ID.
-B=Roles for the account identity: keyless access works only if the Foundry account's managed identity holds the search data-plane and service roles that Learn lists.
+B=Roles for the Foundry identity: keyless access works only if the managed identity that Foundry uses holds the search data-plane and service roles that Learn lists.
 X: C=Key in Key Vault: an ApiKey connection still authenticates with the admin key; moving it to Key Vault protects the secret but doesn't meet a no-keys rule.
 D=Roles for end users: the tool calls the index with the Foundry identity, not each chat user's identity, so per-user search roles don't enable the connection.
 E=Foundry User on the deployment: Foundry User is a Foundry project role and a model deployment isn't a security principal; the search service needs the search roles above.
-T: For keyless Azure AI Search tool access, use an AAD project connection and grant the Foundry account's managed identity Search Index Data Contributor and Search Service Contributor.
+T: For keyless Azure AI Search tool access, use an AAD project connection and grant the Foundry managed identity Search Index Data Contributor and Search Service Contributor.
 V: Foundry Agent Service, Azure AI Search, Microsoft Entra ID
 
 @ AI-103 D2 T2.2 advanced troubleshooting
@@ -295,55 +293,55 @@ D=Account identity with Contributor: toolboxes require the project managed ident
 T: For Entra-protected APIs, use an OpenAPI connection with project managed identity, the API's Application ID URI as audience, and a least-privilege role.
 V: Foundry Agent Service, OpenAPI tool, Microsoft Entra ID
 
-@ AI-103 D2 T2.2 applied troubleshooting
-S: A developer connects a GitHub MCP server, which exposes about 40 tools, to a Foundry agent. To keep the agent read-only, she sets allowed_tools to an empty list. A security review then finds the agent called create_issue. How should she fix the configuration?
-A: Set require_approval to never, because approval mode overrides allowed_tools and lets every tool on the server run without any review
-B: Set allowed_tools to a nonempty list of only the read tools the agent needs, such as search_issues and get_issue
-C: Remove the server_label from the MCP tool, so the agent can no longer address write operations on that particular MCP server by name
-D: Set tool_choice to none for the agent, so the model can still read GitHub data but can no longer call any tool that writes to the repository
-K: B
-G: ## Restricting which MCP tools an agent may call
-The MCP tool connects an agent to a **remote** MCP server with these settings:
-- `server_url` and `server_label` (unique per agent)
-- `allowed_tools`: optional list of tool names the agent may use
-- `require_approval`: `always` (default), `never`, or lists of tools that always or never need approval
-- `project_connection_id`: stored credentials
-## The empty-list trap
-Learn: "If you omit this value or set it to an empty list (`[]`), the agent can access all tools exposed by the MCP server." To restrict access, provide a **nonempty** list of tool names. Selecting a subset of tools in the portal catalog (for example for Azure DevOps MCP Server) is equivalent to setting `allowed_tools`.
+@ AI-103 D2 T2.2 applied use-case
+S: A support agent uses an MCP tool for a third-party ticketing MCP server that requires an API key in a request header. The developer's prototype sets the key in the MCP tool's headers in the app code. The security team wants no key in code or app settings, and wants to rotate it in one place. What should the developer do?
+A: Store the key in a project connection for the MCP server and set project_connection_id on the MCP tool to that connection's ID
+B: Put the key in the agent's instructions, so that the model adds it to each MCP request and the app code no longer holds the secret
+C: Set require_approval to always, so that a person reviews every MCP call and the key is sent only after a reviewer approves the call
+D: Append the key to the server_url as a query string parameter, so the MCP tool definition carries it without any custom header
+K: A
+G: ## Credentials for MCP servers
+Many MCP servers require authentication. Learn's MCP tool page: "In Foundry Agent Service, use a project connection to store authentication details, such as API keys or bearer tokens, instead of hard-coding credentials in your app." You then set `project_connection_id` on the MCP tool.
+## Why a project connection
+- The secret is stored once with the project, not in code, configuration files or prompts.
+- Rotating the key means updating the connection; every agent that references it picks up the change.
+- Creating the connection needs the **Foundry Project Manager** role; creating and testing agents needs **Foundry User**.
+## Other options on Learn
+- MCP server authentication also supports Microsoft Entra identities, user delegation and OAuth identity passthrough, depending on the server.
+- A Foundry toolbox can manage credentials centrally for all tools in its bundle.
 ## Example
-`MCPTool(server_label="github", server_url="https://api.githubcopilot.com/mcp", allowed_tools=["search_issues", "get_issue"], require_approval="always")`
-W: Nonempty allowed_tools: an empty list means every tool on the server is allowed, so only an explicit list of read tools actually keeps create_issue out of the agent's reach.
-X: A=require_approval never: approval settings control review of calls, not which tools exist, and never removes the one safeguard left.
-C=Remove server_label: server_label is a required unique identifier for the MCP tool; removing it breaks the configuration rather than restricting tools.
-D=tool_choice none: this stops the model from calling any tool, including the read tools the agent needs to answer questions.
-T: In an MCP tool, allowed_tools: [] means all tools; list the permitted tools explicitly to restrict the agent.
+`MCPTool(server_label="tickets", server_url="https://mcp.contoso-tickets.example/mcp", project_connection_id=tickets_conn_id, require_approval="always")`
+W: Project connection: Learn says to keep API keys and bearer tokens for MCP servers in a project connection referenced by project_connection_id, which removes the key from code and gives one place to rotate it.
+X: B=Key in instructions: this puts the secret into the prompt, where it can leak in responses and traces; Learn says not to include keys or tokens in prompts.
+C=require_approval always: approvals decide whether a call runs, not where the credential is stored; the key would still sit in the app code.
+D=Key in the server URL: the secret is still hard-coded in the tool definition and is more likely to show up in logs; this doesn't meet the rule.
+T: Store MCP server credentials in a project connection and reference it with project_connection_id instead of hard-coding them in the app.
 V: Foundry Agent Service, MCP tool
 
-@ AI-103 D2 T2.2 advanced use-case
-S: An agent uses the Azure DevOps MCP Server. Read tools such as list_work_items may run freely, but create_work_item and update_work_item must be approved by a person before they run. Which TWO steps implement this approval flow? (Select TWO)
-A: Set require_approval to {"always": ["create_work_item", "update_work_item"]} on the MCP tool, so only those tools wait for approval
-B: When the output has an mcp_approval_request, show its tool and arguments to a reviewer, then send an mcp_approval_response with that approval_request_id in the same conversation
-C: Set require_approval to never and add an instruction that tells the model to ask the user in chat for confirmation before it changes any work item
-D: When the output has an mcp_approval_request, start a new conversation and send the approval there, so the approved call runs in a clean context
-E: Set allowed_tools to an empty list, so that every write tool on the server is blocked until a reviewer approves it in the Foundry portal
-K: A,B
-G: ## Approval flow controls for MCP tools
-`require_approval` decides which MCP tool calls stop for a human:
-- `always` (the default): every call needs approval
-- `never`: no approval
-- `{"always": [...]}` or `{"never": [...]}`: per-tool lists
-When approval is required, the response contains an **`mcp_approval_request`** item with the server label, tool name and arguments. Your app reviews it and sends an **`mcp_approval_response`** with `approval_request_id` set to that item's id and `approve` true or false. Learn: submit it **in the same conversation**; if the agent never continues after approval, check that you used the same conversation and the approval request item id.
-## Good practice from Learn
-- require approval for high-risk operations, especially tools that write data
-- review the tool name and arguments before approving
-- log approvals and tool calls for auditing
-W: A=Per-tool approval list: the always list makes only the two write tools pause for a person, while reads run without interruption.
-B=Approval request and response: reviewing the requested call and replying with mcp_approval_response in the same conversation is how the paused call is approved or rejected.
-X: C=Never plus instruction: a chat confirmation is a model behavior, not an enforced control; the model could still call the write tool without asking.
-D=New conversation: the approval must go to the conversation that holds the pending request; otherwise the agent never continues the call.
-E=Empty allowed_tools: an empty list allows all tools, and allowed_tools has no portal approval step.
-T: Use require_approval lists for risky MCP tools and answer each mcp_approval_request with an mcp_approval_response in the same conversation.
-V: Foundry Agent Service, MCP tool, Azure DevOps MCP Server
+@ AI-103 D2 T2.2 advanced troubleshooting
+S: A sales agent in one Foundry project must delegate pricing questions to a pricing agent, a prompt agent in another project, through the a2a tool. The calling identity already has the Foundry Agent Consumer role on the target project, but calls fail because no agent card is found at the pricing agent's A2A path. What should the developer do?
+A: Enable incoming A2A on the pricing agent by setting its agent card and the A2A protocol on its endpoint, then point the a2a tool at its A2A base path
+B: Assign the calling identity the Foundry Project Manager role on the target project, because only that role can read agent cards in another project
+C: Switch the tool type from a2a to a2a_preview, because Foundry Agent Service publishes agent cards only for A2A protocol version 0.3 endpoints
+D: Describe the pricing agent with an OpenAPI specification and call it through the OpenAPI tool, because Foundry agents can't accept inbound A2A
+K: A
+G: ## Two sides of an A2A call
+- **Outgoing**: the calling agent uses the **A2A tool** (`a2a`, A2A protocol v1.0, generally available; the older `a2a_preview` type for v0.3 stays in preview) with a project connection to the remote endpoint.
+- **Incoming**: the target must *be* an A2A endpoint. A Foundry agent becomes one only when you **enable incoming A2A**.
+## Enabling incoming A2A on a Foundry agent
+Learn: "Enabling incoming A2A requires two things: an agent card that describes your agent's capabilities, and the A2A protocol enabled on the agent endpoint. You can set both in a single PATCH call." Then:
+- Foundry publishes the agent card and accepts inbound A2A requests.
+- Incoming A2A requires the responses protocol, which prompt agents use by default.
+- All A2A URLs require Microsoft Entra ID authentication; the caller needs **Foundry Agent Consumer** (or another role with endpoint access) on the target project or agent.
+- Requests that don't name a version get v0.3 (preview) by default; select v1.0 for production.
+## In this case
+The role is already in place, so authorization isn't the problem. A missing agent card means the target hasn't been exposed as an A2A endpoint yet.
+W: Enable incoming A2A: an agent card exists only after incoming A2A is enabled with the card and protocol settings, and the a2a tool then calls the pricing agent's A2A base path.
+X: B=Project Manager role: Foundry Agent Consumer is the least-privilege role for calling agent endpoints, and it's already assigned; a stronger role doesn't create a missing agent card.
+C=Switch to a2a_preview: v1.0 is the generally available protocol that Foundry targets support; the preview type doesn't publish a card that was never enabled.
+D=OpenAPI instead: Foundry agents do support incoming A2A once it's enabled, and wrapping an agent in an OpenAPI spec isn't the documented way to call another Foundry agent.
+T: To call a Foundry agent with the a2a tool, first enable incoming A2A on the target agent (agent card plus A2A protocol), then grant the caller Foundry Agent Consumer.
+V: Foundry Agent Service, A2A tool
 
 @ AI-103 D2 T2.2 applied troubleshooting
 S: A developer built an MCP server that runs on his laptop and talks over stdio. It works in his local MCP client, but he can't add it as an MCP tool to a prompt agent in Foundry Agent Service. What should he do?
@@ -356,7 +354,7 @@ G: ## Foundry runs agents in the cloud
 The Agent Service runtime calls tools from Azure. Learn: "The Agent Service runtime only accepts a remote MCP server endpoint. If you want to add tools from a local MCP server, you need to self-host it on Azure Container Apps or Azure Functions to get a remote MCP server endpoint."
 ## Hosting options compared (from Learn)
 - **Azure Container Apps**: HTTP POST/GET endpoints; any language that runs in Linux containers; custom authentication; tested configuration for private MCP servers (internal ingress on a dedicated MCP subnet)
-- **Azure Functions**: streamable HTTP; Python, Node.js, Java, .NET; key-based authentication (OAuth needs API Management); the MCP webhook endpoint is `/runtime/webhooks/mcp`
+- **Azure Functions**: streamable HTTP; Python, Node.js, Java, .NET; key-based authentication (OAuth needs API Management); containerized servers and `npx` start commands aren't supported
 ## After hosting
 Add an MCP tool with `server_url` set to the remote endpoint, a unique `server_label`, and a project connection if the server needs credentials. Private endpoints need standard agent setup with private networking.
 W: Remote MCP endpoint: Foundry only calls MCP servers over a reachable remote URL, so hosting the server on Container Apps or Functions gives the agent an endpoint it can use.
@@ -366,28 +364,28 @@ D=OpenAPI to localhost: the OpenAPI tool also calls from Azure, so localhost sti
 T: Foundry Agent Service needs a remote MCP endpoint; host local MCP servers on Azure Container Apps or Azure Functions.
 V: Foundry Agent Service, MCP tool, Azure Container Apps, Azure Functions
 
-@ AI-103 D2 T2.2 applied use-case
-S: Financial analysts want to upload quarterly CSV files to an agent, ask questions such as "Which region's margin fell most?", and get back a PNG chart. The team doesn't want to build or host any code execution environment. Which tool should the agent use?
-A: File search with a vector store that contains the CSV files, so the agent retrieves the relevant rows and draws the chart from them
-B: A function tool that the app implements with pandas and matplotlib, returning the chart bytes to the agent as the function output
-C: The Azure AI Search tool with an index built from the CSV files, so semantic ranking can return the rows that answer each question
-D: Code interpreter with the uploaded CSV files, so the model writes and runs Python in a sandbox and returns the chart as a generated file
-K: D
-G: ## What code interpreter does
-Code interpreter lets a Foundry agent **write and run Python code in a sandboxed execution environment**, iterating until it solves data analysis and math tasks or produces charts. Files are uploaded (for example with `purpose="assistants"`) and passed to the tool; generated files come back as `container_file_citation` annotations that the app downloads from the container.
-## Things to know
-- It has charges beyond model tokens.
-- Each conversation that uses it gets its own session; a session is active for one hour by default with a 30-minute idle timeout.
-- It isn't available in every region; tool support depends on both region and model.
-## Choosing between tools
-- Retrieval tools (file search, Azure AI Search) find relevant text; they don't calculate.
-- Function tools run code in **your** app, which means you build and host that code.
-- Code interpreter runs model-written code in a Microsoft-managed sandbox.
-W: Code interpreter: the task needs real computation over tabular data plus chart generation, and code interpreter does both in a managed sandbox without the team hosting anything.
-X: A=File search: it chunks and embeds text for retrieval; it can't aggregate margins across rows or render an image.
-B=Custom function: it would work, but the team would have to build, host and secure the Python execution, which the requirement rules out.
-C=Azure AI Search tool: a search index ranks documents by relevance; it doesn't compute comparisons or produce charts.
-T: For calculations and charts over uploaded data without hosting your own code, give the agent the code interpreter tool.
+@ AI-103 D2 T2.2 applied troubleshooting
+S: An analytics agent with the code interpreter tool replies "I've created the chart sales_by_region.png", but the developer's web app only displays response.output_text, so users never see the image. How should the app get the chart?
+A: Read the container_file_citation annotations in the response, then download each file by its container ID and file ID through the container files API
+B: Add file search to the agent, so that the generated PNG is indexed in a vector store and the app can find it with a query for the chart's file name
+C: Ask the agent to put the chart into output_text as base64 text and decode it in the app, because generated files can't be downloaded from Foundry
+D: Download the chart from the project's storage account by the file name in the reply, because code interpreter writes its output to a blob container
+K: A
+G: ## Where code interpreter output lives
+Code interpreter lets the agent write and run Python in a **sandboxed session**. Files it creates (charts, CSV files) are saved in that session's **container**, not in the reply text.
+- The response's output message carries **annotations**; generated files appear as `container_file_citation` annotations with a `file_id`, a `container_id` and a file name.
+- The app downloads each file through the containers API, for example `openai.containers.files.content.retrieve(file_id=file_id, container_id=container_id)`.
+## Other facts from Learn
+- Each conversation that uses code interpreter gets its own session; a session is active for one hour by default, with a 30-minute idle timeout, so download outputs promptly.
+- Code interpreter has charges beyond model tokens.
+- Input files are uploaded and passed to the tool; Learn's sample uploads a CSV, asks for a chart and downloads the PNG.
+## Example flow
+Take the last output message (`response.output[-1]`), look in its `content[-1].annotations` for an item of type `container_file_citation`, download it with its `container_id` and `file_id`, and show the PNG in the web page.
+W: container_file_citation annotations: generated files are referenced by annotations that carry the container and file IDs, and the app downloads them through the container files API, as Learn's sample does.
+X: B=File search: file search indexes uploaded documents for retrieval; it doesn't collect files created in a code interpreter container or return image bytes.
+C=Base64 in text: Learn's sample downloads generated files directly; pushing image bytes through the reply text wastes tokens and is fragile.
+D=Storage by file name: the documented path to generated files is the container ID and file ID from the annotations, not guessing a blob path from the reply text.
+T: Code interpreter outputs come back as container_file_citation annotations; download them by container ID and file ID.
 V: Foundry Agent Service, code interpreter
 
 @ AI-103 D2 T2.2 advanced use-case
@@ -405,7 +403,6 @@ An agent integrates external capabilities through tools. A common pattern is a *
 2. Your app sends the document to the Content Understanding analyzer and waits for the result.
 3. The app returns JSON such as `{"policy_number": "...", "incident_date": "...", "amount": 1250.00}` as the `function_call_output`.
 4. The model then calls the claims API with those values.
-(Microsoft Agent Framework also offers a Content Understanding context provider, currently a prerelease package, that preprocesses attachments before the model sees them.)
 ## Why not a retrieval tool?
 Retrieval returns chunks that the model must interpret, which is fine for answering questions but weaker when downstream systems need exact, schema-shaped fields.
 W: Content Understanding through a function: an analyzer with a field schema turns each form into typed fields, and returning them as function output gives the agent reliable values to pass to the claims API.
@@ -416,28 +413,29 @@ T: When an agent needs structured fields from documents, call an Azure Content U
 V: Foundry Agent Service, Azure Content Understanding in Foundry Tools, function calling
 
 @ AI-103 D2 T2.2 applied troubleshooting
-S: A store's stock agent has a single OpenAPI tool with the operation checkStock. Its whole job is to report live availability, yet it sometimes answers "Probably in stock" from the model's own knowledge without calling the API. Which change gives the most deterministic tool use?
-A: Set tool_choice to none on each request, so the model stops guessing and waits for the API result before it writes anything to the user
-B: Raise the temperature of the request, so the model explores more possible actions and is more likely to try the checkStock operation
-C: Add the web search tool next to the OpenAPI tool, so the model always has some live data source available when the user asks about stock
-D: Set tool_choice to required on requests, so the model must call a tool, and keep the operationId and description clearly about stock checks
-K: D
-G: ## Controlling when the agent calls tools
-Learn calls `tool_choice` "the most deterministic control over tool calling":
-- `auto`: the model decides whether to call tools
-- `required`: the model must call one or more tools
-- `none`: the model doesn't call tools
-## Learn's troubleshooting guidance
-- "Agent doesn't call the OpenAPI tool" -> tool choice not set or operationId not descriptive -> use `tool_choice="required"` and make operationId values descriptive.
-- "Your agent doesn't call a tool" -> confirm the tool is attached, the model supports it, and use `required` if you need deterministic behavior; review traces to confirm whether a tool call was produced.
-## When required fits
-Use `required` when every turn needs a tool, as for an agent whose only job is a live lookup. For agents that also chat, keep `auto` and strengthen the instructions instead.
-W: tool_choice required: forcing a tool call removes the model's option to answer from memory, and with only one tool and a clear operation description it calls checkStock every time.
-X: A=tool_choice none: none forbids tool calls entirely, so the agent could only ever answer from its own knowledge, the opposite of the goal.
-B=Higher temperature: temperature adds randomness to output; it makes behavior less predictable, not more reliable.
-C=Add web search: a second tool gives the model another way to avoid the inventory API, and public web pages don't know the store's stock.
-T: Use tool_choice required when every turn must call a tool; use clear operationIds and instructions so the model picks the right one.
-V: Foundry Agent Service, OpenAPI tool
+S: A team's Foundry project is in a region chosen for data residency. They add the code interpreter tool to a prompt agent whose model is listed as supporting code interpreter, but requests fail with a "tool not supported" error. Other tools on the agent work. What should the developer check first?
+A: The region column of Learn's tool support by region and model tables, because a tool runs only when both the project's region and the model support it
+B: The agent's tool_choice setting, because a "tool not supported" error means that tool_choice is none and blocks every tool call for the request
+C: The developer's role assignment on the project, because Foundry reports a missing role for a tool as a "tool not supported" error at runtime
+D: The deployment's version upgrade policy, because tools are supported only on deployments that upgrade automatically to the default version
+K: A
+G: ## Tool availability has two conditions
+Foundry Agent Service publishes **tool support by region and model** tables. Learn's tool best-practice page explains the trap:
+- "Tool availability requires support from **both** the model and the region."
+- "If either table shows `No`, the tool can't run, even if the other table shows `Yes`."
+Learn's limits page adds that not all tools are available in every region and gives examples of regions that lack a specific tool.
+## Learn's checklist when a tool misbehaves
+- Agent doesn't call a tool: confirm the tool is attached, confirm the model supports it, use `tool_choice` `required` if you need deterministic behavior, review traces.
+- Tool calls fail: verify configuration and authentication; for MCP and OpenAPI, check the endpoint is reachable.
+- "Tool not supported" although the tables show support: check **both** tables for your region and your model.
+## Fixes
+Use a model and region pair that supports the tool, for example a project in another permitted region, or a different tool that is available where the data must stay.
+W: Region and model support: Learn says a "tool not supported" error despite model support usually means the region doesn't support the tool, because both must show support for the tool to run.
+X: B=tool_choice none: none stops the model from calling tools, but other tools on the agent work, and that setting doesn't raise a "tool not supported" error.
+C=Role assignment: missing permissions show up as authorization errors (401 or 403), not as a tool support error, and other tools work for the same user.
+D=Upgrade policy: the version upgrade setting controls when a deployment moves to new model versions; it isn't a condition for tool support.
+T: A Foundry tool runs only where both the model and the region support it; check both tables when you see "tool not supported".
+V: Foundry Agent Service, code interpreter
 
 @ AI-103 D2 T2.2 advanced tradeoff
 S: A team built a classic Foundry agent solution in which a main agent used the Connected Agents tool to delegate warranty questions to a warranty agent. They are moving to the current Foundry Agent Service API. What should they plan for the delegation?
@@ -447,13 +445,12 @@ C: Replace Connected Agents, which the new Agent Service doesn't offer, with an 
 D: Merge both agents into a single agent with combined instructions, because the new Agent Service supports only one agent per Foundry project
 K: C
 G: ## Multi-agent options in the current Foundry Agent Service
-Learn's A2A page has an explicit migration note: "The Connected Agents tool from the classic Agents API isn't available in the new Foundry Agent Service." To connect one agent to another, use:
-- **A2A tool**: call any Agent2Agent-compatible endpoint, including another Foundry agent exposed as an A2A endpoint. The `a2a` tool type with A2A protocol v1.0 is **generally available**; the older `a2a_preview` type (v0.3) stays in preview. Enabling *incoming* A2A on a Foundry agent is currently labeled preview, and the caller needs the Foundry Agent Consumer role or higher on the target project.
-- **Orchestration in code**: Microsoft Agent Framework workflows (sequential, concurrent, handoff, group chat, Magentic) in a hosted agent or your app.
-- The portal **workflows** feature also orchestrates agents, but Foundry retires it on December 1, 2026; Learn points new builds to Agent Framework.
+Learn's A2A page has an explicit migration note: "The Connected Agents tool from the classic Agents API isn't available in the new Foundry Agent Service." It names two replacements: the **A2A tool** and **workflows**.
+- **A2A tool**: call any Agent2Agent-compatible endpoint, including another Foundry agent exposed as an A2A endpoint. The `a2a` tool type with A2A protocol v1.0 is **generally available**; the older `a2a_preview` type (v0.3) stays in preview. The target Foundry agent must have incoming A2A enabled, and the caller needs the Foundry Agent Consumer role (or another role with endpoint access) on the target project or agent.
+- **Workflows**: the portal workflows designer is one option, but Foundry retires it on December 1, 2026 and points new builds to **Microsoft Agent Framework** workflows (sequential, concurrent, handoff, group chat, Magentic), which run in your app or a hosted agent.
 ## How A2A delegation behaves
 The calling agent sends the request, the remote agent processes it and returns a response, and the calling agent uses it to answer while it keeps managing the conversation.
-W: A2A or code orchestration: Connected Agents isn't available in the new service, so the delegation must be rebuilt with the A2A tool (or orchestration code), which Learn names as the replacement paths.
+W: A2A or code orchestration: Connected Agents isn't available in the new service; Learn names the A2A tool and workflows as replacements, and with portal workflows retiring, code-based orchestration means Agent Framework.
 X: A=Keep Connected Agents: Learn states the tool isn't available in the new Agent Service, so classic definitions won't carry over unchanged.
 B=Vector store instead: a vector store holds documents, not an agent's reasoning and tools; the warranty agent's actions would be lost.
 D=One agent per project: a project can hold many agents; merging them is a design choice, not a platform limit, and it gives up specialized instructions.
@@ -461,53 +458,56 @@ T: Connected Agents doesn't exist in the current Foundry Agent Service; delegate
 V: Foundry Agent Service, A2A tool, Microsoft Agent Framework
 
 @ AI-103 D2 T2.2 applied use-case
-S: A telecom builds a support system with Microsoft Agent Framework. A triage agent talks to the customer first; when it recognizes a billing dispute, the billing agent must take over the whole conversation, with full context, and own the case from then on. Which orchestration pattern fits?
-A: Sequential orchestration, where every agent processes the conversation one after another in a fixed order and passes its output to the next one
-B: Concurrent orchestration, where the triage and billing agents process each message in parallel and their answers are aggregated into one reply
-C: Magentic orchestration, where a manager agent plans the work, assigns subtasks to the specialists and keeps ownership of the final answer
-D: Handoff orchestration, where an agent transfers control of the conversation to the specialist best suited to the request, based on context
-K: D
-G: ## Orchestration patterns in Microsoft Agent Framework
-Microsoft Agent Framework (the successor to Semantic Kernel and AutoGen) has built-in multi-agent patterns:
-- **Sequential**: agents run one after another in a defined order
-- **Concurrent**: agents work on the same input in parallel and the results are aggregated
-- **Handoff**: agents transfer control to each other based on context or the user's request
-- **Group chat**: agents collaborate in a shared conversation
-- **Magentic**: a manager agent dynamically coordinates specialized agents
-## Handoff versus agent-as-tool
-Learn contrasts the two:
-- In **handoff**, control passes to the receiving agent, which takes **full ownership** of the task and has the full conversation context. There is no central authority.
-- In **agent-as-tool**, a primary agent delegates subtasks, gets results back and keeps ownership.
-Handoff also supports tool approval for sensitive operations and checkpointing for durable workflows.
-W: Handoff: the requirement is that the billing agent takes over the whole conversation with full context and owns the case, which is exactly how Learn describes handoff orchestration.
-X: A=Sequential: a fixed order sends every conversation through every agent, rather than routing billing disputes to the billing agent when they appear.
-B=Concurrent: parallel processing suits independent perspectives on the same input, not one specialist taking over the customer.
-C=Magentic: a manager agent keeps ownership and coordinates subtasks, while the requirement is for the billing agent to own the case.
-T: Use handoff orchestration when a specialist agent must take over a conversation and own it; use agent-as-tool or Magentic when a coordinator keeps ownership.
+S: A bank builds a chat in Microsoft Agent Framework with three specialist agents: cards, loans and fraud. The cards agent greets customers. Any specialist must be able to pass the customer directly to another specialist, which then talks to the customer with the full history and owns the case, with no central coordinator. Which approach fits?
+A: Agent-as-tool, where the cards agent calls the loans and fraud agents as tools, receives their results and keeps answering the customer itself
+B: Handoff orchestration, where each specialist can transfer control of the whole conversation, with its context, to another specialist agent
+C: Group chat orchestration, where an orchestrator picks which agent speaks next in a shared conversation and keeps the discussion moving
+D: A workflow in the Foundry portal designer, where an if/else node routes each customer message to the specialist for the detected topic
+K: B
+G: ## Ways to combine agents in Microsoft Agent Framework
+Agent Framework (the successor to Semantic Kernel and AutoGen) offers orchestration patterns such as sequential, concurrent, **handoff**, **group chat** and Magentic, plus the simpler **agent-as-tool** approach.
+## Handoff versus agent-as-tool (Learn)
+- **Control flow**: in handoff, control passes between agents and "there is no central authority managing the workflow"; in agent-as-tool, a primary agent delegates subtasks and control returns to it.
+- **Task ownership**: "the agent receiving the handoff takes full ownership of the task"; with agent-as-tool, the primary agent keeps responsibility.
+- **Context**: in handoff, the conversation is handed off entirely and the receiver has full context; with agent-as-tool, the primary agent may pass only relevant pieces.
+## Handoff versus group chat (Learn)
+Group chat uses a star topology with an **orchestrator in the middle** that selects the next speaker (round-robin, prompt-based or custom logic). Learn contrasts it with handoff, "where agents directly transfer control".
+## Extras
+Handoff workflows support approval-required tools for sensitive operations and checkpointing for durable runs.
+W: Handoff: specialists pass the whole conversation and its context directly to each other, and the receiver owns the case without a coordinator, which matches Learn's description of handoff.
+X: A=Agent-as-tool: the cards agent would stay in charge and relay answers, while the requirement is for the receiving specialist to own the case.
+C=Group chat: an orchestrator picks every speaker, which is the central coordinator the requirement rules out.
+D=Portal workflow: Foundry retires portal workflows on December 1, 2026, and a router node that decides each turn is central control, not specialists handing off.
+T: Choose handoff when specialists must pass a whole conversation to each other and the receiver takes ownership; agent-as-tool and group chat keep a central controller.
 V: Microsoft Agent Framework
 
-@ AI-103 D2 T2.2 advanced tradeoff
-S: An expense process has fixed steps: extract the receipt data, run a policy-check agent, wait for a manager's decision when the amount exceeds a limit, then post the payment. Auditors need the same order on every run. A developer proposes one agent with all four tools. What does Learn recommend?
-A: Keep one agent with all tools, because an agent with autonomous tool use and planning follows the same order on every run once its instructions list the steps
-B: Use four agents in a group chat, so they negotiate in a shared conversation who acts next and agree on the order of steps for each new expense
-C: Use concurrent orchestration, so extraction, the policy check, the approval and the payment all run at once and finish sooner for every expense
-D: Use a Microsoft Agent Framework workflow, which connects the agent and functions through explicit execution paths with a human approval step
-K: D
-G: ## Agents versus workflows in Microsoft Agent Framework
-Learn's guidance:
-- Use an **agent** when the task is open-ended or conversational, you need autonomous tool use and planning, and a single LLM call (possibly with tools) suffices.
-- Use a **workflow** when the process has **well-defined steps**, you need **explicit control over execution order**, or multiple agents or functions must coordinate.
-- "If you can write a function to handle the task, do that instead of using an AI agent."
-## Workflow building blocks
-Graph-based workflows are made of **executors** (agents or functions) connected by **edges**. Human-in-the-loop uses request and response handling (a request port emits a request event; the workflow waits for the external response). **Checkpoints** save workflow state at the end of each superstep so long runs can resume after a failure.
-## Applied here
-Extraction and payment posting are deterministic functions, the policy check is an agent, and the manager decision is a human-in-the-loop request, all in an explicit order.
-W: Agent Framework workflow: fixed steps with an auditable order are what Learn says workflows are for, and a workflow can mix function executors, an agent and a human approval request.
-X: A=One autonomous agent: listing steps in instructions doesn't guarantee order; an agent plans dynamically, which suits open-ended tasks rather than a fixed process.
-B=Group chat: agents taking turns dynamically is useful for collaboration, but it gives no guaranteed sequence for auditors.
-C=Concurrent: the steps depend on each other (payment needs approval), so running them in parallel breaks the process.
-T: Use an agent for open-ended tasks and a workflow when steps and order are known; put deterministic steps in functions.
-V: Microsoft Agent Framework
+@ AI-103 D2 T2.2 advanced troubleshooting
+S: A Microsoft Agent Framework workflow onboards vendors: an extraction agent, a compliance agent, then a request for a manager's approval that can take two days. The workflow runs in a container that is redeployed several times a week, and each redeploy loses in-progress runs, so the agents must start over. What should the developer do?
+A: Build the workflow with checkpoint storage backed by Azure Cosmos DB, and after a restart resume each run from its latest saved checkpoint
+B: Build the workflow with in-memory checkpoint storage, because Agent Framework copies in-process checkpoints across container redeployments
+C: Merge the steps into one agent with detailed instructions, so that a restarted container can rebuild each run's progress from the prompt
+D: Switch the workflow to concurrent orchestration, so all steps finish inside one deployment window before the next redeploy takes place
+K: A
+G: ## Checkpoints in Agent Framework workflows
+Workflows run in **supersteps**. Learn: "Checkpoints are created at the end of each superstep", and a checkpoint captures the whole workflow state:
+- the state of all executors
+- pending messages for the next superstep
+- **pending requests and responses** (such as a waiting human approval)
+- shared state
+Learn lists the uses: long-running workflows that must survive failures, pausing and resuming later, and moving runs across environments or instances.
+## Choosing checkpoint storage (Python)
+- `InMemoryCheckpointStorage`: in-process only, for tests and demos
+- `FileCheckpointStorage`: local disk, single machine
+- `CosmosCheckpointStorage`: Azure Cosmos DB, for "production, distributed, cross-process workflows"
+All implement the same protocol, so you can swap them without changing executor code. In .NET you pass a `CheckpointManager` when running the workflow.
+## In this case
+Redeploys replace the container, so only storage outside the process keeps the run's state; the restarted workflow resumes from the last checkpoint, including the pending approval request.
+W: Durable checkpoints: checkpoints saved to Cosmos DB survive container redeploys and capture pending requests, so each run resumes where it stopped instead of rerunning the agents.
+X: B=In-memory checkpoints: Learn describes in-memory storage as in-process only, so a redeploy loses it along with the run.
+C=One agent: an agent's instructions don't store a run's progress; a restart still loses everything done so far, and the fixed steps fit a workflow better.
+D=Concurrent orchestration: the steps depend on each other and the approval can take two days, so running them in parallel neither works nor avoids redeploys.
+T: For long-running Agent Framework workflows, use durable checkpoint storage such as Cosmos DB and resume runs from their latest checkpoint.
+V: Microsoft Agent Framework, Azure Cosmos DB
 
 @ AI-103 D2 T2.2 applied tradeoff
 S: In November 2026, a team starts a new project that orchestrates three Foundry agents with branching logic and an approval step. One engineer suggests building it in the visual workflows designer in the Foundry portal. What should the team consider?
@@ -532,55 +532,50 @@ D=Hosted agents only: it's the reverse; hosted agents aren't supported in the de
 T: Don't start new orchestration on Foundry portal workflows, which retire on December 1, 2026; use Microsoft Agent Framework.
 V: Microsoft Foundry, Microsoft Agent Framework
 
-@ AI-103 D2 T2.2 applied use-case
-S: In a Python app built with Microsoft Agent Framework, a refund agent has an issue_refund function tool. Refunds must never run until a human support lead approves the specific call. How should the developer implement this semiautonomous control?
-A: Add a sentence to the agent instructions telling the model to ask for approval in its reply text before it calls issue_refund for any customer
-B: Decorate the function with @tool(approval_mode="always_require"); the run then returns an approval request, and the app passes the lead's decision back in a new run
-C: Run issue_refund in a separate concurrent orchestration branch, so a second agent reviews the refund at the same time as the first agent issues it
-D: Set approval_mode="never_require" on the function and log every refund in traces, so the lead can review the calls and reverse wrong refunds afterward
+@ AI-103 D2 T2.2 applied tradeoff
+S: A team has a Semantic Kernel app with plugins and an AutoGen prototype of a multi-agent research assistant. Leadership wants one framework for all new agent code that keeps enterprise features such as telemetry and session state and adds explicit, graph-based multi-agent workflows. Which should the team adopt?
+A: AutoGen for all new work, because its multi-agent conversations already cover the research prototype and the Semantic Kernel plugins can be ported
+B: Microsoft Agent Framework, moving both codebases with the migration guides that Learn provides for Semantic Kernel and for AutoGen apps
+C: Foundry portal workflows for all new work, turning each Semantic Kernel plugin into a node in the visual designer and retiring the code
+D: Semantic Kernel for all new work, rewriting the AutoGen prototype as Semantic Kernel plugins and keeping the orchestration in prompts
 K: B
-G: ## Human in the loop with function tools
-In Microsoft Agent Framework, a function tool can be marked as **requiring approval**:
-- Python: `@tool(approval_mode="always_require")` (Learn's sample comment: use `always_require` in production for human-in-the-loop approvals)
-- .NET: wrap the function in `ApprovalRequiredAIFunction`
-## What happens at runtime
-Learn: an agent run that requires user input "will complete with a response that indicates what input is required from the user, instead of completing with a final answer. The caller of the agent is then responsible for getting the required input from the user, and passing it back to the agent as part of a new agent run."
-## Same idea elsewhere
-- MCP tools in Foundry Agent Service: `require_approval` with `mcp_approval_request` and `mcp_approval_response`.
-- Agent Framework workflows: request and response handling for human steps; orchestrations support approval-required tools that pause the workflow.
-W: approval_mode always_require: the framework stops before executing the tool and returns an approval request, so the refund runs only after the app passes back the lead's decision.
-X: A=Ask in reply text: instructions are a request to the model, not an enforced gate; the model could still call issue_refund without a human decision.
-C=Concurrent review: running review in parallel with the refund means the money moves before anyone approves, which is the opposite of the requirement.
-D=never_require plus logs: after-the-fact review detects mistakes but doesn't prevent them; the requirement is approval before execution.
-T: For semiautonomous agents, mark consequential tools as approval-required so the run pauses for a human decision before execution.
+G: ## Microsoft Agent Framework
+Learn calls Agent Framework "the direct successor" to Semantic Kernel and AutoGen, "created by the same teams":
+- it combines AutoGen's simple abstractions for single- and multi-agent patterns with Semantic Kernel's enterprise features (session-based state management, type safety, filters, telemetry, broad model support)
+- it adds **workflows**: functional and graph-based workflows that connect agents and functions through explicit execution paths, with state management for long-running and human-in-the-loop scenarios
+- Learn provides migration guides from Semantic Kernel and from AutoGen
+## Where it runs
+Agent Framework agents can run in your own app or as Foundry hosted agents, and they can use Foundry models and tools (for example through `FoundryChatClient`). .NET and Python are the main languages; the Go version is in public preview.
+## Why not the portal designer
+Foundry is retiring portal workflows on December 1, 2026, and Learn points new workflow builds to Agent Framework.
+W: Agent Framework: Learn describes it as the next generation of both Semantic Kernel and AutoGen, keeping enterprise features and adding explicit workflows, with migration guides for both codebases.
+X: A=AutoGen: Learn positions Agent Framework as AutoGen's successor; new work on AutoGen means a second migration later and lacks the framework's enterprise and workflow features.
+C=Portal workflows: Foundry retires them on December 1, 2026, and plugin code doesn't become designer nodes.
+D=Semantic Kernel: Semantic Kernel is also succeeded by Agent Framework, and orchestration in prompts gives none of the explicit workflow control that leadership asked for.
+T: For new agent code that replaces Semantic Kernel or AutoGen, use Microsoft Agent Framework, their successor with built-in workflows.
 V: Microsoft Agent Framework
 
 @ AI-103 D2 T2.2 applied troubleshooting
-S: A developer enabled tracing for a Foundry prompt agent in production, but the Traces view in the Foundry portal stays empty and nothing appears in Azure Monitor. Requests to the agent succeed. What should she check first?
-A: That the model deployment uses a Global Standard deployment type, because traces are only collected for agents that run on a global deployment
-B: That the Foundry project is connected to an Application Insights resource, and that her account has a role such as Log Analytics Reader to query telemetry
-C: That diagnostic settings on the project's storage account send blob logs to a Log Analytics workspace, where Foundry reads the agent spans from
-D: That the agent's tool_choice is set to required, because trace spans are only recorded for responses in which the agent calls at least one tool
+S: Server-side tracing is on for a Foundry prompt agent, and the Traces view shows the agent's model and tool spans. Before each call, the calling web app looks up the customer in a CRM and redacts the question. Slow requests sometimes spend most of their time in that app code, which no trace shows. What should the developer do?
+A: Assign the developer the Log Analytics Reader role on Application Insights, so that the app code spans that are hidden become visible in the Traces view
+B: Add client-side tracing to the web app with OpenTelemetry and an Azure Monitor exporter, so that the app's own steps are recorded as spans as well
+C: Open the agent's Monitor tab dashboard, so that the CRM lookup and the redaction steps appear as separate spans in each trace for the agent
+D: Raise the sampling percentage on the Application Insights resource, so that server-side tracing also records the work done inside the web app
 K: B
-G: ## Where Foundry traces live
-Foundry tracing uses **OpenTelemetry** semantic conventions and stores telemetry in **Azure Monitor Application Insights**. Tracing is generally available for prompt and hosted agents (workflow and external agents are in preview).
-Prerequisites from Learn:
-- a Foundry project with tracing enabled, i.e. **connected to an Application Insights resource**
-- access to that Application Insights resource
-- a **Log Analytics Reader** role to view traces, insights and visualizations in Foundry
-## Learn's troubleshooting list
-If traces aren't appearing:
-- verify the project is connected to an Application Insights resource
-- check that your account has permissions to query telemetry
-- for code-based agents, make sure the code includes the necessary instrumentation
-## What a trace contains
-User inputs and agent outputs, tool calls and results, token consumption, and duration and latency, as nested spans.
-W: Application Insights connection and read access: traces are written to the connected Application Insights resource and viewed through Log Analytics, so a missing connection or missing reader role leaves the view empty.
-X: A=Global Standard deployment: tracing doesn't depend on the deployment type; Learn says it's available in all regions where Foundry is supported.
-C=Storage diagnostic settings: blob logs describe storage operations; agent spans go to Application Insights, not to storage diagnostics.
-D=tool_choice required: every agent invocation produces spans, including model-only turns; tool calls just add child spans.
-T: Foundry agent traces go to the project's connected Application Insights; check that connection and your Log Analytics Reader access first.
-V: Microsoft Foundry, Azure Monitor Application Insights
+G: ## Server-side and client-side tracing
+Learn recommends **server-side tracing** as the starting point: Foundry enables it automatically after you connect an Application Insights resource to the project, with no code changes, and it "works for any agent hosted in Foundry".
+Server-side tracing sees what runs in Foundry: the agent invocation, model calls and tool executions. It can't see code that runs in **your** application before or after the agent call. Learn: "When you need visibility into your own application code - for example, to trace custom logic surrounding an agent call - you can add client-side instrumentation as a second step."
+## Client-side instrumentation
+- Install the project SDK with OpenTelemetry support (for example `azure-core-tracing-opentelemetry`) and an Azure Monitor exporter.
+- Enable GenAI tracing before creating the project client, and export spans to the project's Application Insights.
+- Wrap your own steps (CRM lookup, redaction) in spans so their duration appears next to the agent's.
+For local development, the Foundry Toolkit for Visual Studio Code can collect spans with a local OTLP collector.
+W: Client-side tracing: server-side tracing only covers what runs in Foundry, and Learn says to add client-side instrumentation to see custom logic around an agent call, such as the CRM lookup and redaction.
+X: A=Log Analytics Reader: the role lets people query telemetry that exists; the developer already sees traces, and no role creates spans for code that isn't instrumented.
+C=Monitor tab: the dashboard shows aggregate metrics such as token usage and latency; it doesn't add spans for code running in the web app.
+D=Higher sampling: sampling keeps more of the telemetry that's emitted; the web app emits no spans, so there's nothing more to keep.
+T: Server-side tracing covers what runs in Foundry; add client-side OpenTelemetry instrumentation to trace your own app code around the agent call.
+V: Microsoft Foundry, tracing, Azure Monitor Application Insights
 
 @ AI-103 D2 T2.2 advanced use-case
 S: Traces for a travel agent show two failure patterns: it sometimes calls search_flights when the user asked about an existing booking, which needs get_booking, and some calls to the airline API fail with HTTP 500 errors. Which TWO built-in agent evaluators measure these two problems? (Select TWO)
