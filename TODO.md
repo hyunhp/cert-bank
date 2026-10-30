@@ -2,13 +2,10 @@
 
 ## Now (warm start — keep this section current; update it with every merge)
 Updated 2026-10-30.
-- In progress: **GCP-ACE study guide** (bank merged: 250 questions). If the session was cleared: start from `main`,
-  branch `gcp-ace-study`, two writers + two reviewers on scratch JSON as for DP-900 (facts from the reviewed bank and
-  docs.cloud.google.com), `STUDY_EXAMS` entry with vendor `gcp` in `js/study.js` (the Google Cloud tab appears once a
-  guide exists), stamp_version, build_data_index, glossary `gcp-*` terms (Sonnet review), README study-days column,
-  tests, merge. Then ask the owner about the next Google Cloud exam (Generative AI Leader, Cloud Digital Leader,
-  Professional Cloud Architect).
-- Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
+- In progress: nothing. Last merged: GCP-ACE study guide (22 days) + 11 `gcp-*` glossary terms. If the session was
+  cleared, start from `main` and ask the owner about the next exam (Google Cloud Generative AI Leader, Cloud Digital
+  Leader or Professional Cloud Architect; see "Next").
+- Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). www.databricks.com is still
   blocked; learn.palantir.com / certification.palantir.com answer 403 (site side). Google Cloud exam pages, guide PDFs
@@ -178,6 +175,11 @@ Docker-format repos). Docs changes kept out of keys or reflected: Admin/Writer/R
 Owner/Editor/Viewer are "legacy basic roles" (f01/e01 fixed 4 earlier questions), Log Analytics is now Observability
 Analytics, `gcloud run deploy --function` for Cloud Run functions, Deployment Manager end of support 2026-03-31.
 `learn_fetch.py` fix: a stray end tag no longer closes `<main>` (Google docs pages were cut off at tab panels).
+GCP-ACE study guide DONE 2026-10-30: 22 days (D1 4, D2 8, D3 7, D4 2, final), three writers + three reviewers (about 25
+fixes, e.g. G2 custom machine types, OS Login roles on project/instance, Cloud NGFW implied actions, Cloud TPU API
+deprecated, 24 h metric-absence limit); retake waiting periods left out (support.google.com is blocked). Glossary +11
+`gcp-*` terms (Sonnet-reviewed). e02 fixed Q008135 (G2 custom types). Study page vendor tabs use the "GCP" short name
+on phones like the question bank.
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
