@@ -1,0 +1,732 @@
+# AI-103 D5 Implement information extraction solutions. T5.1 retrieval and grounding pipelines in Azure AI Search (indexers, skillsets, integrated vectorization, OCR, chunking, index projections, semantic/hybrid/vector queries, Azure AI Search tool, knowledge bases). T5.2 content extraction with Azure Content Understanding (analyzers, Markdown, field schemas, confidence and grounding, classification, model deployments) and Document Intelligence.
+
+@ AI-103 D5 T5.1 applied troubleshooting
+S: A team built a chunked index in Azure AI Search with an indexer, a Text Split skill and an AzureOpenAIEmbedding skill. Indexing succeeds and the vector field is populated. When the app sends a vector query with "kind": "text" and the user's question, the request fails because the text can't be converted to a vector. What must the team add?
+A: A vectorizer in the index's vectorSearch section that calls the same embedding deployment, referenced by a vector profile that is assigned to the vector field
+B: A second AzureOpenAIEmbedding skill in the skillset that runs at query time and writes the embedded question into a temporary field of the index
+C: A semantic configuration that lists the vector field as its content field, so the semantic ranker converts the query text into an embedding first
+D: An indexer field mapping from the chunk text field to the vector field, so the search engine can look up a stored vector for the query string
+K: A
+G: ## Integrated vectorization has two halves
+Integrated vectorization in Azure AI Search covers both directions of the pipeline:
+- **Indexing**: an indexer runs a skillset. A chunking skill (Text Split or the Azure Content Understanding skill) splits content, and an **embedding skill** (for example AzureOpenAIEmbedding) turns each chunk into a vector.
+- **Querying**: a **vectorizer** defined in the index schema turns the text of a query into a vector at query time.
+Skills only run during indexing. Nothing in a skillset touches a query.
+## How a vectorizer is wired in
+1. Define the vectorizer in `vectorSearch.vectorizers` (for example `kind: azureOpenAI` with the deployment).
+2. Reference it from a **vector profile** in `vectorSearch.profiles`, together with the algorithm (for example HNSW).
+3. Set `vectorSearchProfile` on the vector field.
+A query then sends `{"kind": "text", "text": "...", "fields": "contentVector"}` and the engine reads the vectorizer from the field's profile automatically. Learn's rule: the vectorizer must use the same embedding model as the skill that built the vectors.
+W: Vectorizer on the field's profile: the vectorizer is the query-time counterpart of the embedding skill. Once the profile that references it is assigned to the vector field, text queries are vectorized by the service.
+X: B=Second embedding skill: skills run only inside an indexer pipeline during indexing. A skill never runs for a search request, so it can't embed the user's question.
+C=Semantic configuration: the semantic ranker reranks text results with language models and only reads text fields. It doesn't create embeddings and can't list a vector field as content.
+D=Field mapping to the vector field: field mappings move source values into index fields during indexing. They don't give the query engine a way to turn new query text into a vector.
+T: Embedding skills vectorize content at indexing time; a vectorizer on the field's vector profile vectorizes text queries at query time.
+V: Azure AI Search, Azure OpenAI in Foundry Models
+
+@ AI-103 D5 T5.1 advanced troubleshooting
+S: A search index was built with chunks embedded by text-embedding-3-small through the AzureOpenAIEmbedding skill. To improve quality, a developer changes only the index's Azure OpenAI vectorizer to a text-embedding-3-large deployment. Vector queries now return errors or unrelated chunks. What is the correct fix?
+A: Keep the new vectorizer and switch the vector algorithm from HNSW to exhaustive KNN, so every chunk is compared with the query vector and recall improves
+B: Keep the new vectorizer and enable semantic ranker on the queries, so the reranking step promotes the relevant chunks to the top of the vector results
+C: Use the same model on both sides: either point the vectorizer back to the small model, or change the skill and field dimensions and re-run indexing
+D: Keep the new vectorizer and add the large model to the semantic configuration's keyword fields, so the two embedding spaces are aligned at query time
+K: C
+G: ## Vectors are only comparable inside one embedding space
+An embedding model maps text to a point in its own vector space. Two models, even from the same family, produce vectors that are not comparable: they can differ in **dimensions** (text-embedding-3-small defaults to 1536, text-embedding-3-large to 3072) and in what each dimension means.
+## Skill and vectorizer come as a pair
+Azure AI Search pairs each embedding skill with a vectorizer:
+- AzureOpenAIEmbedding skill and the Azure OpenAI vectorizer
+- Custom Web API skill and the Custom Web API vectorizer
+- AML skill and the Foundry model catalog vectorizer
+Learn states that you must use the same embedding model for both, because the vectorizer creates query vectors that are compared with the vectors the skill stored.
+## Changing models
+To move to a new model, update the embedding skill, the vector field's `dimensions` and the vectorizer together, then rebuild the index so every chunk is re-embedded.
+W: Same model at indexing and query time: the query vector must come from the model that produced the stored vectors. Either revert the vectorizer, or move the skill, field dimensions and vectorizer to the new model and re-index.
+X: A=Exhaustive KNN: exhaustive search compares more vectors, but comparing vectors from two different models is meaningless no matter how many are scanned, and a dimension mismatch still fails.
+B=Semantic ranker: semantic ranking reorders an initial result set. If the vector step returns the wrong chunks or errors out, the reranker has nothing useful to promote.
+D=Model in the semantic configuration: a semantic configuration lists text fields (title, content, keywords) for the reranker. It has no setting that maps one embedding space to another.
+T: Index and query vectors must come from the same embedding model; changing models means changing the skill, the field dimensions and the vectorizer together and re-indexing.
+V: Azure AI Search, Azure OpenAI in Foundry Models
+
+@ AI-103 D5 T5.1 applied troubleshooting
+S: An insurer indexes PDFs from Azure Blob Storage for a RAG app. Many PDFs are scanned forms with no text layer, and their chunks in the index are empty. The team wants to fix this with built-in Azure AI Search features in the existing skillset pipeline. Which two changes are needed? (Select TWO)
+A: Set the indexer's imageAction configuration parameter to generateNormalizedImages, so document cracking outputs the page images as normalized images
+B: Add the OCR skill with its context and image input set to /document/normalized_images/*, then merge its text output into the content before chunking
+C: Add the Key Phrase Extraction skill before the Text Split skill, so each scanned page gets a list of phrases that the chunking step can split
+D: Set the indexer's parsingMode to markdown, so the blob indexer converts each scanned page into Markdown sections before running the skillset
+E: Raise the Text Split skill's maximumPageLength to 50,000 characters, so scanned pages are kept in one chunk instead of being dropped as too small
+K: A,B
+G: ## Document cracking separates text and images
+When a blob indexer opens a file (document cracking), it extracts the text layer into `/document/content`. A scanned PDF is just page images, so the text layer is empty and every downstream skill (chunking, embedding) receives nothing.
+## Built-in OCR in an AI enrichment pipeline
+1. **imageAction** on the indexer: `none` (default) ignores images; `generateNormalizedImages` (or `generateNormalizedImagePerPage`) produces an array of images at `/document/normalized_images`.
+2. **OCR skill** (`#Microsoft.Skills.Vision.OcrSkill`): its only input is an image from `/document/normalized_images/*`. It returns `text` and `layoutText`, and recognizes printed and handwritten text.
+3. **Text Merge skill**: merges the OCR text back into the document content (for example into `merged_text`), which then feeds the Text Split and embedding skills.
+The OCR skill is billed through an attached Foundry resource beyond 20 documents per indexer per day, and image extraction is billed by Azure AI Search.
+W: A=imageAction generateNormalizedImages: without normalized images the OCR skill has no input; this setting makes document cracking emit the scanned pages as images.
+B=OCR skill on normalized images: the OCR skill reads text from each normalized image; merging that text into the content gives the chunking and embedding skills real text to work on.
+X: C=Key Phrase Extraction: this skill analyzes existing text. A scanned page has no text yet, so there is nothing to extract phrases from or to split.
+D=parsingMode markdown: markdown parsing mode is for blobs that already contain Markdown text. It doesn't read text out of images in a scanned PDF.
+E=Larger maximumPageLength: chunk size only matters once text exists. The chunks are empty because no text was extracted, not because they were cut too small.
+T: For scanned documents in an indexer pipeline, set imageAction to generate normalized images and run the OCR skill on them, then merge the OCR text before chunking.
+V: Azure AI Search, Azure Vision in Foundry Tools
+
+@ AI-103 D5 T5.1 applied use-case
+S: A parts distributor enriches product sheets in an Azure AI Search skillset. Each sheet must also get a normalized part number from the company's own lookup logic, which already runs as an HTTPS endpoint in Azure Functions. No built-in skill provides this logic. How should the team add it to the pipeline?
+A: Add a GenAI Prompt skill whose prompt asks a chat model to call the Azure Functions endpoint and copy the normalized part number into its output
+B: Add a Custom Entity Lookup skill and paste the function's normalization rules into the skill's inline entity list, so the lookup runs inside the service
+C: Add an Azure OpenAI vectorizer that points to the function URL, so the normalized part number is computed whenever a query touches a product sheet
+D: Add a Custom Web API skill whose uri points to the function; it receives a values array of records and must return each recordId with its data
+K: D
+G: ## Built-in, custom and utility skills
+Azure AI Search groups skills into three kinds:
+- **Built-in skills** wrap a well-understood Azure capability (OCR, entity recognition, Azure OpenAI Embedding, GenAI Prompt, Azure Content Understanding).
+- **Custom skills** run your own code outside the search service. The **Custom Web API** skill calls any HTTPS endpoint (often an Azure function); the **AML** skill calls a model in Foundry or Azure Machine Learning.
+- **Utility skills** run inside the service (Text Split, Text Merge, Shaper, Conditional).
+## The Custom Web API contract
+The skill posts JSON with a top-level `values` array, at most `batchSize` records per call:
+`{"values": [{"recordId": "0", "data": {"text": "..."}}]}`
+The endpoint must answer with the same structure: one entry per `recordId` with a `data` object (plus optional `errors` and `warnings`). Outputs named in the skill definition then become enrichment nodes that later skills or output field mappings can use.
+W: Custom Web API skill: this is the documented way to plug your own HTTPS code into a skillset; the indexer sends batches of records and maps the returned data back into the enrichment tree.
+X: A=GenAI Prompt skill: this skill sends a prompt to a chat completion model. The model doesn't call the company's endpoint, so the deterministic lookup logic never runs.
+B=Custom Entity Lookup: this skill matches text against a user-defined list of words and phrases. It can't execute normalization code that already lives in a function app.
+C=Vectorizer pointing to the function: vectorizers turn query text into vectors at query time. They don't add enrichment fields to documents during indexing.
+T: To run your own logic during indexing, call it from a Custom Web API skill that follows the values/recordId/data contract.
+V: Azure AI Search, Azure Functions
+
+@ AI-103 D5 T5.1 advanced comparison
+S: A team is creating a new skillset for long PDF and PPTX reports. Tables often continue across pages and must stay intact in the chunks, and chunks should carry page location metadata. They want a generally available skill that extracts and chunks without a separate Text Split skill. Which skill fits best?
+A: The Document Extraction skill with image extraction enabled, followed by the Text Split skill set to sentences mode so tables are kept together
+B: The Azure Content Understanding skill, which outputs Markdown chunks with location metadata and keeps cross-page tables together as one unit
+C: The OCR skill on normalized page images, whose layoutText output keeps table rows aligned and records the page number for every chunk
+D: The Document Layout skill with outputFormat set to text, which is the recommended choice for new skillsets that need cross-page tables
+K: B
+G: ## Extraction skills for RAG ingestion
+Learn compares the built-in options for cracking documents into chunks with metadata:
+- **Document Extraction skill**: a utility skill that extracts text and images. No text location metadata, no table preservation, no built-in chunking, so a Text Split skill follows it.
+- **Document Layout skill**: uses the Document Intelligence layout model; outputs Markdown sections or text chunks. Learn now says it *remains supported for existing pipelines*, and recommends the Content Understanding skill for new skillsets.
+- **Azure Content Understanding skill** (`#Microsoft.Skills.Util.ContentUnderstandingSkill`, GA in REST API `2026-04-01`): extraction and chunking in one skill, tables and figures in Markdown, **cross-page tables as a single unit**, chunks that can span pages, location metadata for PDF, DOCX, XLSX and PPTX.
+## Status details
+The skill's GA chunking is `fixedSize` by characters. Semantic chunking and AI-generated image descriptions are preview features (2026-05-01-preview and later). Unlike the Document Layout skill, it has no 20 free documents per indexer per day.
+W: Azure Content Understanding skill: it extracts and chunks in one GA skill, keeps tables that span pages together in Markdown, and returns location metadata, so no Text Split skill is needed.
+X: A=Document Extraction plus Text Split: Document Extraction doesn't preserve tables or return text location metadata, and splitting by sentences doesn't reassemble a table that continues on the next page.
+C=OCR skill: OCR reads text from images and returns line positions. It doesn't detect table structure across pages or produce chunks for RAG.
+D=Document Layout skill for new skillsets: the skill still works, but Learn recommends Content Understanding for new skillsets, and the layout skill's text output treats tables as plain text.
+T: For new document skillsets that need extraction plus chunking, Markdown tables and cross-page tables, use the Azure Content Understanding skill.
+V: Azure AI Search, Azure Content Understanding in Foundry Tools
+
+@ AI-103 D5 T5.1 applied use-case
+S: A skillset splits each manual into chunks and embeds them. The team wants one search index where every search document is a chunk, and each chunk repeats the parent manual's title and URL so the RAG app can cite it. Parent-only documents must not appear in the index. How should they configure the skillset?
+A: Add a Shaper skill that nests every chunk inside its parent document, and map the shaped object to one complex collection field of the index
+B: Run two indexers on the same data source, one writing parent documents and one writing chunks, and join them at query time on the parent key
+C: Add indexProjections that target the chunk index, map the parent fields in the selectors, and set projectionMode to skipIndexingParentDocuments
+D: Set the indexer's parsingMode to jsonArray, so each chunk produced by the Text Split skill is parsed as a separate document with parent fields
+K: C
+G: ## One-to-many indexing with index projections
+Chunking turns one source document into many chunks. **Index projections**, defined in the skillset, control how those chunks become search documents:
+- **Single index, repeating parent fields** (recommended for RAG): parent fields such as title and URL are copied into every chunk document, so all documents have one shape.
+- **Single index, mixed shapes**: parents and chunks live side by side (default `includeIndexingParentDocuments`).
+- **Separate indexes**: parents in one index, chunks in another; there are no query-time joins.
+## Required pieces
+- A chunk index with a key field (`Edm.String`, keyword analyzer) and a filterable `parent_id` string field.
+- `indexProjections.selectors`: `targetIndexName`, `parentKeyFieldName`, `sourceContext` (for example `/document/pages/*`) and `mappings` for chunk text, vector and parent fields.
+- `parameters.projectionMode: skipIndexingParentDocuments` so only chunk documents are written.
+W: Index projections with skipIndexingParentDocuments: the projection writes one search document per chunk with the parent's title and URL copied in, and the projection mode stops the parent document itself from being indexed.
+X: A=Shaper into a complex collection: shaping keeps the chunks inside one parent document, so the index still has one document per manual instead of one per chunk.
+B=Two indexers and a query-time join: Azure AI Search doesn't join documents at query time, and two indexers duplicate the work that index projections do in one pass.
+D=parsingMode jsonArray: parsing modes split source files (such as JSON arrays) before enrichment. They don't apply to chunks that a skill creates inside the pipeline.
+T: To index chunks as their own search documents with parent fields repeated, use index projections with projectionMode skipIndexingParentDocuments.
+V: Azure AI Search
+
+@ AI-103 D5 T5.1 applied troubleshooting
+S: A RAG app answers questions from policy documents chunked by the Text Split skill (textSplitMode pages, maximumPageLength 2000, pageOverlapLength 0). Answers often miss a condition that starts at the end of one chunk and finishes in the next. Which change addresses this most directly?
+A: Switch textSplitMode to sentences, so each chunk holds a single sentence and no condition is ever divided between two consecutive chunks
+B: Set pageOverlapLength to about a quarter of the chunk size, so the end of each chunk is repeated at the start of the next one
+C: Set maximumPagesToTake to 1, so the skill keeps only the first and most complete chunk of each document and discards the fragments
+D: Raise maximumPageLength above the embedding model's input limit, so that each policy document always ends up as one single chunk
+K: B
+G: ## Why chunks lose context
+Fixed-size chunking cuts text at a length limit. A sentence or rule that crosses that boundary ends up half in one chunk and half in the next, and retrieval may return only one half.
+## Text Split skill settings
+- `textSplitMode`: `pages` (default; chunks of several sentences) or `sentences` (one sentence per chunk).
+- `maximumPageLength`: maximum characters per chunk; the splitter avoids breaking sentences.
+- `pageOverlapLength`: characters from the end of the previous chunk repeated at the start of the next. It must be less than half of `maximumPageLength`.
+- `maximumPagesToTake`: how many chunks to keep (`0` = all).
+## Learn's starting point
+Learn suggests starting around 512 tokens (about 2,000 characters) with **25% overlap**, then tuning for the content. Overlap keeps continuity between neighbouring chunks without large duplication. Chunks must also stay under the embedding model's input limit (8,191 tokens for text-embedding-3-small).
+W: Overlap between chunks: repeating the tail of one chunk at the head of the next keeps a rule that crosses a boundary complete in at least one chunk.
+X: A=Sentences mode: single-sentence chunks cut a multi-sentence condition into even more pieces and give the embedding very little context.
+C=maximumPagesToTake 1: keeping only the first chunk throws away the rest of every policy document, so later conditions can't be retrieved at all.
+D=Chunks above the model limit: input beyond the embedding model's token limit can't be embedded as one vector, which is the reason chunking exists in the first place.
+T: When information is split across chunk boundaries, add overlap (Learn's starting point is about 25%), keeping it under half the chunk length.
+V: Azure AI Search
+
+@ AI-103 D5 T5.1 applied use-case
+S: Users of a support assistant search both by exact error codes such as "E-4471" and by vague descriptions such as "the printer stops after warming up". The index has a searchable text field and a vector field with a vectorizer. Which query design returns good matches for both kinds of question in one request?
+A: A hybrid query that sends the text in search and in a vectorQueries entry, so full-text and vector results are merged with Reciprocal Rank Fusion
+B: A vector-only query with exhaustive set to true, so every chunk is compared with the question and exact codes are found by vector similarity
+C: A full-text query with queryType full and fuzzy matching on every term, so vague descriptions match the documents through spelling variants
+D: Two separate requests, one full-text and one vector, with the app keeping the result list whose top score is higher for each question asked
+K: A
+G: ## Keyword and vector search find different things
+- **Full-text (BM25)** search is precise for exact tokens: product codes, error codes, names, dates, specialized jargon.
+- **Vector** search finds content that is *conceptually* similar, even with no shared words.
+Each alone misses what the other finds.
+## Hybrid search in Azure AI Search
+A hybrid query is **one request** with both `search` (text) and `vectorQueries` parameters:
+`{"search": "printer stops after warming up", "vectorQueries": [{"kind": "text", "text": "printer stops after warming up", "fields": "contentVector", "k": 50}], "top": 10}`
+The engine runs both queries in parallel and merges the ranked lists with **Reciprocal Rank Fusion (RRF)** into one result set. Filters, facets and semantic ranking still apply. Learn notes that hybrid retrieval with semantic ranker gives significant relevance gains in benchmarks, which is why it's the common choice for RAG grounding.
+W: Hybrid query merged with RRF: one request runs keyword search (strong on exact codes) and vector search (strong on paraphrases) and fuses the rankings, so both question styles get relevant results.
+X: B=Exhaustive vector-only query: exhaustive KNN improves vector recall, but embeddings don't reliably match exact codes such as "E-4471"; keyword search is the precise tool for those.
+C=Full Lucene with fuzzy terms: fuzzy search tolerates misspellings, not paraphrases. A vague description shares few words with the right document, so it still won't match.
+D=Two requests, keep the higher top score: BM25 scores and vector similarity scores are on different scales, so comparing them is meaningless; RRF exists to merge rankings instead.
+T: Use a hybrid query (text plus vector in one request, merged with RRF) when users mix exact identifiers and natural-language descriptions.
+V: Azure AI Search
+
+@ AI-103 D5 T5.1 applied troubleshooting
+S: A team enables semantic ranker for hybrid queries over a chunk index. The semantic configuration lists title as the title field and a long keywords field first, then the chunk text field, under content. Reranking ignores parts of the chunk text, and captions rarely come from it. What should the developer change?
+A: Raise the vector query's k to 1,000, so the semantic ranker receives more candidate chunks and finds the passages in the chunk text field
+B: Switch the query to queryType full, so the semantic ranker reads every field of the index instead of the fields listed in the configuration
+C: Put the chunk text field first among the content fields and remove low-value fields, because inputs are trimmed in priority order
+D: Add the vector field to the semantic configuration's content fields, so reranking uses the embedding of the chunk instead of its text
+K: C
+G: ## What the semantic ranker reads
+Semantic ranker is an L2 reranker. It takes the top **50** results of a BM25 or RRF ranked query and rescores them with Microsoft's language models, returning `@search.rerankerScore` (0 to 4), captions and optional answers.
+## Inputs are summarized and trimmed
+For each document the ranker builds a summary string of up to 2,048 tokens from the fields in the **semantic configuration**:
+- title field: up to 128 tokens
+- keywords fields: up to 128 tokens
+- content fields: the remaining tokens, **in the order listed**
+Anything past the limit is ignored, so Learn advises listing fields in priority order. Only text fields can be used; the reranking uses text only.
+## Practical settings
+- Put the main chunk text first in `prioritizedContentFields`.
+- Keep keywords short.
+- For hybrid or vector queries, set `k` to 50 so the ranker gets its full input.
+W: Chunk text first in the content fields: the ranker trims inputs in the listed order, so moving the chunk text up (and dropping low-value fields) makes its passages part of what is scored and used for captions.
+X: A=k of 1,000: the semantic ranker only reranks the top 50 results; a larger k doesn't change how much of each document's text it reads.
+B=queryType full: full selects the Lucene query syntax for the text query. Semantic ranking still reads only the fields in the semantic configuration.
+D=Vector field in the configuration: semantic configurations accept text fields only, and the ranker works on text, not on stored embeddings.
+T: The semantic ranker reads a trimmed summary built from the semantic configuration's fields in priority order, so list the main chunk text first.
+V: Azure AI Search
+
+@ AI-103 D5 T5.1 applied definition
+S: A product owner reviews a design that adds semantic ranker to an Azure AI Search hybrid query used for grounding a chat model. Which two statements about the semantic ranker are correct? (Select TWO)
+A: It reranks only the top results of the initial BM25 or RRF ranked result set, at most 50, rather than scoring every document in the index
+B: Its captions and semantic answers are verbatim text taken from the indexed documents, not new text composed by a generative model
+C: It replaces the vector search step of a hybrid query, so the index no longer needs a vectorizer once semantic ranking is turned on
+D: It writes a generated summary of each document into the index during indexing, and queries later return that stored summary as the caption
+E: It needs the chat model's deployment name in the query request, because it calls that model to compose a direct answer for the user
+K: A,B
+G: ## Semantic ranker in the query pipeline
+Semantic ranker is a **query-side** feature of Azure AI Search:
+1. The query runs as usual: BM25 for text, RRF for hybrid or vector queries.
+2. The top 50 results go to the semantic ranker, which builds a summary string per document from the semantic configuration's fields.
+3. Microsoft-hosted language models (adapted from Bing) rescore the documents (`@search.rerankerScore`, 0 to 4) and extract **captions** and, when requested, **answers**.
+## What it doesn't do
+Learn is explicit: "Captions and answers are always verbatim text from your index. There's no generative AI model in this workflow that creates or composes new content." It doesn't touch the index at indexing time and doesn't replace vector or keyword retrieval; it only reorders what retrieval returned. Query rewrite, which generates query variants, is a separate preview capability.
+## Why it matters for grounding
+Reranking improves which chunks reach the chat model. The chat model, not the ranker, writes the final answer.
+W: A=Reranks the top 50: semantic ranking is a second-stage (L2) step over the first-stage results, limited to the top 50.
+B=Verbatim captions and answers: captions and answers are extracted from indexed text by reading-comprehension models; nothing is generated.
+X: C=Replaces vector search: the ranker works on the results retrieval already produced. Without the vector step (and its vectorizer), conceptual matches never reach it.
+D=Summary written at indexing time: the summary string is built per query, in memory, from the configured fields. Nothing is stored in the index during indexing.
+E=Needs a chat deployment: the semantic ranker uses Microsoft-hosted ranking models. It doesn't call your chat model and doesn't compose answers.
+T: Semantic ranker reorders the top 50 retrieved results and extracts verbatim captions and answers; it never generates text or replaces retrieval.
+V: Azure AI Search
+
+@ AI-103 D5 T5.1 applied troubleshooting
+S: A Foundry agent uses the Azure AI Search tool through a project connection that authenticates with an admin API key. After the security team disables public network access on the search service and adds a private endpoint, the agent, deployed with the standard setup and virtual network injection, fails with "Unable to connect to Azure AI Search Resource". What should the team do?
+A: Rotate the admin key and store the new key in Azure Key Vault, then reference the secret from the project connection instead of pasting it
+B: Re-enable public network access on the search service, because the Azure AI Search tool can't reach a search service through a private endpoint
+C: Switch the agent to the basic agent setup, which routes tool calls through the Foundry resource's own managed network to private search services
+D: Switch the connection to Microsoft Entra project managed identity and give that identity Search Index Data Contributor and Search Service Contributor
+K: D
+G: ## Connecting the Azure AI Search tool
+The Azure AI Search tool grounds a Foundry agent in one search index and returns inline citations. It reaches the search service through a **project connection** that uses either an API key or **keyless authentication** with Microsoft Entra ID.
+## Private networking rules on Learn
+- A basic agent setup doesn't support private Azure AI Search services; use the **standard agent setup with virtual network injection**.
+- With a private virtual network, the connection **must use Microsoft Entra project managed identity**. Key-based authentication isn't supported, and the documented symptom is "Unable to connect to Azure AI Search Resource ... Cannot connect to host".
+## Keyless setup
+Enable RBAC on the search service (API keys and roles, or roles only), then assign the Foundry account's system-assigned managed identity:
+- **Search Index Data Contributor**
+- **Search Service Contributor**
+Recreate the project connection with auth type managed identity (`AAD`).
+W: Managed identity connection with the two search roles: private networking requires keyless authentication, and the managed identity needs the documented data-plane and service roles to query the index.
+X: A=Rotate the key into Key Vault: storing the key more safely doesn't help, because key-based authentication isn't supported for the tool over private networking at all.
+B=Re-enable public access: the standard setup with virtual network injection is the supported way to reach a private search service; opening the service to the internet defeats the security change.
+C=Basic agent setup: Learn states the basic setup doesn't support private Azure AI Search resources; private access needs the standard setup with network injection.
+T: For a private Azure AI Search service, the agent's search connection must use project managed identity with Search Index Data Contributor and Search Service Contributor.
+V: Foundry Agent Service, Azure AI Search, Microsoft Entra ID
+
+@ AI-103 D5 T5.1 applied troubleshooting
+S: An HR agent in Foundry Agent Service uses the Azure AI Search tool. Answers are grounded in the right policy text, and the agent instructions ask for citations, but the citations show only an index reference and never a clickable link to the source document. What is the most likely cause?
+A: The tool's query_type is set to simple, and URL citations are only produced when the tool uses the vector_semantic_hybrid query type
+B: The tool's top_k value is left at its default, which returns too few documents for the agent to build citations that contain links
+C: The index has no retrievable field that holds the document's source URL, so the tool has no link to place in the citation annotation
+D: The agent's model doesn't support streaming, and url_citation annotations are only added to responses that are streamed to the client
+K: C
+G: ## What the Azure AI Search tool needs from the index
+Learn lists the index requirements for the tool:
+- one or more searchable, retrievable `Edm.String` fields
+- one or more searchable vector fields (`Collection(Edm.Single)`)
+- at least one retrievable text field with the content to cite
+- **a retrievable field that contains a source URL** (and optionally a title) so citations can include a link
+## Tool parameters
+- `project_connection_id` and `index_name` (required)
+- `top_k` (default 5)
+- `query_type`: `simple`, `vector`, `semantic`, `vector_simple_hybrid`, or `vector_semantic_hybrid` (default)
+- `filter`: applied to every query the agent makes
+## Checking citations
+In responses, citations arrive as annotations; in a stream, look for `url_citation` annotations with a URL. If citations are missing entirely, Learn's first fix is to update the instructions to request them.
+W: Missing source URL field: the citation link comes from a retrievable URL field in the index. Without it, the tool can cite the chunk but has no link to attach.
+X: A=simple query type: the query type changes how the index is searched. Citations with links are documented for the tool in general, including samples that use simple.
+B=Default top_k: top_k controls how many results come back (default 5). It doesn't decide whether a citation includes a link.
+D=Streaming required for links: url_citation annotations appear in streamed events, but non-streamed responses also carry annotations; streaming isn't what supplies the URL.
+T: For linked citations from the Azure AI Search tool, the index needs a retrievable source URL field (and optionally a title).
+V: Foundry Agent Service, Azure AI Search
+
+@ AI-103 D5 T5.1 advanced tradeoff
+S: A bank wants a production RAG service that calls an Azure AI Search knowledge base and passes the merged grounding content to its own chat model. Compliance allows only generally available features. Which design meets the requirement?
+A: Call the retrieve action with the 2026-04-01 REST API, using intents input and minimal, extractive retrieval against GA knowledge source types
+B: Call the retrieve action with the 2026-04-01 REST API and set low retrieval reasoning effort, so an LLM plans subqueries from the chat history
+C: Call the retrieve action with the 2026-04-01 REST API and enable answer synthesis, so the knowledge base returns a cited natural-language answer
+D: Create the knowledge base in the Foundry portal and call it with the messages input, because portal-created objects use the stable GA schema
+K: A
+G: ## Agentic retrieval and knowledge bases
+Agentic retrieval in Azure AI Search runs a multi-query pipeline through a **knowledge base** that points to one or more **knowledge sources** (for example a search index, Blob Storage, OneLake or the web). The app calls the knowledge base's **retrieve** action (or its MCP endpoint), and subqueries run in parallel with semantic reranking. The response contains merged grounding content, and optionally references and an activity log.
+## What is GA and what is preview
+Knowledge bases became GA with REST API `2026-04-01`. Learn states:
+- `2026-04-01` supports only the **intents** input and **minimal, extractive** retrieval with GA knowledge source types.
+- **Preview** (`2026-08-01-preview`): LLM-based query planning, answer synthesis, non-minimal reasoning effort and the multi-turn **messages** input.
+- The Azure portal and Foundry portal give **preview-only** access; objects created there may use preview schemas and need migration.
+## GA-only design
+Send intents to the knowledge base with minimal effort, take the merged content and references, and generate the answer with your own deployed model.
+W: 2026-04-01 with intents and minimal extractive retrieval: that is exactly the GA surface; the bank's own model then writes the answer from the merged content.
+X: B=Low reasoning effort with query planning: LLM-based query planning and non-minimal reasoning effort are preview capabilities and aren't supported by 2026-04-01.
+C=Answer synthesis: generating a cited answer inside the knowledge base is a preview capability; the GA API returns extractive content only.
+D=Portal-created knowledge base with messages: both portals give preview-only access, and the messages input is a preview feature.
+T: GA agentic retrieval (REST 2026-04-01) is minimal, extractive retrieval with intents input; query planning, answer synthesis and messages input are preview.
+V: Azure AI Search, Microsoft Foundry
+
+@ AI-103 D5 T5.1 applied use-case
+S: Engineering PDFs describe approval workflows mostly as embedded diagrams, so a RAG app can't answer process questions from the extracted text. The team wants the diagrams to become searchable text in the same chunk index, using generally available skills. Which pipeline addition fits?
+A: Add the Image Analysis skill with the tags feature, so each diagram is indexed with a list of object tags such as "arrow", "box" and "text"
+B: Extract the inline images, run the GenAI Prompt skill to verbalize each image with a chat model, then embed the description with the text
+C: Add the Text Translation skill on normalized images, so the words inside each diagram are translated into the index language and stored
+D: Add the Entity Recognition skill on the extracted images, so the steps and roles shown in each diagram are stored as entity fields in the index
+K: B
+G: ## Multimodal content in a RAG index
+Azure AI Search's multimodal pipeline (what the Import data wizard builds) has these steps:
+1. **Extract** page text and inline images (Document Extraction skill or Azure Content Understanding skill).
+2. **Chunk** text (Text Split skill, or built into the Content Understanding skill).
+3. **Verbalize images** with the **GenAI Prompt skill**: a chat completion model writes a short natural-language description, such as "Five-step HR access workflow that begins with manager approval".
+4. **Embed** text and descriptions, then store images in a knowledge store for display.
+## Why verbalization helps
+Once a diagram is expressed as text, keyword, vector and semantic ranking all work on it, and the chat model can cite it like any other passage. The GenAI Prompt skill is GA in REST API `2026-04-01`. The alternative path, direct image embeddings with the Azure Vision multimodal embeddings skill, is still a **preview** skill.
+W: Image extraction plus GenAI Prompt verbalization: an LLM turns each diagram into a descriptive sentence that is embedded and indexed with the surrounding text, so process questions can match it.
+X: A=Image Analysis tags: tags name objects in a picture ("arrow", "box"). They don't capture the sequence of steps a workflow diagram expresses.
+C=Text Translation on images: the translation skill works on text, not images, and translating labels doesn't describe how the steps connect.
+D=Entity Recognition on images: entity recognition analyzes text for categories such as Person or Location. It can't read an image and doesn't describe a process.
+T: To make diagrams searchable in a RAG index with GA skills, extract images and verbalize them with the GenAI Prompt skill before embedding.
+V: Azure AI Search, Microsoft Foundry
+
+@ AI-103 D5 T5.1 applied use-case
+S: A training company wants its RAG assistant to answer from recorded webinars (MP4) and podcast episodes (MP3) alongside existing PDF chunks in one Azure AI Search index. Which ingestion approach fits?
+A: Point a blob indexer at the media container with imageAction set to generateNormalizedImages, so the indexer extracts frames and transcribes the speech
+B: Add the OCR skill to the existing skillset for the media container, so it reads the spoken words and the on-screen text of each recording
+C: Store the recordings as vector fields in the index and let the vectorizer embed the raw audio and video bytes when a query is received
+D: Analyze the files with Content Understanding prebuilt-videoSearch and prebuilt-audioSearch, then push transcripts and summaries into the index
+K: D
+G: ## What an indexer pipeline can crack
+Blob indexers crack documents: text, Office files, PDFs and images. Azure AI Search's multimodal search natively covers **documents that contain text and images**. Indexers don't transcribe speech or segment video.
+## Content Understanding for audio and video
+Azure Content Understanding in Foundry Tools has RAG analyzers for media:
+- **prebuilt-audioSearch**: transcribes conversations and produces a one-paragraph summary; supports several locales.
+- **prebuilt-videoSearch**: segments videos by topic shifts or scene changes, returns transcripts and a description of each segment.
+## Joining the index
+The app sends each file to the analyzer, then uploads the results as search documents (push API), for example one document per video segment with fields such as transcript, summary, start time and source URL, embedded with the same model as the PDF chunks. The Learn RAG tutorial for Content Understanding builds such a unified multimodal index.
+W: Content Understanding media analyzers plus push: the search analyzers turn speech and video into transcripts and segment descriptions, which can be embedded and pushed into the same index as the PDF chunks.
+X: A=imageAction on media: imageAction creates normalized images from documents and image files. It doesn't decode MP4/MP3 streams or transcribe audio.
+B=OCR skill for recordings: OCR reads printed and handwritten text in images. It doesn't hear speech, and the indexer doesn't feed it video frames.
+C=Raw media in vector fields: vector fields store numeric embeddings produced by a model; a vectorizer embeds query text, not stored audio or video files.
+T: For audio and video in a RAG index, extract transcripts and segment descriptions with Content Understanding (audioSearch, videoSearch) and push them into the index.
+V: Azure Content Understanding in Foundry Tools, Azure AI Search
+
+@ AI-103 D5 T5.1 advanced troubleshooting
+S: A nightly indexer with integrated vectorization processes thousands of new documents. Some search documents end up without vectors because the Azure OpenAI embedding deployment hit its token-per-minute quota, and the same deployment also serves query-time vectorization. Which two actions follow Learn's guidance? (Select TWO)
+A: Run the indexer on a schedule (for example every few minutes), so later runs pick up the documents that throttling made the earlier run miss
+B: Use separate embedding deployments for indexing and for query vectorization, ideally in different subscriptions, so the two loads don't compete
+C: Configure a shorter retry interval in the AzureOpenAIEmbedding skill, so the skill retries throttled calls faster until every chunk succeeds
+D: Switch the vectorizer to a different embedding model with a higher quota, so query traffic no longer counts against the indexing deployment
+E: Remove the Text Split skill, so each document is embedded in one call and the total number of requests to the embedding model goes down
+K: A,B
+G: ## Throttling in integrated vectorization
+During indexing, the embedding skill calls your Azure OpenAI deployment for every chunk. Azure AI Search has **built-in, non-configurable** batching and retry logic for throttling errors, but if the quota is exhausted, retries fail and some documents miss their vectors.
+## Learn's recommendations
+- **Put the indexer on a schedule** (Learn's example: every 5 minutes). Each run processes documents that are new, changed or were missed, so throttled documents are retried later.
+- **Separate workloads**: Azure OpenAI token-per-minute limits are per model, per subscription. Learn recommends an embedding model deployment for each workload (indexing vs query) and, if possible, deploying them in different subscriptions.
+- Know the quotas of the embedding model before sizing a large ingestion.
+## What stays constant
+The vectorizer must use the same embedding model as the skill, so switching models only on the query side isn't an option.
+W: A=Indexer on a schedule: scheduled runs reprocess documents that failed or were skipped because of throttling, which Learn recommends for exactly this case.
+B=Separate deployments per workload: token quotas are per model and subscription, so splitting indexing and query traffic stops them from consuming the same quota.
+X: C=Shorter retry interval: the skill's retry and batching policy is built in and not configurable, and faster retries against an exhausted quota still fail.
+D=Different model for the vectorizer: query vectors must come from the same model as the indexed vectors, so changing the query model breaks vector search.
+E=Remove chunking: whole documents often exceed the embedding model's input limit, and removing chunking hurts retrieval quality; it doesn't fix the quota conflict.
+T: For throttled integrated vectorization, schedule the indexer to catch missed documents and give indexing and querying their own embedding deployments.
+V: Azure AI Search, Azure OpenAI in Foundry Models
+
+@ AI-103 D5 T5.2 applied use-case
+S: A consultancy is building RAG ingestion for mixed PDFs, Word files and scanned images. Each file should become clean Markdown with tables, figure descriptions and a short document summary, ready to chunk and embed, with as little custom configuration as possible. Which Content Understanding analyzer should they call?
+A: prebuilt-read, which returns words, paragraphs, formulas and barcodes as Markdown text without needing any model deployment for the analysis
+B: prebuilt-documentSearch, which returns layout-aware Markdown with figure descriptions, annotations and a one-paragraph document summary
+C: prebuilt-documentFieldSchema, which analyzes each document and proposes a field schema that the team can then use for RAG chunking
+D: prebuilt-document, which is the base analyzer for documents and returns figure descriptions and a summary unless a field schema is added
+K: B
+G: ## Analyzer families in Content Understanding
+Azure Content Understanding in Foundry Tools groups its prebuilt analyzers by purpose:
+- **Content extraction**: `prebuilt-read` (OCR text), `prebuilt-layout` (adds tables, sections, figures), `prebuilt-digitalParse` (machine-readable files). These don't need a language model.
+- **Base analyzers**: `prebuilt-document`, `prebuilt-image`, `prebuilt-audio`, `prebuilt-video`, the parents for custom analyzers.
+- **RAG analyzers**: `prebuilt-documentSearch`, `prebuilt-imageSearch`, `prebuilt-audioSearch`, `prebuilt-videoSearch`.
+- **Domain-specific**: invoices, receipts, IDs, tax forms, contracts and more.
+- **Utility**: `prebuilt-documentFieldSchema` (proposes a schema), `prebuilt-documentFields`.
+## prebuilt-documentSearch
+Learn calls it the recommended analyzer for document ingestion in RAG workflows. It extracts paragraphs, tables and figures as Markdown, describes and analyzes charts and diagrams (PDF and image files), captures handwritten annotations, adds a **one-paragraph summary** and produces chunk-ready output. It uses a completion model (the `prebuilt-analyzer-completion-mini` alias), so model deployments must be configured.
+W: prebuilt-documentSearch: it's the RAG analyzer built for this exact job, returning Markdown with layout, figure descriptions and a document summary without custom setup.
+X: A=prebuilt-read: it provides basic OCR text without layout analysis, so tables, figure descriptions and summaries are missing.
+C=prebuilt-documentFieldSchema: this utility analyzer suggests a field schema for structured extraction; it doesn't produce Markdown content for chunking.
+D=prebuilt-document base analyzer: the base analyzer is meant as a parent for custom analyzers; the ready-made RAG behavior (descriptions, summary) is what documentSearch adds.
+T: For RAG-ready Markdown from documents, use the prebuilt-documentSearch analyzer.
+V: Azure Content Understanding in Foundry Tools
+
+@ AI-103 D5 T5.2 applied tradeoff
+S: A records team needs to convert thousands of scanned reports into text with paragraphs, section structure and tables for a downstream parser. They don't need summaries or fields and have not deployed any chat or embedding model in their Foundry resource. Which Content Understanding analyzer fits?
+A: prebuilt-documentSearch, because it adds figure descriptions and a summary, which also makes its table extraction more accurate than any other analyzer
+B: prebuilt-digitalParse, because it reads the internal structure of each file directly and so returns tables faster than any OCR-based analyzer
+C: prebuilt-layout, because it returns text with tables, sections and figures through OCR and layout analysis and needs no language model
+D: A custom analyzer based on prebuilt-document with an empty field schema, because custom analyzers are the only ones that return table structure
+K: C
+G: ## Content extraction analyzers
+Content Understanding has three content extraction analyzers built on `prebuilt-document`. None of them needs a language model or an embedding model:
+- **prebuilt-read**: OCR text: words, paragraphs, formulas, barcodes. No layout analysis.
+- **prebuilt-layout**: everything in read plus layout: tables, figures, sections and structure, hyperlinks and annotations in digital PDFs.
+- **prebuilt-digitalParse**: reads the machine-readable content inside a file's structure. Learn: for scanned or image-based documents, use prebuilt-read or prebuilt-layout instead.
+## Choosing between extraction and RAG analyzers
+Learn's decision guide says that for **OCR or layout extraction only**, Content Understanding prebuilt-read or prebuilt-layout is recommended for lower cost and richer layout output. RAG analyzers such as prebuilt-documentSearch call generative models (figure descriptions, summaries), which needs model deployments and costs more.
+W: prebuilt-layout: it adds tables and section structure on top of OCR and runs without any model deployment, which matches the scanned input and the no-model constraint.
+X: A=prebuilt-documentSearch: its extra generative features need a completion model deployment, which the team doesn't have, and summaries aren't required.
+B=prebuilt-digitalParse: it relies on machine-readable content inside the file; scanned pages are images, so Learn points to read or layout instead.
+D=Custom analyzer for tables: prebuilt-layout already returns table structure; a custom analyzer isn't required for layout output.
+T: For OCR plus layout (tables, sections) without summaries or fields, use prebuilt-layout; it needs no generative model.
+V: Azure Content Understanding in Foundry Tools
+
+@ AI-103 D5 T5.2 applied use-case
+S: A custom Content Understanding document analyzer extracts fields from supplier complaint letters. One field, Severity, must always be exactly one of Low, Medium or High so a workflow can route the case. How should the developer define this field in the fieldSchema?
+A: Type string with method extract, so the analyzer copies the severity wording exactly as it appears in the letter and keeps its source location
+B: Type number with method generate, so the analyzer returns a score from 1 to 3 that the workflow converts into Low, Medium or High on its own
+C: Type string with method generate and a description that says "severity", so the model writes the value freely from the letter's tone
+D: Type string with method classify and an enum of Low, Medium and High, with a description of what each level means in these letters
+K: D
+G: ## Field extraction methods
+A Content Understanding analyzer's `fieldSchema` defines fields with a `type`, a `description` and a `method`:
+- **extract**: the value is taken as it appears in the content (documents only). Requires `estimateSourceAndConfidence: true` for that field.
+- **generate**: the value is produced by the model from the content, useful for summaries or inferred values.
+- **classify**: the value is chosen from a **predefined set of categories**, best used with an `enum`.
+If no method is set, the service picks one from the type and description.
+## Descriptions are prompts
+The model treats each field's description as a mini-prompt, so specific wording (for example "High: the defect stopped production or caused injury") improves accuracy.
+## Example
+`"Severity": {"type": "string", "method": "classify", "enum": ["Low", "Medium", "High"], "description": "Impact level of the complaint..."}`
+W: classify with an enum: classification restricts the value to the listed categories, so the workflow always receives Low, Medium or High.
+X: A=extract: extract copies text as written. Letters rarely contain the literal words Low, Medium or High, so the output won't match the routing values.
+B=number with generate: a generated number shifts the mapping into the workflow and still allows values outside 1 to 3; classify gives the categories directly.
+C=generate with free text: free generation can return any wording ("fairly serious"), which breaks routing that expects three fixed values.
+T: Use method classify with an enum when a field must be one of a fixed set of values.
+V: Azure Content Understanding in Foundry Tools
+
+@ AI-103 D5 T5.2 applied use-case
+S: An accounts payable workflow uses a custom Content Understanding analyzer on invoices. Reviewers must see where on the page each invoice number and total came from, and the workflow must send only low-confidence values to human review. Which configuration supports this?
+A: Set returnDetails to false and omitContent to true, so the response contains only field values and the reviewers see a shorter result to check
+B: Use method extract for these fields and set estimateFieldSourceAndConfidence to true, then route values below a confidence threshold to review
+C: Use method generate for these fields and ask in each field description for the page number, so the model writes the location into the value
+D: Enable enableLayout and enableOcr, because layout analysis attaches a bounding box and confidence score to every field that the schema defines
+K: B
+G: ## Confidence scores and grounding
+Content Understanding can return, for each document field:
+- a **confidence score** from 0 to 1, and
+- **grounding**: the source location (page number, bounding box or span) the value came from.
+Both are enabled with `estimateFieldSourceAndConfidence` at the analyzer level, or `estimateSourceAndConfidence` per field (the field setting overrides the analyzer setting). Fields with `method: extract` must have it set to true.
+## Straight-through processing
+Learn describes the pattern: high-confidence values flow straight through automation, low-confidence values go to human review, and grounding lets the reviewer jump to the exact region in the document. This reduces review cost while keeping accuracy.
+## Related settings
+- `returnDetails`: adds detailed metadata such as spans and bounding boxes for content elements.
+- `omitContent`: drops the content object and returns only fields.
+- `enableOcr`, `enableLayout`: content extraction options for text and structure, not per-field confidence.
+W: extract with estimateFieldSourceAndConfidence: extract returns the literal values, and the source-and-confidence setting adds a score and location for each one, which drives the threshold routing and the reviewer's view.
+X: A=returnDetails false and omitContent: these settings shrink the response; they remove detail rather than adding per-field confidence or location.
+C=Location in the description: asking the model to write a page number into the value is unreliable free text, not the service's computed grounding and confidence.
+D=enableLayout and enableOcr: these control content extraction (text, paragraphs, tables). Field confidence and grounding come from the source-and-confidence setting.
+T: Turn on estimateFieldSourceAndConfidence (required for extract fields) to get per-field confidence and source location for human-review routing.
+V: Azure Content Understanding in Foundry Tools
+
+@ AI-103 D5 T5.2 applied use-case
+S: A utility company wants structured fields from recorded customer calls: the reason for the call, whether a callback was promised, and the customer's overall sentiment. Calls are in English and Spanish. How should the developer create the custom analyzer?
+A: Set baseAnalyzerId to prebuilt-audio, set locales to en-US and es-ES, and define generate or classify fields for reason, callback and sentiment
+B: Set baseAnalyzerId to prebuilt-document, upload the call audio as the input file, and define extract fields that copy the reason and sentiment words
+C: Set baseAnalyzerId to prebuilt-audioSearch, because only RAG analyzers can be extended into custom analyzers for audio and video content
+D: Set baseAnalyzerId to prebuilt-layout and enable OCR, so the speech in each call is recognized as text before the field schema is applied
+K: A
+G: ## Custom analyzers start from a base analyzer
+A custom analyzer names its parent in `baseAnalyzerId`. Learn states that you can **currently only derive custom analyzers from four base analyzers**:
+- `prebuilt-document`
+- `prebuilt-image`
+- `prebuilt-audio`
+- `prebuilt-video`
+The custom analyzer inherits the parent's defaults and adds a `fieldSchema`, `config` and `models`.
+## Audio specifics
+- `config.locales`: BCP-47 codes such as `["en-US", "es-ES"]` for transcription (supported by prebuilt-audio, prebuilt-video and prebuilt-callCenter).
+- The `extract` method is supported for documents only, so audio fields use **generate** (for example a short reason) or **classify** (for example sentiment as Positive/Neutral/Negative, or callback as true/false).
+## Example
+`{"analyzerId": "callFields", "baseAnalyzerId": "prebuilt-audio", "config": {"locales": ["en-US", "es-ES"]}, "fieldSchema": {"fields": {"Sentiment": {"type": "string", "method": "classify", "enum": ["Positive", "Neutral", "Negative"]}}}}`
+W: prebuilt-audio base with locales and generate/classify fields: audio analyzers derive from prebuilt-audio, locales guide transcription, and generate or classify are the methods available for audio fields.
+X: B=prebuilt-document with extract: a document analyzer doesn't transcribe audio, and extract is only supported for documents in any case.
+C=prebuilt-audioSearch as base: custom analyzers can only derive from the four base analyzers; RAG analyzers such as audioSearch aren't valid parents.
+D=prebuilt-layout with OCR: OCR reads text in images and documents. It doesn't recognize speech, and layout isn't a base analyzer for custom analyzers.
+T: Build audio field extraction on baseAnalyzerId prebuilt-audio with locales set, using generate or classify fields (extract is documents only).
+V: Azure Content Understanding in Foundry Tools
+
+@ AI-103 D5 T5.2 applied troubleshooting
+S: A developer calls prebuilt-documentSearch and a custom invoice analyzer with the 2025-11-01 API. Both requests fail because no model deployment is available for the analyzers, although gpt-5.2 and text-embedding-3-large are deployed in the same Foundry resource. Which two actions can fix this? (Select TWO)
+A: Send PATCH /contentunderstanding/defaults with a modelDeployments map from model names and prebuilt aliases to the deployment names
+B: Include a modelDeployments object in each analyze request that maps the required model names and aliases to the deployment names
+C: Rename both deployments to prebuilt-analyzer-completion and prebuilt-analyzer-embedding, so the analyzers find them by name
+D: Assign the Foundry resource's managed identity the Search Index Data Reader role, so the analyzers can read the deployed models
+E: Move both model deployments into a separate Foundry project, because Content Understanding only reads deployments from a dedicated project
+K: A,B
+G: ## Content Understanding uses your model deployments
+Generative features (field extraction, figure description, segmentation, summaries) run on **your** Foundry model deployments: a chat completion model and an embedding model. You pay for their tokens separately from Content Understanding meters.
+## Model names, aliases and deployments
+- A custom analyzer's `models` section names catalog models (for example `"completion": "gpt-5.2"`) or aliases.
+- Prebuilt analyzers use **aliases**: `prebuilt-analyzer-completion`, `prebuilt-analyzer-completion-mini` (for example prebuilt-*Search), `prebuilt-analyzer-embedding`.
+- These names are mapped to your **deployment names** at runtime.
+## Two documented ways to provide the mapping
+1. **Resource defaults**: `PATCH /contentunderstanding/defaults` with `{"modelDeployments": {"gpt-5.2": "myGpt52", "prebuilt-analyzer-completion-mini": "myGpt52", "prebuilt-analyzer-embedding": "myEmbed", ...}}`. Later analyze calls can omit the mapping. Content Understanding Studio can set the same defaults.
+2. **Per request**: pass `modelDeployments` in the analyze request; this also overrides the defaults for that call.
+W: A=Resource-level defaults: once the names and aliases are mapped to deployments for the resource, every analyzer can resolve its models without per-call settings.
+B=modelDeployments per request: each analyze call can carry its own mapping, which works without defaults and overrides them when they exist.
+X: C=Rename deployments to alias names: aliases are resolved through the modelDeployments mapping, not by matching deployment names.
+D=Search Index Data Reader: that role grants read access to Azure AI Search indexes; it has nothing to do with resolving model deployments.
+E=Separate project: the deployments only need to be mapped; Learn's setup maps deployments on the Foundry resource, with no dedicated project requirement.
+T: Content Understanding resolves models through a modelDeployments mapping, set once as resource defaults or passed in each analyze request.
+V: Azure Content Understanding in Foundry Tools, Foundry Models
+
+@ AI-103 D5 T5.2 advanced use-case
+S: A lender receives single PDF files that each bundle a loan application, several pay stubs and a bank statement in random order. Each document type needs its own extraction schema, and pages that match none of the types must not be forced into one. How should the analyzer be configured?
+A: Set segmentPerPage to true without contentCategories, so each page is returned separately and the app guesses the document type from its fields
+B: Create three separate custom analyzers and call each of them on the whole PDF, then keep the result whose fields have the highest confidence
+C: Set enableSegment to true with contentCategories for each document type, each linked to its analyzerId, plus an other category for the rest
+D: Set enableSegment to false with contentCategories, so the whole file is classified once and every page is processed by the matching analyzer
+K: C
+G: ## Classification and segmentation in Content Understanding
+An analyzer's `config` can classify content and route it to other analyzers:
+- `contentCategories`: a set of categories, each with a **description** (acts as a prompt for boundaries and classification) and an optional `analyzerId` to process that category.
+- `enableSegment: true`: the file is split into **segments** by the category descriptions and the content structure, each segment is classified, and segments with an analyzerId are analyzed by that analyzer.
+- `enableSegment: false`: the **whole file** is classified as one item and routed.
+- `segmentPerPage: true`: forces one segment per page when segmentation is on.
+- `omitContent: true`: return only subanalyzer results.
+## The "other" category
+Learn warns: if an "other" or "default" category isn't defined, content is **forced** into one of the listed categories. Adding `"other": {}` (no analyzerId) categorizes unmatched pages without processing them.
+## Example
+`"config": {"enableSegment": true, "contentCategories": {"application": {"description": "...", "analyzerId": "loanApp"}, "payStub": {"description": "...", "analyzerId": "payStub"}, "other": {}}}`
+W: Segmentation with categories and an other category: the service splits the bundle into documents, classifies each one, routes it to its own analyzer, and leaves non-matching pages in other.
+X: A=segmentPerPage without categories: page segmentation needs categories to classify against, and a document such as a statement can span several pages.
+B=Run three analyzers on the whole file: each analyzer would read every document in the bundle, mixing pay stub values into application fields; classification is what separates them.
+D=enableSegment false: without segmentation the entire file gets one category, so a bundle of different documents can't be routed piece by piece.
+T: For bundled files, enable segmentation with contentCategories linked to analyzers, and add an other category so unmatched content isn't forced into a type.
+V: Azure Content Understanding in Foundry Tools
+
+@ AI-103 D5 T5.2 applied troubleshooting
+S: A RAG agent answers from Markdown produced by a custom Content Understanding analyzer based on prebuilt-document. Questions about quarterly revenue bar charts and process flow diagrams in the reports fail, because the Markdown only shows image links for those figures. Which two config settings should be enabled? (Select TWO)
+A: enableFigureDescription, so each figure's Markdown image gets a generated natural-language description of what it shows
+B: enableFigureAnalysis, so charts are added as Chart.js data or tables and diagrams are added as Mermaid code after the image
+C: enableFormula, so the bars in each chart are converted into LaTeX expressions that the chat model can read and compute from
+D: enableBarcode, so the values encoded in each chart are decoded and placed in the Markdown next to the figure's image link
+E: tableFormat set to html, so every chart in the report is rendered as an HTML table that keeps merged cells and multirow headers
+K: A,B
+G: ## How figures appear in Content Understanding Markdown
+Content Understanding converts documents into GitHub Flavored Markdown. Figures (images, charts, diagrams) appear as Markdown images whose alt text is the text detected inside the figure:
+- default: `![Q1 Q2 Q3](figures/1.1)`
+- with **enableFigureDescription**: `![Q1 Q2 Q3](figures/1.1 "Bar chart of revenue by quarter, rising from Q1 to Q3")`
+- with **enableFigureAnalysis**: the image is followed by structured content: a chart as **Chart.js** JSON (or a Markdown table), a diagram as a **Mermaid** code block.
+Both settings default to `false` on document analyzers.
+## Why it matters for RAG
+Numbers in a chart and steps in a flow diagram are invisible in a bare image link. The description makes the figure searchable; the analysis gives the model the actual data points and diagram structure to reason over.
+W: A=enableFigureDescription: it adds a generated description to each figure in the Markdown, so the meaning of the chart or diagram becomes text the agent can retrieve.
+B=enableFigureAnalysis: it appends chart data (Chart.js or a table) and diagram structure (Mermaid), giving the agent the exact values and steps.
+X: C=enableFormula: it detects mathematical formulas and writes them in LaTeX; it doesn't read bar heights from charts.
+D=enableBarcode: it decodes barcodes and QR codes, not values plotted in a chart.
+E=tableFormat html: tableFormat controls how real tables are written (html is already the default); it doesn't turn charts into tables.
+T: To make charts and diagrams usable by an agent, enable figure description and figure analysis so the Markdown carries descriptions, chart data and Mermaid diagrams.
+V: Azure Content Understanding in Foundry Tools
+
+@ AI-103 D5 T5.2 applied troubleshooting
+S: A team feeds Content Understanding output into a Markdown header splitter and a small model that only handles plain Markdown. Paragraphs come through well, but every table arrives as an HTML table block that the model misreads. The tables are simple grids. What should the developer change in the analyzer config?
+A: Set enableLayout to false, so tables are no longer detected and their cells are written as plain paragraphs that the small model can parse
+B: Set returnDetails to true, so the response includes a structured table object that the splitter uses instead of the Markdown content field
+C: Set tableFormat to markdown, so extracted tables are written as Markdown tables instead of the default HTML representation in the output
+D: Set chartFormat to markdown, so every table and chart in the document is rendered as a Markdown table instead of a Chart.js code block
+K: C
+G: ## Table output in Content Understanding
+Document analyzers write tables into the Markdown content using the `tableFormat` setting:
+- `"html"` (**default**): keeps complex structures such as merged cells and multirow headers.
+- `"markdown"`: pipe-style Markdown tables, suited to simple tables and text-based processing.
+Learn's guidance: use html when complex table structures must be preserved; use markdown for simple tables in text-based processing.
+## Related settings
+- `enableLayout` (default true): paragraphs, sections, reading order and structural elements.
+- `chartFormat`: how **charts** found by figure analysis are written (Chart.js).
+- `returnDetails`: adds bounding boxes, spans and confidence metadata to the JSON.
+Document Intelligence's layout model made the same move: in v4.0 (2024-11-30) its Markdown output represents tables as HTML to support merged cells.
+W: tableFormat markdown: it switches table output from the default HTML to Markdown tables, which a plain-Markdown splitter and model handle, and the tables here are simple grids.
+X: A=enableLayout false: turning layout off loses tables, sections and reading order, which hurts chunking far more than the HTML format did.
+B=returnDetails true: it adds metadata such as spans and bounding boxes to the JSON response; the Markdown content would still contain HTML tables.
+D=chartFormat markdown: chartFormat applies to charts produced by figure analysis, not to tables extracted from the document text.
+T: Content Understanding writes tables as HTML by default; set tableFormat to markdown when downstream tools expect plain Markdown tables.
+V: Azure Content Understanding in Foundry Tools
+
+@ AI-103 D5 T5.2 applied comparison
+S: A hospital network must extract data from patient intake forms inside an isolated network with no connection to Azure. The forms follow one fixed template. Which approach fits this requirement?
+A: Content Understanding custom analyzer with a zero-shot field schema, because it needs no labeled samples and runs inside the hospital network
+B: Content Understanding prebuilt-layout, because it doesn't need a language model and so it can process the forms without reaching Azure
+C: Document Intelligence containers with a custom template model trained on labeled samples of the form, run on the hospital's own servers
+D: A Foundry model deployment that reads each form image, called through a private endpoint, so no traffic leaves the hospital network
+K: C
+G: ## Content Understanding and Document Intelligence today
+Learn's "Choose the right Foundry Tool for document processing" positions:
+- **Content Understanding analyzers**: generative AI based; strong on unstructured or highly variable documents, multimodal content, inferred fields, zero-shot schemas.
+- **Document Intelligence models**: purpose-trained extraction models; ideal for structured documents with common templates where consistency, low latency and proven accuracy matter. Custom neural models train with as few as 5 labeled samples.
+## Deployment location
+The decision guide lists one scenario with a single answer: **on-premises or air-gapped deployment: Document Intelligence containers ("Only option today")**. Document Intelligence containers include Read, Layout and Custom template models, among others. Content Understanding runs as a cloud service on a Foundry resource. A private endpoint keeps traffic on a private network path, but the service itself is still in Azure.
+## Existing workloads
+Learn also notes that teams already running Document Intelligence in production keep their APIs, endpoints and SDKs; no migration is required.
+W: Document Intelligence containers with a custom template model: containers are the only documented option for on-premises or air-gapped processing, and the custom template container suits a form that always uses the same layout.
+X: A=Content Understanding zero-shot analyzer: zero-shot schemas are a strength of Content Understanding, but the service runs in Azure, which an isolated network can't reach.
+B=prebuilt-layout without a model: not needing a language model doesn't make it local; prebuilt-layout is still a Content Understanding cloud analyzer.
+D=Foundry model over a private endpoint: a private endpoint is still a connection to the Azure service, which the requirement of no connection to Azure rules out.
+T: For on-premises or air-gapped document extraction, Document Intelligence containers are the only option today.
+V: Azure Document Intelligence in Foundry Tools, Azure Content Understanding in Foundry Tools
+
+@ AI-103 D5 T5.2 applied comparison
+S: A legal team needs the parties, the governing law, and the contract end date from service agreements of very different formats. Many contracts state only a start date and a duration, so the end date must be inferred. There are no labeled samples. Which approach fits best?
+A: Document Intelligence prebuilt layout model with Markdown output, then regular expressions in the app to find the parties, law and end date
+B: Document Intelligence custom neural model trained on five labeled contracts, which learns to calculate end dates from start dates and durations
+C: Document Intelligence prebuilt invoice model, whose vendor and customer fields map to the contract parties and whose due date maps to the end date
+D: Content Understanding prebuilt-contract analyzer, or a custom analyzer with generate fields, which can infer values that aren't stated in the text
+K: D
+G: ## Unstructured documents and inferred fields
+Learn's decision guide for document processing describes **Scenario 4: unstructured documents** (contracts, agreements, referral letters) and recommends Content Understanding prebuilt or custom analyzers:
+- use **prebuilt-contract** for legal agreements, or a custom analyzer for other unstructured types;
+- Content Understanding can **infer fields not explicitly present**, for example deriving a contract end date from a start date and a duration, or the jurisdiction from the parties' addresses;
+- custom analyzers start **zero-shot**: describe fields in plain language, no labeling.
+## Where Document Intelligence fits
+Document Intelligence prebuilt and custom models suit structured, consistent templates. Custom models learn to extract labeled values from where they appear; they don't reason over the text to compute a value that isn't written.
+## In a custom analyzer
+An inferred value uses `method: generate` with a clear description, for example "End date of the agreement; if not stated, compute it from the effective date and the term."
+W: Content Understanding contract or custom analyzer: generative extraction handles high format variation without labels and can derive values such as an end date from a start date and duration.
+X: A=Layout plus regular expressions: patterns can't reliably find parties or governing law across very different wording, and they can't infer a missing end date.
+B=Custom neural model: it learns to extract labeled fields from consistent structures; it extracts what is written rather than calculating new values.
+C=Invoice model: its schema is built for invoices; mapping invoice fields onto contract concepts produces wrong or empty values.
+T: For variable, unstructured documents and inferred values without labels, use Content Understanding (prebuilt-contract or a custom analyzer with generate fields).
+V: Azure Content Understanding in Foundry Tools, Azure Document Intelligence in Foundry Tools
+
+@ AI-103 D5 T5.2 applied troubleshooting
+S: A zero-shot Content Understanding custom analyzer extracts fields from referral letters. The field "Urgency" (description: "urgency") and "Referrer" (description: "name") are often wrong: dates appear in Referrer and urgency is left empty. Labeled samples aren't available yet. What is the first thing to improve?
+A: Change both fields to method extract, so the analyzer can only return text that appears in the letter and must place it in the right field
+B: Rewrite the analyzer and field descriptions to say exactly what each field means and where it is found, with allowed values for urgency
+C: Switch the analyzer's baseAnalyzerId to prebuilt-layout, so the analyzer understands the letter's sections before it extracts any fields
+D: Raise the temperature setting of the completion model deployment, so the analyzer explores more candidate values for each field it extracts
+K: B
+G: ## Descriptions drive zero-shot extraction
+In a Content Understanding custom analyzer, the model reads:
+- the analyzer `description`, used as context for all field extraction, and
+- each field's `description`, which Learn describes as a **mini-prompt** that guides extraction; specificity and clarity directly improve accuracy.
+A one-word description such as "name" leaves the model guessing whose name: the patient, the referring doctor or the clinic.
+## Better field definitions
+- `"Referrer": {"type": "string", "description": "Full name of the doctor who wrote and signed the referral, usually in the signature block. Not the patient."}`
+- `"Urgency": {"type": "string", "method": "classify", "enum": ["Routine", "Urgent", "Emergency"], "description": "Clinical urgency stated or implied by the referring doctor..."}`
+## Improving further
+Once labeled samples exist, adding them to the analyzer's knowledge source improves accuracy over time; Learn's decision guide calls this the path after zero-shot.
+W: Precise analyzer and field descriptions: descriptions are the prompts for zero-shot extraction, so stating who the referrer is, where to find it and the allowed urgency values fixes the confusion.
+X: A=method extract: extract only returns literal text and needs source estimation; urgency is often implied rather than written, so this makes empty values more likely.
+C=prebuilt-layout as base: custom analyzers must derive from one of the four base analyzers such as prebuilt-document; layout isn't a valid base.
+D=Higher temperature: the analyzer's behavior is shaped by schema and descriptions; more randomness wouldn't resolve which name or urgency the field means.
+T: In zero-shot Content Understanding analyzers, field and analyzer descriptions act as prompts; make them specific before reaching for labeled data.
+V: Azure Content Understanding in Foundry Tools
+
+@ AI-103 D5 T5.2 applied tradeoff
+S: A production invoice pipeline calls prebuilt-invoice directly. After an API version upgrade, some field names and values in the output change and break a downstream mapping. The team wants analyzer behavior to stay the same until they choose to change it. What does Learn recommend?
+A: Pin every request to the oldest API version that still supports prebuilt-invoice, so the prebuilt analyzer's schema never changes again
+B: Switch the pipeline to prebuilt-documentFields, which returns generic key-value pairs whose names stay fixed across API versions
+C: Set omitContent to true on each analyze request, so only the stable field values are returned and the changed content object is ignored
+D: Get the prebuilt-invoice definition and create a custom analyzer from a copy of it, then call that analyzer in production
+K: D
+G: ## Prebuilt analyzers evolve
+Prebuilt analyzers in Content Understanding are maintained by Microsoft and improve over time. Learn's warning: **prebuilt analyzer definitions can change across API versions. To ensure consistent behavior, make a copy of the prebuilt analyzer instead of relying on the prebuilt version directly in production scenarios.**
+## How to copy a prebuilt analyzer
+1. `GET /analyzers/prebuilt-invoice` returns its JSON definition (field schema and config).
+2. Edit as needed (for example add or rename fields).
+3. `PUT /analyzers/myInvoice` with the definition creates your custom analyzer.
+4. Call `POST /analyzers/myInvoice:analyze` in production.
+Your analyzer changes only when you update it, so tests and downstream mappings stay valid, and you can adopt improvements deliberately.
+W: Copy into a custom analyzer: a custom analyzer built from the prebuilt definition keeps the schema the team owns, so upgrades don't silently change the output.
+X: A=Pin the oldest API version: older versions eventually lose support, and pinning forgoes fixes; Learn's documented approach for stable behavior is copying the analyzer.
+B=prebuilt-documentFields: this utility analyzer extracts generic key-value pairs, so the invoice-specific fields and line items the mapping depends on would be lost.
+C=omitContent: it removes the content object from the response; the field schema of prebuilt-invoice can still change between versions.
+T: For stable production behavior, copy a prebuilt analyzer into your own custom analyzer rather than calling the prebuilt one directly.
+V: Azure Content Understanding in Foundry Tools
+
+@ AI-103 D5 T5.2 applied use-case
+S: A company already runs Document Intelligence v4.0 (2024-11-30) layout analysis in production. It now wants the same output to feed a RAG chunker that splits content by headings, without changing services. What should the developer change in the layout request?
+A: Call the prebuilt-read model instead of layout, because read returns headings and sections as Markdown while layout returns only plain text lines
+B: Set outputContentFormat to markdown, so the layout result's content contains headings, paragraphs and tables in Markdown form for splitting
+C: Set output to figures, so the layout model returns cropped section images that the chunker can use to identify each heading and paragraph
+D: Migrate the pipeline to Content Understanding first, because Document Intelligence layout can't produce Markdown output for RAG chunking
+K: B
+G: ## Markdown output from the Document Intelligence layout model
+The Document Intelligence layout model detects paragraphs with roles (title, sectionHeading, pageHeader...), tables, figures and selection marks. With **`outputContentFormat=markdown`** the result's `content` field is Markdown:
+- titles and section headings become Markdown headings (`#`, `##`)
+- tables are written as HTML tables in v4.0 (supports merged cells)
+- selection marks use ☒ and ☐
+- figures appear as `<figure>` blocks
+Learn's Python sample passes `output_content_format=ContentFormat.MARKDOWN` to the analyze call.
+## Chunking by headings
+Markdown headings give a semantic chunker natural boundaries (for example LangChain's MarkdownHeaderTextSplitter, used in Learn's RAG samples).
+## No forced migration
+Learn's tool-choice article says that teams already running Document Intelligence keep their APIs, endpoints, SDKs and billing; no migration is required.
+W: outputContentFormat markdown: the existing layout call can return Markdown with headings, which the chunker splits on, so no service change is needed.
+X: A=prebuilt-read: the read model returns text lines and words without layout roles, so it has fewer structural cues than layout, not more.
+C=output figures: this option returns cropped images of detected figures; it doesn't mark headings or produce text for chunking.
+D=Migrate to Content Understanding: Content Understanding also produces Markdown, but Learn states no migration is required and the layout model supports Markdown output itself.
+T: Document Intelligence layout returns Markdown (headings, tables) when you set outputContentFormat=markdown, which suits heading-based RAG chunking.
+V: Azure Document Intelligence in Foundry Tools
+
+@ AI-103 D5 T5.2 applied troubleshooting
+S: A Content Understanding analyzer extracts fields and Markdown from user-submitted documents. For some files the analysis status is successful, the Markdown content is complete, but several generated field values are missing and the response contains warnings. What is the most likely explanation?
+A: The guardrail on the connected model deployment flagged the content and restricted field generation, while the extracted source content was kept
+B: The analyzer exceeded the file size limit, so Content Understanding processed only the first pages and skipped the fields on later pages
+C: The estimateFieldSourceAndConfidence setting was off, so fields without a confidence score were removed from the response with a warning
+D: The prebuilt alias for the completion model points to a deleted deployment, so the analyzer fell back to returning only the Markdown
+K: A
+G: ## Content Understanding inherits Foundry guardrails
+Content Understanding uses your Foundry model deployments for generative steps, and it **inherits the guardrails** (formerly content filters) applied to those deployments. Learn explains the effect on analysis:
+- An analyzer can extract Markdown, pages and paragraphs, and also run field extraction with language models.
+- **Guardrails can restrict field generation while preserving extracted source content.**
+- Analysis can therefore **succeed with warnings** even when some field values aren't returned.
+- Blocking can limit field extraction or stop analysis; with the required approval, annotate-only behavior keeps detections for human review instead of blocking.
+## What to do
+Review warnings before using results in automated workflows. Decide whether the content should be blocked, or whether an approved annotate-only configuration plus human review is more appropriate for the use case.
+W: Guardrail restricting field generation: this matches the documented behavior exactly: extraction succeeds and content is preserved, while flagged content stops some generated fields and produces warnings.
+X: B=File size limit: a size problem would show up as a failed request or truncated content, but here the Markdown content is complete.
+C=Source and confidence off: that setting only adds confidence and location to fields; leaving it off doesn't remove field values.
+D=Deleted deployment: a missing model deployment would break every generative step for every file, not drop a few fields only on some flagged documents.
+T: When Content Understanding succeeds with warnings but some fields are missing, check the model deployment's guardrail: it can restrict field generation while keeping content.
+V: Azure Content Understanding in Foundry Tools, Microsoft Foundry
