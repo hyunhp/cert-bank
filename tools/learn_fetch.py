@@ -77,8 +77,15 @@ class Text(html.parser.HTMLParser):
     def handle_endtag(self, tag):
         if tag == "title":
             self.in_title = False
-        if tag in VOID or not any(t == tag for t, _ in self.stack):
-            return                        # stray end tag
+        if tag in VOID:
+            return
+        for t, hidden in reversed(self.stack):  # a stray end tag (unbalanced markup, as on docs.cloud.google.com)
+            if t == tag:                        # must not close <main> or a hidden block it does not belong to
+                break
+            if t == "main" or hidden:
+                return
+        else:
+            return
         while self.stack:                 # close implicitly-closed children too
             t, hidden = self.stack.pop()
             if hidden:
