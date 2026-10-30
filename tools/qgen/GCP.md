@@ -40,6 +40,8 @@ used on the exam."
 - Nothing in preview is keyed; check the docs' "Preview" banner. Retired products are never the right answer:
   Container Registry shut down 2025-03-18 (use Artifact Registry); Cloud Deployment Manager reached end of support
   2026-03-31 (use Infrastructure Manager or Terraform).
+- Cloud Storage has five storage classes: Standard, Nearline, Coldline, Archive and Rapid (zonal buckets only); never
+  write "all classes" when only the four location-flexible ones are meant.
 - IAM: basic roles (Owner/Editor/Viewer) are discouraged in production; prefer predefined roles; custom roles exist at
   organization or project level (not folder). Verify each role name (`roles/...`) on the docs before keying it.
 - Write in the detailed style of CLAUDE.md (G/W/X/T) and list the docs pages relied on as `# src:` lines.
