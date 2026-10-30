@@ -52,6 +52,7 @@ Amazon Web Services, Palantir Technologies, Microsoft와 관련 없는 비공식
 | | | PLTR-APD Application Developer | 400 | 17 |
 | Azure | Foundational | AZ-900 Azure Fundamentals | 225 | 14 |
 | | | AI-901 Azure AI Fundamentals | 225 | 13 |
+| | | SC-900 Security, Compliance, and Identity Fundamentals | 225 | – |
 | | Associate | AZ-104 Azure Administrator | 250 | 32 |
 | | | AI-103 Azure AI Apps and Agents Developer | 243 | 20 |
 | | Expert | AZ-305 Azure Solutions Architect | 251 | 22 |

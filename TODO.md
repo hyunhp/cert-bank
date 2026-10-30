@@ -135,6 +135,10 @@ cross-batch overlaps thanks to PLAN.md and `qgen check --siblings`). Reviewers u
 before the token-savings changes. AZ-305 study guide DONE 2026-10-30: 22 days (D1 6, D2 5, D3 4, D4 6, final), two
 writers + two Learn reviewers (16 fixes); glossary +9 Azure terms (DTU/vCore, Hyperscale, failover group, RU/s, PIM,
 Managed HSM, Virtual WAN, Cloud Adoption Framework, Global Reach; Sonnet-reviewed) and 32 existing terms tagged AZ-305.
+SC-900 DONE 2026-10-30: registered (4 domains, midpoint weights, 45 questions, 45 min), 225 questions in b01-b08 from
+PLAN.md, reviewed (30 fixes, 0 cross-batch overlaps; e.g. retired "approved client app" grant, eDiscovery (Standard/Premium)
+classic retired 2025-08-31, Sentinel moving to the Defender portal after 2027-03-31 kept out of keys). Writers were
+started in waves of 4 to stay under the usage limit. Open: SC-900 study guide and glossary terms.
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
