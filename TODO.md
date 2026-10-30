@@ -49,8 +49,9 @@ Notices live in `data/exam-specs.json` ("update"), shown above the section filte
   workforces, C02 weights/65 questions; +7 gen-AI days: RAG data, FM choice/customization, FM evaluation, FM deploy/agents,
   FM CI/CD, FM monitoring/cost, securing gen AI), 3 writers + 3 reviewers (about 18 fixes); glossary +6, 41 terms tagged.
   Built from the reviewed bank and C01, not the official guide: re-check at GA (2027-01-14).
-  OPEN: Bedrock docs now list only supervised/reinforcement fine-tuning and distillation (no continued pre-training):
-  re-check Q006184 and b02 mentions (explain/fix batch if it is gone).
+  Continued pre-training (2026-10-30): Bedrock's customization page lists only supervised/reinforcement fine-tuning and
+  distillation (doc-history shows no removal; Nova and HyperPod still document it). Only 2 of ~30 mentions keyed it:
+  AIF-C01 Q002492 (f02) and MLA-C02 Q006184 (f01) now key the service-neutral technique; the rest are distractors. Re-check Bedrock docs ~2027-01.
 - ANS-C01: retires 2026-12-31, no successor. Keep the bank (credentials stay valid 3 years); consider hiding it later.
 - No change found for CLF-C02, AIF-C01, AIB-C01 (new, beta from 2026-09-29), SAA-C03, DEA-C01, SOA-C03, DOP-C02,
   AIP-C01, SCS-C03 (only three language versions end 2026-12-31).
