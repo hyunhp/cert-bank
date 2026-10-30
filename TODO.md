@@ -126,7 +126,9 @@ overlaps replaced as batches were ingested one by one). Facts found: Azure OpenA
 IQ knowledge base or classic RAG instead); Foundry portal workflows retire 2026-12-01 (Microsoft Agent Framework);
 Connected Agents gone from the new Agent Service (a2a tool v1.0 GA); Sora 2 video is preview, no GA video model (2 stems
 say so); Memory, agent guardrails, many agent evaluators, agent Monitor tab metrics are preview; sku capacity units per TPM
-differ by model. Open: AI-103 study guide and glossary terms.
+differ by model. AI-103 study guide DONE 2026-10-30: 20 days (D1 5, D2 6, D3 3, D4 2, D5 3, final), two writers +
+two Learn reviewers (22 fixes); glossary +9 Azure terms (RRF, semantic ranker, TPM/RPM, Application Insights, skillset, A2A,
+NMT, WER, Content Credentials; reviewed with Sonnet) and 28 existing terms tagged AI-103.
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
