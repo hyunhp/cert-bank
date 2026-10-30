@@ -24,8 +24,8 @@ const STUDY_EXAMS = [
 const VENDORS = [["aws", "AWS"], ["palantir", "Palantir"], ["azure", "Azure"]];
 const vendorOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[3];
 const isNewVersion = name => / \(new\)$/.test(name);
-const shortName = name => name.replace(/ – (Associate|Professional|Specialty)( \(new\))?$/, "");
-const LEVELS = [["foundational", "Foundational"], ["associate", "Associate"], ["professional", "Professional"], ["specialty", "Specialty"]];
+const shortName = name => name.replace(/ – (Associate|Professional|Expert|Specialty)( \(new\))?$/, "");
+const LEVELS = [["foundational", "Foundational"], ["associate", "Associate"], ["professional", "Professional"], ["expert", "Expert"], ["specialty", "Specialty"]];
 const levelOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[2];
 // Exams with a published guide (listed in exams-index.json); all of them if the index is missing.
 const available = () => STUDY_EXAMS.filter(([c]) => !dataIndex || !dataIndex.study || c in dataIndex.study);

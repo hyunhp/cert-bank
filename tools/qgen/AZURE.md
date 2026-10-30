@@ -60,12 +60,28 @@ of April 16, 2026") and https://learn.microsoft.com/en-us/credentials/certificat
 | Item types | "You may have interactive components"; this bank only has multiple choice |
 | Preview features | Same note as AI-901: mostly GA, commonly used preview features possible. Key answers stay on GA features |
 
+### AZ-305 Designing Microsoft Azure Infrastructure Solutions (added 2026-10-30)
+Sources: https://learn.microsoft.com/en-us/credentials/certifications/resources/study-guides/az-305 ("Skills measured as
+of April 17, 2026"), https://learn.microsoft.com/en-us/credentials/certifications/azure-solutions-architect/ (Microsoft
+Certified: Azure Solutions Architect Expert; "you must earn the Microsoft Certified: Azure Administrator Associate
+certification") and the exam page (updated April 17, 2026).
+
+| Item | Value |
+|---|---|
+| Length | Not on the exam pages. Learn's exam-duration page: role-based exams without labs 100 minutes, with labs 120; this bank assumes 100 |
+| Questions | Not published. This bank assumes 50 (mock length only) |
+| Pass mark | Scaled score 700 or greater |
+| Domains | D1 identity, governance and monitoring 25-30%, D2 data storage 20-25%, D3 business continuity 15-20%, D4 infrastructure 30-35%; `exam-specs.json` stores the midpoints |
+| Level | `expert` (a new level segment in the Azure tab) |
+
 ## Codes and task ids
 - `AZ-900` (Azure Fundamentals), vendor `azure`, level `foundational`.
 - `AI-901` (Azure AI Fundamentals), vendor `azure`, level `foundational`; tasks T1.1-T1.3 and T2.1-T2.4 are the guide's 7
   skill groups in order.
 - `AI-103` (Azure AI Apps and Agents Developer – Associate), vendor `azure`, level `associate`; tasks T1.1-T5.2 are
   the guide's 14 skill groups in order.
+- `AZ-305` (Azure Solutions Architect – Expert), vendor `azure`, level `expert`; tasks T1.1-T4.4 are the guide's 12 skill
+  groups in order.
 - `AZ-104` (Azure Administrator – Associate), vendor `azure`, level `associate`; tasks T1.1-T5.2 are the guide's 15 skill
   groups in order.
 - Domains D1-D3 follow the study guide's order and names exactly.
@@ -96,6 +112,10 @@ of April 16, 2026") and https://learn.microsoft.com/en-us/credentials/certificat
   agents, RAG with Azure AI Search, evaluation, tracing, guardrails, Content Understanding, Speech, Language,
   Translator). Short code (Python SDK, REST) and settings are fine when shown on Learn. Apply every naming and status fact in
   `tools/qgen/AZURE-status.md`; check GA vs preview for each keyed feature (Foundry changes fast).
+- AZ-305 is a design exam: stems are short requirement scenarios ("A company needs ... Which solution should you
+  recommend?") that test choosing between services and tiers and the trade-offs (cost, availability, RPO/RTO, security,
+  operations). No CLI syntax or portal clicks. The real exam uses long case studies; keep stems short (stem-length gate)
+  and put the deciding requirement in the stem.
 - AZ-900 is a fundamentals exam: stems test choosing and describing services, not CLI flags or portal clicks.
 - AZ-104 is an administrator exam: stems are hands-on scenarios (configure, troubleshoot, interpret). Concrete settings,
   role names, `az`/PowerShell commands, ARM/Bicep snippets and portal blades are fine when each detail is checked on
