@@ -24,3 +24,11 @@ Shared hot spots belong to ONE batch only; others may use them as distractors bu
 | b11 | T6.1, T6.2 | 22 | CapEx to OpEx and TCO; financial governance and cost tools, people/process/technology; resource hierarchy (resources, projects, folders, organization) and its benefits; controlling consumption (quotas, budgets, billing reports, Dynamic Workload Scheduler, Spot VMs); Observability (Cloud Monitoring, Logging, Trace, Profiler, Error Reporting); operations terms (operational excellence, reliability, high availability); resilient design (redundancy, replication, backups); measuring performance (latency, traffic, saturation, errors); DevOps and SRE (SLI, SLO, SLA) | |
 
 Waves (about 4 writers at a time): b01, b03, b05, b07; then b02, b04, b06, b08; then b09, b10, b11.
+
+## Top-up 2026-10-30 (pool 226 -> 275, domain targets D1 50 / D2-D5 50 each / D6 28)
+Rules as above. Read the published GCP-CDL questions first (data/GCP-CDL.json) and write NEW business scenarios; do not
+repeat published ones; use the tasks with the fewest questions first (`qgen plan GCP-CDL`).
+| Batch | Needs | Owns | Leave to |
+|---|---|---|---|
+| b12 | D1 10, D2 9, D3 9 | T1.1-T1.2, T2.1-T2.3, T3.1-T3.2 (cloud benefits/models, data, AI/ML) | D4, D5, D6 (b13) |
+| b13 | D4 9, D5 9, D6 6 | T4.1-T4.3 (migration, compute, APIs), T5.1-T5.2 (security), T6.1-T6.2 (cost, operations) | D1-D3 (b12) |

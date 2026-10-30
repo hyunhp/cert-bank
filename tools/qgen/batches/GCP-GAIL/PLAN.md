@@ -24,3 +24,11 @@ Shared hot spots belong to ONE batch only; others may use them as distractors bu
 | b13 | T4.3 | 11 | responsible AI and transparency, privacy (risks, anonymization vs pseudonymization), data quality, bias and fairness, accountability and explainability | secure AI (b12) |
 
 Waves (about 4 writers at a time): b01, b04, b07, b10; then b02, b05, b08, b11; then b03, b06, b09, b12; then b13.
+
+## Top-up 2026-10-30 (pool 226 -> 275, domain targets D1 82 / D2 96 / D3 55 / D4 41)
+Rules as above. Read the published GCP-GAIL questions first (data/GCP-GAIL.json) and write NEW scenarios; use the tasks with
+the fewest published questions first (`qgen plan GCP-GAIL`). Gap kept out: Gemini app and Gems (blocked hosts).
+| Batch | Needs | Owns | Leave to |
+|---|---|---|---|
+| b14 | D1 14 (T1.2, T1.3, T1.4 first, then T1.1), D3 10 (T3.1, T3.2, T3.3 spread) | data types and business impact, five layers, Google foundation models and strengths, FM limitations and remedies, prompting techniques, grounding | all of D2 and D4 (b15) |
+| b15 | D2 17 (T2.1-T2.5 spread, prefer T2.3/T2.4/T2.5), D4 7 (T4.1-T4.3) | Google Cloud strengths, prebuilt products, customer experience products, developer building tools, agent tools; adoption phases, secure AI, responsible AI | D1 and D3 (b14) |
