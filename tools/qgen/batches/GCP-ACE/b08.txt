@@ -87,7 +87,7 @@ A **signed URL** carries authentication data in its query string, so anyone who 
 - `--impersonate-service-account` signs without downloading a service account key, which is the safer choice.
 W: Signed URL: the customer gets a link that works without any Google identity, only for that object and only for two hours, and the bucket's IAM policy never changes.
 X: A=allUsers for two hours: this makes every object in the bucket public to anyone during that window, and public access prevention, if enforced, blocks it anyway.
-B=IAM grant to an email: IAM principals must be Google identities; a customer without a Google account cannot authenticate to use the grant.
+B=IAM grant to an email: an IAM role only helps a principal that can authenticate to Google Cloud (a Google account or a federated identity); the customer has neither, so the grant cannot be used.
 D=Static website bucket: this publishes the archive to the whole internet, which breaks the privacy requirement, and adds a bucket to manage.
 T: Temporary access for someone without a Google account → signed URL (`gcloud storage sign-url --duration`), signed by a service account.
 V: Cloud Storage
@@ -653,29 +653,29 @@ T: VPC firewall: lowest priority number wins regardless of how specific the rule
 V: Cloud NGFW, VPC
 
 @ GCP-ACE D3 T3.3 applied troubleshooting
-S: Security wants a log entry for every blocked attempt to reach VMs in vpc-prod on TCP 22 from the internet. The network has no rule that matches this traffic, so it is dropped by the implied deny ingress rule. An engineer looks for a logging switch on the implied rule but cannot find one. What should she do?
-A: Create an ingress deny rule for tcp:22 from 0.0.0.0/0 at priority 65534 with --enable-logging, so it matches before the implied rule
-B: Enable VPC Flow Logs on the subnets, because flow logs are the only place where drops by the implied deny ingress rule appear
-C: Run gcloud compute firewall-rules update on the implied deny rule with --enable-logging, a setting the console does not show
-D: Turn on Data Access audit logs for the Compute Engine API, which record every connection that a firewall rule denies
+S: In vpc-ops, rule ops-ssh allows ingress tcp:22 from 10.0.0.0/8 to VMs tagged ops at priority 1000, and rule allow-internal allows all protocols from 10.0.0.0/8 at priority 2000. Security now requires that SSH from 10.0.0.0/8 to the ops VMs be blocked. The engineer's gcloud compute firewall-rules update ops-ssh --action=deny fails. What should she do?
+A: Create a new ingress rule that denies tcp:22 from 10.0.0.0/8 to tag ops at priority 900, then delete ops-ssh, because a rule's action cannot be updated
+B: Update ops-ssh with --disabled so that it is no longer enforced, which lets the implied deny ingress rule block the SSH connections to the ops VMs
+C: Update ops-ssh with --priority=65535 so the implied deny ingress rule, which wins ties at that priority, blocks SSH to the VMs tagged ops instead
+D: Update ops-ssh with --direction=EGRESS so the rule stops matching inbound SSH, while keeping its name, tags and ranges for any later rollback
 K: A
-G: ## Firewall rules logging
-Logging is enabled **per rule** (`--enable-logging` on create or update, or in the console). Each time the rule allows or denies a TCP or UDP connection, Cloud NGFW writes a **connection record** to Cloud Logging with the addresses, ports, protocol and a reference to the rule.
-- Allowed connections are logged once; denied packets for the same 5-tuple are logged repeatedly (every 5 seconds while they keep arriving).
-- **Implied rules** (deny all ingress, allow all egress, priority 65535) are not real rules and **cannot be logged**.
-## Logging what the implied rule drops
-Create an explicit rule that does the same thing with logging on, at a priority just above the implied rules:
-`gcloud compute firewall-rules create log-deny-ssh --network=vpc-prod --direction=INGRESS --action=deny --rules=tcp:22 --source-ranges=0.0.0.0/0 --priority=65534 --enable-logging`
-Because it only denies traffic that would be denied anyway, it changes nothing about connectivity.
-## Also useful
-- `--disabled` keeps a rule defined but not enforced, handy for testing changes.
-- VPC Flow Logs record sampled flows for VM interfaces; they are not tied to firewall rules.
-W: Explicit logged deny at 65534: it matches the same SSH attempts just before the implied rule, denies them as before, and writes a connection record for each blocked attempt.
-X: B=VPC Flow Logs: flow logs sample VM traffic and do not identify which firewall rule dropped it; the documented way to audit denials is firewall rules logging.
-C=Update the implied rule: implied rules are not editable objects, and firewall rules logging is not supported for them, so there is nothing to update.
-D=Data Access audit logs: audit logs record API calls on resources, such as creating a rule; they do not record network connections.
-T: Implied rules cannot be logged; add an explicit rule (priority 65534) with --enable-logging to record that traffic.
-V: Cloud NGFW, Cloud Logging
+G: ## What you can change on a VPC firewall rule
+You can update many parts of an existing rule with `gcloud compute firewall-rules update`: protocols and ports, source and destination ranges, targets, priority, logging and the enforcement state (`--disabled` / `--no-disabled`).
+You **cannot** modify a rule's **name**, **network**, **action** (allow or deny) or **direction** (ingress or egress). To change any of those, create a new rule and delete the old one.
+## How the rules interact
+- The matching rule with the lowest priority number decides; at equal priority a deny beats an allow.
+- The implied deny ingress rule (priority 65535) only applies when **no** other rule matches.
+- Disabling a rule keeps it defined but removes it from evaluation, so traffic falls through to the next matching rule, not straight to the implied rule.
+## The scenario
+SSH from `10.0.0.0/8` matches `ops-ssh` (1000) and `allow-internal` (2000). Removing or weakening `ops-ssh` alone leaves `allow-internal` allowing SSH. A new deny rule with a number below 2000 is needed:
+`gcloud compute firewall-rules create deny-ops-ssh --network=vpc-ops --direction=INGRESS --action=deny --rules=tcp:22 --source-ranges=10.0.0.0/8 --target-tags=ops --priority=900`
+then `gcloud compute firewall-rules delete ops-ssh`.
+W: New deny rule then delete: the action of an existing rule cannot be changed, so a new deny rule is required, and at priority 900 it is evaluated before allow-internal at 2000, blocking SSH to the ops VMs.
+X: B=Disable ops-ssh: with ops-ssh disabled, SSH still matches allow-internal at priority 2000, so the traffic is allowed and the implied deny rule is never reached.
+C=Priority 65535: allow-internal at 2000 still matches SSH first, and the implied deny only applies when no explicit rule matches, so nothing is blocked.
+D=Change direction: a rule's direction cannot be updated any more than its action, and even an egress rule would leave allow-internal allowing inbound SSH.
+T: A VPC firewall rule's name, network, action and direction cannot be updated; create a new rule with the right priority and delete the old one.
+V: Cloud NGFW, VPC
 
 @ GCP-ACE D3 T3.3 advanced troubleshooting
 S: A project team adds a VPC firewall rule with priority 0 that allows TCP 3389 from the office range 203.0.113.0/24 to its Windows VMs. RDP still fails. The network team finds a hierarchical firewall policy attached to the organization with a rule that denies TCP 3389 from 0.0.0.0/0. What explains this, and what is the fix?
