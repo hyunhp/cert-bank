@@ -162,7 +162,7 @@ Storage" (no Gen2) and "Azure DocumentDB" (vCore MongoDB) names as on Learn.
 DP-900 study guide DONE 2026-10-30: 14 days (D1 4, D2 3, D3 2, D4 4, final), two writers + two Learn reviewers (about 15
 fixes: ORC dropped, SELECT is DML, Session "most widely used" not default, no item-type claims); glossary +10 Azure terms
 (normalization, foreign key, DDL/DML, Delta Lake, OneLake, hierarchical namespace, consistency levels, DAX, DirectQuery,
-eventstream; Sonnet-reviewed) and acid, star-schema, az-request-units tagged DP-900.
+eventstream; Sonnet-reviewed) and acid, star-schema tagged DP-900.
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
