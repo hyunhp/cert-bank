@@ -116,9 +116,12 @@ function parseHash() {
 
 async function loadIndex() {
   const res = await fetch("./data/exams-index.json", { cache: "no-cache" });
+  if (!res.ok) throw new Error("exams-index.json " + res.status);
   dataIndex = await res.json();
   const v = dataIndex.files && dataIndex.files["exam-specs.json"];
-  specs = await (await fetch(`./data/exam-specs.json${v ? "?v=" + v : ""}`)).json();
+  const sres = await fetch(`./data/exam-specs.json${v ? "?v=" + v : ""}`);
+  if (!sres.ok) throw new Error("exam-specs.json " + sres.status);
+  specs = await sres.json();
 }
 
 async function loadGlossary() {

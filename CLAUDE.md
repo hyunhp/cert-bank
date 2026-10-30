@@ -12,7 +12,8 @@ Vendors: `exam-specs.json` gives each exam a `vendor`; `index.html` has `EXAMS` 
 vendor. Keep the `aws_qbank_*` localStorage keys: renaming them would wipe every user's bookmarks and history.
 Palantir exams publish a percent pass mark (`passingPct`) and no domain weights (`weightsAssumed`, equal weights).
 **Before any `PLTR-*` work read `tools/qgen/PALANTIR.md`** (official facts and writing rules).
-**Before any `AZ-*` (Microsoft Azure) work read `tools/qgen/AZURE.md`**; facts are checked on learn.microsoft.com only.
+**Before any `AZ-*` or `AI-*` (Microsoft Azure) work read `tools/qgen/AZURE.md`** (for AI-901/AI-103 also
+`tools/qgen/AZURE-status.md`); facts are checked on learn.microsoft.com only.
 Open work items are in `TODO.md` — read it at the start of a session.
 Study guide: `study.html` + `js/study.js` read `data/study/<EXAM>.json` (day-by-day plans, edited directly,
 not through qgen) and mark terms from `data/glossary.json` with tap/hover popovers (EN + KO). See

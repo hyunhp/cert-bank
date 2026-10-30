@@ -8,7 +8,7 @@
   question bank to the day's domain. No horizontal overflow on a phone-sized viewport.
     python3 tools/study_test.py
 """
-import functools, hashlib, http.server, json, pathlib, sys, threading
+import functools, hashlib, http.server, json, pathlib, re, sys, threading
 from playwright.sync_api import sync_playwright
 
 ROOT = str(pathlib.Path(__file__).resolve().parents[1])
@@ -28,6 +28,10 @@ idx = json.load(open(pathlib.Path(ROOT, "data", "exams-index.json"), encoding="u
 files = sorted(pathlib.Path(ROOT, "data", "study").glob("*.json"))
 check("study guides present", len(files) >= 12, [f.stem for f in files])
 check("index lists every guide", sorted(idx.get("study", {})) == [f.stem for f in files])
+study_js = open(pathlib.Path(ROOT, "js", "study.js"), encoding="utf-8").read()
+study_block = study_js[study_js.index("STUDY_EXAMS"):study_js.index("].map(", study_js.index("STUDY_EXAMS"))]
+study_codes = set(re.findall(r'\["([A-Z][A-Z0-9-]+)", "', study_block))
+check("STUDY_EXAMS in js/study.js lists every guide (else the guide is silently hidden)", set(idx.get("study", {})) <= study_codes, sorted(set(idx.get("study", {})) - study_codes))
 for f in files:
     g = json.load(open(f, encoding="utf-8"))
     codes = {d["code"] for d in (specs[f.stem]["domains"] if f.stem in specs else g["domains"])}

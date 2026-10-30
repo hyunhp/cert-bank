@@ -18,7 +18,7 @@ Steps:
    - W: and one X: entry per wrong option (published letters, one per line), each starting with a
      short option name and a colon, giving the specific reason it works or fails.
    - T: one-sentence key idea that contrasts the right choice with the tempting wrong one.
-   - Accurate for current AWS services (check the availability notes in TODO.md #6). Never refer to
+   - Accurate for current services (check the availability notes in TODO.md section 1; for Azure exams also tools/qgen/AZURE.md). Never refer to
      options by letter in the text.
    Fetch documentation with `python3 tools/learn_fetch.py <url>` (shared cache) and read it with `--grep`; list
    the pages you relied on as `# src: <url>` lines at the top of the batch.

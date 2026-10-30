@@ -31,7 +31,7 @@ with sync_playwright() as p:
     data_reqs = []
     pg.on("request", lambda r: data_reqs.append(r.url) if "/data/" in r.url else None)
     pg.goto(BASE + "#exam=SAA-C03"); pg.wait_for_selector(".qcard"); pg.wait_for_timeout(800)
-    exam_files = [u for u in data_reqs if re.search(r"/data/[A-Z]{3}-C\d{2}\.json", u)]
+    exam_files = [u for u in data_reqs if re.search(r"/data/[A-Z]+(?:-[A-Z0-9]+)+\.json", u)]
     check("first visit loads one exam file", len(exam_files) == 1 and "SAA-C03" in exam_files[0], exam_files)
     check("index loaded", any("exams-index.json" in u for u in data_reqs), data_reqs)
     check("versioned exam URL", exam_files and exam_files[0].endswith("?v=" + index["exams"]["SAA-C03"]["v"]), exam_files)
@@ -45,7 +45,7 @@ with sync_playwright() as p:
     pg2.on("request", lambda r: reqs2.append(r.url) if "/data/" in r.url else None)
     pg2.goto(BASE + "#bookmarks"); pg2.wait_for_selector(".qcard", timeout=15000)
     check("bookmark from other exam shown", pg2.query_selector(f"#card-{aif}") is not None)
-    loaded = sorted(re.search(r"/data/([A-Z]{3}-C\d{2})\.json", u).group(1) for u in reqs2 if re.search(r"/data/[A-Z]{3}-C\d{2}\.json", u))
+    loaded = sorted(re.search(r"/data/([A-Z]+(?:-[A-Z0-9]+)+)\.json", u).group(1) for u in reqs2 if re.search(r"/data/[A-Z]+(?:-[A-Z0-9]+)+\.json", u))
     holders = sorted(c for c, e in index["exams"].items() if any(a <= int(aif[1:]) <= b for a, b in e["ids"]))
     check("bookmarks view loads only the exams holding bookmarked ids", loaded == holders and len(loaded) < len(index["exams"]), (loaded, holders))
     pg2.close()

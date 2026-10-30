@@ -9,7 +9,7 @@ Amazon Web Services, Palantir Technologies or Microsoft, and no real exam questi
 
 | | What it is | Link |
 |---|---|---|
-| **Question Bank** | 6,300+ original multiple-choice questions with detailed explanations | [Open](https://hyunhp.github.io/cert-bank/) |
+| **Question Bank** | 7,400+ original multiple-choice questions with detailed explanations | [Open](https://hyunhp.github.io/cert-bank/) |
 | **Study Guide** | A day-by-day study plan per exam: key concepts, what the exam looks for, two check questions and a one-line recap | [Open](https://hyunhp.github.io/cert-bank/study.html) |
 
 ## How to use
