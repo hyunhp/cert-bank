@@ -120,6 +120,13 @@ were told what had just been published, which caught most cross-batch overlap. A
 two independent Learn reviewers (17 fixes); glossary +10 terms (few-shot, fine-tuning, multimodal, system message, SLM,
 transformer, SSML, DefaultAzureCredential, NER, OCR; Learn-reviewed) and 16 vendor-neutral/az-* terms tagged AI-901. Foundry changes fast (agents classic retire 2027-03-31, Azure Language legacy features 2029-03-31, Language
 Studio 2027-03-20, Image Analysis/Custom Vision 2028-09-25), re-check with section 1.
+AI-103 DONE 2026-10-30: registered (5 domains, midpoint weights, 50 questions assumed, 120 min), 243 questions in b01-b10
+(every domain at its target; 39 multi-answer), each batch independently reviewed against Learn (~100 fixes, ~25 cross-batch
+overlaps replaced as batches were ingested one by one). Facts found: Azure OpenAI On Your Data retired 2026-10-14 (Foundry
+IQ knowledge base or classic RAG instead); Foundry portal workflows retire 2026-12-01 (Microsoft Agent Framework);
+Connected Agents gone from the new Agent Service (a2a tool v1.0 GA); Sora 2 video is preview, no GA video model (2 stems
+say so); Memory, agent guardrails, many agent evaluators, agent Monitor tab metrics are preview; sku capacity units per TPM
+differ by model. Open: AI-103 study guide and glossary terms.
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's

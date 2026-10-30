@@ -1,0 +1,457 @@
+# AI-103 D1 T1.3 Manage, monitor, and secure AI systems (18 questions: quotas, rate limits, PTU and spillover, cost, safety and drift monitoring, Application Insights, Azure AI Search health, keyless auth, private networking, Foundry RBAC, Key Vault)
+
+@ AI-103 D1 T1.3 advanced troubleshooting
+S: A support chatbot calls a chat model through a Global Standard deployment that was created with 10,000 tokens per minute (TPM). During business hours many calls fail with HTTP 429 and the message "Rate limit is exceeded". The Model quota page shows 200,000 TPM of quota for that model and deployment type in the region, of which only 10,000 is assigned. What should the developer do first?
+A: Edit the deployment and raise its TPM allocation, because the TPM assigned to a deployment sets its rate limit and unassigned regional quota is still free.
+B: Submit a quota increase request for the region, because a 429 that names a rate limit always means the subscription quota for the model is used up.
+C: Convert the deployment to provisioned throughput, because a Standard deployment keeps the TPM it was created with and cannot be given more later.
+D: Raise max_tokens on every request so each call returns more text, which lowers the number of calls the chatbot needs to send in each minute.
+K: A
+G: ## Quota versus deployment rate limit
+In Microsoft Foundry, Azure OpenAI quota is granted to a subscription **per region, per model and per deployment type**, in tokens per minute (TPM). Quota is a pool, not a limit on traffic by itself:
+- When you create a deployment you **assign** part of that pool to it, for example 10,000 TPM.
+- The assigned TPM becomes the deployment's **TPM rate limit**, and a matching **requests per minute (RPM)** limit is derived from it.
+- Unassigned quota sits idle. It does not raise any deployment's limit until you assign it.
+## Reading the 429
+Learn separates several kinds of 429. "Requests to ... have been limited" or "Rate limit is exceeded" means traffic exceeded the TPM or RPM of **this deployment's allocation**; the recommended action is to increase the deployment's TPM, rebalance quota across deployments, or request more quota. Learn also warns that you can have approved quota at the subscription level and still hit 429s because the quota is not allocated to the deployment receiving the traffic.
+## Example
+Quota 200,000 TPM, assigned 10,000 TPM. Editing the deployment (Deployments page or Management > Model quota) to 60,000 TPM raises its limit at once and leaves 140,000 TPM for other deployments.
+W: Raise deployment TPM: the deployment is throttled at its own 10,000 TPM allocation while 190,000 TPM of regional quota is unassigned, so assigning more TPM to it lifts the rate limit with no support request.
+X: B=Quota increase request: the subscription still has 190,000 TPM unassigned, so the pool is not exhausted; the bottleneck is the allocation of this one deployment.
+C=Convert to provisioned: TPM on a Standard deployment can be changed after creation in increments of 1,000, and provisioned throughput is a billing and capacity decision, not the fix for an under-allocated deployment.
+D=Raise max_tokens: the rate limiter counts the prompt plus max_tokens for each request, so a larger max_tokens uses up the TPM budget faster and makes the 429s worse.
+T: A 429 "rate limit exceeded" with unassigned quota left means the deployment's own TPM allocation is too small; assign more TPM to that deployment.
+V: Microsoft Foundry, Foundry Models, Azure OpenAI
+
+@ AI-103 D1 T1.3 advanced troubleshooting
+S: A nightly job summarizes support tickets through a Standard deployment. Every request sets max_tokens to 4,000, but the summaries average about 150 tokens. The job receives frequent HTTP 429 responses, yet the Processed Inference Tokens metric in Azure Monitor shows usage far below the deployment's TPM. What explains this, and what is the best fix?
+A: Azure Monitor token metrics run several hours behind real traffic, so the job is truly over its TPM and the only fix is a regional quota increase.
+B: Cached prompt tokens are counted twice against the rate limit, so the job should turn off prompt caching to halve the tokens that are counted.
+C: Each api-version has its own separate token allowance, so the job should pin an older api-version that still has a larger per-minute allowance.
+D: The rate limiter counts the prompt estimate plus max_tokens as each request arrives, so lowering max_tokens toward the real reply size frees budget.
+K: D
+G: ## How the TPM limit is counted
+The TPM rate limit is **not** applied to the tokens you are billed for. When a request arrives, the service computes an **estimated maximum processed-token count** from:
+- the prompt text and its length
+- the `max_tokens` setting
+- the `best_of` setting
+That estimate is added to a running counter that resets every minute. When the counter reaches the deployment's TPM, further requests get **429** until it resets.
+## Why the metrics look low
+Token usage metrics in Azure Monitor (such as Processed Inference Tokens) show **billed tokens from successfully processed requests**. A request with `max_tokens=4000` reserves about 4,000 completion tokens of rate-limit budget even if the model writes only 150. Learn lists "max_tokens overestimation" as a common reason for 429s while usage metrics sit well below quota.
+## Example
+A 1,000-token prompt with `max_tokens=4000` counts about 5,000 tokens toward the limit. With `max_tokens=300` it counts about 1,300, so almost four times as many requests fit in the same TPM.
+W: Lower max_tokens: the limiter reserves prompt plus max_tokens per request, so a 4,000 ceiling for 150-token answers burns the TPM budget long before billed usage gets close; sizing max_tokens to the expected reply fixes the throttling.
+X: A=Metrics lag, quota increase: the gap is not a delay; billed-token metrics and the request-time estimate measure different things, so asking for more quota treats the wrong cause.
+B=Disable prompt caching: caching does not double-count tokens against the limit, and turning it off would not touch the inflated max_tokens reservation that is causing the 429s.
+C=Pin an older api-version: the TPM limit belongs to the deployment's allocation, not to the API version used to call it, so changing api-version gives no extra allowance.
+T: Rate limits count prompt plus max_tokens when the request arrives, not billed tokens, so oversized max_tokens causes 429s even when usage metrics look low.
+V: Azure OpenAI, Azure Monitor, Foundry Models
+
+@ AI-103 D1 T1.3 applied use-case
+S: A document-tagging job starts at 02:00 and sends about 3,000 requests to a Standard deployment in the first few seconds. Many requests fail with HTTP 429 even though the total number of requests in each minute is below the deployment's requests-per-minute limit. Which TWO changes should the developer make? (Select TWO)
+A: Put the requests on a queue and send them at a steady controlled rate, because the RPM limit is checked over short windows of about 1 or 10 seconds.
+B: On each 429, wait for the time in the retry-after-ms header, or back off exponentially with jitter, and stop after a capped number of retries.
+C: Resend every rejected request immediately in a tight loop until it succeeds, because rejected requests do not count toward the per-minute limit.
+D: Split the job across both API keys of the same resource, because each key on a Foundry resource has its own separate TPM and RPM counter.
+E: Raise best_of on each request so that a single call returns several candidate tags, which reduces the total number of requests the job sends.
+K: A,B
+G: ## RPM is enforced in short windows
+The requests-per-minute (RPM) limit expects traffic to be **evenly spread across the minute**. Azure OpenAI evaluates the incoming rate over a small period, typically **1 or 10 seconds**. If more requests arrive in that window than the RPM implies, new requests get 429 until the next window.
+- A 600 RPM deployment checked on 1-second windows throttles once more than 10 requests arrive in one second.
+- So a burst at 02:00:00 can be throttled even though the minute's total is under the limit.
+## Handling 429 correctly
+Learn's guidance:
+- Use the `retry-after-ms` header on the 429 when present; otherwise use **exponential backoff with random jitter**.
+- Cap the number of retries (for example 5 to 10).
+- **Unsuccessful requests still count toward the per-minute rate limit**, so resending without backing off makes throttling worse.
+- Avoid sharp spikes, ramp up gradually, and queue non-urgent work to process it at a controlled rate.
+The `x-ratelimit-remaining-requests` and `x-ratelimit-remaining-tokens` headers on every response let the client slow down before it hits 429.
+W: A=Queue at a steady rate: spreading 3,000 requests across the minute keeps each 1- or 10-second window under the RPM-derived threshold, which removes the burst that triggers the 429s.
+B=Honor retry-after-ms with backoff: waiting the advised time, or backing off exponentially with jitter and a retry cap, lets throttled requests succeed without adding more load during the throttled window.
+X: C=Immediate tight retry loop: failed requests still count toward the rate limit, so instant resends keep the deployment throttled and stretch out the failures.
+D=Split across API keys: the rate limit belongs to the deployment's assigned TPM and RPM, not to a key, so both keys share the same counters.
+E=Raise best_of: each increment of best_of multiplies the token estimate counted against the rate limit, so it pushes the job toward more 429s, not fewer.
+T: RPM limits are enforced over 1- to 10-second windows, so smooth bursts with a queue and retry 429s with retry-after-ms or exponential backoff with jitter.
+V: Azure OpenAI, Foundry Models
+
+@ AI-103 D1 T1.3 advanced use-case
+S: An online retailer serves its shopping assistant from a Global Provisioned Throughput deployment. During flash sales utilization reaches 100% and some calls return HTTP 429. The same Foundry resource already has a Global Standard deployment of the same model and version. Overflow must go to the standard deployment for every request, without changing application code. What should the developer configure?
+A: Add the x-ms-spillover-deployment header to every inference request, naming the standard deployment as the target for any overflow traffic.
+B: Set the spilloverDeploymentName property on the provisioned deployment to the name of the standard deployment in the same Foundry resource.
+C: Buy an Azure reservation for more PTUs, because a reservation adds guaranteed capacity to the existing provisioned deployment right away.
+D: Change the provisioned deployment's version upgrade policy so that the service sends overflow requests to the newest default model version.
+K: B
+G: ## Spillover for provisioned deployments
+A provisioned deployment reserves a fixed amount of capacity, measured in provisioned throughput units (PTUs). When it is fully used it returns non-200 responses such as **429**. **Spillover** routes those overage requests to a **standard deployment** in the **same Foundry resource**, so bursts are served at standard (pay-per-token) rates instead of failing.
+Prerequisites: a provisioned deployment and a pay-as-you-go deployment of the **same model and version** in the same resource.
+## Two ways to turn it on
+- **For all requests**: set the deployment property `spilloverDeploymentName` to the standard deployment's name, during creation or on an existing provisioned deployment. No client change.
+- **Per request**: send the `x-ms-spillover-deployment` header on the requests that may spill. Requests without the header never spill. If both are set, the deployment property wins.
+## Seeing it work
+Spilled responses carry `x-ms-spillover-from-deployment` and `x-ms-spillover-error` (for example 429). In Azure Monitor, split the Azure OpenAI Requests metric (it has an `IsSpillover` dimension) or by deployment to compare traffic on each deployment.
+W: Set spilloverDeploymentName: the deployment-level property enables spillover for every request to the provisioned deployment, so overflow moves to the matching standard deployment with no change to the shopping assistant's code.
+X: A=Per-request header: x-ms-spillover-deployment works, but it has to be added to each request by the client, which breaks the requirement to leave the application code unchanged.
+C=Buy a reservation: Azure reservations are a billing discount on the PTU meter; Learn states they don't guarantee capacity and do not add PTUs to a deployment.
+D=Version upgrade policy: the policy decides when a deployment moves to a new model version, and it has nothing to do with routing excess traffic.
+T: To send provisioned overflow to a standard deployment for all requests without code changes, set spilloverDeploymentName on the provisioned deployment.
+V: Foundry Models, Azure OpenAI, provisioned throughput
+
+@ AI-103 D1 T1.3 applied comparison
+S: An operations team runs a contract-review app on a provisioned (PTU) deployment and wants an Azure Monitor alert that fires before the deployment starts throttling calls. Which metric should the alert use?
+A: The Latency metric in the Cognitive Services HTTP Requests category, which is built to show when a provisioned deployment has run out of capacity.
+B: Processed Prompt Tokens, which counts input tokens and also turns red in Metrics explorer once all of the deployment's PTUs are being used.
+C: Provisioned-managed Utilization V2, which reports PTUs consumed as a percentage of PTUs deployed; at 100% calls are throttled with 429.
+D: Blocked Volume, which counts the calls that the service rejected because the deployment had no free PTU capacity at the time of the request.
+K: C
+G: ## Watching a provisioned deployment
+A provisioned deployment has a fixed capacity. Azure Monitor collects platform metrics for it automatically, and **Provisioned-managed Utilization V2** (`AzureOpenAIProvisionedManagedUtilizationV2`) is the capacity gauge:
+- It is calculated as `(PTUs consumed / PTUs deployed) x 100`.
+- When utilization is **100% or more, calls are throttled and 429 is returned**.
+- It can be split by ModelDeploymentName, ModelName, ModelVersion and StreamType.
+The older Provisioned-managed Utilization metric is deprecated and replaced by the V2 metric.
+## Other metrics and what they mean
+- **Azure OpenAI Requests**: call counts, splittable by StatusCode and IsSpillover.
+- **Time to Response, Time Between Tokens, Time to Last Byte**: Azure OpenAI latency measures.
+- **Latency** under Cognitive Services - HTTP Requests: a legacy metric that Learn says produces misleading results for Azure OpenAI.
+- **Blocked Volume**: calls rejected by the content filter.
+## Example
+A metric alert "Provisioned-managed Utilization V2 average > 85% for 5 minutes" warns the team before throttling starts, so they can add PTUs or enable spillover.
+W: Utilization V2: it measures how much of the deployed PTU capacity is in use and the service throttles at 100%, so a threshold below 100% gives a warning before 429s begin.
+X: A=Legacy Latency metric: it is a generic Cognitive Services HTTP metric that Learn says is not designed for Azure OpenAI and is misleading for diagnosing it; it does not measure PTU capacity.
+B=Processed Prompt Tokens: it counts input tokens processed, but it is not a percentage of deployed capacity and has no built-in link to the throttling point.
+D=Blocked Volume: it counts calls rejected by the content filter (guardrails), not calls refused for lack of PTU capacity.
+T: Alert on Provisioned-managed Utilization V2 to catch a PTU deployment approaching 100% utilization, the point where calls are throttled with 429.
+V: Azure Monitor, Azure OpenAI, provisioned throughput
+
+@ AI-103 D1 T1.3 advanced use-case
+S: Three internal teams call one shared model deployment through Azure API Management. Finance wants each team held to a fixed monthly token budget, and engineering wants a per-minute token cap per team so one team cannot starve the others. What should the developer configure?
+A: Three Standard deployments with one third of the TPM each, because a deployment's TPM allocation also stops calls once a monthly token budget is spent.
+B: A Microsoft Cost Management budget for each team, because Cost Management budgets reject a team's API calls as soon as its spending passes the limit.
+C: The rate-limit-by-key policy with a call count per team, because API Management converts the number of calls into exact token counts for each model.
+D: The llm-token-limit policy keyed on each team's subscription ID, with a tokens-per-minute value plus a token-quota that uses a Monthly quota period.
+K: D
+G: ## Per-consumer token limits at the gateway
+A deployment's TPM limit applies to **everyone** who calls it. To give each consumer its own limits, put Azure API Management in front of the model and use the **`llm-token-limit`** policy. It limits language model token use **per key**:
+- `counter-key`: what to count against, for example the API Management subscription ID of each team.
+- `tokens-per-minute`: a rate limit. When it is exceeded the caller gets **429 Too Many Requests** with a `Retry-After` header.
+- `token-quota` with `token-quota-period` (Hourly, Daily, Weekly, Monthly or Yearly): a quota. When it is exceeded the caller gets **403 Forbidden**.
+- Either the rate, the quota or both must be set, and `estimate-prompt-tokens` (true or false) is a required attribute.
+## Example
+```
+<llm-token-limit counter-key="@(context.Subscription.Id)"
+  tokens-per-minute="20000" token-quota="5000000" token-quota-period="Monthly"
+  estimate-prompt-tokens="false" />
+```
+Each team's subscription key gets its own 20,000-token-per-minute cap and a 5,000,000-token monthly quota.
+## Budgets are alerts
+Cost Management budgets track spending and send alerts; they do not block API calls.
+W: llm-token-limit per team: one policy enforces both a tokens-per-minute cap and a monthly token quota for each counter key, so each team's subscription gets its own limits on the shared deployment.
+X: A=Split deployments by TPM: a deployment's TPM is a per-minute rate limit only; it has no monthly budget, and splitting the model into three deployments is not needed to separate consumers.
+B=Cost Management budgets: budgets watch spending and notify people when thresholds are crossed, but they do not reject or throttle API calls.
+C=rate-limit-by-key: this policy counts calls, not tokens; one call can use 50 tokens or 50,000, so it cannot enforce a token budget.
+T: Use API Management's llm-token-limit policy with a per-consumer counter key to enforce both per-minute token caps (429) and token quotas over a period (403).
+V: Azure API Management, Microsoft Cost Management, Foundry Models
+
+@ AI-103 D1 T1.3 applied troubleshooting
+S: A team fine-tuned a model and deployed it for a two-day pilot, then stopped sending traffic. Weeks later, cost analysis in Microsoft Cost Management, grouped by Resource and then by Meter, still shows a steady hourly charge for the Foundry resource. What is the most likely cause and fix?
+A: Fine-tuning training charges recur every hour while the training data file remains uploaded, so delete the training file from the project.
+B: Fine-tuned deployments incur an hourly hosting charge while deployed even with no traffic, so delete the deployment and redeploy when needed.
+C: The base model's Standard deployment is billed per hour by default, so switch it to Batch so that it is billed only while batch jobs run.
+D: Cost analysis shows estimates that include reserved capacity, so the charge disappears by itself once the current billing cycle closes.
+K: B
+G: ## How fine-tuned models are billed
+Learn lists three charges for Azure OpenAI fine-tuned models:
+- **Training**: per token or per hour, depending on the model, while the training job runs.
+- **Hosting**: an **hourly cost per deployed model, even if the model is unused**.
+- **Inference**: per token, when the model is called.
+Learn warns that fine-tuned deployments incur hosting charges while deployed, even in low-usage periods, and advises removing deployments you do not need.
+## Finding the meter
+In Microsoft Cost Management, group cost analysis by **Resource** and then by **Meter**. Each charge maps to a meter, so a steady hourly hosting meter stands out from token meters, which follow traffic.
+## Contrast with base models
+A Standard deployment of a base model is billed per token, so with no traffic it has no usage charge. The fine-tuned deployment is the one that keeps costing money while idle.
+W: Delete the idle fine-tuned deployment: hosting is billed hourly for as long as the fine-tuned model is deployed, regardless of traffic, so removing it stops the charge and the model can be redeployed later.
+X: A=Training data file: training is charged while the training job runs; an uploaded data file does not create a recurring hourly training charge.
+C=Base model hourly billing: Standard deployments are billed per token, so an idle base deployment has no hourly charge, and Batch is a cheaper per-token option for asynchronous jobs.
+D=Reserved capacity estimate: reservations apply to provisioned throughput, which this team does not use, and a real hosting meter will keep charging every cycle until the deployment is removed.
+T: A deployed fine-tuned model is billed hourly for hosting even with no traffic, so delete fine-tuned deployments you are not using.
+V: Microsoft Cost Management, Azure OpenAI, Microsoft Foundry
+
+@ AI-103 D1 T1.3 applied use-case
+S: A healthcare chatbot runs on a model deployment with guardrails. The safety team wants an Azure Monitor alert when the number of requests rejected by the content filter rises sharply on that deployment. Requests that the filter only annotates must not count. Which metric should the alert use?
+A: Harmful Volume Detected, which counts only the calls blocked by the content filter and leaves out calls the filter merely annotated as harmful.
+B: Azure OpenAI Requests split by StatusCode, because calls blocked by guardrails are reported as server errors and no other calls return that code.
+C: Blocked Volume, split by ModelDeploymentName, which counts the calls to the deployment that the content filter rejected in each period.
+D: Total Volume Sent For Safety Check, which counts only the calls rejected by the content filter during each one-minute interval.
+K: C
+G: ## Safety metrics in Azure Monitor
+Azure OpenAI publishes a **ContentSafety - Risks&Safety** metric category. These platform metrics are collected automatically, can be split by dimensions and can drive alerts:
+- **Blocked Volume** (`RAIRejectedRequests`): calls **rejected** by the content filter. Dimensions include ModelDeploymentName, ModelName, TextType and Category.
+- **Harmful Volume Detected** (`RAIHarmfulRequests`): calls detected as harmful in **both block and annotate mode**.
+- **Total Volume Sent For Safety Check** (`RAITotalRequests`): all calls evaluated by the content filter.
+- **Safety System Event** (`RAISystemEvent`): system events for risks and safety monitoring.
+## Picking the right one
+"Detected" is broader than "blocked". If a guardrail is set to annotate only, harmful content is flagged and counted in Harmful Volume Detected but the call still succeeds. Blocked Volume counts only the calls that were actually rejected.
+## Example
+Metric alert: Blocked Volume, total, split by ModelDeploymentName = `triage-chat`, dynamic threshold. Splitting by Category also shows which harm category is driving the blocks.
+W: Blocked Volume: it counts exactly the calls rejected by the content filter and can be split per deployment, which matches "rejected, not annotated" for one deployment.
+X: A=Harmful Volume Detected: it counts calls detected as harmful in both block and annotate mode, so annotated-only requests would be included, which the team wants to exclude.
+B=Requests by StatusCode: a filtered prompt is reported as a client error mixed with every other bad request, and it is not a server error, so the status code split cannot isolate guardrail rejections.
+D=Total Volume Sent For Safety Check: it counts every call evaluated by the content filter, blocked or not, so it measures traffic volume rather than rejections.
+T: Use Blocked Volume to monitor requests rejected by guardrails; Harmful Volume Detected also counts annotate-only detections.
+V: Azure Monitor, Azure OpenAI, guardrails
+
+@ AI-103 D1 T1.3 advanced troubleshooting
+S: Last week a claims assistant began returning answers in a different format, although no code, prompt or guardrail changed. The deployment's Details tab shows a newer model version than before. Its upgrade policy is "Upgrade once new default version becomes available". The team wants to choose when the version changes and to test new versions first. What should the developer do?
+A: Pin an older api-version query parameter in the client code, because the api-version value selects which model weights the deployment runs.
+B: Add a system message telling the model to keep its earlier answer format, because the system message also pins the deployment to the model version it was tested with.
+C: Move the workload to a provisioned deployment, because provisioned deployments apply new versions automatically, but only during weekends.
+D: Change the upgrade policy so the deployment stops following each new default version, and test new versions in a separate deployment before switching traffic.
+K: D
+G: ## Behavior drift from model version upgrades
+A Foundry model deployment has two separate versions:
+- the **model version** (for example `2024-08-06`), which is the model weights that answer requests
+- the **API version** (`api-version`), which is the contract your code uses
+A new model version can change output style, format and quality even when nothing in your app changed. That is a form of drift you should monitor for and control.
+## Upgrade policies (Standard deployments)
+Set per deployment, at deploy time or later in the deployment settings:
+- **Upgrade once new default version becomes available**: moves automatically when a new default version is published. This is what surprised the team.
+- **Once the current version expires**: stays on the current version and moves automatically only when that version is retired.
+- **Opt out of automatic model version upgrades**: you upgrade manually; when the version is retired, the deployment stops working.
+With either of the last two, the team decides when to move before the retirement date. Azure notifies customers at least two weeks before a new version becomes the default, and Learn advises testing applications with the new version after release.
+## Example
+Set `claims-prod` to Once the current version expires, create `claims-next` with the new version, run your evaluation set against both, then upgrade production (or switch the app's deployment name) when the results are acceptable.
+W: Stop following the default and test separately: a policy that no longer moves with each new default version keeps production on the tested version, and a side-by-side deployment lets the team compare the new version before choosing when to switch, ahead of the retirement date.
+X: A=Pin an older api-version: the API version is the request contract, not the model weights, so pinning it does not undo a model version upgrade.
+B=System message: a system message shapes the prompt the model sees, but it cannot select or hold a model version, so the next default version would still replace the weights the team tested.
+C=Provisioned deployment: there is no weekend-only upgrade behavior, and moving to provisioned throughput changes billing and capacity rather than solving version control.
+T: To stop unexpected behavior drift from model upgrades, take the deployment off "upgrade once new default version becomes available" and test new versions in a separate deployment.
+V: Foundry Models, Microsoft Foundry
+
+@ AI-103 D1 T1.3 applied troubleshooting
+S: A developer opens the Monitor tab (Agent Monitoring Dashboard, preview) for an agent in the Microsoft Foundry portal to check token usage, latency and run success rate. The agent is handling production traffic, but every chart is empty. What is the most likely missing step?
+A: Connect an Application Insights resource to the Foundry project, because the agent monitoring dashboard reads its telemetry from Application Insights.
+B: Create a diagnostic setting that sends the Foundry resource's metrics to a storage account, because the dashboard reads monitoring data from storage.
+C: Assign end users the Foundry Agent Consumer role, because only runs made by holders of that role are recorded for the agent's monitoring dashboard.
+D: Assign the project's managed identity the Cognitive Services Usages Reader role, because the dashboard can only load run data through that role.
+K: A
+G: ## Where Foundry monitoring data lives
+Microsoft Foundry's production monitoring is **integrated with Azure Monitor Application Insights**. Agent telemetry (traces, token counts, latency, run outcomes and evaluation results) is stored in the Application Insights resource **connected to the Foundry project**, and the portal views query it.
+The agent **Monitor** tab (the Agent Monitoring Dashboard, currently in preview) shows summary cards and charts for:
+- token usage
+- latency
+- run success rate
+- evaluation and red-teaming results, when configured
+Its prerequisites are a Foundry project with an agent and **an Application Insights resource connected to the project**. Retention and billing follow the Application Insights settings.
+## Access to the data
+Viewers also need Azure RBAC access to the Application Insights resource, and Log Analytics Reader on the linked workspace for log-based views.
+## Example
+No Application Insights connection means nothing to query, so the dashboard is empty even with heavy traffic. After connecting one (and instrumenting tracing), new runs start appearing in the charts.
+W: Connect Application Insights: the dashboard reads agent telemetry from the project's connected Application Insights resource, so without that connection there is no data to show.
+X: B=Diagnostic setting to storage: diagnostic settings route platform logs and metrics, but the agent dashboard does not read from a storage account; it queries Application Insights.
+C=Foundry Agent Consumer: this role grants least-privilege access to call agent endpoints; it has no effect on whether runs are recorded for monitoring.
+D=Cognitive Services Usages Reader: this role lets users see subscription quota and usage for deployment checks, and it has nothing to do with agent telemetry.
+T: Foundry's monitoring dashboards read from Application Insights, so connect an Application Insights resource to the project before expecting any agent metrics.
+V: Application Insights, Azure Monitor, Foundry Agent Service, Microsoft Foundry
+
+@ AI-103 D1 T1.3 applied troubleshooting
+S: An indexer loads 10,000 PDF files from Blob Storage into an Azure AI Search index for a RAG app. The indexer's last run shows Success, but the index contains only 9,940 documents, and users report that some policies are never found. How should the developer investigate?
+A: Treat Success as proof that every file was indexed, and look for a scoring profile on the index that hides the 60 lowest-scoring documents from all results.
+B: Open the run's execution details or call Get Indexer Status, because a run can succeed while some documents fail if errors stay below Max failed items.
+C: Add a replica to the search service, because when partitions are full the service drops new documents silently without logging any indexer errors.
+D: Check only the Azure activity log, because the portal hides document-level indexer errors and the activity log is where per-document failures go.
+K: B
+G: ## What indexer status really means
+Azure AI Search reports each indexer run with a status:
+- **Success**: the run completed. Learn notes that **a run can be successful even if individual documents have errors**, as long as the number of errors is less than the indexer's **Max failed items** setting.
+- **Failed**: errors exceeded Max failed items and indexing stopped.
+- **In Progress** and **Reset** describe active and fully re-run indexers.
+## Where to see per-document problems
+- **Azure portal**: select the indexer to see the execution history (up to 50 recent runs). Each run lists start and end times plus **Errors and Warnings**; you can download them as CSV.
+- **REST**: `GET https://[service].search.windows.net/indexers/[name]/status?api-version=...` returns `lastResult` and `executionHistory`, with `itemsProcessed`, `itemsFailed` and the error list.
+- **Azure Monitor metrics**: Document processed count and Skill execution invocation count, split by indexer, show trends and support alerts.
+Warnings are common (for example, PDFs with no extractable text) and don't always mean a problem.
+## Example
+`itemsProcessed: 10000, itemsFailed: 60` with errors such as "document is too large" points to the 60 missing files to fix and re-index.
+W: Execution details or Get Indexer Status: a Success run can still contain failed documents below the Max failed items threshold, and the per-run error list names each failed document and why.
+X: A=Scoring profile hides documents: scoring profiles change ranking order, they never remove documents from the index count, and Success does not prove every document was indexed.
+C=Add a replica: replicas add query capacity, not storage, and the service reports indexing failures instead of silently dropping documents.
+D=Activity log only: the activity log records control-plane events such as key retrieval; per-document indexer errors appear in the indexer's execution history and status API.
+T: An indexer run marked Success can still have failed documents below Max failed items, so check execution history or Get Indexer Status for per-document errors.
+V: Azure AI Search, Azure Blob Storage, Azure Monitor
+
+@ AI-103 D1 T1.3 advanced troubleshooting
+S: A RAG assistant queries an Azure AI Search index. During weekday peaks some search calls fail with HTTP 503, and the Throttled search queries percentage metric spikes at the same times. Indexers run only at night. Which change most directly addresses the problem?
+A: Add replicas to the search service, because replicas add query-serving capacity and query-based throttling is usually relieved by more replicas.
+B: Add partitions to the search service, because partitions add storage and indexing capacity, and that extra capacity is what relieves query throttling.
+C: Raise the chat model deployment's TPM, because Azure AI Search throttles retrieval queries whenever the connected model is returning 429s.
+D: Switch the search service back to API key authentication, because validating Microsoft Entra tokens is the main cause of 503 responses at peak.
+K: A
+G: ## Throttling in Azure AI Search
+Azure AI Search throttles when it is at capacity. From the client side:
+- a throttled call returns **HTTP 503**
+- during indexing, **HTTP 207** can also mean some items failed to index under load
+The **Throttled search queries percentage** metric shows the share of queries dropped instead of processed in each minute, and you can alert on it. Resource logs routed to Log Analytics let you chart 503s by operation (`Query.Search`, `Query.Suggest` and so on) over time.
+## Replicas versus partitions
+- **Replicas** are copies of the index that serve queries; more replicas mean more queries per second and high availability.
+- **Partitions** split the index storage and indexing work.
+Learn's rule of thumb: a simple fix for most throttling is more resources, **typically replicas for query-based throttling, or partitions for indexing-based throttling**. Both add cost, so first confirm the pattern with metrics.
+## Example
+Throttling at 10:00 to 12:00 on weekdays, no indexing at those times, rising SearchQueriesPerSecond: add a replica (or two) and watch the throttled percentage drop.
+W: Add replicas: the 503s come from query load at peak, not indexing, and replicas are the unit that adds query capacity, which is Learn's standard fix for query-based throttling.
+X: B=Add partitions: partitions mainly add storage and indexing throughput, which Learn ties to indexing-based throttling; indexing here runs only at night, so the daytime query load is not what partitions address.
+C=Raise model TPM: the model's rate limit and the search service's capacity are separate; a 429 from the model does not cause Azure AI Search to return 503.
+D=Back to API keys: the authentication method is not what drives capacity throttling, and returning to keys would weaken security without adding capacity.
+T: HTTP 503 with a rising Throttled search queries percentage during query peaks means the search service needs more replicas; use partitions for indexing load.
+V: Azure AI Search, Azure Monitor
+
+@ AI-103 D1 T1.3 applied use-case
+S: A web app on Azure App Service calls a Microsoft Foundry project with an API key stored in the app settings. The security team wants no secret stored or rotated anywhere for this app, and wants any leaked key to stop working. Which TWO actions should the developer take? (Select TWO)
+A: Enable a managed identity on the web app, assign it the Foundry User role on the Foundry resource and use DefaultAzureCredential in the code.
+B: Set disableLocalAuth to true on the Foundry resource, or assign the Azure Policy that disables key access, so that API keys are rejected.
+C: Move the API key into Azure Key Vault and load it through a Key Vault reference, which turns the existing key-based call into a keyless one.
+D: Assign the web app's identity the Cognitive Services Contributor role, because that is the role Foundry checks for project inference calls.
+E: Regenerate both API keys every day with automation, which Microsoft Entra ID treats as the same as token-based authentication for audits.
+K: A,B
+G: ## Keyless authentication in Foundry
+Foundry accepts two kinds of credentials:
+- **API keys**: static secrets that give full access to the resource with no per-user identity, scope or audit.
+- **Microsoft Entra ID tokens** (keyless): OAuth 2.0 bearer tokens for the scope `https://ai.azure.com/.default`, checked against Azure RBAC.
+Microsoft recommends Entra ID for production. Some features, such as Foundry Agent Service and evaluations, accept only Entra ID.
+## Managed identity removes the secret
+A **managed identity** is an Entra identity that Azure creates for a resource and whose credentials Azure rotates, so there is nothing to store. In code, `DefaultAzureCredential` uses your `az login` session locally and the managed identity in Azure, so the same code works in both places. The identity needs a data-plane role: for Foundry projects that is **Foundry User**. Learn tells you not to use roles that start with "Cognitive Services" for Foundry work (except Cognitive Services Usages Reader for quota visibility).
+## Turning keys off
+Keyless code alone leaves the keys valid. Set `disableLocalAuth` to `true` (Bicep/ARM, or `Set-AzCognitiveServicesAccount -DisableLocalAuth $true`), or assign the built-in Azure Policy "Azure AI Services resources should have key access disabled". The change can take minutes to hours to reach the gateway; confirm that an old key now gets HTTP 401.
+W: A=Managed identity with Foundry User: the app gets Entra tokens from its managed identity, so no key is stored, and Foundry User grants the data-plane actions the calls need.
+B=Disable local authentication: with key access disabled, every API key, including a leaked one, is rejected and only Entra ID tokens are accepted.
+X: C=Key Vault reference: the vault protects where the key is stored, but the app still authenticates with the same key, which still must be rotated and still works if leaked.
+D=Cognitive Services Contributor: Learn says not to use Cognitive Services roles for Foundry scenarios; Foundry User is the least-privilege role for building and calling in a project.
+E=Daily key rotation: rotation shortens how long a leaked key is useful, but the app still stores a secret and Entra ID does not treat keys as token-based authentication.
+T: Go keyless by giving the app a managed identity with the Foundry User role and DefaultAzureCredential, then disable local (key) authentication on the resource.
+V: Microsoft Entra ID, Azure App Service, Microsoft Foundry, Azure Policy
+
+@ AI-103 D1 T1.3 advanced troubleshooting
+S: A Foundry resource has public network access set to Disabled and a private endpoint in a hub virtual network. Developers in the office connect over a site-to-site VPN and use the company's on-premises DNS servers. Their calls to the Foundry endpoint fail, and nslookup on their machines returns a public IP address. What should the network team do?
+A: Give developers a new privatelink-specific hostname for the endpoint, because clients behind a private endpoint must use a different URL from public clients.
+B: Re-enable public network access for all networks, because private endpoint DNS records only become active after the public endpoint has been reachable.
+C: Configure the on-premises DNS to resolve the privatelink name to the private endpoint IP, by forwarding to a resolver in Azure or by adding the A record.
+D: Assign the developers the Foundry User role at project scope, because a public IP answer from nslookup means RBAC is refusing their requests.
+K: C
+G: ## How private endpoint DNS works
+When you create a private endpoint for a Foundry resource, Azure changes the public DNS record into a **CNAME to a `privatelink` subdomain** and, by default, creates a **private DNS zone** for that subdomain with an A record pointing at the private endpoint's IP. The zone is linked to the virtual network.
+- From **inside the linked virtual network**, the name resolves to the private IP.
+- From **outside**, it resolves to the public endpoint, which is blocked when public network access is Disabled.
+Clients use **the same connection string** in both cases; no special URL is needed.
+## Custom and on-premises DNS
+On-premises DNS servers cannot see the Azure private DNS zone. Learn says to configure your DNS server to resolve the Foundry name in the `privatelink` subdomain to the private endpoint IP: delegate or conditionally forward that subdomain to a resolver that can query the private DNS zone (for example Azure DNS Private Resolver in the hub), or add the A records to your DNS server yourself.
+## Example
+`contoso-ai.services.ai.azure.com` -> CNAME `contoso-ai.privatelink.services.ai.azure.com`. On-premises DNS forwards `privatelink.services.ai.azure.com` to the hub resolver and gets `10.20.1.5`.
+W: Fix on-premises name resolution: the endpoint is reached only through the private IP, and the on-premises DNS returns the public address, so forwarding the privatelink zone to Azure or adding the A record makes the same hostname resolve privately.
+X: A=New privatelink hostname: Learn states that clients behind the private endpoint use the same connection string as public clients; DNS, not the URL, decides which address is reached.
+B=Re-enable public access: private endpoint DNS does not depend on the public endpoint, and opening public access defeats the network isolation requirement.
+D=Foundry User role: a public IP in nslookup is a name resolution problem; RBAC applies only after a request reaches the service and would not change DNS answers.
+T: When on-premises clients resolve a private-endpoint Foundry resource to its public IP, make on-premises DNS resolve the privatelink name to the private endpoint IP.
+V: Azure Private Link, Azure DNS, Microsoft Foundry
+
+@ AI-103 D1 T1.3 applied use-case
+S: A RAG app uses an Azure AI Search indexer (Basic tier) to read policy PDFs from a Blob Storage account. The security team has set AllowSharedKeyAccess to false on the storage account and forbids any secret in the indexer's data source definition. Which configuration lets the indexer read the blobs?
+A: Turn on the search service's system-assigned managed identity, grant it Storage Blob Data Reader on the storage account, and use a ResourceId connection string with no key.
+B: Generate an account SAS token with read and list permissions on the container, put it in the data source connection string, and rotate it every month with automation.
+C: Grant the Foundry project's managed identity Storage Blob Data Reader on the storage account, because indexers used by a Foundry RAG app run under the project identity.
+D: Grant the search service's managed identity Search Index Data Reader on the storage account, because that role lets a search service read source files for indexing.
+K: A
+G: ## Indexer connections without secrets
+An indexer reads source content through a **data source** object. A classic Blob Storage connection string carries an account key or a SAS token, which is a secret. Azure AI Search can instead connect with a **managed identity** (Basic tier or higher):
+- Enable a system-assigned (or user-assigned) managed identity on the **search service**.
+- In the storage account's Access control (IAM), give that identity the data role for the task: **Storage Blob Data Reader** for blob indexing (Storage Table Data Reader for tables).
+- Set the data source connection string to a **ResourceId** with no account key or password. A user-assigned identity also needs the `identity` property on the data source.
+The connection and role assignment are validated when the indexer runs.
+## Shared Key disabled
+With `AllowSharedKeyAccess` set to false, Blob Storage rejects requests authorized with Shared Key. Account SAS and service SAS tokens are signed with the account key, so they are rejected too; Microsoft Entra authorization (and user delegation SAS) still works.
+## Firewalled storage
+If the storage account is also network-protected and in the same region as the search service, Learn requires the system-assigned identity plus either the trusted service exception or a resource instance rule.
+## Example
+`"connectionString": "ResourceId=/subscriptions/<sub-id>/resourceGroups/rg-rag/providers/Microsoft.Storage/storageAccounts/stpolicies/;"` with Storage Blob Data Reader assigned to the search service's identity on `stpolicies`.
+W: Search service identity with Storage Blob Data Reader: the indexer authenticates to Blob Storage with the search service's Entra identity, which is unaffected by disabling Shared Key, and the ResourceId connection string contains no secret.
+X: B=Account SAS token: an account SAS is signed with the storage account key, so it is rejected when Shared Key access is disallowed, and it is still a secret stored in the data source.
+C=Foundry project identity: the indexer runs inside the search service and connects as the search service's own managed identity, so a role given to the project's identity is never used.
+D=Search Index Data Reader: it is a search data-plane role that authorizes queries on search indexes; it grants no blob read actions on a storage account.
+T: To index Blob Storage without secrets, give the search service a managed identity, assign it Storage Blob Data Reader and use a ResourceId connection string.
+V: Azure AI Search, Azure Blob Storage, Microsoft Entra ID
+
+@ AI-103 D1 T1.3 applied definition
+S: A security team wants the secrets for Foundry connections that do not use Microsoft Entra ID, such as an API key for a third-party data source, kept in the company's own Azure Key Vault rather than the default store. Which statement about setting this up is correct?
+A: By default Foundry keeps connection secrets as plain text in the project storage account, and adding a Key Vault connection encrypts existing ones.
+B: Foundry copies existing connection secrets into the new vault automatically, so the Key Vault connection can be added at any time later on.
+C: Create the Key Vault connection before any other connections exist on the Foundry resource and its projects, and use only one per Foundry resource.
+D: Each Foundry project can have its own Key Vault connection, and deleting a vault later affects only the single project that used that vault.
+K: C
+G: ## Where Foundry stores connection secrets
+Connections let a Foundry project reach other services. Connections that use Microsoft Entra ID need no stored secret. For connections that use keys or other secrets:
+- **By default**, Foundry stores connection details in a **Microsoft-managed Key Vault outside your subscription**.
+- To manage the secrets yourself, add an **Azure Key Vault connection** (bring your own vault).
+## Rules for a bring-your-own vault
+- The Foundry resource must have **no existing connections** at the resource or project level when you add it.
+- **One Azure Key Vault connection per Foundry resource.**
+- Foundry **does not migrate secrets**; you remove and recreate connections yourself.
+- **Deleting the vault breaks the Foundry resource**: every feature that depends on secret-based connections stops working. Deleting individual secrets can break other connections.
+- The Foundry resource's managed identity needs a role on the vault; **Key Vault Secrets Officer** is the minimal role (Key Vault Contributor or Administrator also work).
+## Tip
+Prefer Entra ID connections wherever the target service supports them, so fewer secrets need a vault at all.
+W: Before other connections, one per resource: Learn requires a Foundry resource with no existing connections and allows only one Key Vault connection per Foundry resource, so it must be planned at setup time.
+X: A=Plain text in project storage: the default store is a Microsoft-managed Key Vault outside your subscription, not plain text, and adding a vault does not re-encrypt or move anything.
+B=Automatic migration: Foundry does not support secret migration, which is why the connection must exist before other connections are created.
+D=Per-project vaults: the limit is one Key Vault connection per Foundry resource, and deleting the vault breaks the whole resource, not one project.
+T: Add a bring-your-own Key Vault connection to a Foundry resource before any other connections exist; only one is allowed and secrets are never migrated.
+V: Azure Key Vault, Microsoft Foundry
+
+@ AI-103 D1 T1.3 applied troubleshooting
+S: A RAG backend running in Azure Container Apps uses its managed identity to query an Azure AI Search index. The search service was created with default settings, and every query from the backend is rejected. API keys must not be used. Which TWO actions fix this with least privilege? (Select TWO)
+A: Set the search service's API access control to Role-based access control, or to Both during migration, since the default accepts only API keys.
+B: Assign the managed identity the Search Index Data Reader role on the search service, or on the single index that the backend queries.
+C: Assign the managed identity Search Service Contributor, because it is the least-privileged built-in role that can run queries on an index.
+D: Enable the trusted service exception on the search service, because it lets managed identities of Azure apps skip authentication on queries.
+E: Assign the managed identity the Foundry User role on the Foundry resource, because Foundry roles also authorize queries on connected indexes.
+K: A,B
+G: ## Data-plane access to Azure AI Search
+A new search service accepts **API keys only** for data-plane calls (create, load and query indexes). To use Microsoft Entra ID tokens, including tokens from a managed identity, you must **enable role-based access control**:
+- **API keys**: the default; tokens are not accepted.
+- **Role-based access control** (recommended): tokens only.
+- **Both**: keys or tokens; meant for the transition period. If a request carries both, the key is used.
+## Roles
+- **Search Index Data Reader**: read-only query access to index content. By default it applies to all indexes; it can be scoped to a single index.
+- **Search Index Data Contributor**: load and change index content.
+- **Search Service Contributor**: manage the service and its objects (indexes, indexers). Learn warns that Owner, Contributor and Search Service Contributor can retrieve admin keys, which give full read-write access to the data plane.
+## Example
+Enable RBAC, then assign Search Index Data Reader on the `policies-index` to the backend's managed identity. The backend's token now authorizes queries, and nothing else.
+W: A=Enable role-based access control: with the default API-key-only setting, the service ignores Entra tokens, so the backend's managed identity can never be authorized until RBAC is turned on.
+B=Search Index Data Reader: it grants read-only query access and can be scoped to the one index, which is exactly the least privilege the backend needs.
+X: C=Search Service Contributor: Learn says this role can create and manage search objects but cannot load documents or run queries, and it can retrieve admin keys, so it is both the wrong role and far too much privilege.
+D=Trusted service exception: this is a Storage firewall feature that lets the search service's own identity reach blobs for indexing; it does not bypass authentication for callers of the search service.
+E=Foundry User: Foundry roles authorize Foundry resources and projects; Azure AI Search checks its own Search Index Data roles on the search service.
+T: For keyless queries to Azure AI Search, turn on role-based access control on the service and give the caller Search Index Data Reader, scoped as narrowly as possible.
+V: Azure AI Search, Microsoft Entra ID, Azure Container Apps
+
+@ AI-103 D1 T1.3 applied comparison
+S: A company has published a customer-support agent in a Foundry project. A partner integration runs as a service principal that must only send requests to the agent's endpoint through the Responses API. It must not create or change agents, deploy models, or reach other Foundry data. Which role assignment follows least privilege?
+A: Foundry User on the project, because it is the least-privilege Foundry role for anyone who works with agents, including callers that only use them.
+B: Foundry Agent Consumer at project or agent scope, because it grants access to interact with agent endpoints and no development capabilities.
+C: Foundry Project Manager on the Foundry resource, because publishing an agent requires that callers of the published agent hold the same role.
+D: Reader on the Foundry resource, because read access to the resource is enough to send requests to an agent's endpoint and receive answers.
+K: B
+G: ## Foundry built-in roles at a glance
+Foundry roles authorize Microsoft Entra ID callers (keys bypass RBAC entirely). Key built-in roles:
+- **Foundry Agent Consumer**: interact with agent endpoints in a project. Least privilege for principals that only call agents.
+- **Foundry User**: reader access plus project data actions; least privilege for **developers who build and test** agents.
+- **Foundry Project Manager**: manage projects, build in them, **publish agents** and assign Foundry User to others.
+- **Foundry Account Owner** / **Foundry Owner**: manage resources and projects; Owner can also build.
+- Azure **Reader**: read access only; it cannot interact with agent endpoints.
+## Scopes
+Roles can be assigned at the Foundry resource, the project, or an **individual agent** (agent-scope assignments are evaluated for agent endpoint access). The Azure portal currently assigns Foundry Agent Consumer only at account scope; use the Azure CLI (`az role assignment create`) for project or agent scope.
+## Example
+Partner app needs only the support agent: assign Foundry Agent Consumer at that agent's scope. Internal developers building agents: Foundry User on the project.
+W: Foundry Agent Consumer: it is the role Learn names for principals that only need to call agents, granting agent endpoint access without build, deploy or data actions, and it can be narrowed to one project or one agent.
+X: A=Foundry User: it includes data actions for building and developing in the project, which is more than a call-only partner integration should have.
+C=Foundry Project Manager: this role is needed by whoever publishes agents; callers of a published agent do not need it, and it adds management and role-assignment rights.
+D=Reader: Reader gives read access to resources but cannot interact with agent endpoints, so the partner's calls would be refused.
+T: Give principals that only call agents the Foundry Agent Consumer role, scoped to the project or the single agent.
+V: Microsoft Foundry, Foundry Agent Service, Microsoft Entra ID

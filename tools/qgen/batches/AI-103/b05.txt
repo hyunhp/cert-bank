@@ -1,0 +1,655 @@
+# AI-103 D2 T2.1 Build generative applications by using Foundry: deploy and consume models (v1 endpoint, Responses API, chat completions, deployment names, keyless auth, multimodal input, Claude endpoint), RAG in application code (Azure AI Search retrieval, prompt assembly, citations, On Your Data retirement), workflows and tool-augmented flows (function calling, structured outputs, background mode), evaluation (groundedness, relevance, coherence, fluency, similarity, retrieval, datasets, cloud evaluation), Foundry SDK and project connections
+
+@ AI-103 D2 T2.1 applied troubleshooting
+S: A Python service calls a gpt-5-mini deployment through the v1 endpoint with keyless authentication. It creates the client once at startup with `OpenAI(base_url="https://contoso-ai.openai.azure.com/openai/v1/", api_key=token_provider())`. Requests succeed for a while, then every call returns 401 Unauthorized until the service restarts. What should the developer change?
+A: Pass the token provider function itself as `api_key=token_provider`, so the OpenAI client requests a fresh Microsoft Entra token whenever the old one expires
+B: Switch the client class to `AzureOpenAI()` with a dated `api_version`, because the plain `OpenAI()` client can't send Microsoft Entra tokens to Azure
+C: Change the token scope in `get_bearer_token_provider` from `https://ai.azure.com/.default` to the resource's own endpoint URL with `/.default` added
+D: Assign the service's managed identity the Foundry Account Owner role, because the Foundry User role only issues tokens that last a few minutes
+K: A
+G: ## Keyless authentication with the v1 endpoint
+With the v1 Azure OpenAI API you use the standard `OpenAI()` client and point `base_url` at `https://<resource>.openai.azure.com/openai/v1/`. For Microsoft Entra ID (keyless) authentication, Learn shows this pattern:
+`token_provider = get_bearer_token_provider(DefaultAzureCredential(), "https://ai.azure.com/.default")`
+`client = OpenAI(base_url=..., api_key=token_provider)`
+## Function versus string
+`get_bearer_token_provider` returns a **function**. Learn's v1 article says to set `api_key` to `token_provider` "to enable automatic retrieval and refresh of an authentication token instead of using a static API key". The v1 API added automatic token refresh to the `OpenAI()` client, which previously needed the `AzureOpenAI()` client.
+- `api_key=token_provider`: the client calls the function when it needs a token, so expired tokens are replaced.
+- `api_key=token_provider()`: the function runs once at startup and the client keeps that single token string. Entra access tokens expire, and every later call fails with 401 until a restart gets a new token.
+## Example
+A service started at 08:00 works until its token expires, then fails on every request. Passing the callable fixes it without any role or endpoint change.
+W: Pass the callable: handing the client the provider function lets it fetch and refresh Entra tokens on demand, which is exactly what stops the 401 errors that begin once the first token expires.
+X: B=Go back to AzureOpenAI(): the v1 API was designed so the plain `OpenAI()` client handles Entra tokens and refresh; returning to dated API versions doesn't address the static token string.
+C=Change the scope: Learn's samples use the `https://ai.azure.com/.default` scope for this endpoint. The first calls succeed, which shows the scope is accepted; the failure starts later because the token isn't refreshed.
+D=Bigger role: role assignments decide what an identity may do, not how long its tokens live. Foundry User is the role Learn recommends for day-to-day development, and a higher role wouldn't refresh a cached string.
+T: For keyless auth with the OpenAI client, pass `api_key=token_provider` (the function), not `token_provider()` (a single token that expires).
+V: Microsoft Foundry, Azure OpenAI, Microsoft Entra ID
+
+@ AI-103 D2 T2.1 applied troubleshooting
+S: A research tool's privacy policy sets `store=False` on every Responses API request so that the service keeps no response data. A developer adds `background=True` to a multi-minute o3 analysis request, and the request is rejected. Which change lets the task run in background mode while keeping stored data to a minimum?
+A: Send this request with `store=True`, then delete the stored response by its ID as soon as the app has retrieved the final output
+B: Keep `store=False` and also set `stream=True`, because a streamed background request can report progress without a stored response
+C: Keep `store=False` and pass `previous_response_id`, so the service rebuilds the background task from an earlier stored turn
+D: Keep `store=False` and move the request to a Global Batch deployment, because background mode runs only on batch deployments
+K: A
+G: ## Background mode needs a stored response
+Background mode runs long Responses API tasks asynchronously: the request returns at once with a response ID and a `queued` status, and the app polls that ID until the task reaches a terminal state. Polling only works if the service keeps the response object, so Learn lists this limitation: "Background mode requires store=true. Stateless requests are not supported."
+## Keeping stored data small
+- By default, stored response data is retained for 30 days.
+- Learn shows how to delete a stored response by ID.
+- A privacy-minded design therefore stores only the background requests, retrieves the result, and deletes the response right away. Interactive turns can keep using `store=False`.
+## Example flow
+1. `job = client.responses.create(model="o3-analysis", input=task, background=True, store=True)`
+2. Poll `client.responses.retrieve(job.id)` while the status is `queued` or `in_progress`.
+3. Save the output in the app, then delete the stored response by its ID.
+W: store=True, then delete: background mode can't run statelessly, so the request must be stored; deleting the response by ID after retrieval keeps the data held by the service as short-lived as possible.
+X: B=Add streaming: streaming a background response also needs `background` and a stored response; the store requirement applies whether or not the request streams.
+C=previous_response_id: chaining reads an earlier stored response and doesn't lift the rule that the background request itself must be stored.
+D=Global Batch deployment: batch is a separate deployment type for large asynchronous job files; background mode is a request option of the Responses API with reasoning models such as o3.
+T: Background mode requires `store=true`; to limit retained data, delete the stored response by ID once the result has been collected.
+V: Microsoft Foundry, Azure OpenAI
+
+@ AI-103 D2 T2.1 applied troubleshooting
+S: A team deploys a model sold by Azure from another provider in its Foundry resource. Their existing helper calls `client.responses.create()` on the /openai/v1/ endpoint and returns a 400 Model not supported error for this deployment, while the OpenAI models in the same resource work. What should the developer do?
+A: Redeploy the model into a separate Azure OpenAI resource, because the v1 endpoint of a Foundry resource only routes requests to OpenAI models
+B: Add the provider's API version string as an `api-version` query parameter, which turns on Responses API support for non-OpenAI deployments
+C: Call `client.chat.completions.create()` for this deployment on the same endpoint and client, since it doesn't support the Responses API
+D: Move the call to the Foundry project endpoint, because only the project route translates Responses API requests for partner model deployments
+K: C
+G: ## One endpoint, two inference APIs
+The v1 endpoint of a Foundry resource (`https://<resource>.openai.azure.com/openai/v1/`) serves Azure OpenAI models **and** other Foundry Models sold by Azure. It exposes two inference APIs:
+- **Responses API** (`client.responses.create`): the newer API with the latest features such as stateful chaining and built-in tools.
+- **Chat Completions API** (`client.chat.completions.create`): the message-list API that many models support.
+## When Responses isn't supported
+Learn's endpoint article notes that the Responses API works with Azure OpenAI models and with models sold by Azure that support it (it names DeepSeek, Llama and Grok). "If a deployment doesn't support the Responses API, the request returns 400 Model not supported. In that case, use the Chat Completions API by calling `client.chat.completions.create` instead."
+## Practical design
+Keep one client and one credential for the resource, and let a small routing table record which deployments use which API. The deployment name stays in the `model` field either way.
+W: Chat Completions on the same client: the error is specific to the Responses API, and Learn's documented fallback is Chat Completions on the same v1 endpoint, which most models sold by Azure support.
+X: A=Separate Azure OpenAI resource: the Foundry resource's v1 endpoint already serves non-OpenAI models; moving it would also lose access because an Azure OpenAI resource offers only Azure OpenAI models.
+B=Add api-version: the v1 route uses implicit versioning, and no version string adds Responses support to a model that lacks it.
+D=Project endpoint: the project endpoint adds Foundry features such as agents and evaluations; Learn's fix for 400 Model not supported is Chat Completions on the same v1 endpoint, not a different route.
+T: If a deployment returns 400 Model not supported on the Responses API, call it with Chat Completions on the same v1 endpoint.
+V: Microsoft Foundry, Foundry Models
+
+@ AI-103 D2 T2.1 applied use-case
+S: A Python RAG app already uses AIProjectClient and its OpenAI-compatible client for answers. It now needs to vectorize each user question with a text-embedding-3-small deployment before a vector query in Azure AI Search. How should the app request the embeddings?
+A: Call `embeddings.create` on the client from `project.get_openai_client()`, because the project endpoint routes every model type deployed in the resource
+B: Create a project connection of type Azure OpenAI that points to the embedding deployment, then call it through the connections operations on the project client
+C: Ask the Responses API to return the embedding by adding the embedding deployment as a tool in the same request that generates the final answer
+D: Use an OpenAI client pointed at the resource's /openai/v1/ endpoint and call `embeddings.create`, because the project endpoint doesn't route embeddings
+K: D
+G: ## Two endpoints, two jobs
+Learn's Foundry SDK overview describes two ways to reach models:
+- **Foundry SDK** (`azure-ai-projects`) over the **project endpoint** `https://<resource>.services.ai.azure.com/api/projects/<project>`. `get_openai_client()` returns an OpenAI-compatible client for the Responses API, agents, evaluations and fine-tuning.
+- **OpenAI SDK** over the **resource's v1 endpoint** `https://<resource>.openai.azure.com/openai/v1`. It offers the full OpenAI API surface, "including embeddings".
+## The embeddings rule
+The SDK overview's tip is explicit: "Use the OpenAI SDK endpoint for generating embeddings. The project endpoint used by the Foundry SDK doesn't currently route embedding requests."
+## Example
+A RAG app can hold both clients: `project.get_openai_client()` for `responses.create` and an `OpenAI(base_url="https://<resource>.openai.azure.com/openai/v1/", api_key=token_provider)` client for `embeddings.create(model="text-embedding-3-small", input=question)`. Both can use the same Entra credential.
+W: OpenAI client on the v1 endpoint: Learn routes embedding requests through the resource's /openai/v1/ endpoint, so a second OpenAI client there produces the query vector the search call needs.
+X: A=Project OpenAI client: this client targets the project's Responses route, and Learn states that the project endpoint doesn't currently route embedding requests.
+B=Connection for the deployment: connections link a project to other resources and store how to authenticate; they don't make a model deployment callable through the project client.
+C=Embedding as a tool: an embedding model isn't a Responses tool, and the app needs the vector before retrieval, not inside the answer request.
+T: Generate embeddings with the OpenAI SDK on `https://<resource>.openai.azure.com/openai/v1/`; the project endpoint serves Responses, agents and evaluations.
+V: Microsoft Foundry, Foundry SDK, Azure AI Search
+
+@ AI-103 D2 T2.1 applied troubleshooting
+S: A developer creates `AIProjectClient(endpoint=os.environ["PROJECT_ENDPOINT"], credential=DefaultAzureCredential())`. The variable holds `https://contoso-ai.openai.azure.com/openai/v1`. Listing connections fails with 404 Not Found, although `az login` succeeds and the developer has the Foundry User role. What should the variable contain?
+A: `https://contoso-ai.services.ai.azure.com/api/projects/<project-name>`, the project endpoint shown on the Foundry project's home page
+B: `https://contoso-ai.openai.azure.com/openai/v1/projects/<project-name>`, the v1 route extended with the name of the project to open
+C: `https://management.azure.com/subscriptions/<id>/resourceGroups/<rg>`, the Azure Resource Manager scope that contains the Foundry project
+D: `https://contoso-ai.cognitiveservices.azure.com/openai/deployments/<name>`, the deployment URL of the model the project uses
+K: A
+G: ## The project endpoint
+The Foundry SDK (`azure-ai-projects`) is a thin client over all Foundry project APIs, reached through **one project endpoint**:
+`https://<resource-name>.services.ai.azure.com/api/projects/<project-name>`
+The Python client README says you find it on the Foundry project home page. With a custom subdomain, the subdomain replaces the resource name.
+## Two client types from one endpoint
+- **Project client** (`AIProjectClient`): Foundry-native operations, for example listing connections, reading project properties, enabling tracing.
+- **OpenAI-compatible client** (`project.get_openai_client()`): Responses, agents, evaluations, fine-tuning.
+## Troubleshooting 404s
+Learn's SDK troubleshooting section: for "Connection refused or 404 Not Found", verify the resource and project names and check that the URL has the `services.ai.azure.com/api/projects/<project-name>` format. The `openai.azure.com/openai/v1` address is the OpenAI SDK endpoint of the resource; it has no project APIs such as connections.
+W: Project endpoint: AIProjectClient expects the `services.ai.azure.com/api/projects/<project>` URL, which is the only address that exposes project operations such as listing connections.
+X: B=v1 route plus project: there's no project segment under /openai/v1; that route serves OpenAI-style inference for the resource, not project operations.
+C=Resource Manager scope: management.azure.com is the control plane for creating and configuring resources; AIProjectClient calls the Foundry data plane.
+D=Deployment URL: that's an older per-deployment inference address; it reaches one model, not the project's connections, datasets or evaluations.
+T: AIProjectClient takes the project endpoint `https://<resource>.services.ai.azure.com/api/projects/<project>`; the /openai/v1 address belongs to the OpenAI SDK.
+V: Microsoft Foundry, Foundry SDK
+
+@ AI-103 D2 T2.1 applied use-case
+S: A new developer joins a team that builds a chat app in an existing Foundry project. She must run the app locally with DefaultAzureCredential, call deployed models through the project and run evaluations. Following least privilege, which role assignment should she get?
+A: Foundry Account Owner on the Foundry resource, because calling deployed models requires permissions on the parent resource instead of the project
+B: Foundry Project Manager on the project, because evaluations need the right to manage the project and every connection defined in it
+C: Foundry User on the project, the role Learn lists for day-to-day development such as calling models and running evaluations
+D: Owner on the resource group, assigned permanently so that she can create any missing resources while she develops the app
+K: C
+G: ## Foundry roles (renamed)
+Foundry's built-in roles were recently renamed; role IDs and permissions didn't change:
+- **Foundry User** (formerly Azure AI User)
+- **Foundry Project Manager** (formerly Azure AI Project Manager)
+- **Foundry Account Owner** (formerly Azure AI Account Owner)
+- **Foundry Owner** (formerly Azure AI Owner)
+## Which role for which task
+Learn's SDK overview lists roles "at the narrowest scope":
+- **Foundry User on the Foundry project** for day-to-day development.
+- **Foundry Project Manager on the project** to manage an existing project and its connections.
+- **Foundry Account Owner on the Foundry resource** to create projects or manage account-level resources; a resource-group assignment only when creating a Foundry resource, activated just in time through Privileged Identity Management.
+The cloud evaluation and portal evaluation articles also list the Foundry User role on the project as the prerequisite for running evaluations.
+## If the token request fails
+The SDK troubleshooting tips: run `az login`, then confirm at least Foundry User on the project.
+W: Foundry User on the project: it covers building and testing with models and evaluations in that project and nothing more, which is the narrowest fit for a developer's daily work.
+X: A=Account Owner on the resource: that role is for creating projects and managing account-level resources, far more than calling models needs.
+B=Project Manager: managing the project and its connections is an administrative task; running evaluations only needs Foundry User.
+D=Permanent resource-group Owner: Learn recommends just-in-time elevation only when creating a Foundry resource, and Owner grants control over every resource in the group.
+T: Give developers Foundry User on the Foundry project; reserve Project Manager and Account Owner for managing projects and resources.
+V: Microsoft Foundry, Microsoft Entra ID, Azure RBAC
+
+@ AI-103 D2 T2.1 applied use-case
+S: A support chatbot uses the Responses API. After the first turn, the developer wants the model to keep the earlier context while sending as little data as possible on each later request. How should the second request be built?
+A: Send the full transcript again in `input` and also set `previous_response_id`, so the model receives the history twice and weights it more strongly
+B: Store the transcript in a project connection and pass the connection name in `instructions`, which the service reads before generating the reply
+C: Send only the new user message in `input` and set `previous_response_id` to the id of the previous response, so the service links the turns
+D: Increase `max_output_tokens` on the first request, so the first response holds enough context for the model to remember on the next turn
+K: C
+G: ## State in the Responses API
+Learn describes the Responses API as producing **stateful, multi-turn responses**. Responses are stored by the service (by default for 30 days), so a later request can refer to an earlier one.
+## Two ways to carry context
+- **`previous_response_id` chaining**: "Chain turns by passing the previous response ID to `previous_response_id`." Each later request sends only the new user input; the service supplies the earlier turns.
+- **Manual chaining**: the app keeps a list of input items, appends `response.output` and the next user message, and sends the whole list each time.
+## Example
+`first = client.responses.create(model="support-chat", input="My router keeps rebooting.")`
+`second = client.responses.create(model="support-chat", previous_response_id=first.id, input="It started after the firmware update.")`
+Learn's compaction section repeats the rule for this pattern: with `previous_response_id`, "pass only the new user message on each turn and carry the latest response ID forward."
+W: New message plus previous_response_id: the service already holds the earlier response, so linking to its id preserves context while each request carries only the new turn.
+X: A=Transcript and id together: this duplicates history the service already has, raising token use without improving recall, which is the opposite of the goal.
+B=Transcript in a connection: connections store how a project authenticates to other resources; the Responses API doesn't read conversation history from them.
+D=Bigger first output: output token limits cap how much the model writes; they don't create memory for later requests.
+T: With the Responses API, continue a conversation by sending only the new input and `previous_response_id` set to the last response's id.
+V: Microsoft Foundry, Azure OpenAI
+
+@ AI-103 D2 T2.1 applied use-case
+S: An insurer's claims assistant calls the Responses API. The architects don't want later turns to depend on responses held by the service, so the app keeps the conversation itself. Which approach carries context to the next turn correctly?
+A: Append the items in `response.output` to the app's input list, add the new user message, and send the whole list as `input` on the next request
+B: Copy only `response.output_text` into the `instructions` field of the next request, because instructions are the only place earlier turns are read
+C: Send the new user message alone, because the model keeps a private memory of each caller's earlier requests for the life of the deployment
+D: Pass the earlier response id as `previous_response_id` and leave `input` empty, so the service rebuilds the conversation on its side
+K: A
+G: ## Manual chaining
+Learn shows two ways to chain Responses API turns. Besides `previous_response_id`, you can "manually carry forward output items in the next request":
+`inputs = [{"type": "message", "role": "user", "content": "..."}]`
+`response = client.responses.create(model=deployment, input=inputs)`
+`inputs += response.output`
+`inputs.append({"role": "user", "type": "message", "content": "next question"})`
+`second = client.responses.create(model=deployment, input=inputs)`
+## Why choose it
+- The app owns the full history, so it can trim, redact or persist it in its own store.
+- Later turns don't rely on the service's stored response objects.
+- Learn's compaction guidance calls this **stateless input-array chaining**, the alternative to `previous_response_id` chaining.
+## What a model doesn't do
+The model itself has no memory between calls. Anything it should know about earlier turns must be in the request or linked through a stored response.
+W: Append output items and the new message: the app sends the full item history each time, so the model has the earlier turns without relying on stored responses.
+X: B=Output text in instructions: instructions carry developer guidance; copying just the final text loses the earlier user turns and any tool call items in the output.
+C=Model memory: models are stateless between requests; without history in the input or a linked response, the next turn starts from nothing.
+D=previous_response_id with empty input: this is the service-side chaining the architects want to avoid, and a turn still needs the new user message.
+T: For app-managed state, append `response.output` and the next user message to the input list and send the list every turn.
+V: Microsoft Foundry, Azure OpenAI
+
+@ AI-103 D2 T2.1 applied use-case
+S: A legal research tool sends a long analysis task to an o3 deployment through the Responses API. The task can take several minutes, and the web front end's HTTP calls time out first. Which design fits?
+A: Raise `max_output_tokens` to the model maximum, which makes the service return its partial answer before the front end's timeout is reached
+B: Send the request with `background=True`, store the returned response id, and poll the response until its status leaves queued and in_progress
+C: Split the task into many single-sentence requests sent in parallel, because reasoning models can't run any request longer than one minute
+D: Move the call to the Chat Completions API with streaming, because only Chat Completions keeps a connection open for multi-minute tasks
+K: B
+G: ## Long-running reasoning tasks
+Reasoning models such as o3 can think for a long time on complex tasks. Holding an HTTP request open for minutes is fragile: proxies, load balancers and browsers time out.
+## Background mode
+Learn: "Background mode lets you run long-running tasks asynchronously with reasoning models such as o3 and o1-pro. ... When a request is sent with `"background": true`, the task is processed asynchronously, and you poll for its status."
+- The call returns immediately with a **response id** and a `queued` status.
+- The app polls with `client.responses.retrieve(id)` while the status is `queued` or `in_progress`.
+- At a terminal status (for example `completed`), the output is available. The id can also be used to stream or cancel.
+## Example pattern
+The web tier starts the task, saves the id with the user's job, and the page checks the job status every few seconds. Learn notes a known performance issue when combining background mode with streaming.
+W: Background mode and polling: the request returns at once with an id, so no HTTP call has to stay open while the model reasons, and the app collects the result when the status is final.
+X: A=Bigger output limit: `max_output_tokens` caps generated tokens (including reasoning tokens); it doesn't return partial work early, and a higher cap only lets the task run longer.
+C=Many tiny requests: splitting a coherent analysis loses context between pieces, and there's no one-minute limit that forces it.
+D=Chat Completions streaming: streaming keeps one connection open for the whole task, which is the fragile part; background mode exists on the Responses API for exactly this case.
+T: For multi-minute reasoning tasks, send Responses requests with `background=True` and poll the response id until it reaches a final status.
+V: Microsoft Foundry, Azure OpenAI
+
+@ AI-103 D2 T2.1 applied use-case
+S: A field-inspection app lets technicians photograph damaged equipment and ask questions such as "What part is cracked?". The app uses Chat Completions with a gpt-4.1 deployment. How should it send the photo with the question?
+A: Upload the photo to Azure Blob Storage and put only the blob URL as plain text in the system message, so the model downloads it as background context
+B: Run optical character recognition on the photo first and send the extracted text, because chat models accept text tokens only in the messages list
+C: Create a separate image deployment of the same model and call it first, then pass its caption into the text-only gpt-4.1 deployment for the answer
+D: Put a user message whose content is an array with a text part holding the question and an image_url part pointing to the photo
+K: D
+G: ## Vision-enabled chat models
+Learn describes vision-enabled chat models as large multimodal models that "can analyze images and provide textual responses to questions about them". The current list includes the o-series reasoning models, the GPT-5 series, the GPT-4.1 series and the GPT-4o series. You use them by calling the Chat Completions API on a supported deployment.
+## Shape of a multimodal message
+Instead of a plain string, the user message's `content` becomes an **array of parts**:
+`{"role": "user", "content": [`
+`  {"type": "text", "text": "What part is cracked?"},`
+`  {"type": "image_url", "image_url": {"url": "<image url>"}}`
+`]}`
+The question and the image arrive in the same turn, so the model can reason over both together. The URL must be reachable by the service (Learn's samples use a publicly accessible image URL).
+## Why not preprocess
+OCR only extracts text and would miss the visual crack. Captioning first loses detail the question needs. A multimodal model answers directly from the pixels.
+W: Text part plus image_url part: a vision-enabled deployment such as gpt-4.1 reads both parts of the same user message and answers the question about the image.
+X: A=URL as text in the system message: a URL written as plain text is just characters; the model only treats an image as input when it arrives as an image content part.
+B=OCR first: vision-enabled models accept image parts directly, and OCR would discard the visual damage the technician is asking about.
+C=Separate image deployment: one deployment of a vision-enabled model handles text and images together; a caption-then-answer chain adds latency and loses detail.
+T: To ask about an image, send a user message whose content array has a text part and an `image_url` part to a vision-enabled deployment.
+V: Microsoft Foundry, Azure OpenAI
+
+@ AI-103 D2 T2.1 applied troubleshooting
+S: A team deploys a Claude model in its Foundry resource. A developer reuses the company's OpenAI client helper, sets `base_url` to the resource's /openai/v1/ endpoint and passes the Claude deployment name, but the calls fail. What should the developer use instead?
+A: The same OpenAI client with `client.chat.completions.create()`, because Claude deployments support only the older Chat Completions route on that endpoint
+B: The project endpoint with `AIProjectClient`, because partner models are reachable only after a project connection to the Anthropic service is created
+C: The Anthropic SDK pointed at `https://<resource>.services.ai.azure.com/anthropic`, which serves Claude deployments through the Anthropic Messages API
+D: A serverless API deployment of Claude in a separate Azure Machine Learning workspace, because Foundry resources can't host Anthropic models directly
+K: C
+G: ## Different model families, different endpoints
+Learn's SDK overview lists which SDK and endpoint to use:
+- **OpenAI SDK**: `https://<resource>.openai.azure.com/openai/v1`, for Azure OpenAI models and models sold by Azure through Responses or Chat Completions.
+- **Foundry SDK**: the project endpoint, for agents, evaluations and project features.
+- **Anthropic SDK**: `https://<resource>.services.ai.azure.com/anthropic`, for Anthropic Claude models deployed in Foundry.
+## Claude in Foundry
+"Claude models use a separate `/anthropic` endpoint and the Anthropic Messages API, not the OpenAI-compatible endpoint." The Messages API is at `.../anthropic/v1/messages`.
+## Example
+`client = AnthropicFoundry(azure_ad_token_provider=token_provider, base_url="https://<resource>.services.ai.azure.com/anthropic")`
+`client.messages.create(model="<claude-deployment>", messages=[...], max_tokens=1024)`
+Keyless auth works the same way as for other models: a bearer token provider for the `https://ai.azure.com/.default` scope. The `model` value is still the deployment name.
+W: Anthropic SDK on /anthropic: Claude deployments in Foundry are served by the Anthropic Messages API on the resource's /anthropic endpoint, so the OpenAI-compatible route can't handle them.
+X: A=Chat Completions on v1: Learn says Claude uses the separate /anthropic endpoint, not the OpenAI-compatible endpoint, so switching OpenAI methods doesn't help.
+B=Project client and connection: the project endpoint serves Foundry features over the Responses API; Learn sends Claude traffic to /anthropic and doesn't require an Anthropic connection.
+D=Separate workspace: the scenario's Claude deployment already lives in the Foundry resource; it only needs the right endpoint and SDK.
+T: Call Claude deployments in Foundry with the Anthropic SDK at `https://<resource>.services.ai.azure.com/anthropic`, not the OpenAI v1 endpoint.
+V: Microsoft Foundry, Foundry Models
+
+@ AI-103 D2 T2.1 applied use-case
+S: A ticket triage step uses Chat Completions with one function tool, record_ticket, whose parameters hold category and priority. The app needs a record_ticket call for every ticket, but sometimes the model answers with plain text instead. How should the developer set `tool_choice`?
+A: Leave it at "auto" and expand the function description, so the model decides on its own to call record_ticket on every request
+B: Set it to "none", so the model drops the free-text reply and writes the category and priority in the function's argument format
+C: Set it to a named tool object for record_ticket, which forces the model to call that specific function on every request it gets
+D: Leave it unset and set `parallel_tool_calls` to false, so the model has to return exactly one record_ticket call on each turn
+K: C
+G: ## How tool_choice works
+When a request defines function tools, `tool_choice` decides whether the model may, must or must not call them. Learn's function calling article describes three settings:
+- `"auto"` (the default): "the model decides on its own if it should call a function and if so which function to call". A plain-text answer is allowed.
+- A **named tool object** forces one function: `tool_choice={"type": "function", "function": {"name": "record_ticket"}}`.
+- `"none"` forces a user-facing message, so no function is called.
+## Parallel calls are a different setting
+`parallel_tool_calls` controls whether one response may hold several tool calls. Setting it to false limits the model to one call per turn; it doesn't make a call mandatory.
+## Example
+A triage pipeline that always needs structured category and priority values names record_ticket in `tool_choice`, reads `tool_calls[0].function.arguments`, and can add `strict: true` to the function so the arguments follow its schema.
+W: Named tool object: naming record_ticket in `tool_choice` makes the call mandatory, so every ticket returns arguments the pipeline can parse instead of free text.
+X: A=auto with a better description: auto still lets the model choose a text reply; a clearer description may reduce misses but can't guarantee a call.
+B=none: this setting forces a user-facing message and prevents any function call, which is the opposite of what triage needs.
+D=parallel_tool_calls false: it caps how many calls one response may contain; under the default auto choice the model can still answer in text.
+T: To make the model always call one specific function, set `tool_choice` to a named tool object; "auto" lets it choose and "none" blocks calls.
+V: Microsoft Foundry, Azure OpenAI
+
+@ AI-103 D2 T2.1 advanced troubleshooting
+S: A travel app defines two strict function tools (book_flight and book_hotel) for a Chat Completions deployment. When a user asks to book both, some calls come back with arguments that don't follow the tool schemas. Which setting does Learn say to apply when using structured outputs with function tools?
+A: Set `tool_choice` to "none", so the model returns a user-facing message and the app parses both bookings from that message text afterward
+B: Set `parallel_tool_calls` to false, because structured outputs aren't supported with parallel function calls and need one call per turn
+C: Raise `max_completion_tokens`, because strict schemas fail only when the model runs out of tokens while writing two sets of arguments
+D: Remove `strict: true` from both tools, because strict mode works only when the request defines exactly one function tool at a time
+K: B
+G: ## Structured outputs for function calling
+Function calling lets the model return a tool call with JSON arguments that your code executes. Setting `strict: true` on a function definition applies **structured outputs** to those arguments, so they follow the tool's JSON Schema.
+## The parallel calls limitation
+Models that support parallel function calling can return several tool calls in one response (for example, one per booking). Learn's structured outputs article states: "Structured outputs are not supported with parallel function calls. When using structured outputs set `parallel_tool_calls` to false."
+With `parallel_tool_calls=false`, the model requests one call per turn: the app runs book_flight, returns the result, and the model then requests book_hotel, each with schema-conformant arguments.
+## Related controls
+- `tool_choice: "auto"` (default): the model decides whether and which tool to call.
+- `tool_choice` set to a named function forces that function; `"none"` forces a user-facing message.
+W: parallel_tool_calls false: Learn documents that strict structured outputs don't apply to parallel calls, so turning parallel calls off restores schema-conformant arguments for each booking.
+X: A=tool_choice none: this stops tool calls altogether and forces the app to parse free text, giving up the structured arguments the design relies on.
+C=More completion tokens: the arguments are malformed because of parallel calls, not truncation, so a bigger limit doesn't fix the schema mismatch.
+D=Remove strict: dropping strict removes schema enforcement entirely; strict mode works with multiple tools as long as calls aren't parallel.
+T: When function tools use `strict: true` structured outputs, set `parallel_tool_calls` to false.
+V: Microsoft Foundry, Azure OpenAI
+
+@ AI-103 D2 T2.1 applied use-case
+S: A retail assistant uses the Responses API with a function tool get_order_status. The first response contains an output item of type function_call with name, arguments and call_id. What must the app do to get the final answer for the user?
+A: Run the function in app code, then send a function_call_output item carrying the result and the same call_id, chained with previous_response_id
+B: Send the function name back as a new user message, so the model executes get_order_status on the service side and writes the answer itself
+C: Wait for the service to call the app's order API, because declaring a function tool registers its URL for the model to call automatically
+D: Copy the arguments into the `instructions` field of a new request, so the model can guess the order status from the parameters it chose
+K: A
+G: ## Who runs a function tool
+With function calling, the model never executes code. Learn: "The model generates function calls and structured arguments based on the functions you specify. Your application executes the functions and returns the results to the model, so you remain in control of the actions taken."
+## The Responses API loop
+1. Send the request with `tools=[{"type": "function", "name": "get_order_status", "parameters": {...}}]`.
+2. Read `response.output`. For each item with `type == "function_call"`, parse `item.arguments` (a JSON string) and run your function.
+3. Send a new request with `previous_response_id=response.id` and `input` containing `{"type": "function_call_output", "call_id": item.call_id, "output": json.dumps(result)}`.
+4. Read `final.output_text`.
+## Why call_id matters
+When a response contains several calls, each result must reference the `call_id` of the call it answers so the model can match them.
+W: Execute and return function_call_output: the app runs the function and returns the result tied to the call_id in a chained request, which gives the model real data for the final answer.
+X: B=Name as user message: the model can't execute app code; resending the name just restarts the request without any order data.
+C=Automatic callback: a function tool definition is only a name, description and parameter schema; it has no URL and the service never calls it.
+D=Arguments in instructions: the arguments are the query, not the answer; without the function result the model can only guess the status.
+T: For Responses function calling, run the function yourself and return a `function_call_output` with the matching `call_id`, chained with `previous_response_id`.
+V: Microsoft Foundry, Azure OpenAI
+
+@ AI-103 D2 T2.1 applied tradeoff
+S: A bank's assistant uses function calling. One function runs read-only balance queries against a database, and another can move money between a customer's accounts. Which TWO practices does Learn recommend for this design? (Select TWO)
+A: Rely on the function descriptions alone to stop misuse, because the model never calls a function in a way its description doesn't mention
+B: Validate every model-generated call in code, checking the function, its parameters and whether the action fits the request
+C: Give the database connection used by the balance function read-only access instead of the account that can also write data
+D: Let the model pass raw SQL text as an argument, so one generic database function can serve every request without schema changes
+E: Run all function calls with an administrator identity, so that no call fails partway through because of a missing permission
+K: B,C
+G: ## Function calls are model output, not trusted input
+The model only proposes calls; your app executes them. That makes the app responsible for what actually happens. Learn's function calling article lists practices for using functions safely:
+- **Validate function calls**: "Always verify the function calls generated by the model. This includes checking the parameters, the function being called, and ensuring that the call aligns with the intended action."
+- **Principle of least privilege**: "Grant only the minimum access necessary for the function to perform its job. ... if you're using function calls to query a database, you should only give your application read-only access to the database. You also shouldn't depend solely on excluding capabilities in the function definition as a security control."
+## Applying it here
+- The balance function uses read-only credentials.
+- The transfer function checks that both accounts belong to the signed-in customer and that the amount is within limits before it runs; high-risk actions can also ask the user to confirm.
+W: B=Validate calls: checking the function, its arguments and whether the action matches the user's intent stops a wrong or manipulated call before it moves money.
+C=Read-only for queries: a read-only database identity limits the damage if the balance function is ever misused, exactly as Learn's least-privilege example describes.
+X: A=Descriptions as security: Learn warns against depending only on what the function definition leaves out; descriptions guide the model but enforce nothing.
+D=Raw SQL argument: letting the model write arbitrary queries widens what a manipulated prompt could do and removes the narrow, checkable parameters.
+E=Administrator identity: broad permissions are the opposite of least privilege and turn any bad call into a high-impact one.
+T: Treat model-generated function calls as untrusted: validate them in code and give each function only the access it needs.
+V: Microsoft Foundry, Azure OpenAI
+
+@ AI-103 D2 T2.1 applied use-case
+S: An HR team builds a classic RAG app over policy documents already indexed in Azure AI Search with text and vector fields. Questions often use words such as "telecommute" while documents say "remote work". Which request flow should the app use?
+A: Send the question to the model first and let it answer from its training data, then search the index only when the user says the answer is wrong
+B: Load every policy document into the system message at startup, so the model always has the full corpus and the app never needs to query the index
+C: Run a keyword-only query for the exact words in the question and pass the full documents of the top results to the model as the answer context
+D: Run a hybrid query with semantic ranking, then pass the top chunks with their source ids to the model with instructions to answer only from them
+K: D
+G: ## Classic RAG
+Azure AI Search's RAG overview describes the **classic RAG pattern**: "your application sends a single query to Azure AI Search and orchestrates the handoff to an LLM separately. Your deployed LLM formulates an answer using the flattened result set from the query." It uses GA features and suits simpler requirements. (Agentic retrieval with knowledge bases is the newer option; its LLM query planning is in preview.)
+## Getting the right chunks
+For query understanding, Learn lists:
+- **Hybrid queries** that combine keyword and vector search for better recall.
+- **Semantic ranking** that re-scores results by meaning, not just keywords.
+- **Vector similarity** that matches concepts, not exact terms, so "telecommute" can find "remote work".
+For token limits it adds configurable result limits (top-k for vectors) and a `select` list that returns only the fields you need.
+## Prompt assembly
+1. Embed the question and run the hybrid query with semantic ranking.
+2. Take the top chunks and format each with an id or title and its content.
+3. Send a system message that says to answer only from the sources and cite them, plus the user question and the sources.
+W: Hybrid plus semantic ranking, then grounded prompt: vector and semantic matching bridge the vocabulary gap, and passing only the top chunks with ids keeps the prompt small and citable.
+X: A=Model first: answering from training data ignores the company's policies and invites fabricated answers, which RAG exists to prevent.
+B=All documents in the system message: the corpus won't fit the token budget, and Learn's guidance is to return concise, highly relevant results instead.
+C=Keyword-only with full documents: exact-word matching misses "remote work" for "telecommute", and whole documents waste tokens compared with chunks.
+T: In classic RAG, run a hybrid query with semantic ranking and give the model only the top chunks with source ids and an answer-only-from-sources instruction.
+V: Azure AI Search, Microsoft Foundry
+
+@ AI-103 D2 T2.1 applied use-case
+S: A compliance assistant uses classic RAG with Azure AI Search. Auditors require every answer to show which policy document supports each claim, and the app must not display a citation that points to a document the search didn't return. Which TWO steps should the developer implement? (Select TWO)
+A: Label each retrieved chunk in the prompt with its document id and title, and instruct the model to cite those ids next to every claim
+B: Ask the model to list the documents it used from its own knowledge, since the model remembers which public sources contain each policy
+C: After generation, check that every cited id appears in the set of chunks retrieved for this request before showing it to the user
+D: Raise the temperature so the model adds more citations per answer, which raises the chance that each claim has at least one source
+E: Return only the answer text from the search query, because Azure AI Search attaches citations to the model output automatically
+K: A,C
+G: ## Citations are something you build
+In classic RAG your application assembles the prompt, so the model can only cite what you show it, in the form you show it.
+## Step 1: make sources citable
+Format each retrieved chunk with an identifier, for example:
+`[doc-17] Travel Policy v4: Employees must book economy class for flights under six hours...`
+Then instruct the model: answer only from the sources, cite the id in brackets after each claim, and say you don't know if the sources don't cover the question.
+## Step 2: verify what came back
+Models can still produce a wrong or invented id. Microsoft's On Your Data migration checklist includes "Resolve citations and verify source support" and "Read the answer and validate citation IDs". The app keeps the list of ids it retrieved for the request and drops or flags any citation not in that list before rendering links.
+## Why not rely on the model
+The model has no knowledge of your private documents beyond the prompt, so "remembered" sources are fabrications.
+W: A=Label chunks and require ids: giving each chunk an id and requiring per-claim citations is what lets the answer point to a specific document.
+C=Validate cited ids: checking citations against the retrieved set catches invented or mismatched ids before an auditor sees them.
+X: B=Model's own knowledge: the policies are private, so any source the model "remembers" is a guess rather than a citation.
+D=Higher temperature: more randomness makes citations less reliable, not more complete.
+E=Automatic citations from search: in classic RAG the search returns results and the app builds the prompt; nothing attaches citations to the model output for you.
+T: For trustworthy RAG citations, label each chunk with an id, require the model to cite ids, and validate cited ids against what was retrieved.
+V: Azure AI Search, Microsoft Foundry
+
+@ AI-103 D2 T2.1 applied troubleshooting
+S: In late October 2026, an internal Q&A app that sends chat completions requests with a `data_sources` block pointing to an Azure AI Search index starts failing, although plain chat requests to the same deployment still work. What is the right response?
+A: Recreate the Azure AI Search index with a new name and update the `data_sources` block, because the index schema expired after the deployment upgrade
+B: Remove the `data_sources` block and keep the rest of the code, because the model now searches the index automatically from the same resource
+C: Migrate off Azure OpenAI On Your Data, which retired on October 14, 2026, to a Foundry IQ knowledge base or app-managed classic RAG
+D: Change the request to an older dated api-version, which keeps On Your Data available for existing resources that already use the feature
+K: C
+G: ## Azure OpenAI On Your Data has retired
+Azure OpenAI On Your Data let a chat completions request carry a `data_sources` configuration so the service queried a source such as Azure AI Search and grounded the answer. Learn now states: "Azure OpenAI On Your Data retired on October 14, 2026, and is no longer supported by Microsoft." The article is kept only for history and migration.
+## What still works
+"Ordinary Azure OpenAI chat completions requests without On Your Data configuration aren't the retired feature." That's why plain chat calls keep working.
+## Migration options
+- Call a **Foundry IQ knowledge base** directly for corpus Q&A (Microsoft's migration sample reuses the existing Azure AI Search index). Generally available knowledge base retrieval uses the 2026-04-01 API with app-managed answer generation; the sample's answer synthesis uses a preview API.
+- Use **classic RAG**: query Azure AI Search in your app and generate the answer yourself.
+- Add Foundry Agent Service when you also need tools or workflows.
+Learn warns: "Removing the On Your Data configuration alone doesn't replace retrieval or preserve document-level authorization." Migration isn't automatic.
+W: Migrate off On Your Data: the feature behind the `data_sources` block is retired, so the app needs a supported retrieval path such as a Foundry IQ knowledge base or its own classic RAG code.
+X: A=Recreate the index: the index is fine; existing indexes can be reused in the migration. The request fails because the feature that read them is gone.
+B=Just remove data_sources: without the block, nothing retrieves documents; the model would answer from training data and lose any per-user authorization.
+D=Older api-version: retirement applies to the feature, not to one API version, so no version string brings it back.
+T: Azure OpenAI On Your Data retired on 2026-10-14; replace `data_sources` requests with a Foundry IQ knowledge base or app-managed RAG.
+V: Azure OpenAI, Azure AI Search, Foundry IQ
+
+@ AI-103 D2 T2.1 applied use-case
+S: A platform team is checking dozens of internal apps for use of the retired Azure OpenAI On Your Data feature before planning migrations. Which TWO findings in an app's code or request logs indicate that it uses On Your Data? (Select TWO)
+A: Requests that pass the resource endpoint ending in /openai/v1/ and set the deployment name in the model field of the request body
+B: Requests whose body contains a `data_sources` property, or the legacy `dataSources` property, alongside the chat messages
+C: Calls to the `/extensions/chat/completions` path on the Azure OpenAI resource instead of the plain chat completions path
+D: Code that queries Azure AI Search with SearchClient and then pastes the top results into the system message of a chat request
+E: Requests that authenticate with a bearer token from DefaultAzureCredential instead of sending the resource's api-key header
+K: B,C
+G: ## Finding affected applications
+Microsoft's retirement guidance has a section titled "Identify affected applications": "Search your application requests, code, and configuration for `data_sources`, the legacy `dataSources`, and the `/extensions/chat/completions` path. These are signals that an application uses Azure OpenAI On Your Data."
+## What isn't affected
+- Ordinary chat completions or Responses calls without an On Your Data configuration.
+- Apps that already do **classic RAG** themselves: they call Azure AI Search and put the results in the prompt. That's the supported pattern the migration points to.
+- The authentication method or the endpoint format; these don't indicate On Your Data.
+## Example audit
+A simple repository search for `data_sources`, `dataSources` and `extensions/chat/completions` across code and gateway logs produces the list of apps to migrate.
+W: B=data_sources property: this request property (and its older camel-case form) is how an app hands retrieval configuration to On Your Data.
+C=/extensions/chat/completions path: the older On Your Data requests used this extensions path, so its presence marks an affected app.
+X: A=v1 endpoint and deployment name: that's the standard way to call any deployment and says nothing about On Your Data.
+D=App-side search: querying Azure AI Search in code and passing results to the model is classic RAG, which is the supported replacement.
+E=Bearer token auth: keyless authentication is unrelated to whether a request uses On Your Data.
+T: Apps that use On Your Data show `data_sources`/`dataSources` in request bodies or call `/extensions/chat/completions`.
+V: Azure OpenAI, Azure AI Search
+
+@ AI-103 D2 T2.1 applied use-case
+S: Testers find that a RAG assistant sometimes adds return-policy details that appear nowhere in the retrieved context, even though its answers stay on topic and read well. Which built-in evaluator measures this problem directly?
+A: Relevance, which scores how accurately and completely the response addresses the query without needing any ground truth answer
+B: Fluency, which scores grammar, vocabulary and readability of the response and flags sentences that a reader would struggle to follow
+C: Groundedness, which scores how well the response aligns with the given context without fabricating content that the context doesn't contain
+D: Coherence, which scores the logical order of ideas in the response and how clearly each sentence connects to the one before it
+K: C
+G: ## Fabrication in RAG
+A RAG response can be well written and on topic yet still include claims the sources don't support. That's a **fabrication** (also called an ungrounded claim or hallucination) and it's a precision problem: the answer contains something it shouldn't.
+## Matching evaluators to failures
+From Learn's RAG and general-purpose evaluator articles:
+- **Groundedness**: "how well the generated response aligns with the given context without fabricating content (precision aspect)". Inputs: response and context (query optional, recommended).
+- **Relevance**: whether the response accurately addresses the query (query, response).
+- **Response Completeness** (preview): the recall side, whether the response misses information in the ground truth.
+- **Coherence** and **Fluency**: writing quality, "independent of factual correctness".
+AI-assisted evaluators like these score 1 to 5 with a default pass threshold of 3.
+## Example
+Context: "Items can be returned within 30 days with receipt." Response: "Returns are accepted within 30 days, and shipping is refunded." The refund claim isn't in the context, so groundedness drops even though relevance stays high.
+W: Groundedness: it compares the response with the retrieved context and penalizes content the context doesn't support, which is exactly the added return-policy details.
+X: A=Relevance: the answers are on topic, so relevance stays high; it doesn't check claims against the context.
+B=Fluency: fluency judges language quality, and Learn notes these writing-quality evaluators are independent of factual correctness.
+D=Coherence: a fabricated claim can be perfectly logical and well connected; coherence measures flow, not support.
+T: To catch fabricated content in RAG answers, run the Groundedness evaluator with the response and the retrieved context.
+V: Microsoft Foundry, Foundry evaluations
+
+@ AI-103 D2 T2.1 applied use-case
+S: A team has a JSONL test file in which each line holds only a query and the response their app produced. The file has no retrieved context and no ground truth answers. Which TWO built-in evaluators can score this file as it is? (Select TWO)
+A: Relevance, which judges whether each response accurately and directly addresses the query that was asked
+B: F1 score, which measures the share of words that each response has in common with an expected answer
+C: Similarity, which judges how close each response is in meaning to an expected answer for the same query
+D: Retrieval, which judges how relevant the retrieved context chunks are to addressing the query that was asked
+E: Fluency, which judges the grammar, vocabulary range and readability of each response that the app produced
+K: A,E
+G: ## Evaluators need specific fields
+Every built-in evaluator reads named fields from the test data through a data mapping such as `{{item.query}}`. If a required field is missing, that evaluator can't score the row. Learn's tables list the required inputs:
+- **Relevance**: query, response
+- **Coherence**: query, response (or messages)
+- **Fluency**: response (or messages)
+- **Groundedness**: response plus the grounding context (query optional)
+- **Retrieval**: query, context
+- **Similarity**: query, response, ground_truth
+- **F1, BLEU, ROUGE and similar NLP metrics**: ground_truth, response
+AI-assisted evaluators (Relevance, Coherence, Fluency, Groundedness, Retrieval, Similarity) also need a judge model `deployment_name`.
+## Planning test data
+Decide which metrics you need before you collect data. If groundedness matters, log the retrieved context with each response; if you want similarity or F1, write expected answers.
+W: A=Relevance: it needs only the query and the response, which every line has.
+E=Fluency: it scores the response text alone, so the file is enough.
+X: B=F1 score: it compares the response with a ground truth answer word by word, and the file has no expected answers.
+C=Similarity: it compares the response with a ground truth answer, which the file lacks.
+D=Retrieval: it scores the retrieved context against the query, and there's no context to score.
+T: Match evaluators to the data you have: query plus response supports Relevance, Coherence and Fluency; Retrieval needs context; Similarity and F1 need ground truth.
+V: Microsoft Foundry, Foundry evaluations
+
+@ AI-103 D2 T2.1 applied comparison
+S: A tutoring app is tested against expected answers written by teachers. A correct reply often uses different words, for example "Paris is France's largest city" for "The largest city in France is Paris". Which evaluator gives credit for such paraphrases?
+A: F1 score, which counts the words shared by the response and the ground truth and balances precision against recall
+B: BLEU score, which measures how many exact n-grams of the response also appear in the teacher's reference answer
+C: ROUGE score, which measures recall-oriented n-gram overlap and returns separate precision, recall and F1 values
+D: Similarity, an LLM-judge evaluator that scores the semantic closeness of the response to the ground truth for the query
+K: D
+G: ## Two families of ground-truth metrics
+Learn's textual similarity article separates them:
+- **Similarity** (`builtin.similarity`): an LLM judge "focuses on semantics of a response, instead of simple overlap in tokens or n-grams. It also considers the broader context of a query." Inputs: query, response, ground_truth; a judge `deployment_name`; 1-5 score, default threshold 3.
+- **F1, BLEU, GLEU, ROUGE, METEOR**: algorithmic overlap of tokens or n-grams; no judge model; 0-1 float, default threshold 0.5. METEOR adds some synonym and stemming handling.
+## Choosing
+Learn: "Use `builtin.similarity` when semantic meaning matters — for example, when paraphrases or synonyms should score as equivalent. Use the algorithmic evaluators ... when exact token overlap is the criterion, such as machine translation quality assessment, fixed-answer retrieval, or NLP benchmarking." All six are GA.
+## Example
+"Paris is France's largest city" vs "The largest city in France is Paris": overlap metrics are reduced by the reordering and word changes, while Similarity rates them as equivalent.
+W: Similarity: an LLM judge compares meaning with the teacher's answer, so a correct paraphrase scores well even when the wording differs.
+X: A=F1 score: it counts shared words, so paraphrases with different vocabulary lose points even when they are correct.
+B=BLEU: it rewards exact n-gram matches, which suits translation benchmarks rather than free-form correct answers.
+C=ROUGE: it measures n-gram overlap with a recall focus; reworded answers still score lower than their correctness deserves.
+T: Use the Similarity evaluator when paraphrases should count as correct; F1, BLEU and ROUGE reward exact word overlap.
+V: Microsoft Foundry, Foundry evaluations
+
+@ AI-103 D2 T2.1 advanced use-case
+S: A RAG team wants to tune Azure AI Search settings (top_k, chunk size, vector or semantic queries) for their app. They have human relevance labels for documents per test query. Which evaluator gives search quality metrics such as NDCG and fidelity for comparing those settings?
+A: Retrieval, which uses an LLM judge to score how relevant the retrieved chunks are to each query when no labels are available
+B: Groundedness, which checks whether the final response stays within the retrieved context instead of measuring search ranking
+C: Document Retrieval, which compares retrieved documents with ground-truth relevance labels and returns NDCG, XDCG, fidelity and holes
+D: Relevance, which judges how accurately and completely the generated response answers the query for each of the test queries
+K: C
+G: ## Process versus system evaluation in RAG
+Learn splits RAG evaluators into:
+- **System evaluation** of the final response: Groundedness, Relevance, Response Completeness (preview).
+- **Process evaluation** of the retrieval step: **Retrieval** and **Document Retrieval**.
+## Document Retrieval
+Use it when "retrieval quality is a bottleneck for your RAG, and you have query relevance labels (ground truth)". It compares `retrieved_documents` (ids with search scores) with `retrieval_ground_truth` (ids with human `query_relevance_label` values) and returns:
+- **Fidelity**: how many of the known good documents were returned
+- **NDCG** and **XDCG**: ranking quality in the top results
+- **Max relevance N**: best relevance in the top-k
+- **Holes**: retrieved documents with no relevance label
+It needs no judge model.
+## Parameter sweep
+Learn describes generating retrieval results for different search settings (search algorithms, top_k, chunk sizes) and using `document_retrieval` "to find the search parameters that yield the highest retrieval quality".
+W: Document Retrieval: with human labels it computes standard search metrics such as NDCG and fidelity, which is what a parameter sweep across search settings needs.
+X: A=Retrieval: it's the choice when you don't have labels; it returns an LLM-judged 1-5 score, not NDCG or fidelity.
+B=Groundedness: it evaluates the final answer against context, so it can't tell which search setting ranked documents better.
+D=Relevance: it scores the generated answer against the query; poor ranking and poor generation look the same in this score.
+T: With human relevance labels, use the Document Retrieval evaluator (NDCG, XDCG, fidelity, holes) to compare search settings for RAG.
+V: Microsoft Foundry, Foundry evaluations, Azure AI Search
+
+@ AI-103 D2 T2.1 applied use-case
+S: A team logged 500 production questions with the answers their app gave last month in a JSONL file. They want quality scores in the Foundry portal for exactly those answers, without calling the model again. Which evaluation target should they choose?
+A: Model, so the portal resends each question to the current deployment and scores the newly generated answers against the file
+B: Dataset, which evaluates preexisting model or agent outputs stored in a CSV or JSONL test file without rerunning anything
+C: Agent with simulated data, so a user-simulator model replays each question as a conversation and the portal scores the replies
+D: Model with synthetic data, so the portal generates new questions like the logged ones and scores answers to those instead
+K: B
+G: ## Evaluation targets in the Foundry portal
+When you create an evaluation, you first choose what it runs against. Learn's portal evaluation article lists:
+- **Agent**: runs your agent on the inputs and scores its outputs.
+- **Model**: runs a deployed model on your prompts and scores what it generates.
+- **Dataset**: "Evaluates preexisting model or agent outputs from a test dataset." Learn's summary: "Evaluating preexisting outputs without re-running the model or agent."
+- **Traces**: scores agent interactions already captured in Application Insights.
+## Data sources
+A dataset is a CSV or JSONL file. Other options include existing datasets for model benchmarking and synthetic data, where AI generates test queries.
+## Choosing
+If you want to know how *last month's answers* scored, re-running the model would score different answers from a possibly different model version. A dataset target scores the logged answers exactly as users saw them. Map the file's columns (for example `query`, `response`) to the evaluators' inputs.
+W: Dataset target: it scores the answers already in the file, so the results describe exactly what users received and no inference is repeated.
+X: A=Model target: it generates fresh answers, which may differ from the logged ones and wouldn't measure last month's quality.
+C=Agent with simulated data: simulation creates new synthetic conversations; it doesn't score recorded answers.
+D=Synthetic data: generated questions replace the real ones, losing the production set the team wants to measure.
+T: To score outputs you already have, use a Dataset evaluation target; Model and Agent targets generate new outputs first.
+V: Microsoft Foundry, Foundry evaluations
+
+@ AI-103 D2 T2.1 applied troubleshooting
+S: A developer configures a cloud evaluation with the Foundry SDK using builtin.coherence and builtin.f1_score over a JSONL dataset. The F1 results come back, but the coherence evaluator fails to start. The coherence criterion has a data mapping but no initialization parameters. What is missing?
+A: A ground_truth column, because coherence compares every response with an expected answer before it scores the flow of ideas
+B: A connection to Application Insights, because AI-assisted evaluators write their reasoning to traces before they return a score
+C: The `deployment_name` of a GPT model deployment to act as the LLM judge, which AI-assisted evaluators require and F1 doesn't
+D: A higher pass threshold than the default of 3, because coherence can't start when its threshold is lower than the F1 threshold
+K: C
+G: ## Two kinds of built-in evaluators
+- **AI-assisted (LLM-as-judge)**: Coherence, Fluency, Relevance, Groundedness, Retrieval, Similarity. A judge model reads the inputs and scores them on a 1-5 scale. Learn lists `deployment_name` as a **required parameter**; general-purpose evaluator guidance suggests gpt-5-mini as a good balance of performance and cost.
+- **Algorithmic**: F1, BLEU, GLEU, ROUGE, METEOR. They compute token or n-gram overlap and need no judge model; F1, BLEU, GLEU and METEOR list no required parameters (ROUGE only needs a `rouge_type`).
+## Cloud evaluation setup
+The cloud evaluation article sets shared variables: `AZURE_AI_PROJECT_ENDPOINT` and `AZURE_AI_MODEL_DEPLOYMENT_NAME` ("the model deployment used by AI-assisted evaluators"), then creates `AIProjectClient` and its OpenAI client. A criterion for an AI-assisted evaluator looks like:
+`{"type": "azure_ai_evaluator", "name": "coherence", "evaluator_name": "builtin.coherence", "initialization_parameters": {"deployment_name": model_deployment}, "data_mapping": {"query": "{{item.query}}", "response": "{{item.response}}"}}`
+## Why F1 still worked
+F1 only needs `ground_truth` and `response`, so it ran without a judge.
+W: Judge deployment name: coherence is scored by an LLM judge, and without `deployment_name` in its initialization parameters the evaluator has no model to call.
+X: A=ground_truth column: coherence needs query and response (or messages); ground truth is for Similarity and the NLP metrics.
+B=Application Insights: connecting it lets results flow to monitoring, but it isn't required for an evaluator to run.
+D=Threshold: thresholds decide pass or fail after scoring; they don't prevent an evaluator from starting.
+T: AI-assisted evaluators need a judge model `deployment_name`; algorithmic metrics such as F1 and BLEU don't.
+V: Microsoft Foundry, Foundry SDK, Foundry evaluations
+
+@ AI-103 D2 T2.1 applied use-case
+S: A Python app reads the Azure AI Search endpoint for its RAG step from a config file that each environment edits by hand. The Foundry project already has an Azure AI Search connection. The team wants the app to discover that resource through the project instead. What should the app use?
+A: The connections operations on AIProjectClient, created with the project endpoint, to retrieve the Azure AI Search connection
+B: The `OpenAI()` client on the /openai/v1/ endpoint, calling `client.models.list()` to find the search service the project uses
+C: The project's model deployments list, because each deployment records the search index that the project attached to it
+D: An Azure Resource Manager query for every Azure AI Search service in the subscription, taking the first service the query returns
+K: A
+G: ## What a connection is
+Learn: "Connections let you authenticate to Microsoft and other resources within your Foundry projects." Azure AI Search, Azure Storage, Application Insights, Azure Key Vault and other services can be connected. Connection details are stored in a managed Key Vault unless you bring your own.
+## Reading connections from code
+The Azure AI Projects client library (part of the Foundry SDK) lets you "enumerate connected Azure resources in your Foundry project using `.connections` operations", alongside `.deployments`, `.datasets` and `.indexes`. Learn's SDK overview places "listing connections" among the project client's Foundry-native operations.
+## Example flow
+1. Configure only `FOUNDRY_PROJECT_ENDPOINT` per environment.
+2. `project = AIProjectClient(endpoint=..., credential=DefaultAzureCredential())`
+3. Use `project.connections` to find the Azure AI Search connection and read its target endpoint.
+4. Create the `SearchClient` with that endpoint and a keyless credential.
+Each environment's project points to its own search service, so the code stays the same.
+W: Project connections: the project client's connections operations expose the connected search resource, so the app needs only the project endpoint per environment.
+X: B=models.list on v1: that lists models available to the resource; search services aren't models and aren't returned.
+C=Deployments list: deployments describe models (name, version, capacity, guardrails), not search indexes.
+D=Resource Manager query: picking the first search service in a subscription is fragile and ignores which service the project actually uses.
+T: Let apps discover connected resources such as Azure AI Search through `AIProjectClient` connections operations, configured with just the project endpoint.
+V: Microsoft Foundry, Foundry SDK, Azure AI Search
+
+@ AI-103 D2 T2.1 applied use-case
+S: A developer moves a Python app from the `AzureOpenAI()` client with a dated `api_version` to the v1 Azure OpenAI API, keeping API key authentication. Which TWO changes are part of this move? (Select TWO)
+A: Create the client with `OpenAI()` from the openai package instead of `AzureOpenAI()`, passing the resource endpoint in `base_url`
+B: Append `/openai/v1/` to the resource endpoint in `base_url` and stop passing a dated `api_version` with each request
+C: Replace the deployment name in the `model` field with the catalog model name, because v1 resolves models by their catalog names
+D: Switch the endpoint to the project endpoint, because the v1 API serves Azure OpenAI only through Foundry projects
+E: Send the API key as a project connection secret, because the v1 API no longer accepts keys passed directly to the client
+K: A,B
+G: ## The v1 Azure OpenAI API
+Since August 2025, you can opt in to the **v1** API. Learn lists what it changes:
+- "`OpenAI()` client is used instead of `AzureOpenAI()`."
+- "Pass the Azure OpenAI endpoint to `base_url` and append `/openai/v1` to the endpoint address."
+- "`api-version` is no longer a required parameter with the v1 GA API."
+Preview features are opted into with feature-specific headers or path segments instead of changing API versions.
+## Before and after
+Before: `AzureOpenAI(azure_endpoint=..., api_key=..., api_version="2024-xx-xx")`
+After: `OpenAI(api_key=os.getenv("AZURE_OPENAI_API_KEY"), base_url="https://<resource>.openai.azure.com/openai/v1/")`
+The request still names the **deployment** in `model`. Keys still work; with Entra ID you pass a token provider as `api_key` instead.
+W: A=OpenAI() client: the v1 API is designed for the standard OpenAI client, so `AzureOpenAI()` isn't needed anymore.
+B=/openai/v1/ and no api_version: the v1 route uses implicit versioning, so the base URL changes and the dated version parameter goes away.
+X: C=Catalog model name: the `model` field still takes the deployment name on the v1 endpoint.
+D=Project endpoint: the v1 API lives on the resource endpoint `https://<resource>.openai.azure.com/openai/v1/`; the project endpoint is for the Foundry SDK.
+E=Key as connection secret: the v1 examples pass the API key straight to `OpenAI(api_key=...)`; connections aren't involved.
+T: Moving to v1 means `OpenAI()` with `base_url=https://<resource>.openai.azure.com/openai/v1/` and no `api_version`, still naming the deployment in `model`.
+V: Microsoft Foundry, Azure OpenAI

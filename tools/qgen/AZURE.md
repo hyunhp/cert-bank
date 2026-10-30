@@ -46,10 +46,26 @@ of April 15, 2026", page updated 2026-07-13) and https://learn.microsoft.com/en-
 | Audience | Beginning AI developers: conceptual AI knowledge plus basic Python and familiarity with Azure resources |
 | Preview features | "Most questions cover features that are general availability (GA). The exam may contain questions on Preview features if those features are commonly used." Key answers stay on GA features; when a feature is preview, say so in the explanation |
 
+### AI-103 Developing AI Apps and Agents on Azure (added 2026-10-30)
+Sources: https://learn.microsoft.com/en-us/credentials/certifications/resources/study-guides/ai-103 ("Skills measured as
+of April 16, 2026") and https://learn.microsoft.com/en-us/credentials/certifications/azure-ai-apps-and-agents-developer-associate/
+(Microsoft Certified: Azure AI Apps and Agents Developer Associate). AI-103 replaces AI-102 (retired 2026-06-30).
+
+| Item | Value |
+|---|---|
+| Length | 120 minutes ("You will have 120 minutes to complete this assessment") |
+| Questions | Not published. This bank assumes 50 (mock length only) |
+| Pass mark | Scaled score 700 or greater |
+| Domains | D1 Plan and manage an Azure AI solution 25-30%, D2 Implement generative AI and agentic solutions 30-35%, D3 computer vision 10-15%, D4 text analysis 10-15%, D5 information extraction 10-15%; `exam-specs.json` stores the midpoints |
+| Item types | "You may have interactive components"; this bank only has multiple choice |
+| Preview features | Same note as AI-901: mostly GA, commonly used preview features possible. Key answers stay on GA features |
+
 ## Codes and task ids
 - `AZ-900` (Azure Fundamentals), vendor `azure`, level `foundational`.
 - `AI-901` (Azure AI Fundamentals), vendor `azure`, level `foundational`; tasks T1.1-T1.3 and T2.1-T2.4 are the guide's 7
   skill groups in order.
+- `AI-103` (Azure AI Apps and Agents Developer – Associate), vendor `azure`, level `associate`; tasks T1.1-T5.2 are
+  the guide's 14 skill groups in order.
 - `AZ-104` (Azure Administrator – Associate), vendor `azure`, level `associate`; tasks T1.1-T5.2 are the guide's 15 skill
   groups in order.
 - Domains D1-D3 follow the study guide's order and names exactly.
@@ -81,6 +97,17 @@ of April 15, 2026", page updated 2026-07-13) and https://learn.microsoft.com/en-
   Language Studio retires 2027-03-20; Image Analysis v3.2/v4.0 and Custom Vision retire 2028-09-25 (never key them);
   dall-e-3 retired 2026-03-04, GPT-image-2 and the GPT-image-2.5 models are GA while GPT-image-1/1-mini/1.5 are limited-access preview; Realtime API
   with gpt-realtime and Voice Live API are GA, gpt-audio chat completions uses a preview API version.
+  Checked during the AI-103 reviews (2026-10-30): Azure OpenAI On Your Data retired 2026-10-14; Foundry portal workflows
+  retire 2026-12-01 (use Microsoft Agent Framework; Python/.NET not labelled preview); Connected Agents not in the new
+  Agent Service, a2a tool (A2A v1.0) GA; Memory, agent guardrails, Task Adherence/Intent Resolution/Task Completion
+  evaluators, the agent Monitor tab metrics, AI Red Teaming Agent and Sora 2 are preview; Foundry IQ knowledge bases are
+  GA in Search REST 2026-04-01 only with minimal extractive retrieval (query planning/answer synthesis preview); model
+  router GA (session affinity and routing metadata preview); Translator text API 2026-06-06 GA with NMT or LLM choice;
+  LLM Speech GA; Content Understanding pro mode existed only in a retired preview API; capacity units per TPM vary by model.
+- AI-103 is a developer associate exam: stems are build/configure/troubleshoot scenarios in Microsoft Foundry (models,
+  agents, RAG with Azure AI Search, evaluation, tracing, guardrails, Content Understanding, Speech, Language,
+  Translator). Short code (Python SDK, REST) and settings are fine when shown on Learn. Apply every AI-901 naming and
+  status fact recorded above; check GA vs preview for each keyed feature (Foundry changes fast).
 - AZ-900 is a fundamentals exam: stems test choosing and describing services, not CLI flags or portal clicks.
 - AZ-104 is an administrator exam: stems are hands-on scenarios (configure, troubleshoot, interpret). Concrete settings,
   role names, `az`/PowerShell commands, ARM/Bicep snippets and portal blades are fine when each detail is checked on
