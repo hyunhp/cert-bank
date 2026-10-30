@@ -79,7 +79,7 @@ of April 15, 2026", page updated 2026-07-13) and https://learn.microsoft.com/en-
   conversations + responses (classic threads/messages/runs deprecated, retire 2027-03-31); Azure Language key phrases,
   sentiment/opinion mining and summarization are "legacy" (retire 2029-03-31; PII, language detection, NER are core);
   Language Studio retires 2027-03-20; Image Analysis v3.2/v4.0 and Custom Vision retire 2028-09-25 (never key them);
-  dall-e-3 retired 2026-03-04, GPT-image-2 is GA while GPT-image-1/1-mini/1.5 are limited-access preview; Realtime API
+  dall-e-3 retired 2026-03-04, GPT-image-2 and the GPT-image-2.5 models are GA while GPT-image-1/1-mini/1.5 are limited-access preview; Realtime API
   with gpt-realtime and Voice Live API are GA, gpt-audio chat completions uses a preview API version.
 - AZ-900 is a fundamentals exam: stems test choosing and describing services, not CLI flags or portal clicks.
 - AZ-104 is an administrator exam: stems are hands-on scenarios (configure, troubleshoot, interpret). Concrete settings,
