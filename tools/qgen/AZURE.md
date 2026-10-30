@@ -74,6 +74,18 @@ certification") and the exam page (updated April 17, 2026).
 | Domains | D1 identity, governance and monitoring 25-30%, D2 data storage 20-25%, D3 business continuity 15-20%, D4 infrastructure 30-35%; `exam-specs.json` stores the midpoints |
 | Level | `expert` (a new level segment in the Azure tab) |
 
+### SC-900 Microsoft Security, Compliance, and Identity Fundamentals (added 2026-10-30)
+Sources: https://learn.microsoft.com/en-us/credentials/certifications/resources/study-guides/sc-900 ("Skills measured as
+of October 21, 2026") and https://learn.microsoft.com/en-us/credentials/certifications/security-compliance-and-identity-fundamentals/
+("You will have 45 minutes to complete this assessment").
+
+| Item | Value |
+|---|---|
+| Length | 45 minutes |
+| Questions | Not published. This bank assumes 45 (mock length only) |
+| Pass mark | Scaled score 700 or greater |
+| Domains | D1 concepts 10-15%, D2 Microsoft Entra 25-30%, D3 Microsoft security solutions 35-40%, D4 Microsoft compliance solutions 20-25%; `exam-specs.json` stores the midpoints |
+
 ## Codes and task ids
 - `AZ-900` (Azure Fundamentals), vendor `azure`, level `foundational`.
 - `AI-901` (Azure AI Fundamentals), vendor `azure`, level `foundational`; tasks T1.1-T1.3 and T2.1-T2.4 are the guide's 7
@@ -82,6 +94,8 @@ certification") and the exam page (updated April 17, 2026).
   the guide's 14 skill groups in order.
 - `AZ-305` (Azure Solutions Architect – Expert), vendor `azure`, level `expert`; tasks T1.1-T4.4 are the guide's 12 skill
   groups in order.
+- `SC-900` (Security, Compliance, and Identity Fundamentals), vendor `azure`, level `foundational`; tasks T1.1-T4.4 are
+  the guide's 14 skill groups in order.
 - `AZ-104` (Azure Administrator – Associate), vendor `azure`, level `associate`; tasks T1.1-T5.2 are the guide's 15 skill
   groups in order.
 - Domains D1-D3 follow the study guide's order and names exactly.
@@ -116,6 +130,10 @@ certification") and the exam page (updated April 17, 2026).
   recommend?") that test choosing between services and tiers and the trade-offs (cost, availability, RPO/RTO, security,
   operations). No CLI syntax or portal clicks. The real exam uses long case studies; keep stems short (stem-length gate)
   and put the deciding requirement in the stem.
+- SC-900 is a fundamentals exam across Microsoft Entra, Defender XDR, Defender for Cloud, Sentinel and Purview: stems
+  describe a need and ask which capability or concept fits. Many of these products are Microsoft 365 services; check
+  names and licensing-free facts on learn.microsoft.com (entra/, defender-xdr/, purview/, azure/sentinel/). Use
+  current names (Microsoft Defender XDR, not Microsoft 365 Defender; Microsoft Purview, not Microsoft 365 compliance).
 - AZ-900 is a fundamentals exam: stems test choosing and describing services, not CLI flags or portal clicks.
 - AZ-104 is an administrator exam: stems are hands-on scenarios (configure, troubleshoot, interpret). Concrete settings,
   role names, `az`/PowerShell commands, ARM/Bicep snippets and portal blades are fine when each detail is checked on
