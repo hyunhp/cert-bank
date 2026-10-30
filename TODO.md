@@ -116,8 +116,9 @@ AI-901 DONE 2026-10-29: registered (2 domains, midpoint weights 42.5/57.5, 45 qu
 b01-b09 (one batch per skill group or half of one, 38 multi-answer), each independently reviewed against Learn (~110 fixes:
 ~20 near-duplicates across batches, fundamentals depth for SDK/API trivia in b07-b09, preview paths replaced by GA ones,
 e.g. gpt-audio chat completions -> gpt-realtime). Reviewed batches were ingested as they finished and later reviewers
-were told what had just been published, which caught most cross-batch overlap. Open: AI-901 study guide and glossary
-terms; Foundry changes fast (agents classic retire 2027-03-31, Azure Language legacy features 2029-03-31, Language
+were told what had just been published, which caught most cross-batch overlap. AI-901 study guide DONE 2026-10-30: 13 days (D1 5, D2 7, final), two writers +
+two independent Learn reviewers (17 fixes); glossary +10 terms (few-shot, fine-tuning, multimodal, system message, SLM,
+transformer, SSML, DefaultAzureCredential, NER, OCR; Learn-reviewed) and 16 vendor-neutral/az-* terms tagged AI-901. Foundry changes fast (agents classic retire 2027-03-31, Azure Language legacy features 2029-03-31, Language
 Studio 2027-03-20, Image Analysis/Custom Vision 2028-09-25), re-check with section 1.
 
 ## Future: other certifications (researched 2026-10-29, not started)

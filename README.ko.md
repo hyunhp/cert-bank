@@ -51,7 +51,7 @@ Amazon Web Services, Palantir Technologies, Microsoft와 관련 없는 비공식
 | | | PLTR-AIE AI Engineer | 400 | 17 |
 | | | PLTR-APD Application Developer | 400 | 17 |
 | Azure | Foundational | AZ-900 Azure Fundamentals | 225 | 14 |
-| | | AI-901 Azure AI Fundamentals | 225 | – |
+| | | AI-901 Azure AI Fundamentals | 225 | 13 |
 | | Associate | AZ-104 Azure Administrator | 250 | 32 |
 
 여러 시험에 공통으로 쓰이는 문항이 있어 시험별 합계는 전체 고유 문항 수보다 많습니다. Palantir는 섹션 비중을
