@@ -58,7 +58,7 @@ affiliated with Amazon Web Services, Palantir Technologies, Microsoft or Google,
 | | Associate | AZ-104 Azure Administrator | 250 | 32 |
 | | | AI-103 Azure AI Apps and Agents Developer | 243 | 20 |
 | | Expert | AZ-305 Azure Solutions Architect | 251 | 22 |
-| Google Cloud | Foundational | GCP-CDL Cloud Digital Leader | 226 | – |
+| Google Cloud | Foundational | GCP-CDL Cloud Digital Leader | 226 | 15 |
 | | | GCP-GAIL Generative AI Leader | 226 | 15 |
 | | Associate | GCP-ACE Associate Cloud Engineer | 250 | 22 |
 
