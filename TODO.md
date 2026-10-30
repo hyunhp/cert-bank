@@ -1,5 +1,22 @@
 # TODO
 
+## Now (warm start — keep this section current; update it with every merge)
+Updated 2026-10-30.
+- In progress: **DP-900** question bank on branch `azure-dp-900` (registered; `tools/qgen/batches/DP-900/PLAN.md`
+  owns topics per batch; target 225 in b01-b09). If the session was cleared: `git fetch && git checkout azure-dp-900`,
+  run `python3 tools/qgen/qgen.py check --siblings` on each draft, review drafts not yet ingested (`batch-reviewer`),
+  ingest one at a time, finish missing batches with `question-writer` per PLAN.md. Then the DP-900 study guide +
+  glossary, then merge.
+- Done this cycle (all merged): AI-901, AI-103, AZ-305, SC-900 banks, study guides and glossary terms; Resume button;
+  docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
+- Next after DP-900: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). Other vendors need
+  hosts: www.databricks.com is still blocked; learn.palantir.com / certification.palantir.com answer 403 (site side);
+  Google Cloud exam pages and docs.cloud.google.com are reachable. Ask the owner which vendor next.
+- Working style the owner asked for: merge reviewed work once all tests pass (merge permission rule is set), then
+  report; start question writers in waves of about 4 (a 5-hour usage limit stopped 10 parallel writers once); reviewers
+  start as each writer finishes; Sonnet for glossary/format checks; reports short.
+- Token baseline: with the cache/PLAN workflow reviewers use ~50-75k tokens per batch (90-160k before), writers ~75-110k.
+
 ## AWS exam versions (checked 2026-10-27)
 Notices live in `data/exam-specs.json` ("update"), shown above the section filters and in mock setup.
 - SAP-C02 -> SAP-C03: DONE 2026-10-27 from the official guide (docs.aws.amazon.com, 2026-10-27): 5 domains
