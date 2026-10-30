@@ -235,6 +235,12 @@ idle prefetch of `data/explanations/<EXAM>.json` (up to 331 KB gzip) finishes wa
 pass ~700: render the first ~50 cards then the rest on idle, or split explanation files per domain.
 
 ## Tooling notes
+- Subagent token savings (2026-10-30, owner request): `tools/learn_fetch.py` shared docs cache (main article text only,
+  `--grep` for the relevant lines); batches carry `# src:` lines for reviewers; `qgen check --siblings` catches
+  overlaps between parallel batches before review; `expand-exam` writes `PLAN.md` (topics owned per batch) first, uses
+  25-30-question batches, Sonnet for format-only work, and ingests each batch as soon as it is reviewed; question
+  writers no longer use worktree isolation (they wrote into stale worktrees and could not see new registrations);
+  agent reports are capped (writers 150 words, reviewers 200). Foundry status facts moved to `tools/qgen/AZURE-status.md`.
 - `tools/diagrams/build_assets.py` reuses icons already in `assets/aws-icons.svg` when the icon pack is missing, so
   it works on any PC; only brand-new icons need the pack (path as first argument).
 - Windows cp949: file I/O in tools now passes `encoding="utf-8"`; `qgen.py` and `diagrams/check.py` reconfigure stdout.

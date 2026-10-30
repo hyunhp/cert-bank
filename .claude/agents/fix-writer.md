@@ -19,7 +19,9 @@ Steps:
    Fix the flaw at its root: make exactly one option defensible, keep distractors as long and specific as
    the answer, keep the tested concept unless it is obsolete. Write G:/W:/X:/T: in the detailed style of
    `e01.txt`; never refer to options by letter in the text.
+   Fetch documentation with `python3 tools/learn_fetch.py <url>` (shared cache) and read it with `--grep`; list
+   the pages you relied on as `# src: <url>` lines at the top of the batch.
 4. Run `python3 tools/qgen/qgen.py check <batch>` until it reports 0 errors, and
    `python3 tools/qgen/length_bias.py <batch>` for length bias.
-5. Do NOT run ingest, do NOT edit data/*.json, do NOT commit. Report the batch path, the check summary
+5. Do NOT run ingest, do NOT edit data/*.json, do NOT commit. Report in at most 150 words: the batch path, the check summary
    line, and ids you could not fix with the reason.
