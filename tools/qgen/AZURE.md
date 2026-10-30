@@ -86,6 +86,18 @@ of October 21, 2026") and https://learn.microsoft.com/en-us/credentials/certific
 | Pass mark | Scaled score 700 or greater |
 | Domains | D1 concepts 10-15%, D2 Microsoft Entra 25-30%, D3 Microsoft security solutions 35-40%, D4 Microsoft compliance solutions 20-25%; `exam-specs.json` stores the midpoints |
 
+### DP-900 Microsoft Azure Data Fundamentals (added 2026-10-30)
+Sources: https://learn.microsoft.com/en-us/credentials/certifications/resources/study-guides/dp-900 ("Skills measured as
+of July 21, 2026") and https://learn.microsoft.com/en-us/credentials/certifications/azure-data-fundamentals/ ("You will
+have 45 minutes to complete this assessment").
+
+| Item | Value |
+|---|---|
+| Length | 45 minutes |
+| Questions | Not published. This bank assumes 45 (mock length only) |
+| Pass mark | Scaled score 700 or greater |
+| Domains | D1 core data concepts 25-30%, D2 relational data 20-25%, D3 non-relational data 15-20%, D4 analytics workload 25-30%; `exam-specs.json` stores the midpoints |
+
 ## Codes and task ids
 - `AZ-900` (Azure Fundamentals), vendor `azure`, level `foundational`.
 - `AI-901` (Azure AI Fundamentals), vendor `azure`, level `foundational`; tasks T1.1-T1.3 and T2.1-T2.4 are the guide's 7
@@ -96,6 +108,8 @@ of October 21, 2026") and https://learn.microsoft.com/en-us/credentials/certific
   groups in order.
 - `SC-900` (Security, Compliance, and Identity Fundamentals), vendor `azure`, level `foundational`; tasks T1.1-T4.4 are
   the guide's 14 skill groups in order.
+- `DP-900` (Azure Data Fundamentals), vendor `azure`, level `foundational`; tasks T1.1-T4.3 are the guide's 11 skill
+  groups in order.
 - `AZ-104` (Azure Administrator – Associate), vendor `azure`, level `associate`; tasks T1.1-T5.2 are the guide's 15 skill
   groups in order.
 - Domains D1-D3 follow the study guide's order and names exactly.
@@ -134,6 +148,10 @@ of October 21, 2026") and https://learn.microsoft.com/en-us/credentials/certific
   describe a need and ask which capability or concept fits. Many of these products are Microsoft 365 services; check
   names and licensing-free facts on learn.microsoft.com (entra/, defender-xdr/, purview/, azure/sentinel/). Use
   current names (Microsoft Defender XDR, not Microsoft 365 Defender; Microsoft Purview, not Microsoft 365 compliance).
+- DP-900 is a data fundamentals exam: describe data concepts, relational and non-relational services, analytics
+  (Microsoft Fabric, Azure Databricks) and Power BI. Facts from learn.microsoft.com (azure/, fabric/, power-bi/,
+  training/modules for DP-900). Azure Database for MariaDB is retired; Azure Synapse Analytics is still documented but
+  Microsoft points new analytics to Fabric — check status before keying Synapse.
 - AZ-900 is a fundamentals exam: stems test choosing and describing services, not CLI flags or portal clicks.
 - AZ-104 is an administrator exam: stems are hands-on scenarios (configure, troubleshoot, interpret). Concrete settings,
   role names, `az`/PowerShell commands, ARM/Bicep snippets and portal blades are fine when each detail is checked on
