@@ -18,6 +18,7 @@ Steps:
    For `PLTR-*` exams read `tools/qgen/PALANTIR.md` first and follow it (single answer only, no multi-answer;
    sources are the official exam guide and palantir.com/docs only; no UI click paths).
    For `AZ-*`/`AI-*` exams read `tools/qgen/AZURE.md` (and `tools/qgen/AZURE-status.md` for AI-901/AI-103).
+   For `GCP-*` exams read `tools/qgen/GCP.md` (sources: docs.cloud.google.com and the exam guide).
    Every question gets a detailed explanation (G:, W:, X:, T:) in the style of
    `tools/qgen/batches/ANS-C01/e01.txt`: teach the underlying concept first, then give each
    option a named, specific reason. Never refer to options by letter in the explanation.

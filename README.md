@@ -2,20 +2,20 @@
 
 **[Open the site →](https://hyunhp.github.io/cert-bank/)** · [한국어](README.ko.md)
 
-Free, original practice material for AWS, Palantir and Microsoft Azure certifications. Unofficial: not affiliated with
-Amazon Web Services, Palantir Technologies or Microsoft, and no real exam questions (no dumps).
+Free, original practice material for AWS, Palantir, Microsoft Azure and Google Cloud certifications. Unofficial: not
+affiliated with Amazon Web Services, Palantir Technologies, Microsoft or Google, and no real exam questions (no dumps).
 
 ## What's here
 
 | | What it is | Link |
 |---|---|---|
-| **Question Bank** | 7,400+ original multiple-choice questions with detailed explanations | [Open](https://hyunhp.github.io/cert-bank/) |
+| **Question Bank** | 8,300+ original multiple-choice questions with detailed explanations | [Open](https://hyunhp.github.io/cert-bank/) |
 | **Study Guide** | A day-by-day study plan per exam: key concepts, what the exam looks for, two check questions and a one-line recap | [Open](https://hyunhp.github.io/cert-bank/study.html) |
 
 ## How to use
 
 **Question Bank**
-1. Pick a vendor (AWS, Palantir or Azure), a level, then an exam.
+1. Pick a vendor (AWS, Palantir, Azure or Google Cloud), a level, then an exam.
 2. Optionally narrow to one exam section (domain).
 3. Click a question to see the answer and why each option is right or wrong. Many explanations include an
    architecture diagram.
@@ -58,9 +58,11 @@ Amazon Web Services, Palantir Technologies or Microsoft, and no real exam questi
 | | Associate | AZ-104 Azure Administrator | 250 | 32 |
 | | | AI-103 Azure AI Apps and Agents Developer | 243 | 20 |
 | | Expert | AZ-305 Azure Solutions Architect | 251 | 22 |
+| Google Cloud | Associate | GCP-ACE Associate Cloud Engineer | 250 | – |
 
 Some questions belong to more than one exam. Palantir publishes no section weights, so its sections count equally;
-Azure publishes weight ranges, and the mock exam uses their midpoints.
+Azure publishes weight ranges, and the mock exam uses their midpoints. Google Cloud publishes no pass mark (results are
+pass/fail only), so its mock exam aims at 80%.
 
 ## Your data
 
@@ -69,7 +71,7 @@ sent to a server. To move bookmarks to another browser or device, use the backup
 
 ## Accuracy
 
-Content is checked against official AWS, Palantir and Microsoft Learn documentation. Services that AWS has closed to new customers
+Content is checked against official AWS, Palantir, Microsoft Learn and Google Cloud documentation. Services that AWS has closed to new customers
 are marked as such in explanations and study notes, because exams may still mention them. Found a mistake? Please
 [open an issue](https://github.com/hyunhp/cert-bank/issues) with the question id (for example `Q001234`) or the
 exam and day.
