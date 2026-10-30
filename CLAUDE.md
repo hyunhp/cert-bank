@@ -65,6 +65,9 @@ answer), stem length. `python3 tools/qgen/length_bias.py <batch>` lists the ques
 
 ## Commands
 - Plan gaps: `python3 tools/qgen/qgen.py plan <EXAM>`; status: `python3 tools/qgen/qgen.py report`
-- Validate: `python3 tools/qgen/qgen.py check <batch>`; write: `... ingest <batch>`
+- Validate: `python3 tools/qgen/qgen.py check <batch>` (`--siblings` also compares with unpublished batches in the
+  same folder); write: `... ingest <batch>`
+- Docs for writers/reviewers: `python3 tools/learn_fetch.py [--grep "<terms>"] <url>` (shared text cache in
+  ~/.cache/cert-bank-docs; batches list their pages as `# src: <url>` lines so reviewers reuse them)
 - Tests (all must pass before commit):
   `node tools/mock_unit_test.mjs && python3 tools/study_test.py && python3 tools/mock_e2e_test.py && python3 tools/mock_link_test.py && python3 tools/bookmark_backup_test.py && python3 tools/loading_perf_test.py && python3 tools/domain_filter_test.py && python3 tools/vendor_tabs_test.py && python3 tools/support_test.py && python3 tools/diagrams/scroll_ui_test.py && python3 tools/diagrams/check.py && python3 tools/diagrams/site_test.py`

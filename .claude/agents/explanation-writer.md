@@ -20,6 +20,8 @@ Steps:
    - T: one-sentence key idea that contrasts the right choice with the tempting wrong one.
    - Accurate for current AWS services (check the availability notes in TODO.md #6). Never refer to
      options by letter in the text.
+   Fetch documentation with `python3 tools/learn_fetch.py <url>` (shared cache) and read it with `--grep`; list
+   the pages you relied on as `# src: <url>` lines at the top of the batch.
 4. Run `python3 tools/qgen/qgen.py check <batch>` until it reports 0 errors.
-5. Do NOT run ingest, do NOT edit data/*.json, do NOT commit. Report the batch path, the check
+5. Do NOT run ingest, do NOT edit data/*.json, do NOT commit. Report in at most 150 words: the batch path, the check
    summary line, and any ids you skipped with the reason.

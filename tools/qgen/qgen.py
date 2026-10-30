@@ -419,7 +419,22 @@ def qtext(stem, correct_texts):
 
 
 # ---------------------------------------------------------------- check / ingest
-def check(path, write=False):
+def sibling_items(path, state):
+    """New-question blocks of the other batch files in the same folder that are not ingested yet (for --siblings):
+    parallel writers can then catch overlaps with each other before review instead of after."""
+    me = pathlib.Path(path).resolve()
+    out = []
+    for f in sorted(me.parent.glob("b*.txt")):
+        if f.resolve() == me:
+            continue
+        for b in (build(b, []) for b in parse(f)):
+            if b and not b.get("explain_only") and b["hash"] not in state:
+                out.append({"id": f"{f.name} {b['where']}", "stem": b["stem"],
+                            "text": qtext(b["stem"], [b["choices"][k] for k in b["keys"]])})
+    return out
+
+
+def check(path, write=False, siblings=False):
     blocks = parse(path)
     errors, warns = [], []
     built = [b for b in (build(b, errors) for b in blocks) if b]
@@ -452,6 +467,10 @@ def check(path, write=False):
     own_ids = {state[i["hash"]] for i in items if i["hash"] in state} | {i["pin"] for i in items if i["pin"]}
     ex_list = [q for qid, q in existing.items() if qid not in own_ids]
     ex_texts = [qtext(q["stem"], [c["text"] for c in q["choices"] if c["key"] in q["correctKeys"]]) for q in ex_list]
+    if siblings:
+        sib = sibling_items(path, state)
+        ex_list += [{"id": x["id"], "stem": x["stem"]} for x in sib]
+        ex_texts += [x["text"] for x in sib]
     new_texts = [qtext(i["stem"], [i["choices"][k] for k in i["keys"]]) for i in items]
     vecs = vectors(ex_texts + new_texts)
     ev, nv = vecs[: len(ex_texts)], vecs[len(ex_texts):]
@@ -718,7 +737,9 @@ if __name__ == "__main__":
         for e in sys.argv[2:]:
             share(e)
     elif cmd in ("check", "ingest"):
-        ok = all(check(p, write=(cmd == "ingest")) for p in sys.argv[2:])
+        # check --siblings also compares against the not-yet-ingested batch files next to it (parallel writers)
+        sib = cmd == "check" and "--siblings" in sys.argv
+        ok = all(check(p, write=(cmd == "ingest"), siblings=sib) for p in sys.argv[2:] if not p.startswith("--"))
         sys.exit(0 if ok else 1)
     else:
         report()
