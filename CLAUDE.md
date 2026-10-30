@@ -16,6 +16,7 @@ Palantir exams publish a percent pass mark (`passingPct`) and no domain weights 
 `tools/qgen/AZURE-status.md`); facts are checked on learn.microsoft.com only.
 **Before any `GCP-*` (Google Cloud) work read `tools/qgen/GCP.md`**; facts are checked on docs.cloud.google.com and the
 exam guide only.
+Markdown notes (TODO.md, handoffs, PR bodies, reports) are written as compressed key summaries: follow `.claude/skills/md-summary/SKILL.md`.
 Open work items are in `TODO.md` — read it at the start of a session, starting with its **Now** section (warm
 start: what is in progress, on which branch, what comes next). Update that section in every PR you merge.
 Study guide: `study.html` + `js/study.js` read `data/study/<EXAM>.json` (day-by-day plans, edited directly,

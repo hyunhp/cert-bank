@@ -2,13 +2,9 @@
 
 ## Now (warm start — keep this section current; update it with every merge)
 Updated 2026-10-30.
-- In progress: **GCP-CDL study guide** (bank merged: 226 questions, b01-b11). If the session was cleared: start from `main`,
-  branch `gcp-cdl-study`, two writers + two reviewers on scratch JSON as for GCP-GAIL (facts from the reviewed bank and
-  cloud.google.com / docs.cloud.google.com only; about 15 days, one per exam-guide section group; D6 shorter), a
-  `STUDY_EXAMS` entry (vendor `gcp`, foundational) in `js/study.js`, stamp_version, build_data_index, glossary `gcp-*` terms
-  (Sonnet review), README study-days column, tests, merge. Open gaps: Gemini app and Gems (GAIL T2.2, blocked hosts);
+- In progress: nothing. GCP-CDL study guide merged (15 days). Open gaps: Gemini app and Gems (GAIL T2.2, blocked hosts);
   CDL golden signals / CapEx-OpEx / data-type definitions use generally accepted meanings (no reachable Google page).
-- Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; GCP-CDL bank; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
+- Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; GCP-CDL bank and study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). www.databricks.com is still
   blocked; learn.palantir.com / certification.palantir.com answer 403 (site side). Google Cloud exam pages, guide PDFs
@@ -204,6 +200,11 @@ say "lift and optimize" (questions describe the action, same answer under both l
 definition page (no "formerly Anthos" claim); "compliance resource manager" matches no Google page (the question keys the
 Compliance resource center); Looker/BigQuery/Pub/Sub/Dataflow claims softened to what pages say; first-/second-/third-party
 data, supply-chain stages, golden signals, CapEx/OpEx, SLI/SLO/SLA use generally accepted definitions, stated in G:.
+
+GCP-CDL study guide DONE 2026-10-30: 15 days (D1 3, D2 3, D3 2, D4 3, D5 2, D6 1, final), three writers + three reviewers
+(about 12 fixes: Cloud SQL engines, GPU/TPU wording, budgets do not stop resources by themselves, distractor lengths);
+glossary +8 `gcp-*` terms (zero trust, Iceberg, Spark, GDPR/CCPA, API styles, VPN, digital sovereignty, Mandiant), 11 existing tagged.
+New: `.claude/skills/md-summary` (markdown notes as compressed key summaries, referenced in CLAUDE.md).
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
