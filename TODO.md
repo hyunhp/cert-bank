@@ -132,7 +132,9 @@ NMT, WER, Content Credentials; reviewed with Sonnet) and 28 existing terms tagge
 AZ-305 DONE 2026-10-30: registered (4 domains, midpoint weights, 50 questions assumed, 100 min assumed, new `expert`
 level segment), 251 questions in b01-b10 written from PLAN.md (topics owned per batch) and reviewed (19 fixes; no
 cross-batch overlaps thanks to PLAN.md and `qgen check --siblings`). Reviewers used ~50-75k tokens per batch vs 90-160k
-before the token-savings changes. Open: AZ-305 study guide and glossary terms.
+before the token-savings changes. AZ-305 study guide DONE 2026-10-30: 22 days (D1 6, D2 5, D3 4, D4 6, final), two
+writers + two Learn reviewers (16 fixes); glossary +9 Azure terms (DTU/vCore, Hyperscale, failover group, RU/s, PIM,
+Managed HSM, Virtual WAN, Cloud Adoption Framework, Global Reach; Sonnet-reviewed) and 32 existing terms tagged AZ-305.
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
