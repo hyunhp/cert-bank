@@ -2,11 +2,9 @@
 
 ## Now (warm start — keep this section current; update it with every merge)
 Updated 2026-10-30.
-- In progress: **DP-900 study guide + glossary** (bank merged: 225 questions). If the session was cleared: start from
-  `main`, branch `azure-dp-900-study`, two writers + two Learn reviewers on scratch JSON as for SC-900 (see the SC-900
-  note below), then `STUDY_EXAMS` in `js/study.js`, `stamp_version.py`, `build_data_index.py`, glossary az-* terms
-  (Sonnet review), README study-days column, tests, merge.
-- Done this cycle (all merged): AI-901, AI-103, AZ-305, SC-900 banks (+ DP-900 bank), study guides and glossary terms; Resume button;
+- In progress: nothing. Last merged: DP-900 study guide (14 days) + 10 glossary terms. If the session was cleared,
+  start from `main` and ask the owner which exam or vendor comes next (see "Next" below).
+- Done this cycle (all merged): AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next after DP-900: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). Other vendors need
   hosts: www.databricks.com is still blocked; learn.palantir.com / certification.palantir.com answer 403 (site side);
@@ -161,6 +159,10 @@ DP-900 DONE 2026-10-30: registered, 225 questions in b01-b09 from PLAN.md, revie
 overlaps). Learn facts kept out of keys: Cosmos DB for PostgreSQL on a retirement path (5 APIs taught), Synapse dropped
 from the DP-900 module (Fabric + Databricks), Q&A visual retires 2027-02, preview Fabric features; "Azure Data Lake
 Storage" (no Gen2) and "Azure DocumentDB" (vCore MongoDB) names as on Learn.
+DP-900 study guide DONE 2026-10-30: 14 days (D1 4, D2 3, D3 2, D4 4, final), two writers + two Learn reviewers (about 15
+fixes: ORC dropped, SELECT is DML, Session "most widely used" not default, no item-type claims); glossary +10 Azure terms
+(normalization, foreign key, DDL/DML, Delta Lake, OneLake, hierarchical namespace, consistency levels, DAX, DirectQuery,
+eventstream; Sonnet-reviewed) and acid, star-schema tagged DP-900.
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
