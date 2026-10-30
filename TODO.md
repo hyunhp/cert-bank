@@ -2,10 +2,14 @@
 
 ## Now (warm start — keep this section current; update it with every merge)
 Updated 2026-10-30.
-- In progress: nothing. Last merged: GCP-ACE study guide (22 days) + 11 `gcp-*` glossary terms. If the session was
-  cleared, start from `main` and ask the owner about the next exam (Google Cloud Generative AI Leader, Cloud Digital
-  Leader or Professional Cloud Architect; see "Next").
-- Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
+- In progress: **GCP-GAIL study guide** (bank merged: 226 questions, b01-b13). If the session was cleared: start from
+  `main`, branch `gcp-gail-study`, two writers + two reviewers on scratch JSON as for DP-900/GCP-ACE (facts from the
+  reviewed bank and cloud.google.com / docs.cloud.google.com only; about 14 days, one per exam-guide section), a
+  `STUDY_EXAMS` entry (vendor `gcp`, level foundational) in `js/study.js`, stamp_version, build_data_index, glossary
+  `gcp-*` terms (Sonnet review), README study-days column, tests, merge. Open gap: the Gemini app and Gems (exam guide
+  T2.2) have no question because gemini.google / workspace.google.com / support.google.com are blocked here; ask the
+  owner whether to allow those hosts and add an `eNN`/`bNN` batch, or accept the gap.
+- Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). www.databricks.com is still
   blocked; learn.palantir.com / certification.palantir.com answer 403 (site side). Google Cloud exam pages, guide PDFs
@@ -180,6 +184,15 @@ fixes, e.g. G2 custom machine types, OS Login roles on project/instance, Cloud N
 deprecated, 24 h metric-absence limit); retake waiting periods left out (support.google.com is blocked). Glossary +11
 `gcp-*` terms (Sonnet-reviewed). e02 fixed Q008135 (G2 custom types). Study page vendor tabs use the "GCP" short name
 on phones like the question bank.
+
+GCP-GAIL bank DONE 2026-10-30: Generative AI Leader (foundational, business-level; 90 min, 50-60 questions, 55 assumed;
+D1 30 / D2 35 / D3 20 / D4 15; pass mark not published), 226 questions in b01-b13 from PLAN.md, each reviewed (about 60
+fixes). Docs facts kept out of keys or reflected: Video Intelligence API deprecated (shutdown 2027-09-14) so a Gemini
+model is the answer; Customer Engagement Suite is now "Gemini Enterprise for Customer Experience" and Dialogflow CX
+evolved into CX Agent Studio (questions use the guide's names, G: mentions the new ones); Model Monitoring v2 and several
+SCC AI features are Preview (not keyed); SAIF pages unreachable so SAIF questions stay at purpose level; diffusion,
+structured/unstructured and labeled/unlabeled data use generally accepted definitions; "extensions" and "plugins" are not
+defined on reachable pages. Gap: Gemini app and Gems (T2.2), see Now.
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's

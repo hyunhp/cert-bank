@@ -20,10 +20,27 @@ used on the exam."
 | Domains | D1 setting up a cloud solution environment ~20%, D2 planning and implementing ~30%, D3 ensuring successful operation ~30%, D4 configuring access and security ~20% |
 | Prerequisites | None; 6+ months hands-on recommended |
 
+### GCP-GAIL Generative AI Leader (added 2026-10-30)
+Sources: https://cloud.google.com/learn/certification/generative-ai-leader and the exam guide
+https://services.google.com/fh/files/misc/generative_ai_leader_exam_guide_english.pdf (read 2026-10-30; the exam page
+says "This exam was recently updated to reflect branding changes. Refer to the exam guide to review product names").
+
+| Item | Value |
+|---|---|
+| Length | 90 minutes |
+| Questions | "50-60 multiple choice questions". This bank assumes 55 (mock length only) |
+| Pass mark | Not published (pass/fail). `passMarkUnpublished: true` |
+| Domains | D1 fundamentals of gen AI ~30%, D2 Google Cloud's gen AI offerings ~35%, D3 techniques to improve model output ~20%, D4 business strategies ~15% |
+| Prerequisites | None. Business-level: strategy and influence, "not technical implementation" |
+
 ## Codes and task ids
 - Google Cloud exams have no codes: this bank uses `GCP-` + an abbreviation. Vendor `gcp`, tab "Google Cloud".
 - `GCP-ACE` (Associate Cloud Engineer), level `associate`; tasks T1.1-T4.2 are the guide's 12 numbered sections
   (1.1, 1.2, 2.1-2.4, 3.1-3.4, 4.1, 4.2), recorded in `tools/qgen/tasks.json` (Korean) and `data/exam-tasks.json`.
+
+- `GCP-GAIL` (Generative AI Leader), level `foundational`; tasks T1.1-T4.3 are the guide's 15 numbered sections (1.1-1.4,
+  2.1-2.5, 3.1-3.3, 4.1-4.3), in `tools/qgen/tasks.json` (Korean) and `data/exam-tasks.json`. The guide repeats the
+  data bullets of 1.1 under 1.2: questions about data types and quality go to T1.2.
 
 ## Writing rules
 - Use the product names of the current exam guide: Cloud Run functions (not Cloud Functions), Google Cloud
@@ -47,3 +64,14 @@ used on the exam."
   prefer predefined roles; custom roles exist at
   organization or project level (not folder). Verify each role name (`roles/...`) on the docs before keying it.
 - Write in the detailed style of CLAUDE.md (G/W/X/T) and list the docs pages relied on as `# src:` lines.
+- GCP-GAIL is a business-level exam: stems are about choosing the right product, approach or practice for a business
+  need, never commands, code or console steps. Product names follow the guide: Gemini Enterprise Agent Platform
+  ("Agent Platform", formerly Vertex AI), Agent Search, Conversational Agents, Gemini Enterprise, Gemini for Google
+  Workspace, Model Garden, Agent Studio, Google AI Studio, Secure AI Framework (SAIF). When docs still show an old
+  name (Vertex AI, Dialogflow, Agentspace), use the guide's name and mention the old one once in G: if helpful.
+- Gen AI products change fast: nothing in preview, no model version numbers, context-window sizes, prices, limits,
+  regions or plan names in keyed answers. Test the capability and the reason to choose it.
+- Unreachable hosts (network policy): workspace.google.com, ai.google.dev, deepmind.google, saif.google,
+  support.google.com. Gemini for Workspace, Gemma, Imagen, Veo and SAIF facts come from cloud.google.com and
+  docs.cloud.google.com pages (products/gemini-for-workspace, Model Garden and generative-ai model pages,
+  transform/secure-ai-framework); claims those pages do not settle are left out.
