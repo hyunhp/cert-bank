@@ -111,12 +111,12 @@ export function draw(exam, n, docs, spec, map, seenIds) {
 function timeFor(spec, n) { return Math.ceil((spec.minutes * n) / spec.questions) * 60; }
 
 // Practice targets sit a margin above the official pass mark: AWS scaled scores are not percentages, so
-// AWS and Azure (scaled 700/1000 or more) use 80% (Foundational/Associate) or 85% (Professional/Specialty); vendors that publish a percent
+// AWS and Azure (scaled 700/1000 or more) use 80% (Foundational/Associate) or 85% (Professional/Expert/Specialty); vendors that publish a percent
 // pass mark (Palantir: 70%) use that mark + 10.
 function verdictFor(spec, pct) {
   const level = spec && spec.level;
   const hi = (spec && spec.passingPct) ? Math.min(100, spec.passingPct + 10)
-    : (level === "professional" || level === "specialty") ? 85 : 80;
+    : (level === "professional" || level === "expert" || level === "specialty") ? 85 : 80;
   const mid = (spec && spec.passingPct) ? spec.passingPct : hi - 10;
   if (pct >= hi) return { key: "ready", label: "Pass-ready", note: `${hi}%+ on first attempts is a comfortable margin.` };
   if (pct >= mid) return { key: "border", label: "Borderline", note: `Aim for ${hi}%+ before booking the exam.` };
