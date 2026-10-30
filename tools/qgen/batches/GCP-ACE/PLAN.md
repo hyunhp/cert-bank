@@ -20,3 +20,9 @@ Shared hot spots belong to ONE batch only; others may use them as distractors bu
 | b11 | T4.2 | 26 | creating service accounts, Google-managed service accounts and service agents, least-privilege service accounts in policies, attaching service accounts to resources, granting roles on a service account (as a resource), impersonation (`roles/iam.serviceAccountTokenCreator`, `--impersonate-service-account`), short-lived credentials vs service account keys (avoid keys), Workload Identity Federation for GKE, Workload Identity Federation for external workloads | Workforce Identity Federation (b01) |
 
 Waves (about 4 writers at a time): b01, b03, b05, b07; then b02, b04, b06, b08; then b09, b10, b11.
+
+## Top-up 2026-10-30 (pool 250 -> 275, domain targets D1 55 / D2 82 / D3 82 / D4 55)
+Rules as above; read the published GCP-ACE questions first (data/GCP-ACE.json) and write NEW scenarios; use the tasks with
+the fewest published questions first (`qgen plan GCP-ACE`). One batch: b12 owns D1 5 (prefer T1.2 billing), D2 5 (prefer
+T2.3 networking, T2.4 tools), D3 7 (prefer T3.3 networking, T3.2 storage), D4 7 (T4.1 IAM, T4.2 service accounts). Hands-on
+exam: gcloud/console-free scenario wording per GCP.md, no console click paths.
