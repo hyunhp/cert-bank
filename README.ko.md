@@ -9,7 +9,7 @@ Amazon Web Services, Palantir Technologies, Microsoft, Google과 관련 없는 �
 
 | | 내용 | 링크 |
 |---|---|---|
-| **문제은행** | 상세 해설이 달린 객관식 문항 8,500여 개 | [열기](https://hyunhp.github.io/cert-bank/) |
+| **문제은행** | 상세 해설이 달린 객관식 문항 8,800여 개 | [열기](https://hyunhp.github.io/cert-bank/) |
 | **학습 가이드** | 시험별 Day 단위 학습 계획: 핵심 개념, 시험 포인트, 확인 문제 2개, 한 줄 요약 | [열기](https://hyunhp.github.io/cert-bank/study.html) |
 
 ## 사용 방법
@@ -57,7 +57,8 @@ Amazon Web Services, Palantir Technologies, Microsoft, Google과 관련 없는 �
 | | Associate | AZ-104 Azure Administrator | 250 | 32 |
 | | | AI-103 Azure AI Apps and Agents Developer | 243 | 20 |
 | | Expert | AZ-305 Azure Solutions Architect | 251 | 22 |
-| Google Cloud | Foundational | GCP-GAIL Generative AI Leader | 226 | 15 |
+| Google Cloud | Foundational | GCP-CDL Cloud Digital Leader | 226 | – |
+| | | GCP-GAIL Generative AI Leader | 226 | 15 |
 | | Associate | GCP-ACE Associate Cloud Engineer | 250 | 22 |
 
 여러 시험에 공통으로 쓰이는 문항이 있어 시험별 합계는 전체 고유 문항 수보다 많습니다. Palantir는 섹션 비중을
