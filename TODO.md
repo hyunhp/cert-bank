@@ -138,7 +138,9 @@ Managed HSM, Virtual WAN, Cloud Adoption Framework, Global Reach; Sonnet-reviewe
 SC-900 DONE 2026-10-30: registered (4 domains, midpoint weights, 45 questions, 45 min), 225 questions in b01-b08 from
 PLAN.md, reviewed (30 fixes, 0 cross-batch overlaps; e.g. retired "approved client app" grant, eDiscovery (Standard/Premium)
 classic retired 2025-08-31, Sentinel moving to the Defender portal after 2027-03-31 kept out of keys). Writers were
-started in waves of 4 to stay under the usage limit. Open: SC-900 study guide and glossary terms.
+started in waves of 4 to stay under the usage limit. SC-900 study guide DONE 2026-10-30: 14 days (D1 2, D2 4, D3 5, D4 2, final), two
+writers + two Learn reviewers (15 fixes); glossary +10 Azure terms (SIEM/SOAR, Zero Trust, CSPM/CWPP, CASB, XDR/EDR, DLP,
+sensitivity label, federation, FIDO2/passkey, SSO; Sonnet-reviewed) and 16 existing terms tagged SC-900.
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
