@@ -2,14 +2,11 @@
 
 ## Now (warm start — keep this section current; update it with every merge)
 Updated 2026-10-30.
-- In progress: **GCP-GAIL study guide** (bank merged: 226 questions, b01-b13). If the session was cleared: start from
-  `main`, branch `gcp-gail-study`, two writers + two reviewers on scratch JSON as for DP-900/GCP-ACE (facts from the
-  reviewed bank and cloud.google.com / docs.cloud.google.com only; about 14 days, one per exam-guide section), a
-  `STUDY_EXAMS` entry (vendor `gcp`, level foundational) in `js/study.js`, stamp_version, build_data_index, glossary
-  `gcp-*` terms (Sonnet review), README study-days column, tests, merge. Open gap: the Gemini app and Gems (exam guide
-  T2.2) have no question because gemini.google / workspace.google.com / support.google.com are blocked here; ask the
-  owner whether to allow those hosts and add an `eNN`/`bNN` batch, or accept the gap.
-- Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
+- In progress: nothing. Last merged: GCP-GAIL study guide (15 days) + 13 `gcp-*` glossary terms (11 existing terms tagged
+  GCP-GAIL). If the session was cleared, start from `main` and ask the owner about the next exam. Open gap: the Gemini
+  app and Gems (GAIL guide T2.2) have no question or study detail because gemini.google / workspace.google.com /
+  support.google.com are blocked here: ask whether to allow those hosts and add a batch, or accept the gap.
+- Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). www.databricks.com is still
   blocked; learn.palantir.com / certification.palantir.com answer 403 (site side). Google Cloud exam pages, guide PDFs
@@ -193,6 +190,10 @@ evolved into CX Agent Studio (questions use the guide's names, G: mentions the n
 SCC AI features are Preview (not keyed); SAIF pages unreachable so SAIF questions stay at purpose level; diffusion,
 structured/unstructured and labeled/unlabeled data use generally accepted definitions; "extensions" and "plugins" are not
 defined on reachable pages. Gap: Gemini app and Gems (T2.2), see Now.
+GCP-GAIL study guide DONE 2026-10-30: 15 days (D1 4, D2 5, D3 3, D4 2, final), two writers + two reviewers (about 30 fixes,
+e.g. Veo list has no video editing, Model Monitoring v1 only, SAIF at purpose level, no AI Protection vulnerability claim,
+Video Intelligence deprecated); retake waiting periods left out (support.google.com blocked). Glossary +13 `gcp-*` terms
+(Sonnet-reviewed) and 11 existing terms tagged GCP-GAIL.
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's

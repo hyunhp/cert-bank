@@ -23,6 +23,7 @@ const STUDY_EXAMS = [
   ["AZ-305", "Azure Solutions Architect – Expert", "expert", "azure"],
   ["SC-900", "Security, Compliance, and Identity Fundamentals", "foundational", "azure"],
   ["DP-900", "Azure Data Fundamentals", "foundational", "azure"],
+  ["GCP-GAIL", "Generative AI Leader", "foundational", "gcp"],
   ["GCP-ACE", "Associate Cloud Engineer", "associate", "gcp"],
 ].map(([code, name, level, vendor]) => [code, name, level, vendor || "aws"]);
 const VENDORS = [["aws", "AWS"], ["palantir", "Palantir"], ["azure", "Azure"], ["gcp", "Google Cloud", "GCP"]];   // [id, name, short name on phones]
