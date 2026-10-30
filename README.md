@@ -54,7 +54,7 @@ Amazon Web Services, Palantir Technologies or Microsoft, and no real exam questi
 | Azure | Foundational | AZ-900 Azure Fundamentals | 225 | 14 |
 | | | AI-901 Azure AI Fundamentals | 225 | 13 |
 | | Associate | AZ-104 Azure Administrator | 250 | 32 |
-| | | AI-103 Azure AI Apps and Agents Developer | 243 | – |
+| | | AI-103 Azure AI Apps and Agents Developer | 243 | 20 |
 
 Some questions belong to more than one exam. Palantir publishes no section weights, so its sections count equally;
 Azure publishes weight ranges, and the mock exam uses their midpoints.

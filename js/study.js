@@ -19,6 +19,7 @@ const STUDY_EXAMS = [
   ["AZ-900", "Azure Fundamentals", "foundational", "azure"],
   ["AZ-104", "Azure Administrator – Associate", "associate", "azure"],
   ["AI-901", "Azure AI Fundamentals", "foundational", "azure"],
+  ["AI-103", "Azure AI Apps and Agents Developer – Associate", "associate", "azure"],
 ].map(([code, name, level, vendor]) => [code, name, level, vendor || "aws"]);
 const VENDORS = [["aws", "AWS"], ["palantir", "Palantir"], ["azure", "Azure"]];
 const vendorOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[3];
