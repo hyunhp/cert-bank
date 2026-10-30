@@ -4,7 +4,7 @@
 Updated 2026-10-30.
 - In progress: nothing. GCP-CDL study guide merged (15 days). Open gaps: Gemini app and Gems (GAIL T2.2, blocked hosts);
   CDL golden signals / CapEx-OpEx / data-type definitions use generally accepted meanings (no reachable Google page).
-- Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; GCP-CDL bank and study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
+- Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; GCP-CDL bank and study guide; MLA-C02 study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). www.databricks.com is still
   blocked; learn.palantir.com / certification.palantir.com answer 403 (site side). Google Cloud exam pages, guide PDFs
@@ -45,6 +45,12 @@ Notices live in `data/exam-specs.json` ("update"), shown above the section filte
   FM selection/customization/evaluation, FM deployment/agents/CI-CD, FM monitoring/cost/guardrails), each reviewed.
   Task titles came from AWS's C01/C02 comparison page via secondary sources: re-check against the GA guide (2027-01-14)
   and then drop MLA-C01 from the site.
+  MLA-C02 study guide DONE 2026-10-30: 35 days (C01's 28 adapted: Data Wrangler now in SageMaker Canvas, Ground Truth
+  workforces, C02 weights/65 questions; +7 gen-AI days: RAG data, FM choice/customization, FM evaluation, FM deploy/agents,
+  FM CI/CD, FM monitoring/cost, securing gen AI), 3 writers + 3 reviewers (about 18 fixes); glossary +6, 41 terms tagged.
+  Built from the reviewed bank and C01, not the official guide: re-check at GA (2027-01-14).
+  OPEN: Bedrock docs now list only supervised/reinforcement fine-tuning and distillation (no continued pre-training):
+  re-check Q006184 and b02 mentions (explain/fix batch if it is gone).
 - ANS-C01: retires 2026-12-31, no successor. Keep the bank (credentials stay valid 3 years); consider hiding it later.
 - No change found for CLF-C02, AIF-C01, AIB-C01 (new, beta from 2026-09-29), SAA-C03, DEA-C01, SOA-C03, DOP-C02,
   AIP-C01, SCS-C03 (only three language versions end 2026-12-31).
