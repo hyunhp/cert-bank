@@ -2,16 +2,17 @@
 
 ## Now (warm start — keep this section current; update it with every merge)
 Updated 2026-10-30.
-- In progress: **GCP-ACE** (Google Cloud Associate Cloud Engineer; new vendor `gcp`, rules in `tools/qgen/GCP.md`) on
-  branch `gcp-ace`. Target 250 in b01-b11 per `tools/qgen/batches/GCP-ACE/PLAN.md`. Ingested and reviewed: b01, b02, b03,
-  b05, b07 (117). If the session was cleared: `git fetch && git checkout gcp-ace`, `qgen check --siblings` each draft
-  not yet in `tools/qgen/ingested.json`, review (`batch-reviewer`), ingest one at a time, write missing batches with
-  `question-writer` per PLAN.md. Then README rows (vendor list too), TODO DONE note, tests, PR, merge; then a study guide.
-- Done this cycle (all merged): AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
+- In progress: **GCP-ACE study guide** (bank merged: 250 questions). If the session was cleared: start from `main`,
+  branch `gcp-ace-study`, two writers + two reviewers on scratch JSON as for DP-900 (facts from the reviewed bank and
+  docs.cloud.google.com), `STUDY_EXAMS` entry with vendor `gcp` in `js/study.js` (the Google Cloud tab appears once a
+  guide exists), stamp_version, build_data_index, glossary `gcp-*` terms (Sonnet review), README study-days column,
+  tests, merge. Then ask the owner about the next Google Cloud exam (Generative AI Leader, Cloud Digital Leader,
+  Professional Cloud Architect).
+- Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
-- Next after DP-900: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). Other vendors need
-  hosts: www.databricks.com is still blocked; learn.palantir.com / certification.palantir.com answer 403 (site side);
-  Google Cloud exam pages and docs.cloud.google.com are reachable. Ask the owner which vendor next.
+- Next: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). www.databricks.com is still
+  blocked; learn.palantir.com / certification.palantir.com answer 403 (site side). Google Cloud exam pages, guide PDFs
+  (services.google.com) and docs.cloud.google.com are reachable.
 - Working style the owner asked for: merge reviewed work once all tests pass (merge permission rule is set), then
   report; start question writers in waves of about 4 (a 5-hour usage limit stopped 10 parallel writers once); reviewers
   start as each writer finishes; Sonnet for glossary/format checks; reports short.
@@ -167,13 +168,24 @@ fixes: ORC dropped, SELECT is DML, Session "most widely used" not default, no it
 (normalization, foreign key, DDL/DML, Delta Lake, OneLake, hierarchical namespace, consistency levels, DAX, DirectQuery,
 eventstream; Sonnet-reviewed) and acid, star-schema tagged DP-900.
 
+## Google Cloud (started 2026-10-30)
+Rules and facts: `tools/qgen/GCP.md`. Vendor `gcp` (tab "Google Cloud"); exams have no codes, so this bank uses `GCP-`.
+`exam-specs.json` `passMarkUnpublished: true` (Google publishes no pass mark): the mock says so and aims at 80%.
+GCP-ACE DONE 2026-10-30: Associate Cloud Engineer, guide read 2026-10-30 (4 sections ~20/30/30/20%, 12 tasks; 2 h;
+50-60 questions, 55 assumed), 250 questions in b01-b11 from PLAN.md, each reviewed (about 40 fixes, e.g. Rapid storage
+class, spend cap budgets, VPC Flow Logs now records dropped traffic, Extended release channel, Helm charts as OCI in
+Docker-format repos). Docs changes kept out of keys or reflected: Admin/Writer/Reader are the basic roles and
+Owner/Editor/Viewer are "legacy basic roles" (f01/e01 fixed 4 earlier questions), Log Analytics is now Observability
+Analytics, `gcloud run deploy --function` for Cloud Run functions, Deployment Manager end of support 2026-03-31.
+`learn_fetch.py` fix: a stray end tag no longer closes `<main>` (Google docs pages were cut off at tab panels).
+
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
 network settings (only docs.aws.amazon.com, learn.microsoft.com and cloud.google.com/learn pages are reachable now).
 - Palantir Foundry Aware: the entry-level exam of the 2026 framework. Format, cost and proctoring not confirmed
   (community posts conflict); learn.palantir.com / certification.palantir.com are blocked here.
-- Google Cloud: Generative AI Leader (50-60 multiple choice, 90 min; pairs with AIF/AIB), Associate Cloud Engineer,
-  Professional Cloud Architect. Exam pages reachable; guide PDFs (services.google.com) and docs are blocked.
+- Google Cloud: Generative AI Leader (50-60 multiple choice, 90 min; pairs with AIF/AIB), Professional Cloud
+  Architect (Associate Cloud Engineer done, see the Google Cloud section).
 - Databricks Certified Data Engineer Associate (45 multiple choice, 90 min, revised 2026-05-04; pairs with
   DEA-C01 / PLTR-DE). Needs databricks.com and docs.databricks.com.
 - HashiCorp Terraform Associate 004 (live 2026-01-08; multiple choice incl. multi-select). Needs

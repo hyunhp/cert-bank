@@ -2,20 +2,20 @@
 
 **[사이트 열기 →](https://hyunhp.github.io/cert-bank/)** · [English](README.md)
 
-AWS, Palantir, Microsoft Azure 자격증을 위한 무료 연습 자료입니다. 직접 만든 문항이며, 실제 시험 문항(덤프)이 아닙니다.
-Amazon Web Services, Palantir Technologies, Microsoft와 관련 없는 비공식 사이트입니다.
+AWS, Palantir, Microsoft Azure, Google Cloud 자격증을 위한 무료 연습 자료입니다. 직접 만든 문항이며, 실제 시험 문항(덤프)이 아닙니다.
+Amazon Web Services, Palantir Technologies, Microsoft, Google과 관련 없는 비공식 사이트입니다.
 
 ## 무엇이 있나요
 
 | | 내용 | 링크 |
 |---|---|---|
-| **문제은행** | 상세 해설이 달린 객관식 문항 7,400여 개 | [열기](https://hyunhp.github.io/cert-bank/) |
+| **문제은행** | 상세 해설이 달린 객관식 문항 8,300여 개 | [열기](https://hyunhp.github.io/cert-bank/) |
 | **학습 가이드** | 시험별 Day 단위 학습 계획: 핵심 개념, 시험 포인트, 확인 문제 2개, 한 줄 요약 | [열기](https://hyunhp.github.io/cert-bank/study.html) |
 
 ## 사용 방법
 
 **문제은행**
-1. 회사(AWS, Palantir, Azure) → 등급 → 시험 순으로 고릅니다.
+1. 회사(AWS, Palantir, Azure, Google Cloud) → 등급 → 시험 순으로 고릅니다.
 2. 필요하면 특정 섹션(도메인)만 골라 풀 수 있습니다.
 3. 문항을 누르면 정답과 보기별 정답·오답 이유가 나옵니다. 많은 해설에 아키텍처 다이어그램이 함께 있습니다.
 4. ☆를 누르면 북마크되고, 회사 탭 옆 ★ 버튼에서 모아 볼 수 있습니다.
@@ -57,9 +57,11 @@ Amazon Web Services, Palantir Technologies, Microsoft와 관련 없는 비공식
 | | Associate | AZ-104 Azure Administrator | 250 | 32 |
 | | | AI-103 Azure AI Apps and Agents Developer | 243 | 20 |
 | | Expert | AZ-305 Azure Solutions Architect | 251 | 22 |
+| Google Cloud | Associate | GCP-ACE Associate Cloud Engineer | 250 | – |
 
 여러 시험에 공통으로 쓰이는 문항이 있어 시험별 합계는 전체 고유 문항 수보다 많습니다. Palantir는 섹션 비중을
-공개하지 않아 모든 섹션을 같은 비중으로 다루고, Azure는 비중을 범위로 공개해 모의고사는 그 중간값을 씁니다.
+공개하지 않아 모든 섹션을 같은 비중으로 다루고, Azure는 비중을 범위로 공개해 모의고사는 그 중간값을 씁니다. Google Cloud는
+합격 점수를 공개하지 않아(합격/불합격만 표시) 모의고사 목표를 80%로 둡니다.
 
 ## 내 데이터
 
@@ -68,7 +70,7 @@ Amazon Web Services, Palantir Technologies, Microsoft와 관련 없는 비공식
 
 ## 정확성
 
-내용은 AWS, Palantir, Microsoft Learn 공식 문서를 기준으로 확인합니다. AWS가 신규 고객을 받지 않는 서비스는 시험에 여전히
+내용은 AWS, Palantir, Microsoft Learn, Google Cloud 공식 문서를 기준으로 확인합니다. AWS가 신규 고객을 받지 않는 서비스는 시험에 여전히
 나올 수 있어 해설과 학습 노트에 그 사실을 표시합니다. 틀린 내용을 발견하면 문항 ID(예: `Q001234`)나 시험·Day를
 적어 [이슈](https://github.com/hyunhp/cert-bank/issues)로 알려 주세요.
 
