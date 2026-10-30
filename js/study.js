@@ -23,8 +23,9 @@ const STUDY_EXAMS = [
   ["AZ-305", "Azure Solutions Architect – Expert", "expert", "azure"],
   ["SC-900", "Security, Compliance, and Identity Fundamentals", "foundational", "azure"],
   ["DP-900", "Azure Data Fundamentals", "foundational", "azure"],
+  ["GCP-ACE", "Associate Cloud Engineer", "associate", "gcp"],
 ].map(([code, name, level, vendor]) => [code, name, level, vendor || "aws"]);
-const VENDORS = [["aws", "AWS"], ["palantir", "Palantir"], ["azure", "Azure"], ["gcp", "Google Cloud"]];
+const VENDORS = [["aws", "AWS"], ["palantir", "Palantir"], ["azure", "Azure"], ["gcp", "Google Cloud", "GCP"]];   // [id, name, short name on phones]
 const vendorOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[3];
 const isNewVersion = name => / \(new\)$/.test(name);
 const shortName = name => name.replace(/ – (Associate|Professional|Expert|Specialty)( \(new\))?$/, "");
@@ -163,8 +164,8 @@ function renderExamRow() {
     : vendorOf(current.exam) === vendor ? levelOf(current.exam) : (levels[0] || [])[0];
   const vendors = VENDORS.filter(([v]) => all.some(e => e[3] === v));
   $("#vendorRow").hidden = vendors.length < 2;
-  $("#vendorRow").innerHTML = vendors.map(([v, label]) =>
-    `<button class="vtab" role="tab" aria-selected="${v === vendor}" data-vendor="${v}">${label}<span class="cnt">${all.filter(e => e[3] === v).length}</span></button>`).join("");
+  $("#vendorRow").innerHTML = vendors.map(([v, label, short]) =>
+    `<button class="vtab" role="tab" aria-selected="${v === vendor}" data-vendor="${v}"${short ? ` title="${label}"` : ""}>${short ? `<span class="vname">${label}</span><span class="vshort">${short}</span>` : label}<span class="cnt">${all.filter(e => e[3] === v).length}</span></button>`).join("");
   $("#levelRow").hidden = !levels.length;   // shown even for one level, so every vendor looks the same
   $("#levelRow").innerHTML = levels.map(([l, label]) =>
     `<button class="lseg" aria-pressed="${l === level}" data-level="${l}">${label}<span class="cnt">${exams.filter(e => e[2] === l).length}</span></button>`).join("");

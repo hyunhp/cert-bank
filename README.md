@@ -58,7 +58,7 @@ affiliated with Amazon Web Services, Palantir Technologies, Microsoft or Google,
 | | Associate | AZ-104 Azure Administrator | 250 | 32 |
 | | | AI-103 Azure AI Apps and Agents Developer | 243 | 20 |
 | | Expert | AZ-305 Azure Solutions Architect | 251 | 22 |
-| Google Cloud | Associate | GCP-ACE Associate Cloud Engineer | 250 | – |
+| Google Cloud | Associate | GCP-ACE Associate Cloud Engineer | 250 | 22 |
 
 Some questions belong to more than one exam. Palantir publishes no section weights, so its sections count equally;
 Azure publishes weight ranges, and the mock exam uses their midpoints. Google Cloud publishes no pass mark (results are
