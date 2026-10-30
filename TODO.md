@@ -2,8 +2,11 @@
 
 ## Now (warm start — keep this section current; update it with every merge)
 Updated 2026-10-30.
-- In progress: nothing. Last merged: DP-900 study guide (14 days) + 10 glossary terms. If the session was cleared,
-  start from `main` and ask the owner which exam or vendor comes next (see "Next" below).
+- In progress: **GCP-ACE** (Google Cloud Associate Cloud Engineer; new vendor `gcp`, rules in `tools/qgen/GCP.md`) on
+  branch `gcp-ace`. Target 250 in b01-b11 per `tools/qgen/batches/GCP-ACE/PLAN.md`. Ingested and reviewed: b01, b02, b03,
+  b05, b07 (117). If the session was cleared: `git fetch && git checkout gcp-ace`, `qgen check --siblings` each draft
+  not yet in `tools/qgen/ingested.json`, review (`batch-reviewer`), ingest one at a time, write missing batches with
+  `question-writer` per PLAN.md. Then README rows (vendor list too), TODO DONE note, tests, PR, merge; then a study guide.
 - Done this cycle (all merged): AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next after DP-900: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). Other vendors need
