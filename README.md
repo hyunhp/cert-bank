@@ -41,7 +41,7 @@ affiliated with Amazon Web Services, Palantir Technologies, Microsoft or Google,
 | | | SOA-C03 CloudOps Engineer | 395 | 28 |
 | | | DEA-C01 Data Engineer | 395 | 28 |
 | | | MLA-C01 Machine Learning Engineer | 395 | 28 |
-| | | MLA-C02 Machine Learning Engineer (new, GA 2027-01-14) | 469 | – |
+| | | MLA-C02 Machine Learning Engineer (new, GA 2027-01-14) | 469 | 35 |
 | | Professional | SAP-C02 Solutions Architect | 396 | 35 |
 | | | SAP-C03 Solutions Architect (new, from 2026-11-17) | 509 | 38 |
 | | | DOP-C02 DevOps Engineer | 395 | 35 |

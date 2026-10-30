@@ -10,6 +10,7 @@ const STUDY_EXAMS = [
   ["DVA-C03", "Developer – Associate (new)", "associate"],
   ["SOA-C03", "CloudOps Engineer – Associate", "associate"], ["DEA-C01", "Data Engineer – Associate", "associate"],
   ["MLA-C01", "Machine Learning Engineer – Associate", "associate"],
+  ["MLA-C02", "Machine Learning Engineer – Associate (new)", "associate"],
   ["SAP-C02", "Solutions Architect – Professional", "professional"],
   ["SAP-C03", "Solutions Architect – Professional (new)", "professional"], ["DOP-C02", "DevOps Engineer – Professional", "professional"],
   ["AIP-C01", "Generative AI Developer – Professional", "professional"],
