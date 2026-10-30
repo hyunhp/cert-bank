@@ -233,7 +233,9 @@ header.top p.sub{margin:0;color:var(--muted);font-size:.92rem}
 @keyframes explainIn{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion: reduce){.explain.show{animation:none}}
 /* Off-screen cards skip layout and paint until they scroll near the viewport. */
-#listArea .qcard{content-visibility:auto;contain-intrinsic-size:auto 380px}
+#listArea .qcard{content-visibility:auto;contain-intrinsic-size:auto 380px;scroll-margin-top:60px}
+.resumeBtn{border-color:var(--accent);color:var(--accent-ink)}
+.resumeBtn[hidden]{display:none}
 .explain.show.wrong{background:var(--bad-bg);border-color:var(--bad-line)}
 .explain.show.neutral{background:var(--surface-2);border-color:var(--line)}
 .explain .result-line{font-weight:700;margin-bottom:6px;font-size:.9rem}
@@ -320,6 +322,7 @@ header.top p.sub{margin:0;color:var(--muted);font-size:.92rem}
   <div class="listcontrols" id="listControls">
     <button class="shuffleBtn" id="shuffleBtn" type="button">🔀 Shuffle Questions</button>
     <button class="shuffleBtn" id="sequentialBtn" type="button">🔢 Sequential</button>
+    <button class="shuffleBtn resumeBtn" id="resumeBtn" type="button" hidden title="Jump back to the question you were on">↩ Resume</button>
     <button class="shuffleBtn mockBtn" id="mockBtn" type="button">📝 Mock Exam</button>
   </div>
   <div class="bmtools" id="bmTools">
@@ -376,6 +379,27 @@ const counts = {};  // examCode -> count
 let currentQMap = new Map();      // qid -> question object, rebuilt on every renderList()
 const cardState = new Map();      // qid -> { selected:Set<key>, revealed:bool, counted:bool }
 const examScore = {};             // examCode -> { correct, total }
+// Resume after leaving the page by mistake (Back, reload, a link): the displayed order, answers, score and the
+// question in view are kept per browser tab in sessionStorage and restored when the same list is shown again.
+const RESUME_KEY = "aws_qbank_resume_v1";   // { lists: { orderKey: { ids, at, st: { qid: [keys, revealed, counted] } } }, score }
+const resume = (function(){ try { return JSON.parse(sessionStorage.getItem(RESUME_KEY)) || {}; } catch (e) { return {}; } })();
+resume.lists = resume.lists || {};
+Object.assign(examScore, resume.score || {});
+let resumeTimer = 0;
+function saveResume(){
+  clearTimeout(resumeTimer);
+  resumeTimer = setTimeout(() => {
+    const okey = orderKey(), docs = shuffledOrder[okey];
+    if (docs && docs.length && currentQMap.size) {
+      const st = {};
+      docs.forEach(d => { const c = cardState.get(d.id); if (c && (c.selected.size || c.revealed)) st[d.id] = [[...c.selected].join(""), c.revealed ? 1 : 0, c.counted ? 1 : 0]; });
+      const prev = resume.lists[okey] || {};
+      resume.lists[okey] = { ids: docs.map(d => d.id), at: prev.at, st };
+    }
+    resume.score = examScore;
+    try { sessionStorage.setItem(RESUME_KEY, JSON.stringify(resume)); } catch (e) {}
+  }, 300);
+}
 const shuffledOrder = {};         // examCode -> array of docs in the order currently displayed
 const ORDER_MODE_KEY = "aws_qbank_order_mode_v1";
 let orderMode = (function(){ try { return localStorage.getItem(ORDER_MODE_KEY) === "sequential" ? "sequential" : "shuffle"; } catch (e) { return "shuffle"; } })();
@@ -865,6 +889,7 @@ function resetScore(){
   const s = examScore[selectedExam];
   if (s){ s.correct = 0; s.total = 0; }
   currentQMap.forEach((_, qid) => cardState.delete(qid));
+  delete resume.lists[orderKey()];
   renderScorePill();
   renderList();
 }
@@ -1062,15 +1087,81 @@ async function renderList(opts){
     return;
   }
   const okey = orderKey();
+  const saved = resume.lists[okey];
+  if (!reshuffle && !shuffledOrder[okey] && saved && saved.ids) {   // back after leaving the page: same order and answers
+    const byId = new Map(docs.map(d => [d.id, d]));
+    const kept = saved.ids.filter(id => byId.has(id));
+    const keptSet = new Set(kept);
+    shuffledOrder[okey] = kept.map(id => byId.get(id)).concat(docs.filter(d => !keptSet.has(d.id)));
+    Object.entries(saved.st || {}).forEach(([qid, [keys, rev, cnt]]) => {
+      if (byId.has(qid) && !cardState.has(qid)) cardState.set(qid, { selected: new Set(keys.split("")), revealed: !!rev, counted: !!cnt });
+    });
+  }
   if (reshuffle || !shuffledOrder[okey]) shuffledOrder[okey] = orderMode === "sequential" ? sequential(docs) : shuffle(docs);
   const displayDocs = shuffledOrder[okey];
   currentQMap = new Map(displayDocs.map(d => [d.id, d]));
   area.innerHTML = `<div class="qlist">${displayDocs.map(questionCard).join("")}</div>`;
+  displayDocs.forEach(d => applyCardState(d.id));
+  saveResume();
   warmDiagrams(displayDocs);
   ensureExplanations(displayDocs);   // start fetching right away so the first reveal rarely waits
   renderScorePill();
   renderListControls();
+  updateResumeBtn();
 }
+
+// A re-rendered card (exam switched and back, or restored after reload) shows its answers again.
+function applyCardState(qid){
+  const st = cardState.get(qid);
+  if (!st) return;
+  if (st.revealed) { st.revealed = false; revealCard(qid, { counted: st.counted }); return; }
+  const card = document.getElementById(`card-${qid}`);
+  if (!card || !st.selected.size) return;
+  card.querySelectorAll(".choice").forEach(el => el.classList.toggle("picked", st.selected.has(el.dataset.key)));
+  const check = card.querySelector(".check-btn");
+  if (check) check.disabled = false;
+}
+
+// "Resume" jumps back to the question that was in view before the page was left or the list scrolled away.
+function cardAtTop(){
+  const el = document.elementFromPoint(Math.min(window.innerWidth / 2, 300), 90);
+  const card = el && el.closest && el.closest("#listArea .qcard");
+  return card ? card.dataset.qid : null;
+}
+function updateResumeBtn(){
+  const btn = document.getElementById("resumeBtn");
+  const saved = resume.lists[orderKey()];
+  const docs = shuffledOrder[orderKey()] || [];
+  const i = saved && saved.at ? docs.findIndex(d => d.id === saved.at) : -1;
+  const card = i > 0 && document.getElementById(`card-${saved.at}`);
+  const r = card && card.getBoundingClientRect();
+  const inView = r && r.top < window.innerHeight && r.bottom > 0;
+  btn.hidden = !(card && !inView);
+  if (!btn.hidden) btn.textContent = `↩ Resume at ${i + 1} / ${docs.length}`;
+}
+document.getElementById("resumeBtn").addEventListener("click", () => {
+  const saved = resume.lists[orderKey()];
+  const card = saved && document.getElementById(`card-${saved.at}`);
+  if (!card) return;
+  card.scrollIntoView({ block: "start" });
+  // cards above may change height once rendered (content-visibility), so settle on the card again
+  requestAnimationFrame(() => setTimeout(() => card.scrollIntoView({ block: "start" }), 120));
+});
+let scrollTick = 0;
+window.addEventListener("scroll", () => {
+  if (scrollTick) return;
+  scrollTick = setTimeout(() => {
+    scrollTick = 0;
+    const saved = resume.lists[orderKey()];
+    const qid = cardAtTop();
+    if (saved && qid && currentQMap.has(qid) && window.scrollY > 300) { saved.at = qid; saveResume(); }
+    updateResumeBtn();
+  }, 400);
+}, { passive: true });
+
+// After any answer, reveal or retry (handled below), keep the tab's resume state current.
+document.getElementById("listArea").addEventListener("click", () => setTimeout(saveResume, 0), true);
+document.getElementById("listArea").addEventListener("keydown", () => setTimeout(saveResume, 0), true);
 
 // Single delegated listener handles every choice / button click in the list
 document.getElementById("listArea").addEventListener("click", (e) => {
