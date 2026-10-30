@@ -2,9 +2,13 @@
 
 ## Now (warm start — keep this section current; update it with every merge)
 Updated 2026-10-30.
-- In progress: nothing. Last merged: GCP-ACE study guide (22 days) + 11 `gcp-*` glossary terms. If the session was
-  cleared, start from `main` and ask the owner about the next exam (Google Cloud Generative AI Leader, Cloud Digital
-  Leader or Professional Cloud Architect; see "Next").
+- In progress: **GCP-GAIL** (Google Cloud Generative AI Leader, foundational, business-level; rules in `tools/qgen/GCP.md`)
+  on branch `gcp-gail`. Registered; target 226 in b01-b13 per `tools/qgen/batches/GCP-GAIL/PLAN.md` (waves of 4 writers:
+  b01 b04 b07 b10; then b02 b05 b08 b11; then b03 b06 b09 b12; then b13). Ingested so far: none (see
+  `tools/qgen/ingested.json`). If the session was cleared: `git fetch && git checkout gcp-gail`, `qgen check --siblings`
+  each draft not yet ingested, review (`batch-reviewer`), ingest one at a time, write missing batches with
+  `question-writer`. Then README rows, TODO DONE note, tests, PR, merge; then the study guide (about 14 days).
+  Unreachable hosts for GAIL facts: workspace.google.com, ai.google.dev, deepmind.google, saif.google, support.google.com.
 - Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). www.databricks.com is still
