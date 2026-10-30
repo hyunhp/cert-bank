@@ -112,7 +112,7 @@ function timeFor(spec, n) { return Math.ceil((spec.minutes * n) / spec.questions
 
 // Practice targets sit a margin above the official pass mark: AWS scaled scores are not percentages, so
 // AWS and Azure (scaled 700/1000 or more) use 80% (Foundational/Associate) or 85% (Professional/Expert/Specialty); vendors that publish a percent
-// pass mark (Palantir: 70%) use that mark + 10.
+// pass mark (Palantir: 70%) use that mark + 10. Google Cloud publishes no pass mark (pass/fail only): same 80/85% targets.
 function verdictFor(spec, pct) {
   const level = spec && spec.level;
   const hi = (spec && spec.passingPct) ? Math.min(100, spec.passingPct + 10)
@@ -128,7 +128,13 @@ function passMarkNote(spec) {
     return `The official pass mark is ${spec.passingPct}% correct.` +
       (spec.weightsAssumed ? " Official domain weights are not published, so this mock samples every domain equally." : "");
   }
+  if (spec.passMarkUnpublished) return "The official pass mark is not published; results are pass or fail only.";
   return `Percent correct is not the scaled score; the official pass mark is ${spec.passingScore}/1000.`;
+}
+
+function passMarkMeta(spec) {
+  return spec.passingPct ? `official pass mark ${spec.passingPct}% correct`
+    : spec.passMarkUnpublished ? "pass mark not published" : `official pass mark ${spec.passingScore}/1000`;
 }
 
 // ---------- styles ----------
@@ -423,7 +429,7 @@ async function renderSetup(extra) {
         <button class="mode${mode === "short" ? " on" : ""}" data-mode="short" type="button"><b>Short practice</b><span>${shortN} questions · ${Math.round(timeFor(spec, shortN) / 60)} min</span></button>
       </div>
       <label class="row"><input type="checkbox" id="mkTimed"${setupTimed ? " checked" : ""}> Timer (auto-submits at 0:00)</label>
-      <div class="meta">Pool: ${pool.length} questions${setupDomain ? " in this section" : ""} · ${unseen} not yet seen in mock exams · official pass mark ${spec.passingPct ? spec.passingPct + "% correct" : spec.passingScore + "/1000"}${setupDomain ? " (whole exam)" : ""}</div>
+      <div class="meta">Pool: ${pool.length} questions${setupDomain ? " in this section" : ""} · ${unseen} not yet seen in mock exams · ${passMarkMeta(spec)}${setupDomain ? " (whole exam)" : ""}</div>
       ${unseen < (mode === "short" ? shortN : fullN) ? `<div class="meta" style="color:var(--amber)">Fewer unseen questions than needed, so some repeats will be included.</div>` : ""}
       <div class="btnrow"><button class="btn" data-act="start">Start exam</button>
       ${seen.size ? `<button class="linkbtn" data-act="resetseen">Reset seen questions for ${setupExam}</button>` : ""}</div>
