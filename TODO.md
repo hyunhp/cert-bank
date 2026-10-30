@@ -235,6 +235,12 @@ idle prefetch of `data/explanations/<EXAM>.json` (up to 331 KB gzip) finishes wa
 pass ~700: render the first ~50 cards then the rest on idle, or split explanation files per domain.
 
 ## Tooling notes
+- Tech-debt pass (2026-10-30): tests matched only AWS exam file names (`[A-Z]{3}-C\d{2}`), so 7 Palantir/Azure exams
+  were never loaded by mock_e2e/loading_perf/diagram tests; now any exam code. New drift checks: index.html EXAMS and
+  EXAM_LEVEL must match exam-specs.json (vendor_tabs_test), js/study.js STUDY_EXAMS must list every guide (study_test).
+  Removed the stale, unused `data/_manifest.json` (broke the `_` rule) and 1.8 MB of one-off tool output
+  (tools/hardened, tools/explanations, tools/distractor_rewrites, factual_fixes.json, rebalance_answers.py; in git
+  history). fetch() in mock.js/study.js now checks r.ok. `.handoff/` is in .gitignore.
 - Subagent token savings (2026-10-30, owner request): `tools/learn_fetch.py` shared docs cache (main article text only,
   `--grep` for the relevant lines); batches carry `# src:` lines for reviewers; `qgen check --siblings` catches
   overlaps between parallel batches before review; `expand-exam` writes `PLAN.md` (topics owned per batch) first, uses

@@ -77,7 +77,7 @@ def terms_for(icon):
 def load_questions():
     qs = {}
     for f in (ROOT / "data").glob("*.json"):
-        if not re.fullmatch(r"[A-Z]{3}-C\d{2}\.json", f.name):
+        if not re.fullmatch(r"[A-Z]+(?:-[A-Z0-9]+)+\.json", f.name):
             continue
         exp = json.loads((ROOT / "data" / "explanations" / f.name).read_text(encoding="utf-8"))
         for q in json.loads(f.read_text(encoding="utf-8")):

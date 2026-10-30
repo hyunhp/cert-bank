@@ -212,7 +212,7 @@ function injectStyles() {
 async function ensureData() {
   if (!specs) {
     const [s, m] = await Promise.all([
-      fetch("./data/exam-specs.json", { cache: "no-cache" }).then(r => r.json()),
+      fetch("./data/exam-specs.json", { cache: "no-cache" }).then(r => { if (!r.ok) throw new Error("exam-specs.json " + r.status); return r.json(); }),
       fetch("./data/exam-domains.json", { cache: "no-cache" }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
     ]);
     specs = s; domainMap = m;

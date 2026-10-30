@@ -35,6 +35,12 @@ with sync_playwright() as p:
     tabs = pg.eval_on_selector_all(".vtab", "els => els.map(e => [e.dataset.vendor, e.getAttribute('aria-selected'), e.querySelector('.cnt').textContent])")
     check("vendor tabs", [t[0] for t in tabs] == ["aws", "palantir", "azure"], tabs)
     check("aws selected for AWS exam link", tabs[0][1] == "true" and tabs[1][1] == "false", tabs)
+    # index.html keeps its own exam list (EXAMS, EXAM_LEVEL): it must match exam-specs.json
+    ex = pg.evaluate("EXAMS.map(([c, n, v]) => [c, v, EXAM_LEVEL[c] || null])")
+    spec_exams = {c: s for c, s in specs.items() if isinstance(s, dict) and "vendor" in s}
+    check("EXAMS lists every exam in exam-specs.json", sorted(c for c, _, _ in ex) == sorted(spec_exams), sorted(set(spec_exams) ^ {c for c, _, _ in ex}))
+    check("EXAMS vendor and EXAM_LEVEL match exam-specs.json", all(spec_exams.get(c, {}).get("vendor") == v and spec_exams.get(c, {}).get("level") == l for c, v, l in ex),
+          [(c, v, l) for c, v, l in ex if spec_exams.get(c, {}).get("vendor") != v or spec_exams.get(c, {}).get("level") != l])
     check("tab totals", [int(t[2]) for t in tabs] == [total("aws"), total("palantir"), total("azure")], tabs)
     codes = pg.eval_on_selector_all("#chipRow .chip[data-code]", "els => els.map(e => e.dataset.code)")
     check("aws chips only", "SAA-C03" in codes and not any(c.startswith("PLTR-") for c in codes), codes)
