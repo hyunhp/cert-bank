@@ -2,11 +2,13 @@
 
 ## Now (warm start — keep this section current; update it with every merge)
 Updated 2026-10-30.
-- In progress: nothing. Last merged: GCP-GAIL study guide (15 days) + 13 `gcp-*` glossary terms (11 existing terms tagged
-  GCP-GAIL). If the session was cleared, start from `main` and ask the owner about the next exam. Open gap: the Gemini
-  app and Gems (GAIL guide T2.2) have no question or study detail because gemini.google / workspace.google.com /
-  support.google.com are blocked here: ask whether to allow those hosts and add a batch, or accept the gap.
-- Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
+- In progress: **GCP-CDL study guide** (bank merged: 226 questions, b01-b11). If the session was cleared: start from `main`,
+  branch `gcp-cdl-study`, two writers + two reviewers on scratch JSON as for GCP-GAIL (facts from the reviewed bank and
+  cloud.google.com / docs.cloud.google.com only; about 15 days, one per exam-guide section group; D6 shorter), a
+  `STUDY_EXAMS` entry (vendor `gcp`, foundational) in `js/study.js`, stamp_version, build_data_index, glossary `gcp-*` terms
+  (Sonnet review), README study-days column, tests, merge. Open gaps: Gemini app and Gems (GAIL T2.2, blocked hosts);
+  CDL golden signals / CapEx-OpEx / data-type definitions use generally accepted meanings (no reachable Google page).
+- Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; GCP-CDL bank; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). www.databricks.com is still
   blocked; learn.palantir.com / certification.palantir.com answer 403 (site side). Google Cloud exam pages, guide PDFs
@@ -194,6 +196,14 @@ GCP-GAIL study guide DONE 2026-10-30: 15 days (D1 4, D2 5, D3 3, D4 2, final), t
 e.g. Veo list has no video editing, Model Monitoring v1 only, SAIF at purpose level, no AI Protection vulnerability claim,
 Video Intelligence deprecated); retake waiting periods left out (support.google.com blocked). Glossary +13 `gcp-*` terms
 (Sonnet-reviewed) and 11 existing terms tagged GCP-GAIL.
+
+GCP-CDL bank DONE 2026-10-30: Cloud Digital Leader (foundational, business-level; new version live 2026-08-12; 90 min,
+50-60 questions, 55 assumed; D1-D5 18% each, D6 10%; pass mark not published), 226 questions in b01-b11 from PLAN.md, each
+reviewed (about 55 fixes). Docs facts reflected: guide labels replatform "move and improve" while Google's migration docs
+say "lift and optimize" (questions describe the action, same answer under both labels); GKE Enterprise has no reachable
+definition page (no "formerly Anthos" claim); "compliance resource manager" matches no Google page (the question keys the
+Compliance resource center); Looker/BigQuery/Pub/Sub/Dataflow claims softened to what pages say; first-/second-/third-party
+data, supply-chain stages, golden signals, CapEx/OpEx, SLI/SLO/SLA use generally accepted definitions, stated in G:.
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's

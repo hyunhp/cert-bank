@@ -33,6 +33,19 @@ says "This exam was recently updated to reflect branding changes. Refer to the e
 | Domains | D1 fundamentals of gen AI ~30%, D2 Google Cloud's gen AI offerings ~35%, D3 techniques to improve model output ~20%, D4 business strategies ~15% |
 | Prerequisites | None. Business-level: strategy and influence, "not technical implementation" |
 
+### GCP-CDL Cloud Digital Leader (added 2026-10-30)
+Sources: https://cloud.google.com/learn/certification/cloud-digital-leader and the exam guide
+https://services.google.com/fh/files/misc/cloud_digital_leader_exam_guide_english.pdf ("launched on August 12, 2026"; the
+exam page says "As of August 12, the new version of the exam is now live").
+
+| Item | Value |
+|---|---|
+| Length | 90 minutes |
+| Questions | "50-60 multiple choice and multiple select questions". This bank assumes 55 (mock length only) |
+| Pass mark | Not published (pass/fail). `passMarkUnpublished: true` |
+| Domains | D1 digital transformation ~18%, D2 data transformation ~18%, D3 AI ~18%, D4 modernize infrastructure and applications ~18%, D5 trust and security ~18%, D6 scaling with operations ~10% |
+| Prerequisites | None; "experience collaborating with technical professionals" recommended |
+
 ## Codes and task ids
 - Google Cloud exams have no codes: this bank uses `GCP-` + an abbreviation. Vendor `gcp`, tab "Google Cloud".
 - `GCP-ACE` (Associate Cloud Engineer), level `associate`; tasks T1.1-T4.2 are the guide's 12 numbered sections
@@ -41,6 +54,9 @@ says "This exam was recently updated to reflect branding changes. Refer to the e
 - `GCP-GAIL` (Generative AI Leader), level `foundational`; tasks T1.1-T4.3 are the guide's 15 numbered sections (1.1-1.4,
   2.1-2.5, 3.1-3.3, 4.1-4.3), in `tools/qgen/tasks.json` (Korean) and `data/exam-tasks.json`. The guide repeats the
   data bullets of 1.1 under 1.2: questions about data types and quality go to T1.2.
+
+- `GCP-CDL` (Cloud Digital Leader), level `foundational`; tasks T1.1-T6.2 are the guide's 14 numbered sections (1.1, 1.2,
+  2.1-2.3, 3.1, 3.2, 4.1-4.3, 5.1, 5.2, 6.1, 6.2), in `tools/qgen/tasks.json` (Korean) and `data/exam-tasks.json`.
 
 ## Writing rules
 - Use the product names of the current exam guide: Cloud Run functions (not Cloud Functions), Google Cloud
@@ -75,3 +91,10 @@ says "This exam was recently updated to reflect branding changes. Refer to the e
   support.google.com. Gemini for Workspace, Gemma, Imagen, Veo and SAIF facts come from cloud.google.com and
   docs.cloud.google.com pages (products/gemini-for-workspace, Model Garden and generative-ai model pages,
   transform/secure-ai-framework); claims those pages do not settle are left out.
+- GCP-CDL is a business-level exam like GCP-GAIL: stems describe a business goal and ask which approach, product or
+  benefit fits; no commands, flags or console steps. Use the guide's current names (Managed Service for Apache Spark,
+  Gemini Enterprise Agent Platform / Agent Platform, Google Security Operations, Google Threat Intelligence, AI
+  Protection, Model Armor, Cloud Run functions). Same rules as GCP-GAIL: nothing preview or deprecated keyed, no prices,
+  limits, plan or tier names, no model versions. Product facts overlap GCP-ACE (hierarchy, storage classes, IAM) and
+  GCP-GAIL (AI, security tools): test the business value and the reason to choose, not the configuration, and read
+  `data/GCP-ACE.json` / `data/GCP-GAIL.json` questions before writing so scenarios are not repeated.
