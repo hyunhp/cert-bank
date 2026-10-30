@@ -2,10 +2,12 @@
 
 ## Now (warm start — keep this section current; update it with every merge)
 Updated 2026-10-30.
-- In progress: nothing. Last merged: GCP-GAIL study guide (15 days) + 13 `gcp-*` glossary terms (11 existing terms tagged
-  GCP-GAIL). If the session was cleared, start from `main` and ask the owner about the next exam. Open gap: the Gemini
-  app and Gems (GAIL guide T2.2) have no question or study detail because gemini.google / workspace.google.com /
-  support.google.com are blocked here: ask whether to allow those hosts and add a batch, or accept the gap.
+- In progress: **GCP-CDL** (Google Cloud Cloud Digital Leader, foundational, business-level; new version live 2026-08-12; rules in
+  `tools/qgen/GCP.md`) on branch `gcp-cdl`. Registered; target 226 in b01-b11 per `tools/qgen/batches/GCP-CDL/PLAN.md` (waves of
+  4 writers: b01 b03 b05 b07; then b02 b04 b06 b08; then b09 b10 b11). Ingested so far: none (see `tools/qgen/ingested.json`).
+  If the session was cleared: `git fetch && git checkout gcp-cdl`, `qgen check --siblings` each draft not yet ingested, review
+  (`batch-reviewer`), ingest one at a time, write missing batches with `question-writer`. Then README rows, TODO DONE note,
+  tests, PR, merge; then the study guide (about 15 days). Open gap from GCP-GAIL: Gemini app and Gems (blocked hosts).
 - Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). www.databricks.com is still
