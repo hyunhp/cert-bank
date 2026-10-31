@@ -20,6 +20,34 @@ used on the exam."
 | Domains | D1 setting up a cloud solution environment ~20%, D2 planning and implementing ~30%, D3 ensuring successful operation ~30%, D4 configuring access and security ~20% |
 | Prerequisites | None; 6+ months hands-on recommended |
 
+### GCP-PCA Professional Cloud Architect (added 2026-10-31)
+Sources: https://cloud.google.com/learn/certification/cloud-architect and the standard exam guide
+https://services.google.com/fh/files/misc/professional_cloud_architect_exam_guide_english.pdf (read 2026-10-31); the four
+case studies (v6.1) are linked from it: `.../v6.1_pca_{altostrat_media,cymbal_retail,ehr_healthcare,knightmotives_automotive}_case_study_english.pdf`.
+The exam page says it "was updated to reflect recent branding changes. Refer to the exam guide to review product names".
+
+| Item | Value |
+|---|---|
+| Length | 2 hours |
+| Questions | "50-60 multiple choice and multiple select questions". This bank assumes 55 (mock length only) |
+| Pass mark | Not published. `passMarkUnpublished: true` |
+| Case studies | 2 per exam, 20-30% of the questions, 4 published (digest: `tools/qgen/GCP-PCA-cases.md`) |
+| Sections | D1 design and plan ~25%, D2 manage and provision ~17.5%, D3 security and compliance ~17.5%, D4 analyze and optimize processes ~15%, D5 managing implementation ~12.5%, D6 solution and operations excellence ~12.5% |
+| Tasks | 22: 1.1-1.5, 2.1-2.5, 3.1-3.2, 4.1-4.2, 5.1-5.2, 6.1-6.6 (`data/exam-tasks.json`) |
+| Prerequisites | None; 3+ years industry, 1+ year designing on Google Cloud recommended. Cert valid 2 years |
+
+Writing rules (in addition to the shared ones below):
+- Professional depth: design decisions and trade-offs against business and technical requirements (availability, cost, latency,
+  compliance, migration effort), not command syntax. No console click paths, no prices, limits or quotas.
+- About 25% of questions build on one of the four case studies: the stem names the business and gives the one or two facts the
+  decision needs, in own words (digest only; never copy the case text). Spread the cases; one case per question.
+- Well-Architected Framework pillars (operational excellence, security, reliability, performance optimization, cost
+  optimization, sustainability) frame the answers; use the guide's names: Gemini Enterprise Agent Platform / Agent Platform,
+  Gemini Cloud Assist, Model Armor, Chrome Enterprise Premium, Migration Center, Cloud Run functions.
+- Preview or deprecated features stay out of keys (Deployment Manager ended 2026-03-31; Infrastructure Manager or Terraform instead).
+- Overlap: GCP-ACE (hands-on) and GCP-CDL / GCP-GAIL share product facts; read their published questions first, test the
+  architect's choice (which design and why), not the console step.
+
 ### GCP-GAIL Generative AI Leader (added 2026-10-30)
 Sources: https://cloud.google.com/learn/certification/generative-ai-leader and the exam guide
 https://services.google.com/fh/files/misc/generative_ai_leader_exam_guide_english.pdf (read 2026-10-30; the exam page
