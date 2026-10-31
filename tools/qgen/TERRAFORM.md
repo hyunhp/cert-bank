@@ -21,7 +21,8 @@ https://developer.hashicorp.com/terraform/tutorials/certification-004/associate-
 Writing rules:
 - Block header: `@ TF-TA004 D3 T3.4 applied use-case` (level word, then a type such as use-case, definition, troubleshooting, tradeoff, comparison).
 - True/false items become "Which statement is accurate?" questions (single answer). About 15-20% "(Select TWO)" multi-answer, as the exam has.
-- HCL and CLI snippets in stems are expected (<=8 lines); they must be valid Terraform 1.12 syntax. Test the practitioner's decision or prediction
+- HCL and CLI snippets are expected and must be valid Terraform 1.12 syntax. `qgen` joins stem lines with spaces, so stems carry only short inline snippets
+  (one block or one expression); multi-line HCL goes in G:. Test the practitioner's decision or prediction
   ("what does plan show", "which block", "which command"), not trivia.
 - Tested version is Terraform 1.12: do not key features the docs mark as added after 1.12; check the version notes on each docs page.
 - Names: HCP Terraform (formerly Terraform Cloud), Terraform Enterprise, `terraform` CLI, OpenTofu is out of scope. No prices, plan tiers/editions,
