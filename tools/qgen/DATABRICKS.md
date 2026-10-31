@@ -19,6 +19,7 @@ https://www.databricks.com/sites/default/files/2026-10/Databricks-Certified-Data
 | Format | Single answer only in the guide's samples (multiple choice, no "select two"): this bank uses single answer only |
 
 Writing rules:
+- Block header: `@ DBX-DEA D2 T2.4 applied use-case` (a level word, then a type such as use-case, definition, troubleshooting, tradeoff, comparison).
 - Technical, scenario-based, single-answer. Stems state the data situation and the requirement; short SQL/PySpark snippets (<=6 lines) allowed.
 - Current names: Lakeflow Jobs, Lakeflow Declarative Pipelines, Lakeflow Connect (standard and managed connectors), Declarative Automation
   Bundles (formerly Databricks Asset Bundles), Databricks Git folders (formerly Repos), Unity Catalog, Auto Loader, COPY INTO, Liquid Clustering,

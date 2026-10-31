@@ -1,0 +1,600 @@
+# DBX-DEA batch 08: D6 (T6.3 Spark UI skew/spill/shuffle, T6.4 Liquid Clustering and predictive optimization, T6.5 startup failures/library conflicts/OOM) and D7 (T7.1 managed vs external tables, T7.2 GRANT/REVOKE/DENY hierarchy), single answer, detailed explanations
+# src: https://docs.databricks.com/aws/en/optimizations/spark-ui-guide/long-spark-stage-page
+# src: https://docs.databricks.com/aws/en/optimizations/spark-ui-guide/long-spark-stage-io
+# src: https://docs.databricks.com/aws/en/optimizations/spark-ui-guide/spark-driver-overloaded
+# src: https://docs.databricks.com/aws/en/delta/clustering
+# src: https://docs.databricks.com/aws/en/optimizations/predictive-optimization
+# src: https://docs.databricks.com/aws/en/compute/troubleshooting/
+# src: https://docs.databricks.com/aws/en/init-scripts/cluster-scoped
+# src: https://docs.databricks.com/aws/en/libraries/notebooks-python-libraries
+# src: https://docs.databricks.com/aws/en/tables/managed
+# src: https://docs.databricks.com/aws/en/tables/external
+# src: https://docs.databricks.com/aws/en/tables/convert-external-managed
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-undrop-table
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-aux-describe-table
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges
+# src: https://docs.databricks.com/aws/en/sql/language-manual/security-grant
+# src: https://docs.databricks.com/aws/en/sql/language-manual/security-revoke
+# src: https://docs.databricks.com/aws/en/sql/language-manual/security-deny
+
+@ DBX-DEA D6 T6.3 applied troubleshooting
+S: A nightly join-and-aggregate job has one stage that runs for 40 minutes while the rest finish in minutes. On the stage page in the Spark UI, the Summary Metrics table shows a median task duration of 20 seconds, a 75th percentile of 25 seconds and a maximum of 38 minutes. The cluster has 64 cores and most of them sit idle during the last minutes of the stage. What does this pattern indicate?
+A: Data skew: a few tasks process far more data than the others, so the cores that finish early wait for the long tasks
+B: Disk spill: every task ran out of execution memory and wrote its data to local disk before the stage could finish
+C: Too many shuffle partitions: the tiny median task time proves that Spark created more tasks than the stage needed
+D: A cold disk cache: the first reads of the stage were slow, which lifts the maximum duration without affecting the 75th percentile
+K: A
+G: ## Reading the stage page
+Spark splits every stage into tasks, one per partition, and a stage is finished only when its slowest task is finished. The Summary Metrics table of the stage page shows the distribution of task durations: minimum, 25th percentile, median, 75th percentile and maximum.
+## Skew
+Skew means a few partitions hold much more data than the rest, for example because a few key values dominate a join or group-by. Those tasks run long while the other cores sit idle, which wastes cluster capacity and stretches the job. Databricks suggests comparing the maximum with the 75th percentile: a maximum that exceeds the 75th percentile by about 50% or more indicates possible skew. In a healthy stage the two are close.
+Typical fixes are adaptive query execution (AQE) skew handling for sort merge joins, salting the hot keys or pre-aggregating, clustering the source table, or a `REBALANCE` hint when the stage writes a table.
+W: Data skew: a maximum of 38 minutes against a 75th percentile of 25 seconds is far beyond the 50% rule of thumb, and the idle cores at the end of the stage show that only a few long tasks were left running.
+X: B=Disk spill: spill would show up as spill statistics in the stage details and would slow many tasks, not leave a median of 20 seconds with a single extreme maximum.
+C=Too many shuffle partitions: small tasks are not harmful by themselves, and a tiny median would not create a 38-minute outlier; the outlier is a partition that holds far too much data.
+D=Cold disk cache: a cold cache slows the first reads of many tasks evenly, and it would not leave most cores idle while a handful of tasks keep running for tens of minutes.
+T: A maximum task duration far above the 75th percentile (about 50% or more) on the stage page means skew; look for hot keys or uneven partitions.
+V: Spark UI, Adaptive query execution
+
+@ DBX-DEA D6 T6.3 applied troubleshooting
+S: A join-heavy batch ETL job is slow. The stage page of the longest stage shows spill statistics (data written from memory to disk), and task durations are similar across the stage, so there is no skew. The workers are many small instances. Which change addresses the cause most directly?
+A: Use fewer, larger worker instances with more memory, so more shuffle data fits in execution memory before it must be written to disk
+B: Increase the number of workers while keeping the same small instance type, so more tasks run in parallel on identical memory
+C: Enable the disk cache on the workers, because a cache holds shuffle data in memory and removes the need to spill
+D: Cast every column to STRING before the join, so Spark can use a simpler row format with a smaller memory footprint
+K: A
+G: ## What spill is
+Spark uses execution memory for shuffles, joins, sorts and aggregations. When a task needs more than it has, Spark writes intermediate data from memory to local disk and reads it back later. This is called spill. It works, but it is expensive, and it is most common during shuffles. The stage details at the top of the stage page show spill statistics only when the stage spilled; if none appear, there was no spill.
+## Typical remedies
+- Use auto-optimized shuffle (`spark.sql.shuffle.partitions=auto`) so Spark sizes the shuffle partitions from the plan and input size.
+- Reduce the data held in memory: fewer rows or columns, and avoid very large string, array, map or struct columns.
+- Increase executor memory. For complex batch ETL with joins over several tables, use fewer, larger workers: this also reduces the amount of data shuffled between machines.
+- For streaming queries, limit the batch size so micro-batches do not cause spill.
+W: Fewer, larger workers: each task gets more execution memory, so less data spills to disk, and a larger share of the join happens inside a single machine instead of being shuffled over the network.
+X: B=More small workers: parallelism rises, but each executor keeps the same memory and more of the join data is shuffled between machines, so spill is not removed.
+C=Disk cache: the disk cache speeds up repeated reads of remote files on local SSDs; it does not hold shuffle data and does not give execution more memory.
+D=Casting to STRING: strings usually need more memory than numeric or date types, so this raises memory use and can make spill worse.
+T: Spill means execution memory ran short: give tasks more memory per core (fewer, larger workers), shrink the data in memory, or let Spark choose shuffle partitions with `auto`.
+V: Spark UI, Databricks compute
+
+@ DBX-DEA D6 T6.3 applied troubleshooting
+S: A batch job reads a large Delta table with a selective filter on `store_id`. The longest stage in the Spark UI shows a very large Input column and almost no shuffle or output, there is no skew or spill, and throughput per core is around 3 MB per second. The table has no clustering. What should the engineer do to cut the stage time?
+A: Cluster the table on `store_id` with liquid clustering so that data skipping lets the stage read far fewer files
+B: Raise `spark.sql.shuffle.partitions` to 2000 so that the large input is divided among more shuffle tasks
+C: Add a `REBALANCE` hint to the query so that Spark splits oversized output partitions evenly
+D: Increase the executor memory so that the input data stays in memory instead of spilling to disk
+K: A
+G: ## Which I/O column is large?
+The I/O columns of the stage table (Input, Output, Shuffle Read, Shuffle Write) show where the stage spends its time. A rough rule from the Databricks guide: take the largest value, divide by the total number of cores and by the stage duration; if the result is about 3 MB per second per core, the stage is probably I/O bound.
+- High input: the stage reads a lot of data. Store data in Delta, use liquid clustering for better data skipping, make the query more selective, use Photon, use the disk cache for repeated reads, or add compute.
+- High output: reduce rewrites (optimize merges, use deletion vectors), use Photon, or add compute.
+- High shuffle: set `spark.sql.shuffle.partitions` to `auto`.
+## Why clustering helps
+Liquid clustering organizes files by the clustering keys, so a filter on `store_id` can skip files whose min/max statistics rule them out.
+W: Liquid clustering on `store_id`: the stage is limited by input, and clustering lets the selective filter skip most files so that much less data is read.
+X: B=More shuffle partitions: the stage has almost no shuffle, so this setting is not the bottleneck and would only create more, smaller tasks.
+C=REBALANCE hint: it splits skewed output partitions when a stage writes a table; this stage is dominated by input and shows no skew or large output.
+D=More executor memory: that fights spill, but the stage shows no spill, so extra memory would not make the file reads any smaller.
+T: Read the I/O columns first: large Input points to data layout (clustering, selective filters, Photon), large Shuffle to `spark.sql.shuffle.partitions=auto`, large Output to fewer rewrites.
+V: Spark UI, Liquid Clustering
+
+@ DBX-DEA D6 T6.3 applied use-case
+S: A shuffle-heavy aggregation stage reads 900 GB of shuffle data, and the stage page shows the Shuffle Read column as the largest I/O value. Task times are even and there is no spill. The team set `spark.sql.shuffle.partitions` to 200 years ago and never revisited it, and input sizes now change a lot from run to run. Which setting does Databricks recommend to reduce the shuffle time?
+A: Set `spark.sql.shuffle.partitions` to `auto` so that Spark picks the number of shuffle partitions from the query plan and input data size
+B: Set `spark.sql.shuffle.partitions` to 1 so that no data has to be exchanged between executors during the aggregation
+C: Set `spark.sql.autoBroadcastJoinThreshold` to -1 so that every aggregation avoids the shuffle by broadcasting its input
+D: Set `spark.sql.adaptive.enabled` to false so that the plan is fixed and the same number of partitions is used on every run
+K: A
+G: ## High shuffle on the stage page
+A stage with large Shuffle Read or Shuffle Write values spends much of its time moving data between executors for joins and aggregations. A fixed shuffle partition count is a poor fit when input size varies: too few partitions give huge tasks (and spill), too many give lots of tiny tasks.
+## What Databricks recommends
+Set `spark.sql.shuffle.partitions` to `auto` (auto-optimized shuffle). Spark then chooses the number of shuffle partitions based on the query plan and the input data size, together with adaptive query execution (AQE), which can coalesce small shuffle partitions at runtime.
+W: `auto` for shuffle partitions: Spark sizes the partitions from the plan and the data volume of each run, so a changing input no longer runs against a stale fixed number.
+X: B=A single partition: a shuffle still happens, and the whole 900 GB would be handled by one task on one core, which makes the stage slower and causes spill.
+C=Broadcast threshold of -1: this turns automatic broadcast joins off; it does not remove the shuffle of an aggregation and makes joins shuffle more, not less.
+D=Disabling AQE: AQE is what adapts partition counts and handles skew at runtime; turning it off removes that help, and a fixed plan is exactly the problem here.
+T: For high shuffle read/write, use `spark.sql.shuffle.partitions=auto` instead of a hand-tuned constant.
+V: Spark UI, Adaptive query execution
+
+@ DBX-DEA D6 T6.3 advanced troubleshooting
+S: A sort merge join stage shows skew: the maximum task duration is many times the 75th percentile. Adaptive query execution is on, yet the skewed partitions, about 150 MB each, are not being split. A colleague notes the skewed partitions are smaller than the AQE skew thresholds. Which action fits?
+A: Lower `spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes` (and the factor if needed) so AQE treats these partitions as skewed
+B: Add a broadcast hint on the large side of the join, because AQE splits skewed partitions of broadcast joins first
+C: Turn AQE off and set the shuffle partitions to 1, because Spark then no longer compares partition sizes with thresholds
+D: Increase `spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes` so that more partitions qualify as skewed
+K: A
+G: ## How AQE handles skew
+For sort merge joins and shuffle hash joins, adaptive query execution can split a skewed shuffle partition into smaller ones at runtime. It does this only when a partition exceeds both of its size thresholds: a factor over the median partition size (`spark.sql.adaptive.skewJoin.skewedPartitionFactor`) and an absolute size (`spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes`).
+- If the skewed partitions are below the thresholds, lower the thresholds so that they qualify.
+- Broadcast joins are never skew-optimized, and the join type determines which side AQE can optimize.
+- If a few key values hold most of the data, salting the keys or pre-aggregating in two stages also works, and liquid clustering helps when the skew comes from the layout of a stored table.
+W: Lowering the threshold: a partition is split only if it is larger than the threshold, so a lower value lets the 150 MB partitions qualify as skewed.
+X: B=Broadcast hint on the large side: broadcast joins are never skew-optimized by AQE, and broadcasting a large table would overload memory.
+C=AQE off and one partition: without AQE no skew split happens at all, and a single shuffle partition concentrates everything on one task.
+D=Raising the threshold: the threshold is a minimum size a partition must exceed; raising it makes fewer partitions qualify, which is the opposite of what is needed.
+T: AQE splits a skewed partition only when it exceeds both skew thresholds, so lower the thresholds when the skewed partitions are smaller than the defaults.
+V: Spark UI, Adaptive query execution
+
+@ DBX-DEA D6 T6.4 applied use-case
+S: A 5 TB events table is clustered with `CLUSTER BY (customer_id)`. Analysts now filter mostly on `event_date` and `country`, so the team runs `ALTER TABLE events CLUSTER BY (event_date, country)`. The command finishes immediately, but queries on the new keys are still slow for old data. What explains this and what is the next step?
+A: Changing keys only affects newly written data; run `OPTIMIZE events FULL` to recluster the existing files with the new keys
+B: The table must be dropped and recreated, because clustering keys of a Delta table cannot be changed after creation
+C: Clustering keys are applied by `VACUUM`, so run `VACUUM events` to rewrite the old files with the new layout
+D: Old data is reclustered by the next `OPTIMIZE events ZORDER BY (event_date, country)`, which replaces the clustering keys
+K: A
+G: ## Liquid clustering and changing keys
+Liquid clustering replaces Hive-style partitioning and `ZORDER`. A table is clustered by keys set with `CLUSTER BY`, and unlike partitioning you can redefine the keys later with `ALTER TABLE ... CLUSTER BY (...)` without rewriting the existing data.
+## Why old data stays slow
+The `ALTER` only changes the table metadata. Existing files keep their old layout, and a normal `OPTIMIZE` is incremental: it rewrites only what is needed to cluster new data. To recluster everything under the new keys, run:
+```
+OPTIMIZE events FULL;
+```
+On a large table that has not been clustered on the new keys, this can take hours, so plan it. Clustering is not compatible with `ZORDER`.
+W: `OPTIMIZE ... FULL`: it reclusters existing files that were clustered with other keys or not at all, so data skipping on `event_date` and `country` works for old data too.
+X: B=Drop and recreate: keys can be changed with `ALTER TABLE ... CLUSTER BY` on the live table; a rewrite is not required.
+C=VACUUM: it deletes data files that are no longer referenced; it never reorganizes the layout of live files.
+D=ZORDER: liquid clustering is not compatible with `ZORDER`, and a `ZORDER BY` does not define the clustering keys of the table.
+T: After changing clustering keys, run `OPTIMIZE ... FULL` to recluster existing data; a plain OPTIMIZE only clusters data that is not yet clustered.
+V: Liquid Clustering, Delta Lake
+
+@ DBX-DEA D6 T6.4 applied use-case
+S: A catalog has predictive optimization enabled, but a team's `clicks` table never gets compaction or statistics maintenance even after months. DESCRIBE EXTENDED shows the table is an external Delta table in the team's own S3 bucket. What explains this, and what is the durable fix?
+A: Predictive optimization runs only on Unity Catalog managed tables, so convert the table to a managed table
+B: Predictive optimization skips tables with more than 1 TB, so the team must split the table into smaller tables
+C: Predictive optimization needs a Python notebook that calls `OPTIMIZE` once, so the team must add one to a job
+D: Predictive optimization only maintains Iceberg tables, so the team must rewrite the table in the Iceberg format
+K: A
+G: ## What predictive optimization does
+Predictive optimization automatically runs `OPTIMIZE` (including incremental clustering), `VACUUM` and `ANALYZE` on Unity Catalog managed tables, using serverless compute for jobs. Databricks identifies which tables benefit, queues the work, and collects statistics on write, so no one has to schedule maintenance jobs.
+## Requirements
+- Only Unity Catalog managed tables are supported (Delta and Iceberg); external and foreign tables are not maintained.
+- The workspace must be on the Premium plan or above in a supported region, and compute must be a SQL warehouse or Databricks Runtime 12.2 LTS or above.
+- Predictive optimization is a setting that can be enabled at account, catalog, schema or table level and is inherited.
+For an external Delta table, `ALTER TABLE ... SET MANAGED` converts it to a managed table so that Databricks maintains it.
+W: Managed tables only: the table is external, so Databricks does not maintain it; converting it to a managed table brings it under predictive optimization.
+X: B=Size limit: there is no rule that skips tables above a data-size threshold; the table type is what matters.
+C=Manual notebook: the feature runs automatically on eligible tables; the table type, not a missing job, is why nothing runs here.
+D=Iceberg only: predictive optimization supports both Delta Lake and Iceberg managed tables, so Delta is not the problem.
+T: Predictive optimization maintains only Unity Catalog managed tables; external tables need manual maintenance or conversion to managed.
+V: Predictive optimization, Unity Catalog
+
+@ DBX-DEA D6 T6.4 applied definition
+S: A data engineer wants Databricks to choose and adapt the clustering keys of a Unity Catalog managed table from its query history, instead of fixing keys by hand. Which statement does this?
+A: `ALTER TABLE sales CLUSTER BY AUTO`
+B: `ALTER TABLE sales CLUSTER BY NONE`
+C: `ALTER TABLE sales SET TBLPROPERTIES ('delta.autoOptimize.optimizeWrite' = 'true')`
+D: `ALTER TABLE sales SET MANAGED`
+K: A
+G: ## Automatic liquid clustering
+Automatic liquid clustering lets Databricks pick clustering keys by analyzing the historical query workload of a table and change them when query patterns change. You enable it with the `CLUSTER BY AUTO` clause, at creation or on an existing table:
+```
+CREATE TABLE t (a INT, b STRING) CLUSTER BY AUTO;
+ALTER TABLE t CLUSTER BY AUTO;
+```
+- It works on Unity Catalog managed tables and relies on predictive optimization for key selection and the clustering work, which run asynchronously.
+- It changes keys only when predicted savings from better data skipping outweigh the clustering cost, and it may pick no keys for small tables or tables without frequent queries.
+- `CLUSTER BY NONE` removes clustering keys.
+W: `CLUSTER BY AUTO`: it hands key selection to Databricks, which uses the table's query history and predictive optimization to choose and adapt the keys.
+X: B=`CLUSTER BY NONE`: it removes the clustering keys instead of selecting them.
+C=Optimize write property: it affects file sizes at write time and has nothing to do with choosing clustering keys.
+D=`SET MANAGED`: it converts an external table to a managed table; it does not set any clustering keys.
+T: `CLUSTER BY AUTO` makes Databricks pick and adapt clustering keys for managed tables, using predictive optimization.
+V: Liquid Clustering, Predictive optimization
+
+@ DBX-DEA D6 T6.4 applied tradeoff
+S: A schema contains managed tables with predictive optimization enabled through the catalog. A nightly Lakeflow Jobs task still runs `OPTIMIZE` on each liquid-clustered table in that schema, and the team asks if it is still needed. What does Databricks recommend?
+A: Remove the scheduled OPTIMIZE task, because predictive optimization runs OPTIMIZE for enabled tables automatically
+B: Keep the task and add a nightly VACUUM as well, because predictive optimization only maintains statistics
+C: Replace the task with `OPTIMIZE ... ZORDER BY`, because predictive optimization performs Z-ordering on clustered tables
+D: Keep the task, because predictive optimization can run only when the scheduled task is paused
+K: A
+G: ## Predictive optimization and scheduled maintenance
+Predictive optimization decides which tables need `OPTIMIZE`, `VACUUM` and `ANALYZE`, queues them and runs them on serverless compute for jobs. For liquid-clustered tables, its `OPTIMIZE` triggers incremental clustering. Databricks recommends disabling manually scheduled `OPTIMIZE` jobs when predictive optimization is in use. Scheduled jobs add compute cost you pay yourself and duplicate work.
+## Notes
+- When `OPTIMIZE` is run by predictive optimization it does not run `ZORDER`; Z-ordered files are ignored. This is another reason to prefer liquid clustering.
+- Without predictive optimization, schedule `OPTIMIZE` yourself (for busy tables, every one or two hours).
+W: Remove the schedule: predictive optimization already triggers incremental clustering and file optimization for enabled managed tables, so the manual job is redundant.
+X: B=Add VACUUM: predictive optimization runs `OPTIMIZE`, `VACUUM` and `ANALYZE`, not only statistics.
+C=ZORDER replacement: predictive optimization does not run `ZORDER`, and `ZORDER` is not compatible with liquid clustering.
+D=Pause requirement: the scheduled task and predictive optimization do not need to be mutually exclusive to function; the point is that the schedule is no longer needed.
+T: With predictive optimization enabled, drop manual OPTIMIZE schedules; it runs OPTIMIZE, VACUUM and ANALYZE for managed tables.
+V: Predictive optimization, Lakeflow Jobs
+
+@ DBX-DEA D6 T6.4 applied use-case
+S: Predictive optimization is enabled for the catalog `prod`. The schema `prod.scratch` holds short-lived tables that are rewritten every hour, and the team does not want any maintenance compute spent on them, while all other schemas should stay enabled. Which statement fits?
+A: `ALTER SCHEMA prod.scratch DISABLE PREDICTIVE OPTIMIZATION`
+B: `ALTER CATALOG prod DISABLE PREDICTIVE OPTIMIZATION`
+C: `ALTER SCHEMA prod.scratch INHERIT PREDICTIVE OPTIMIZATION`
+D: `ALTER TABLE prod.scratch.* DISABLE PREDICTIVE OPTIMIZATION`
+K: A
+G: ## Inheritance of predictive optimization
+Predictive optimization can be enabled for an account, catalog, schema or table. Managed tables inherit the account value by default, a catalog's setting flows to its schemas, and a schema's setting flows to its tables. You can override the inherited value at a lower level with `ENABLE`, `DISABLE` or `INHERIT`:
+```
+ALTER CATALOG c { ENABLE | DISABLE | INHERIT } PREDICTIVE OPTIMIZATION;
+ALTER SCHEMA s { ENABLE | DISABLE | INHERIT } PREDICTIVE OPTIMIZATION;
+ALTER TABLE t { ENABLE | DISABLE | INHERIT } PREDICTIVE OPTIMIZATION;
+```
+To change it you need to be the owner or have `MANAGE` on that object (account admin for the account).
+W: Schema-level `DISABLE`: it overrides the inherited catalog value for `prod.scratch` and every table in it, and leaves other schemas enabled.
+X: B=Catalog-level `DISABLE`: it turns the feature off for the entire catalog, which also removes it from the schemas that should stay enabled.
+C=`INHERIT`: it resets the schema to the catalog value, which is enabled, so the scratch tables would still be maintained.
+D=Wildcard table syntax: `ALTER TABLE` names one table; there is no wildcard form, and a schema-level setting is the right scope.
+T: Override predictive optimization at the narrowest level that fits: `ALTER SCHEMA ... DISABLE PREDICTIVE OPTIMIZATION` for one schema.
+V: Predictive optimization, Unity Catalog
+
+@ DBX-DEA D6 T6.5 applied troubleshooting
+S: After a Delta pipeline team added a cluster-scoped init script that installs an OS package, every start of their classic cluster fails during launch. The script ends with a failing command, and the cluster event log shows an init script failure. What is the most effective way to find the cause?
+A: Configure cluster log delivery and read the init script log, because a non-zero exit code of the script fails the launch
+B: Increase the driver node size, because init scripts that exceed driver memory terminate the cluster launch
+C: Move the script to a global init script, because global scripts ignore non-zero exit codes during startup
+D: Switch the cluster to serverless compute for notebooks, which runs the same init script with less memory pressure
+K: A
+G: ## Init scripts run before Spark
+An init script is a shell script that runs on every cluster node during startup, before the Spark driver or executor JVM starts. Cluster-scoped init scripts are defined in the cluster configuration and apply to clusters you create and those created for jobs. Scripts run in order.
+## Failure behaviour
+If a cluster-scoped init script returns a non-zero exit code, the cluster launch fails. To troubleshoot it, configure cluster log delivery and examine the init script log. Databricks also recommends using compute policies or built-in features instead of init scripts where possible, and installing libraries via policies and not via init scripts. Serverless compute does not support init scripts.
+W: Log delivery plus init script log: it shows the script output and exit code, which is the evidence needed to fix the failing command.
+X: B=Larger driver: the failure is the exit status of the script, not a memory limit of the driver, so resizing it does not help.
+C=Global script: switching the script type does not stop a failing command from being a failure, and Databricks recommends cluster-scoped or policy-managed scripts over global ones.
+D=Serverless: serverless compute does not support init scripts, so the script would not run at all, which changes the setup rather than finding the cause.
+T: A cluster-scoped init script with a non-zero exit code fails the launch; use cluster log delivery and the init script log to debug it.
+V: Databricks compute, Init scripts
+
+@ DBX-DEA D6 T6.5 applied troubleshooting
+S: Right after a new AWS-based workspace was deployed into the customer's own VPC, the first classic cluster never becomes ready. After roughly 30 minutes the event log reports that the compute plane network is misconfigured and that the node daemon ping timed out. What should the engineer check first?
+A: Routing and firewall rules, to confirm the instances can reach the Databricks control plane, for example with `nc -zv` tests
+B: The Spark configuration `spark.sql.shuffle.partitions`, because a wrong value stops nodes from joining the cluster
+C: The Delta table properties of the tables that the first notebook reads, since a wrong property can stop the bootstrap of nodes
+D: The library list of the cluster, because a missing PyPI package prevents the node daemon from answering pings
+K: A
+G: ## Slow start with a daemon ping timeout
+When Databricks launches a classic cluster, it requests instances in the customer's cloud account. Each instance must bootstrap and connect to the Databricks control plane. If routing or a firewall blocks that path, the node never reports back, the cluster manager waits and then terminates the instances. The event log then shows a network configuration error with a "node daemon ping timeout".
+## What to check
+- Routes, security groups and firewall rules from the workspace subnets to the control plane web application, the secure cluster connectivity relay, S3 and STS.
+- A quick test: start an instance in a workspace subnet and run `nc -zv <host> 443` against the required endpoints.
+- If the tests pass but a proxy or firewall does SSL or deep packet inspection, check the certificates the instance sees.
+Related error: "failed to launch spark container on instance" often means the instance cannot reach STS to access the root S3 bucket.
+W: Network path to the control plane: the symptom is a bootstrap timeout, which is caused by blocked routes or firewall rules, and `nc` tests from the workspace subnets confirm it quickly.
+X: B=Shuffle partitions: this is a Spark runtime setting evaluated while queries run; it has no effect on whether instances can connect to the control plane.
+C=Delta table properties: tables are read only after the cluster is running, so they cannot cause a startup ping timeout.
+D=Library list: libraries are installed after the cluster is up, and a missing package does not stop a node from answering the cluster manager.
+T: A daemon ping timeout on a first cluster points to blocked network paths to the control plane; verify routes, firewall, STS and S3 access.
+V: Databricks compute, Networking
+
+@ DBX-DEA D6 T6.5 applied troubleshooting
+S: A notebook on a classic cluster upgrades a library with `%pip install --upgrade pandas` in cell 1. In cell 2, `pandas.__version__` still prints the old version, although the install log reports success. What is the cause and the fix?
+A: `%pip` does not restart the Python process; call `dbutils.library.restartPython()` so the notebook imports the new version
+B: The install only applies to the next cluster start, so the cluster must be terminated and started again
+C: `%pip` installs only on the driver of another cluster, so the library must be added through the Jobs API
+D: Libraries from PyPI always lose to the copy in Databricks Runtime, so the only option is to upload the wheel file to DBFS
+K: A
+G: ## Notebook-scoped libraries
+`%pip install` creates a Python environment scoped to the notebook session. Other notebooks on the same compute are not affected, and the libraries do not persist: they must be installed again for every session. Place the `%pip` commands at the top of the notebook.
+## Why the old version appears
+`%pip` commands do not restart the Python process automatically. A package that was already imported in the running process stays in memory, so the new version is not seen. After installing or updating a package, call `dbutils.library.restartPython()` to restart the Python process (this resets Python state, so run it before the rest of the code). Upgrading core packages such as IPython with `%pip` may break features; in that case restart the cluster or start a new session.
+W: Restart the Python process: the new package files are installed, but the running interpreter still holds the old module, so a restart makes the notebook import the new one.
+X: B=Cluster restart: notebook-scoped installs take effect in the session, so a full restart is not needed.
+C=Another cluster: `%pip` installs into the notebook's own environment on the attached compute and does not need the Jobs API.
+D=Runtime copy always wins: a notebook-scoped install can supply a newer version, and storing libraries in the DBFS root is deprecated and disabled by default in current runtimes.
+T: After `%pip install` or upgrade, restart the Python process with `dbutils.library.restartPython()` to use the new version.
+V: Databricks notebooks, Libraries
+
+@ DBX-DEA D6 T6.5 applied troubleshooting
+S: A notebook reads a 400 GB Delta table into a DataFrame and calls `rows = df.collect()` to loop over the rows in Python. The run fails with an out-of-memory error on the driver, while the executors show low memory use. What is the best fix?
+A: Keep the work distributed: use DataFrame or SQL transformations and write the result to a table instead of collecting rows
+B: Add more worker nodes, because executor memory is where `collect()` stores the returned rows
+C: Increase `spark.sql.shuffle.partitions`, because the rows collected are limited by the number of shuffle partitions
+D: Call `df.cache()` first, because a cached DataFrame is returned to the driver in compressed form with no extra memory use
+K: A
+G: ## Where memory is used
+A cluster has one driver and several executors. Executors hold partitions and run tasks; the driver coordinates, plans queries and runs any non-Spark Python code. Actions such as `collect()` and `toPandas()` bring the whole result into the driver process, so a large result exhausts driver memory even though executors are idle.
+## Fixes
+- Do the work in Spark: filter, aggregate or join with DataFrame/SQL operations and write the result to a table or volume.
+- If the driver really needs data, bring only a small aggregate or a limited sample.
+- Use a larger driver type only for modest results; it does not scale like distributing the work does.
+- Executor out-of-memory or spill is a separate pattern, visible on the stage page, and is treated with larger workers or better partitioning.
+W: Distributed processing: transformations run on the executors in parallel and results are written out, so the driver never has to hold the 400 GB.
+X: B=More workers: `collect()` returns rows to the driver, so extra workers do not give the driver more memory.
+C=Shuffle partitions: that setting controls the parallelism of shuffles, not how many rows an action may bring to the driver.
+D=`cache()`: caching keeps partitions on executors; `collect()` still copies every row to the driver.
+T: Driver out-of-memory after `collect()` or `toPandas()` means too much data was pulled to one machine; process in Spark and write the output.
+V: Databricks compute, Apache Spark
+
+@ DBX-DEA D7 T7.1 applied use-case
+S: A team registers `raw_events` as an external Unity Catalog table on `s3://acme-landing/events/`, which a partner process also reads. A cleanup script now runs `DROP TABLE main.landing.raw_events`. What happens to the files in the bucket?
+A: Unity Catalog removes only the table metadata, and the data files stay in cloud storage until someone deletes them
+B: Unity Catalog deletes the files immediately, because every dropped table has its data removed from storage
+C: Unity Catalog moves the files into the schema's managed storage location and keeps them for the recovery period
+D: Unity Catalog deletes the files only after the 7-day default recovery period, because external tables use it as well
+K: A
+G: ## Managed and external tables
+Both table types are governed by Unity Catalog (metadata, permissions, lineage), but they differ in who owns the data lifecycle.
+- A managed table stores its files in the managed storage location of the schema or catalog, and Unity Catalog manages layout, optimization and the file lifecycle.
+- An external table stores data in a location you register as a Unity Catalog external location. Unity Catalog manages its metadata but not the lifecycle, optimization, storage location or layout of the files.
+## Dropping
+- Dropping a managed table removes it, and Databricks deletes the data files after a recovery period (default 7 days, during which `UNDROP` works).
+- Dropping an external table removes only the metadata. The files remain, and you must delete them in your storage if they should go.
+W: Metadata only: for external tables, `DROP TABLE` leaves the files in place, so the partner process can keep reading the bucket.
+X: B=Immediate deletion: that is not what happens for external tables; file deletion is the behavior of managed tables, and even then it follows a recovery period.
+C=Move to managed storage: Unity Catalog never relocates the files of an external table on a drop.
+D=Delayed deletion: the recovery-period purge applies to managed tables; for external tables no purge ever happens.
+T: Dropping an external table deletes only metadata; dropping a managed table deletes its files after the recovery period.
+V: Unity Catalog, External tables
+
+@ DBX-DEA D7 T7.1 applied use-case
+S: A Delta table `main.sales.orders_ext` is an external Unity Catalog table, owned by the engineer, in an S3 location. The team wants it managed by Unity Catalog, keeping its name, permissions and history, with minimal downtime for readers and writers. Which statement should the engineer run, on a runtime that supports it?
+A: `ALTER TABLE main.sales.orders_ext SET MANAGED`
+B: `ALTER TABLE main.sales.orders_ext SET MANAGED MOVE`
+C: `CREATE TABLE main.sales.orders_mgd AS SELECT * FROM main.sales.orders_ext`
+D: `ALTER TABLE main.sales.orders_ext UNSET MANAGED`
+K: A
+G: ## Converting an external Delta table to managed
+`ALTER TABLE ... SET MANAGED` converts an external Delta table to a Unity Catalog managed table. The conversion keeps the table name, settings, permissions, views and history, and it limits reader and writer downtime: data is first copied while readers and writers continue, and a short switch moves the final commits and updates the metadata. Path-based reads and writes are redirected to the new location afterwards.
+## Prerequisites and syntax
+- The table must be Delta and you must own it; use a supported runtime or serverless compute.
+- The syntax depends on the source type. External tables use `SET MANAGED` with no `MOVE` or `COPY`; adding them fails with an error. Foreign tables must specify `MOVE` or `COPY`.
+- `CREATE TABLE AS SELECT` also converts data, but creates a new table object and is not recommended compared with `SET MANAGED`.
+- `UNSET MANAGED` is the rollback command.
+W: `SET MANAGED`: it converts the external table in place, keeps name, permissions and history, and minimizes downtime.
+X: B=`SET MANAGED MOVE`: `MOVE` and `COPY` apply to foreign tables only, and using them on an external table fails with an unsupported syntax error.
+C=CTAS: it makes a new table with a new name and no history or permissions, and readers must be switched manually.
+D=`UNSET MANAGED`: it rolls a converted table back to external; it cannot convert an external table in the first place.
+T: External Delta table to managed: `ALTER TABLE ... SET MANAGED` (no MOVE/COPY); foreign tables need `MOVE` or `COPY`.
+V: Unity Catalog, Managed tables
+
+@ DBX-DEA D7 T7.1 applied troubleshooting
+S: Ten days after converting an external Delta table to managed with `SET MANAGED`, the team finds that a partner tool needs the original external location again. They want the table back as external while keeping the writes made since the conversion. What should they do?
+A: Run `ALTER TABLE ... UNSET MANAGED` within the 14-day rollback window, before dropping the managed table
+B: Drop the managed table and re-create the external table by hand from the old location with `CREATE TABLE ... LOCATION`
+C: Run `ALTER TABLE ... SET EXTERNAL` for a new bucket, because rollback is not possible after any writes
+D: Run `UNDROP TABLE` on the managed table, because it restores the pre-conversion external location
+K: A
+G: ## Rolling back a conversion
+After `SET MANAGED` on an external table, Databricks keeps the data in the original external location for 14 days so you can roll back. `ALTER TABLE ... UNSET MANAGED` updates the table metadata to point back to the original external location and preserves the writes made on the managed location after the conversion. Time travel by version still works for those commits (but not by timestamp). Seven days after rollback, the data in the managed location is deleted automatically.
+## Cautions
+- Run `UNSET MANAGED` before dropping a converted table; dropping first may cause data loss or inconsistencies.
+- After 14 days, with predictive optimization enabled, the old external data is deleted automatically.
+W: `UNSET MANAGED` inside 14 days: it points the table back to the original external location and keeps the later writes, so the partner tool can read it again.
+X: B=Drop and recreate: dropping first risks losing the writes made after conversion, because they exist only in the managed location.
+C=`SET EXTERNAL` for a new bucket: rollback with writes preserved is supported, so this is neither needed nor equal to restoring the original location.
+D=`UNDROP`: it recovers dropped tables; it does not move a live table's location.
+T: Roll back an external-to-managed conversion with `UNSET MANAGED` within 14 days, and never drop the converted table first.
+V: Unity Catalog, Managed tables
+
+@ DBX-DEA D7 T7.1 applied troubleshooting
+S: A data engineer who has `USE CATALOG`, `USE SCHEMA` and `CREATE TABLE` on `main.finance` runs `CREATE TABLE main.finance.audit_ext (id BIGINT) LOCATION 's3://acme-finance/audit/'`. The statement fails with a permission error. Which missing privilege explains it?
+A: `CREATE EXTERNAL TABLE` on the external location covering `s3://acme-finance/audit/`
+B: `MODIFY` on the schema `main.finance`
+C: `CREATE MANAGED STORAGE` on the catalog `main`, which sets where its managed tables are stored
+D: `SELECT` on the metastore, which allows queries of any table in it
+K: A
+G: ## Creating an external table
+An external table must point at a path inside a Unity Catalog external location, which links a cloud path to a storage credential. To create one you need:
+- `CREATE EXTERNAL TABLE` on the external location that grants access to the path,
+- `USE CATALOG` on the parent catalog,
+- `USE SCHEMA` and `CREATE TABLE` on the parent schema.
+```
+CREATE TABLE c.s.t (id BIGINT) LOCATION 's3://bucket/dir/';
+```
+Managed tables need only the schema-level rights, since Databricks decides the location.
+W: `CREATE EXTERNAL TABLE` on the external location: the engineer has the schema-side rights, and the missing one governs permission to create tables over that storage path.
+X: B=`MODIFY` on the schema: `MODIFY` is a data-change privilege for tables; it is not what authorizes new tables at a storage path.
+C=`CREATE MANAGED STORAGE`: it sets a custom storage location for managed tables; it does not authorize external table creation.
+D=`SELECT` on the metastore: reading rights are irrelevant to the creation of a table.
+T: Creating an external table needs `CREATE EXTERNAL TABLE` on the external location, plus `USE CATALOG`, `USE SCHEMA` and `CREATE TABLE` on the parents.
+V: Unity Catalog, External locations
+
+@ DBX-DEA D7 T7.1 applied comparison
+S: A team has a feed of Avro files that must be registered as a queryable table in Unity Catalog, and another non-Databricks application reads the same files directly from the bucket. Which table type fits?
+A: An external table, because it can register data in file formats such as Avro and leaves the files in the bucket
+B: A managed table, because managed tables accept Avro files as their storage format
+C: A managed table, because other tools can then read the files directly with no restrictions on path-based access
+D: A foreign table, because it registers files in cloud storage with the same governance as an external table
+K: A
+G: ## When to choose external tables
+Managed tables are the recommended default: Unity Catalog manages storage, layout and optimization, and managed tables are cheaper to store and query. Databricks recommends external tables mainly when:
+- you need a table over existing data in a format that managed tables do not support, such as JSON or Avro, or
+- non-Databricks clients need direct access to the files and cannot use other access patterns (such as the open Unity APIs with credential vending).
+## Things to keep in mind
+- External tables support formats such as DELTA, CSV, JSON, AVRO, PARQUET, ORC and TEXT.
+- Unity Catalog privileges are not enforced when files are accessed directly by outside systems.
+- Reads and writes to managed tables must use table names; path-based access is not supported.
+W: External table: Avro is a format managed tables do not support, and an external table leaves the files in the bucket for the other application.
+X: B=Managed with Avro: managed tables are Delta Lake or Iceberg tables, so Avro files are not their storage format.
+C=Managed with direct reads: path-based access to managed tables is not supported because it bypasses Unity Catalog controls and can cause corruption.
+D=Foreign table: a foreign table represents data in an external catalog (such as a federated Hive metastore), not files registered by the team.
+T: Use external tables for non-Delta formats or direct non-Databricks file access; use managed tables otherwise.
+V: Unity Catalog, External tables
+
+@ DBX-DEA D7 T7.1 applied definition
+S: An engineer inherits several tables in `main.ops` and needs to know for each whether it is managed or external and where its files live, using SQL only. Which command shows this?
+A: `DESCRIBE EXTENDED main.ops.shipments`, which lists the table type and the storage location among the details
+B: `SHOW TABLES IN main.ops`, which lists the table type and storage location of every table in the schema
+C: `DESCRIBE HISTORY main.ops.shipments`, which lists the table type and storage location from the transaction log
+D: `SHOW GRANTS ON TABLE main.ops.shipments`, which lists the table type and the storage location of the data files
+K: A
+G: ## Finding out the table type
+`DESCRIBE TABLE EXTENDED` (or `DESCRIBE EXTENDED`) returns the columns plus detailed table information, including the table type (MANAGED or EXTERNAL), the provider/format and the storage location. Catalog Explorer shows the same details on the table's page. Use this to choose the right command before converting a table, because `SET MANAGED` syntax depends on whether the source is external or foreign.
+## Look-alikes
+- `SHOW TABLES` lists names, schema and whether a table is temporary.
+- `DESCRIBE HISTORY` lists Delta operations (writes, merges, optimizations), not the type.
+- `SHOW GRANTS` lists privileges.
+W: `DESCRIBE EXTENDED`: it adds the table type and location to the column listing, so one command per table answers both questions.
+X: B=`SHOW TABLES`: it returns names and a temporary flag per table, not the type or location.
+C=`DESCRIBE HISTORY`: it reports versions and operations from the Delta log, such as WRITE or OPTIMIZE, not how the table is stored in Unity Catalog.
+D=`SHOW GRANTS`: it lists which principals hold which privileges and says nothing about storage.
+T: `DESCRIBE EXTENDED` shows whether a table is managed or external and its location.
+V: Unity Catalog, Databricks SQL
+
+@ DBX-DEA D7 T7.1 applied troubleshooting
+S: Last week an engineer ran `DROP TABLE main.sales.daily_totals` on a Unity Catalog managed table by mistake. Nobody changed the catalog's retention settings. The table is needed again today with its data. What is the right action?
+A: Run `UNDROP TABLE main.sales.daily_totals`, because dropped managed tables remain recoverable for a default period of 7 days
+B: Run `RESTORE TABLE main.sales.daily_totals TO VERSION AS OF 0`, because RESTORE works on tables that no longer exist
+C: Re-create the table with `CREATE TABLE` and re-ingest everything, because dropped managed tables are purged immediately
+D: Run `REFRESH TABLE main.sales.daily_totals`, because it re-registers a dropped table from its storage files
+K: A
+G: ## Recovering a dropped managed table
+When a Unity Catalog managed table is dropped, Databricks keeps the data files for a recovery period (7 days by default). During this time `UNDROP TABLE` recovers the table. After the period ends, an asynchronous purge deletes the files from your cloud storage. An external table's files are never deleted by a drop, so the issue arises only for managed tables.
+- Permission: dropping a managed table needs `MANAGE` or ownership plus `USE SCHEMA` and `USE CATALOG`.
+- `RESTORE` rolls an existing Delta table back to an earlier version; it cannot revive a dropped table.
+- `REFRESH TABLE` invalidates cached metadata and data.
+W: `UNDROP TABLE`: the drop happened within the 7-day window, so the table and its data can be recovered with a single command.
+X: B=`RESTORE`: it operates on an existing table; a dropped table cannot be restored with it.
+C=Re-ingest: managed tables are not purged immediately, so the data is still recoverable.
+D=`REFRESH TABLE`: it clears cached state; it does not re-register tables.
+T: Use `UNDROP TABLE` within the recovery period (default 7 days) to recover a dropped managed table.
+V: Unity Catalog, Managed tables
+
+@ DBX-DEA D7 T7.2 applied use-case
+S: A BI group `analysts` must query only `main.sales.orders` and nothing else. The group has no privileges yet. Which set of grants is sufficient and follows least privilege?
+A: `USE CATALOG` on `main`, `USE SCHEMA` on `main.sales` and `SELECT` on `main.sales.orders`
+B: `SELECT` on `main.sales.orders` alone, because table privileges include access to the parents
+C: `SELECT` on the catalog `main`, because catalog-level grants are required for any table query
+D: `USE CATALOG` on `main` and `SELECT` on `main.sales`, because schema-level grants pass access up to the catalog
+K: A
+G: ## The hierarchy and the three privileges
+Unity Catalog objects form a hierarchy: metastore, catalog, schema, then tables, views, volumes and functions. To read a table a principal needs:
+- `USE CATALOG` on the parent catalog,
+- `USE SCHEMA` on the parent schema,
+- `SELECT` on the table (or a parent that passes it down by inheritance).
+`USE CATALOG` and `USE SCHEMA` allow navigating into the container but give no data access on their own.
+```
+GRANT USE CATALOG ON CATALOG main TO `analysts`;
+GRANT USE SCHEMA ON SCHEMA main.sales TO `analysts`;
+GRANT SELECT ON TABLE main.sales.orders TO `analysts`;
+```
+W: The three grants: they provide navigation to the schema and read access on exactly one table, which meets least privilege.
+X: B=Table grant only: `SELECT` on the table is not enough without `USE CATALOG` and `USE SCHEMA` on the parents.
+C=Catalog `SELECT`: it would also work only together with `USE CATALOG` and `USE SCHEMA`, and it opens every table in the catalog, which breaks least privilege.
+D=Schema `SELECT` with no `USE SCHEMA`: privileges flow downward, never upward, and without `USE SCHEMA` the schema cannot be used; it also exposes all tables in the schema.
+T: Reading a table needs `USE CATALOG`, `USE SCHEMA` and `SELECT`; grants inherit downward, never upward.
+V: Unity Catalog, GRANT
+
+@ DBX-DEA D7 T7.2 applied use-case
+S: Data scientists in the group `ds_team` need `SELECT` on every table in `main.features`, including tables created there in the future, without anyone running new grants. They already hold `USE CATALOG` on `main` and `USE SCHEMA` on the schema. Which grant fits?
+A: `GRANT SELECT ON SCHEMA main.features TO ds_team`
+B: `GRANT SELECT ON TABLE main.features.* TO ds_team`
+C: `GRANT USE SCHEMA ON SCHEMA main.features TO ds_team`
+D: `GRANT SELECT ON CATALOG main TO ds_team`
+K: A
+G: ## Privilege inheritance
+Privileges granted on a container are inherited by the objects inside it, current and future. Granting `SELECT` on a schema gives `SELECT` on all current and future tables and views in that schema; on a catalog it applies to all schemas in it. Inheritance only goes downward.
+## Choosing the scope
+- Schema-level grant: all tables in this schema now and later (this question).
+- Catalog-level grant: broader than needed here, because it includes every other schema in `main`.
+- Table-level grant: only the named table; new tables need another grant.
+There is no wildcard in `GRANT` object names.
+W: Schema-level `SELECT`: it is inherited by present and future tables in `main.features` and nothing outside the schema.
+X: B=Wildcard table: `GRANT` names an object exactly; there is no `*` form, so the statement is invalid.
+C=`USE SCHEMA`: it permits navigating into the schema but gives no read access to data.
+D=Catalog `SELECT`: it works but exposes all other schemas of `main` as well, which exceeds the requirement.
+T: Grant at the schema level to cover current and future tables; use the narrowest container that matches the requirement.
+V: Unity Catalog, GRANT
+
+@ DBX-DEA D7 T7.2 applied use-case
+S: A Lakeflow Jobs pipeline runs as the service principal with application ID `5f2c8a1e-0000-4d11-9b7e-aaaabbbbcccc`. It must read and append rows to existing tables in `main.etl`. It already has `USE CATALOG` and `USE SCHEMA`. Which statement grants what is missing?
+A: `GRANT SELECT, MODIFY ON SCHEMA main.etl TO `5f2c8a1e-0000-4d11-9b7e-aaaabbbbcccc``
+B: `GRANT ALL PRIVILEGES ON CATALOG main TO `5f2c8a1e-0000-4d11-9b7e-aaaabbbbcccc``
+C: `GRANT SELECT ON SCHEMA main.etl TO `5f2c8a1e-0000-4d11-9b7e-aaaabbbbcccc``
+D: `GRANT MANAGE ON SCHEMA main.etl TO `5f2c8a1e-0000-4d11-9b7e-aaaabbbbcccc``
+K: A
+G: ## Service principals as grantees
+A principal in a Unity Catalog statement can be a user, a group, or a service principal. A service principal is referenced by its application ID value, and names with special characters must be enclosed in backticks. Granting to a service principal (or a group) instead of a person keeps access stable when staff change; production jobs commonly run as a service principal.
+## Read and write privileges
+- `SELECT` reads data.
+- `MODIFY` inserts, updates and deletes data in a table (the older, general data-change privilege).
+- `ALL PRIVILEGES` is broad and does not include `MANAGE`; `MANAGE` allows privilege management, ownership transfer, rename and drop, which a pipeline does not need.
+- Grants on the schema are inherited by current and future tables there.
+W: `SELECT` plus `MODIFY` on the schema: it covers reading and appending to all tables in the schema and nothing else.
+X: B=`ALL PRIVILEGES` on the catalog: it hugely exceeds the need and covers every schema of the catalog.
+C=`SELECT` only: the pipeline would be able to read, but appends need `MODIFY`.
+D=`MANAGE`: it controls permissions and lifecycle of the object; it does not grant read or write access to data by itself.
+T: Grant service principals only what the job needs, by application ID: `SELECT` and `MODIFY` for read/append, not `ALL PRIVILEGES` or `MANAGE`.
+V: Unity Catalog, GRANT
+
+@ DBX-DEA D7 T7.2 applied troubleshooting
+S: To keep contractors out of HR data in a Unity Catalog metastore, an engineer runs `DENY SELECT ON TABLE main.hr.salaries TO contractors`. What should the engineer expect?
+A: `DENY` applies only to the legacy `hive_metastore` catalog; in Unity Catalog, access is controlled by not granting or by revoking
+B: The statement blocks the group even if the group holds a `SELECT` grant on the schema, because a deny takes precedence in Unity Catalog
+C: The statement succeeds, and the deny is inherited by `main.hr` schema and every other table in it
+D: The statement succeeds but only for users who are not metastore admins, because admins bypass the deny
+K: A
+G: ## Unity Catalog grants are additive
+In Unity Catalog, access starts at none. A principal gets access only through `GRANT` (directly, through a group, or by inheritance from a parent), and access is removed with `REVOKE` at the level where it was granted. The SQL `DENY` statement, which in the legacy Hive metastore takes precedence over any grant and flows down the hierarchy, applies only to `hive_metastore` and its objects. Databricks documents the `DENY` statement as not supported by Unity Catalog.
+## What to do instead
+- Do not grant access to the groups that should not have it, and revoke grants they currently hold.
+- Put sensitive data in a separate catalog or schema, and grant only the groups that need it.
+- For finer rules based on tags or per-row/column logic, use the dedicated governance features (row filters, column masks, ABAC policies), which are covered separately.
+W: `hive_metastore` only: the Unity Catalog documentation says the `DENY` statement applies to the legacy metastore, so in Unity Catalog the team manages access by granting and revoking.
+X: B=Deny wins: that precedence is how `DENY` behaves in the legacy metastore; it is not a Unity Catalog behavior.
+C=Inherited deny: inheritance of a deny down the hierarchy is a legacy metastore property as well, not something Unity Catalog applies.
+D=Admin exception: Unity Catalog has no deny to begin with, so there is no admin-bypass mechanism for a deny.
+T: In Unity Catalog there is no `DENY` statement: manage access through grants, revokes, separation of data and fine-grained controls.
+V: Unity Catalog, Hive metastore
+
+@ DBX-DEA D7 T7.2 applied troubleshooting
+S: The group `interns` received `SELECT` on the catalog `main`. A manager wants interns to lose access to all tables of `main.finance` but keep access to the rest of `main`. An admin runs `REVOKE SELECT ON TABLE main.finance.payroll FROM interns` and finds that interns can still query `payroll`. Why, and what fits the requirement?
+A: The grant is on the catalog and inherited by the table, so revoke it there and re-grant `SELECT` on the schemas interns keep
+B: Revoking at table level only removes metadata access, so the interns still read the data until their compute restarts
+C: The revoke must be repeated for each user in the group, because a group member's access is stored per user
+D: Unity Catalog caches grants for 24 hours, so the revoke takes effect on the next day with no other change
+K: A
+G: ## Revoke happens where the grant is
+A privilege that was granted on a catalog is inherited by every schema and table below it. `REVOKE` removes a grant record from the object it names; it does not create an exception on a child object. So revoking `SELECT` on a table when the grant exists on the catalog leaves the catalog grant in force, and the inherited access remains.
+## Fix pattern
+1. Revoke at the level of the original grant: `REVOKE SELECT ON CATALOG main FROM interns`.
+2. Re-grant at a narrower level for the objects that should stay: `GRANT SELECT ON SCHEMA main.sales TO interns`, and so on.
+3. Check with `SHOW GRANTS ON CATALOG main` or on the schema, to see the effective rights.
+Since `DENY` is not available in Unity Catalog, restructuring grants is the way to carve out an exception.
+W: Revoke on the catalog, re-grant on the schemas: the original grant is on the catalog, so only revoking there removes inherited access, and narrower grants restore what interns should keep.
+X: B=Metadata only: a revoke on the table does not leave a partial access state; the problem is that no grant was removed at all.
+C=Per-user revoke: grants on a group apply to the group; there are no per-member copies to revoke.
+D=24-hour cache: nothing in Unity Catalog delays revokes by a day; the grant still exists on the catalog.
+T: Revoke at the level where the privilege was granted; carve out exceptions by revoking the parent and re-granting on narrower children.
+V: Unity Catalog, REVOKE
+
+@ DBX-DEA D7 T7.2 applied use-case
+S: A senior engineer is the owner of the schema `main.curated`, but does not own the table `main.curated.invoices`, which was created by a colleague. The engineer needs to give the group `finance_ro` access to read that table. Which statement is true?
+A: The engineer can grant it, because the owner of the containing schema may grant privileges on the table
+B: The engineer cannot grant it, because only the owner of the table itself may grant privileges on that table
+C: The engineer can grant it, but only after being given `ALL PRIVILEGES` on the table
+D: The engineer cannot grant it, because only account admins can grant privileges on tables
+K: A
+G: ## Who may grant
+Every securable object in Unity Catalog has an owner, and owners have all privileges on the object, including granting access to others. Privileges can be granted by:
+- the owner of the object,
+- the owner of the catalog or schema that contains the object,
+- a user with the `MANAGE` privilege on the object,
+- a metastore admin.
+## Delegation tips
+- Prefer ownership by a group over an individual, so that access management does not depend on a person.
+- Give `MANAGE` on an object to a team that should manage its permissions without owning it.
+- `ALL PRIVILEGES` does not include `MANAGE`.
+W: Schema owner: the engineer owns the container of the table, which is one of the listed ways to be allowed to grant privileges on it.
+X: B=Table owner only: the table owner is only one of several roles; the owner of the containing schema or catalog can also grant.
+C=`ALL PRIVILEGES` first: `ALL PRIVILEGES` excludes `MANAGE`, and ownership of the schema already includes the ability to grant.
+D=Account admin only: granting is not restricted to account admins; owners, `MANAGE` holders and metastore admins can do it.
+T: Grants can be made by the object owner, the owner of its catalog or schema, a `MANAGE` holder, or a metastore admin.
+V: Unity Catalog, GRANT
+
+@ DBX-DEA D7 T7.2 applied troubleshooting
+S: The group `platform_team` was given `GRANT ALL PRIVILEGES ON SCHEMA main.shared TO platform_team`. Members can read, write and create tables there, but an attempt to run `GRANT SELECT ON SCHEMA main.shared TO partners` fails for them. What explains it?
+A: `ALL PRIVILEGES` does not include `MANAGE`, so the team cannot manage privileges on the schema until it is granted `MANAGE` or ownership
+B: `ALL PRIVILEGES` covers only data privileges at table level, so a schema-level grant never lets the team create tables
+C: Groups cannot hold grant rights, because only individual users can manage privileges in Unity Catalog
+D: The statement fails because a schema can be shared with one group at a time, so `partners` must be removed from other schemas first
+K: A
+G: ## What ALL PRIVILEGES covers
+`ALL PRIVILEGES` grants all privileges applicable to the object at the time access is checked, and also the privileges inherited by child objects. It does not include `EXTERNAL USE SCHEMA`, `EXTERNAL USE LOCATION`, `MANAGE` or `READ METADATA`, to avoid data exfiltration or privilege escalation.
+## Managing privileges
+- `MANAGE` lets a principal manage privileges, transfer ownership, rename and drop the object.
+- Owners can always grant. Make the group the owner or grant `MANAGE` if it should hand out access.
+- Revoking `ALL PRIVILEGES` revokes the grant and the privileges implied by it, but leaves `MANAGE` and the other excluded privileges in place.
+- A group is a valid grantee and can own objects.
+W: Missing `MANAGE`: the team can use the schema but cannot grant on it, and `MANAGE` (or ownership) is the privilege that adds that ability.
+X: B=Table-level only: the scenario states members can create tables, which shows the grant works at schema level.
+C=Individuals only: groups can be granted privileges and can own objects, so that is not the limit.
+D=One group per schema: no such restriction exists; the same schema can be granted to any number of principals.
+T: `ALL PRIVILEGES` does not include `MANAGE`; grant `MANAGE` or ownership to let a team manage permissions.
+V: Unity Catalog, GRANT

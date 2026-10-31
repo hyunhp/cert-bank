@@ -9,7 +9,7 @@
 # src: https://docs.databricks.com/aws/en/admin/system-tables/jobs
 
 @ DBX-DEA D4 T4.3 applied troubleshooting
-S: An hourly job uses a scheduled trigger with the time zone America/New_York. On the night the clocks change, the run for one hour is missing and, in the spring, later runs appear shifted by an hour in the run history. The team wants a job that fires at every absolute hour all year. What should they change?
+S: An hourly job uses a scheduled trigger with the time zone America/New_York. On the night the clocks change, one hourly run is missing when the clocks move forward, and runs appear delayed by an hour when they move back. The team wants a job that fires at every absolute hour all year. What should they change?
 A: Replace the cron expression with a simple schedule of every 60 minutes, which the scheduler corrects automatically when daylight saving time begins or ends
 B: Raise the maximum concurrent runs of the job to 2 so that the run missed during the clock change is queued and started later
 C: Set the schedule time zone to UTC, which does not observe daylight saving time, so every hour is an absolute hour
@@ -76,7 +76,7 @@ A file arrival trigger starts a run when new files land in a Unity Catalog volum
 - Only new files trigger runs.
 W: Parent path: since subdirectories are checked recursively, monitoring the parent folder covers every region folder without needing a wildcard.
 X: A=Question mark wildcard: neither `*` nor `?` is allowed in the path, so swapping one for the other does not help.
-C=One trigger per region: a trigger already looks into all subfolders, so splitting it adds triggers and maintenance without gaining coverage (a job also has one trigger in the general case).
+C=One trigger per region: a trigger already looks into all subfolders, so splitting it adds triggers and maintenance without gaining coverage.
 D=Cloud storage URL: the storage location may be given as a volume path or an external location URL, but neither form accepts wildcards.
 T: File arrival triggers monitor a path and everything under it; do not use wildcards, point the trigger at the parent folder.
 
@@ -118,7 +118,7 @@ T: Use Wait after last change to debounce batch arrivals into one run, and Minim
 
 @ DBX-DEA D4 T4.3 applied use-case
 S: Small event files arrive in a volume every few seconds all day. A file arrival trigger starts a job run that takes about 3 minutes, and the team sees back-to-back runs that keep the compute busy while each run handles only a few files. They want at most one run every 15 minutes and are fine with processing in larger groups. What should they configure?
-A: Wait after last change of 900 seconds, so that the run starts 15 minutes after the final file, which never happens on a continuous stream
+A: Wait after last change of 900 seconds, so that a run starts only after 15 minutes without any new file
 B: Switch to a table update trigger on the folder, because it can only fire a maximum of one run per quarter hour
 C: A simple schedule of 15 minutes added in addition to the file arrival trigger, so that the trigger itself is limited
 D: Minimum time between triggers of 900 seconds, so a new run is not started earlier than 15 minutes after the previous run completes
@@ -130,7 +130,7 @@ A job triggered this way commonly reads the location with Auto Loader, which kee
 W: Minimum time between triggers: a value of 900 seconds caps the job at one run per 15 minutes and lets each run process the files accumulated meanwhile.
 X: A=900-second debounce: with a file every few seconds the timer restarts constantly, so the run would be delayed indefinitely and never start under a steady stream.
 B=Table update trigger: it watches tables, not a folder of files, and it has the same kind of cooldown option; changing the trigger type does not give the limit by itself.
-C=Extra schedule: a second schedule would add runs rather than limit those of the file arrival trigger, and a job configured with only one standard trigger does not combine them (multiple triggers are a separate beta feature).
+C=Extra schedule: a second schedule would add runs rather than limit those of the file arrival trigger, and a job configured with only one standard trigger does not combine them.
 T: For a constant stream of small arrivals use the cooldown (Minimum time between triggers); use the debounce only for bursts with quiet gaps.
 
 @ DBX-DEA D4 T4.3 applied troubleshooting
@@ -190,22 +190,24 @@ B=_metadata.file_path: this column describes files read from file sources, and s
 D=Row counts: updates, merges and deletes can leave counts unchanged, and the trigger already exposes exactly this information through dynamic values.
 T: Use the table_update dynamic value references (updated_tables, commit_timestamp, version) to tell a triggered run what changed.
 
-@ DBX-DEA D4 T4.3 applied use-case
-S: A platform team wants one job to start when any table in a group of 14 Unity Catalog tables is updated. When saving the trigger they get an error although each table is readable by the run-as principal. Which requirement applies to a table update trigger monitoring more than 10 tables?
-A: File events must be enabled for every monitored table, because without them a trigger is limited to 10 tables
-B: All monitored tables must be located in the same schema, because a trigger can only watch one schema
-C: The tables must be Delta streaming tables, since batch tables cannot be monitored in groups of more than ten
-D: The job must run on a dedicated all-purpose cluster, which is needed to list change history for many tables
+@ DBX-DEA D4 T4.3 applied troubleshooting
+S: A job has a table update trigger on `main.sales.daily_totals`. An upstream pipeline refreshes the table with three separate MERGE statements a few seconds apart. The job starts after the first MERGE, reads partial data and publishes an incomplete report. Which trigger setting fixes this?
+A: Set Wait after last change to more than the gap between MERGE statements, so each commit resets the timer and the run waits for a quiet table
+B: Set Trigger when to All tables are updated, so the run waits until every MERGE statement has finished
+C: Set Minimum time between triggers to a few seconds, so the second and third MERGE commits are ignored by the trigger
+D: Switch to a file arrival trigger on the table's storage path, which fires only once the third data file has been written
 K: A
-G: ## Limits of table update triggers
-A trigger can monitor up to 25 tables. Up to 10 tables work with any supported location. Monitoring more than 10 requires file events to be enabled on the external location of every monitored table; if one of them has no file events, the trigger cannot be saved or fails to evaluate. Views count as the number of source tables they depend on.
-## Why file events
-With file events Databricks tracks ingestion metadata from cloud provider notifications, which makes table update detection faster and more scalable (the same feature improves Auto Loader and file arrival triggers). Tables in metastore root storage must first move to an external location.
-W: File events: for more than 10 tables, every monitored table must have file events enabled, which lifts the limit from 10 to 25.
-X: B=Same schema: tables from different catalogs and schemas can be monitored by one trigger, as long as the principal can read them.
-C=Streaming tables only: managed tables, external Delta tables, materialized views and streaming tables are all supported sources, so the type is not the restriction.
-D=Dedicated cluster: the trigger is evaluated by the Jobs service, not on a compute resource of the job, so no cluster type applies.
-T: Table update triggers cap at 25 tables, and more than 10 requires file events on every monitored table.
+G: ## Rate control on table update triggers
+A table update trigger fires on the first commit it sees. When a producer updates a table in several commits, the job can start on a partial state. The trigger has two advanced options, the same as a file arrival trigger:
+- **Minimum time between triggers**: a cooldown after a run completes; updates during it start a run only after it expires.
+- **Wait after last change**: a debounce; the trigger waits this long after the most recent table update, and each further update resets the timer.
+## Choosing the value
+Pick a wait longer than the gap between commits of one refresh and shorter than the gap between refreshes. With a few seconds between MERGE statements, a wait of one minute starts one run after the last commit.
+W: Wait after last change: every MERGE commit resets the timer, so the run starts only once the table has been quiet, with all three statements applied.
+X: B=All tables are updated: it combines several monitored tables; here there is one table, and each commit still counts as an update of it.
+C=Short cooldown: the cooldown applies after a run completes, so it does not hold back the first run; the first commit still starts the job on partial data.
+D=File arrival trigger: it watches new files in a location and cannot tell when a multi-statement table refresh is complete; table commits are what the table update trigger already follows.
+T: Use Wait after last change on a table update trigger to debounce multi-commit refreshes into one run after the table settles.
 
 @ DBX-DEA D4 T4.3 applied troubleshooting
 S: A job has a table update trigger on a Unity Catalog view that filters `main.sales.orders` to `region = 'EU'`. Rows for the US region are added to the table, and the job starts although no EU row changed. Why?
@@ -244,8 +246,8 @@ T: For irregular file arrivals prefer a file arrival trigger over a frequent sch
 
 @ DBX-DEA D4 T4.4 applied tradeoff
 S: Each morning an executive dashboard must be refreshed by 06:00 for a compliance review. The source tables are loaded by upstream teams at different times between 01:00 and 04:30, and the job only needs to run once a day. Which trigger is the most suitable?
-A: A table update trigger with All tables are updated, because it always starts the job before 06:00 at the latest
-B: A file arrival trigger on the pipeline's output volume, as it is the only data-driven trigger type that supports a deadline
+A: A table update trigger with All tables are updated, because it starts the job as soon as every source table has been loaded
+B: A file arrival trigger on the pipeline's output volume, because the files signal that the loading is finished
 C: A scheduled trigger at 05:00 in a fixed time zone, since the deadline is a time of day and the data is always there by 04:30
 D: A continuous trigger, so the job picks up the data as soon as it exists and also meets the deadline
 K: C
@@ -255,7 +257,7 @@ Use a **scheduled** trigger when the requirement is defined by the clock (a repo
 Here the business constraint is a time of day, and the upstream window ends at 04:30, so a schedule at 05:00 leaves a safety margin. A data trigger would start whenever the last table changes, but would give no assurance about the deadline if the data never arrives, and the job would not run at all.
 W: Scheduled at 05:00: it is anchored to the compliance time, and all data is there by 04:30, so one run per day is simple and predictable.
 X: A=Table update with All: it starts only when each table changed; if one upstream team is late or skips a day, the job does not run, so no deadline is guaranteed.
-B=File arrival trigger: it is data-driven and has no deadline feature, and the source here is tables, not a folder of files.
+B=File arrival trigger: it follows new files, not a clock, so it gives no deadline either, and the sources here are tables, not a folder of files.
 D=Continuous trigger: it keeps the job running over and over, which does not fit a once-a-day report and wastes compute.
 T: When the requirement is a clock deadline and inputs are ready earlier, use a scheduled trigger; data-driven triggers follow data, not deadlines.
 
@@ -296,16 +298,16 @@ T: Choose a scheduled trigger when the source is an API or other system with not
 @ DBX-DEA D4 T4.4 applied tradeoff
 S: Sensor events must be processed within seconds of arrival, around the clock, and the job reads from a streaming source with a stateful query. The team considers file arrival triggers, scheduled triggers and continuous jobs. Which option matches the requirement?
 A: A job in continuous mode, which keeps one run active and restarts it with exponential backoff when it fails
-B: A scheduled trigger of every 10 seconds, since the scheduler guarantees low-latency starts at exactly that interval
+B: A scheduled trigger that runs every few seconds, since the scheduler guarantees low-latency starts at exactly that interval
 C: A file arrival trigger, as it evaluates on every file creation event with a latency of milliseconds
 D: A table update trigger with a wait after last change of 600 seconds to batch the sensor events
 K: A
 G: ## Continuous jobs
 Continuous mode is the recommended trigger for always-on streaming workloads. There is only one active run; when it ends or fails, the scheduler starts a new run, normally within about a minute. Failures are handled with exponential backoff and no limit on retries, and the backoff resets once the job is healthy.
 ## Why not the others
-The scheduler is not intended for low-latency jobs (runs may be delayed by several minutes) and enforces a minimum of 10 seconds between runs. File arrival triggers check about every minute on a best-effort basis, which is micro-batch speed at best.
+The scheduler is not intended for low-latency jobs: runs may be delayed by several minutes, and each run needs compute to start. File arrival triggers check about every minute on a best-effort basis, which is micro-batch speed at best.
 W: Continuous mode: one run stays active for the stateful stream, and a failed run is restarted automatically with exponential backoff, which fits second-level latency around the clock.
-X: B=10-second schedule: the minimum interval is 10 seconds, but the job start time itself takes much longer, and the scheduler is not intended for low-latency work.
+X: B=Schedule every few seconds: each run has to start compute and the scheduler is not intended for low-latency work, so starts are not guaranteed at that interval and stream state is lost between runs.
 C=File arrival trigger: it is a best-effort check about every minute and then must start a run, so it cannot reach second-level latency or keep stream state.
 D=Table update trigger with a 600-second wait: it delays runs by ten minutes, the opposite of the latency requirement.
 T: Always-on, low-latency streaming belongs in a continuous job; schedules and file arrival triggers are for batch-style runs.
@@ -344,7 +346,7 @@ K: B
 G: ## Run history as a baseline
 The Runs tab of a job has matrix and list views. In the matrix, the **Run total duration** row has one bar per run: the bar color shows the state (green succeeded, red unsuccessful, pink skipped, yellow waiting for retry, grey pending/canceled/timed out) and its **height shows the duration**. The Tasks rows have one cell per task and run, so one slow task stands out. Hovering gives start time, duration, cluster and status.
 ## Using it
-Compare recent bars with the usual level: a staircase of taller bars is a regression trend, a single tall bar is an outlier. Databricks keeps run history for 60 days.
+Compare recent bars with the usual level: a staircase of taller bars is a regression trend, a single tall bar is an outlier.
 W: Matrix view: bar heights for total duration and per-task cells show how run time changes over many runs and which task grows.
 X: A=Run details of latest run: it describes one run; the graph shows tasks and dependencies of that run, not history.
 C=Schedules and triggers list: it configures when runs start; it does not store aggregate durations.
@@ -376,17 +378,17 @@ C=Billing join: the timeline table itself has result_state; billing tables are u
 T: In job_run_timeline the outcome sits on the ending row of a run, so filter result_state IS NOT NULL before computing failure rates.
 
 @ DBX-DEA D6 T6.1 applied troubleshooting
-S: An operations lead sees that failures rose this week and wants to know what the most common error types were across all jobs and pipelines in the workspace over the last two days, without opening runs one by one. Where is this shown in the Jobs UI?
+S: An operations lead sees that failures rose this week and wants to know what the most common error types were across all jobs and pipelines in the workspace over a recent time range, without opening runs one by one. Where is this shown in the Jobs UI?
 A: On the Runs tab, with a Finished runs count graph and a Top 5 error types table for the time range
-B: In the Job details pane of a single job, which lists the five most common errors of that job over the last 60 days of runs
+B: In the Job details pane of a single job, which lists the five most common errors of that job across its whole run history
 C: On the compute page of each cluster, which collects the error codes of all jobs that ran on it
 D: In the Catalog Explorer lineage tab, which counts failed writes to each upstream table
 K: A
 G: ## Workspace-wide run view
 The **Runs** tab (under Jobs & Pipelines) lists running and recent runs of all jobs and pipelines you can access, including runs from external tools such as Airflow. Filters cover name, job or pipeline, run-as user, start/end time, run status, run ID and error code.
-- The **Finished runs count** graph shows failed, skipped and successful runs of the last 48 hours (it appears when you filter to Jobs or Pipelines; non-admins pick Run as me).
+- The **Finished runs count** graph shows failed, skipped and successful runs of recent hours (it appears when you filter to Jobs or Pipelines; non-admins pick Run as me).
 - The **Top 5 error types** table lists the most frequent errors for the selected range.
-- The runs list covers 60 days.
+- The runs list below the graph holds the recent runs that match the filters.
 W: Runs tab with Top 5 error types: it summarizes error frequency for the filtered time range across jobs, so the lead sees the common causes at once.
 X: B=Single job pane: the job details pane holds settings such as triggers and parameters; error rankings are on the workspace Runs tab, across jobs.
 C=Compute page: a cluster does not group job errors, and serverless jobs run without a cluster page anyway.
@@ -394,21 +396,21 @@ D=Lineage tab: lineage shows upstream and downstream tables and has no counts of
 T: The Runs tab combines a finished runs graph with a Top 5 error types table to show failure trends and common causes across jobs.
 
 @ DBX-DEA D6 T6.1 applied comparison
-S: A team keeps a performance baseline for each job and wants to compare this month's run durations with the same month of last year. The Jobs UI run list only goes back about two months. Which source should they use?
+S: A team keeps a performance baseline for each job and wants to compare this month's run durations with the same month of last year, across all jobs of the account. The Jobs UI run list keeps runs only for a limited period. Which source should they use?
 A: Export each notebook run to HTML before it expires, because the exported file keeps the durations of earlier runs
-B: Rely on the Jobs UI, since run history is kept for as long as the job exists
-C: Query system.lakeflow.job_run_timeline, which records job runs across the account with a free retention period of 365 days
+B: Rely on the Jobs UI, since its run history is kept for as long as the job exists
+C: Query system.lakeflow.job_run_timeline, which records job runs across the account with start and end times and result states
 D: Read the cluster event log, which keeps the start and stop time of every job run for years
 K: C
 G: ## UI history versus system tables
-The Jobs UI keeps run history for up to 60 days. To keep or analyze longer periods, use the jobs system tables: `system.lakeflow.job_run_timeline` and `job_task_run_timeline` record runs and tasks with start and end timestamps and states, and have a free retention period of 365 days. Records are typically available within an hour.
+The Jobs UI keeps run history only for a limited period and Databricks recommends exporting results before they expire. To analyze longer periods, use the jobs system tables: `system.lakeflow.job_run_timeline` and `job_task_run_timeline` record runs and tasks with start and end timestamps and states, and they retain history much longer than the UI.
 ## Baselines
 Compute durations from `period_start_time` and `period_end_time` (summed across the hourly slices of a run) per job, then compare periods.
-W: job_run_timeline: it gives account-wide run data with 365 days free retention, enough for a year-over-year baseline of durations.
+W: job_run_timeline: it gives account-wide run data that outlives the UI history, so a year-over-year baseline of durations can be queried.
 X: A=HTML export: it saves the notebook source and cell outputs of one run as a static file; it is not a queryable time series of durations.
-B=Relying on the UI: the UI retains run history for 60 days only, so last year's runs are gone.
+B=Relying on the UI: the UI keeps run history only for a limited period, so last year's runs are gone.
 D=Cluster event log: it records compute lifecycle events, not job run durations, and jobs on serverless compute have no such cluster.
-T: The UI keeps 60 days of runs; use the lakeflow system tables for longer baselines and account-wide trend queries.
+T: The UI keeps runs only for a limited time; use the lakeflow system tables for longer baselines and account-wide trend queries.
 
 @ DBX-DEA D6 T6.2 applied troubleshooting
 S: A job has tasks `extract`, `transform` and `load`, and a side task `notify` that depends on `extract` and is a leaf. In one run, `transform` fails with an error, `load` is not run, and `notify` succeeds. How does Lakeflow Jobs determine the status of the run?
@@ -432,14 +434,14 @@ D=Skipped: a skipped run is one that was never started, for example for exceedin
 T: Run status is decided by leaf tasks: any failed or unrun leaf makes the run Failed, and Succeeded with failures needs all leaves to succeed.
 
 @ DBX-DEA D6 T6.2 applied troubleshooting
-S: A job run shows the status Succeeded with failures, and the team asks what that means. In the run graph, the task `audit_log` (a leaf) succeeded, but the optional task `send_stats`, which `audit_log` does not depend on, failed. Which statement is correct?
+S: A job run shows the status Succeeded with failures, and the team asks what that means. In the run graph, the optional task `send_stats` failed. Its only downstream task `audit_log`, a leaf with the Run if condition All done, ran and succeeded, and no other task failed. Which statement is correct?
 A: All leaf tasks succeeded although another task failed, so the run counts as successful and the failure needs a look
 B: Some leaf tasks failed while others succeeded, so downstream jobs are canceled and the run must be repaired
 C: The run timed out on one task, was retried by the scheduler and then completed with a warning
 D: The job finished but the compute was terminated with an error, so the task logs are incomplete
 K: A
 G: ## Succeeded with failures
-Because the run status is derived from leaf tasks, a failed task that is not a leaf (or whose failure does not block any leaf) can leave the run as **Succeeded with failures**: some tasks failed, but all leaf tasks succeeded. In notifications this state counts as a successful state. Look into the Graph or List view of the run to find the failed task.
+Because the run status is derived from leaf tasks, a failed task that is not a leaf and whose failure does not stop any leaf (for example because the leaf runs with the Run if condition All done) can leave the run as **Succeeded with failures**: some tasks failed, but all leaf tasks succeeded. In notifications this state counts as a successful state. Look into the Graph or List view of the run to find the failed task.
 ## Practical use
 Engineers should check the task graph even for runs that look green, because a middle task can fail without turning the run red.
 W: Leaf success: all leaves succeeded, so the run counts as successful; the failed non-leaf task is still visible in the graph and should be investigated.
