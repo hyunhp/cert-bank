@@ -1,0 +1,465 @@
+# DBX-DEA batch 05: D3 Transformation and Modeling (T3.4 deduplication and aggregates, T3.5 basic Spark tuning, T3.6 gold layer objects, T3.7 data quality), single answer, detailed explanations
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/approx_count_distinct
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/count
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/avg
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/row_number
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-qualify
+# src: https://docs.databricks.com/aws/en/structured-streaming/watermarks
+# src: https://docs.databricks.com/aws/en/optimizations/aqe
+# src: https://docs.databricks.com/aws/en/spark/conf
+# src: https://docs.databricks.com/aws/en/compute/cluster-config-best-practices
+# src: https://docs.databricks.com/aws/en/compute/configure
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-hints
+# src: https://docs.databricks.com/aws/en/ldp/concepts
+# src: https://docs.databricks.com/aws/en/ldp/materialized-views
+# src: https://docs.databricks.com/aws/en/ldp/streaming-tables
+# src: https://docs.databricks.com/aws/en/views/
+# src: https://docs.databricks.com/aws/en/views/materialized
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-create-materialized-view
+# src: https://docs.databricks.com/aws/en/ldp/expectations
+# src: https://docs.databricks.com/aws/en/tables/constraints
+
+@ DBX-DEA D3 T3.4 applied use-case
+S: A silver table `customer_updates` receives several rows per `customer_id` because the source emits every change. Each row has an `updated_at` timestamp. The team needs exactly one row per customer, always the one with the latest `updated_at`. The current code is `df.dropDuplicates(["customer_id"])`, and the kept row changes from run to run. Which approach fixes this in SQL?
+A: Rank rows with `row_number() OVER (PARTITION BY customer_id ORDER BY updated_at DESC)` and keep rank 1 with a `QUALIFY` clause
+B: Run `SELECT DISTINCT customer_id, updated_at` so that only the newest timestamp for each customer remains in the output
+C: Add `ORDER BY updated_at DESC` before the deduplication step so the first row seen by Spark is always the latest one
+D: Replace the duplicate removal with `GROUP BY customer_id` and select the remaining columns without any aggregate functions
+K: A
+G: ## Removing duplicates by key
+`dropDuplicates(["customer_id"])` and `SELECT DISTINCT` remove rows that repeat on the listed columns, but when two rows share the key and differ in other columns, Spark keeps whichever one it meets first. After a shuffle that order is not guaranteed, so the surviving row can change between runs.
+## Deterministic "latest row per key"
+Use a window function to number the rows inside each key and keep the first:
+```
+SELECT * FROM customer_updates
+QUALIFY row_number() OVER (PARTITION BY customer_id ORDER BY updated_at DESC) = 1
+```
+`row_number()` gives each row a unique sequence number inside its partition, following the `ORDER BY`. `QUALIFY` filters on a window function result without a subquery.
+W: row_number with QUALIFY: the window orders each customer's rows by `updated_at` descending and numbers them, so keeping number 1 always returns the most recent row, and ties are the only remaining ambiguity.
+X: B=SELECT DISTINCT on two columns: it keeps every distinct pair of `customer_id` and `updated_at`, so a customer with several timestamps still has several rows, and the other columns are not even selected.
+C=ORDER BY before deduplication: a sort earlier in the plan does not control which row `dropDuplicates` keeps, because the shuffle that follows reorders rows; Spark documents no ordering guarantee for the kept row.
+D=GROUP BY without aggregates: columns that are neither grouped nor aggregated cannot be selected, so the query fails or loses the other columns, and nothing in it picks the latest row.
+T: To keep a specific duplicate (such as the latest), rank with row_number over a partition and filter on rank 1; plain dropDuplicates and DISTINCT keep an arbitrary row.
+
+@ DBX-DEA D3 T3.4 applied comparison
+S: A silver table `contacts` has 1,000 rows. The `email` column is NULL in 200 of them, and the remaining 800 rows hold 600 different addresses. A data quality report must show how many contacts have an e-mail address on file. Which expression returns 800?
+A: `count(email)`, which counts only the rows where the column is not NULL
+B: `count(*)`, which counts the rows after removing the ones where any column is NULL
+C: `count(DISTINCT email)`, which counts every non-NULL value including the repeated ones
+D: `approx_count_distinct(email)`, which counts all non-NULL values using a faster algorithm
+K: A
+G: ## What each count form counts
+- `count(*)` and `count(1)` count every row, NULLs included. Here that is 1,000.
+- `count(expr)` counts the rows where `expr` is not NULL. Here that is 800.
+- `count(DISTINCT expr)` counts the different non-NULL values. Here that is 600.
+- `approx_count_distinct(expr)` estimates the number of different values, so it is close to 600, not 800.
+A missing value is ignored by `count(expr)` and by most other aggregates; only `count(*)` counts rows regardless of content.
+W: count(email): it skips the 200 NULL values and counts the other 800 rows, including the repeated addresses, which is exactly "contacts with an e-mail on file".
+X: B=count(*): it counts all 1,000 rows and does not drop rows that contain NULLs; the description of removing rows is wrong.
+C=count(DISTINCT email): it removes repeated addresses as well as NULLs, so it returns the 600 unique values rather than the 800 non-NULL rows.
+D=approx_count_distinct: it estimates distinct values (about 600), not a total of non-NULL rows, and it is only approximate.
+T: count(*) counts rows, count(col) counts non-NULL values, count(DISTINCT col) counts unique non-NULL values.
+
+@ DBX-DEA D3 T3.4 advanced use-case
+S: A dashboard shows daily unique visitors computed from a 4-billion-row `page_views` table. `count(DISTINCT visitor_id)` over several days takes long and uses a lot of memory. Product owners accept an error of about 2% in the displayed number. Which change reduces the cost most directly while meeting that requirement?
+A: Use `approx_count_distinct(visitor_id, 0.02)` and group by day, which estimates distinct values with a bounded relative error
+B: Use `count(visitor_id)` instead, which gives the number of unique visitors after the engine removes duplicates by itself
+C: Use `count(DISTINCT visitor_id)` on a 2% random sample of the rows and display the sample result unchanged
+D: Use `avg(visitor_id)` per day, because the average of the identifiers approximates the number of unique visitors
+K: A
+G: ## Exact versus approximate distinct counts
+An exact `count(DISTINCT x)` must keep or shuffle every distinct value, which grows with cardinality. `approx_count_distinct(expr[, relativeSD])` uses the HyperLogLog++ algorithm: it keeps a small fixed-size sketch and returns an estimate. The default maximum relative standard deviation is 5%, and the optional second argument lowers it (a smaller value gives a more accurate but larger sketch).
+## When to use it
+Dashboards, monitoring and exploration can tolerate a known small error. Billing, reconciliation and compliance counts must stay exact.
+W: approx_count_distinct with a relativeSD of 0.02: it replaces the memory-heavy exact distinct with a fixed-size HyperLogLog++ sketch, and the second argument sets the accepted error to the stated 2%.
+X: B=count(visitor_id): it counts non-NULL rows, so a visitor with ten page views is counted ten times; no deduplication happens.
+C=Distinct count on a sample: the result of a sample counts only the visitors who appear in the sample, so the figure is far below the real number and would have to be scaled with an unreliable estimate.
+D=avg of identifiers: the mean of identifier values says nothing about how many different identifiers exist.
+T: When a small known error is acceptable, approx_count_distinct(col, relativeSD) replaces exact count(DISTINCT) at much lower cost.
+
+@ DBX-DEA D3 T3.4 applied troubleshooting
+S: A gold report shows the average rating per product with `SELECT product_id, avg(rating) FROM reviews GROUP BY product_id`. Many reviews have `rating` NULL because the customer only left a text comment. A new analyst rewrites the metric as `avg(coalesce(rating, 0))` and the averages drop sharply. Which statement explains the difference?
+A: `avg(rating)` ignores NULL values, while `coalesce(rating, 0)` turns unrated reviews into zeros that are included in the average
+B: `avg(rating)` treats NULL as zero already, so the extra `coalesce` should not change results unless the data changed
+C: `avg(rating)` raises an error whenever a group contains NULL, so the original query could not have returned results
+D: `coalesce(rating, 0)` removes the rows with NULL from the group, so the denominator becomes smaller and the averages drop
+K: A
+G: ## Aggregates and NULL
+Most aggregate functions skip NULL inputs. `avg(col)` sums the non-NULL values and divides by the number of non-NULL values; a group with only NULLs returns NULL. This is why a missing value is not the same as zero.
+## Replacing NULL changes the meaning
+`coalesce(rating, 0)` returns 0 when `rating` is NULL. Those rows now count as real ratings of 0, so the sum stays the same but the count grows, and the average falls. Only fill NULLs with a default when the business meaning really is "zero".
+W: NULL is ignored by avg: the original query divides by the number of rated reviews, while the rewrite adds a zero rating for each comment-only review, which raises the denominator and lowers every average.
+X: B=NULL treated as zero: avg does not do that; it skips NULLs, which is exactly why the two queries differ.
+C=Error on NULL: avg handles NULL without errors; it only raises an arithmetic overflow error for very large sums, and NULLs are not a cause.
+D=coalesce removes rows: coalesce never removes rows; it substitutes a value, so the rows stay in the group and the count of values goes up, not down.
+T: Aggregates such as avg and sum skip NULLs; filling NULL with 0 before aggregating changes the result.
+
+@ DBX-DEA D3 T3.4 applied definition
+S: During profiling of a silver DataFrame `df` in a notebook, an engineer needs count, mean, standard deviation, minimum, the 25th, 50th and 75th percentiles and maximum for the numeric columns, returned as a DataFrame. Which call does that?
+A: `df.summary()`
+B: `df.describe()`
+C: `df.agg(F.count("*"))`
+D: `df.dropDuplicates()`
+K: A
+G: ## Two profiling methods
+- `DataFrame.describe()` returns count, mean, stddev, min and max.
+- `DataFrame.summary()` returns the same statistics plus approximate percentiles; by default 25%, 50% and 75%. You can also pass the statistics you want, for example `df.summary("count", "min", "75%", "max")`.
+Both return a DataFrame, so the result can be filtered or written like any other. The percentiles of `summary()` are approximate to keep the computation cheap on large data.
+W: summary(): it produces count, mean, stddev, min, the three quartile percentiles and max for the numeric columns, in one result.
+X: B=describe(): it computes count, mean, stddev, min and max but not the 25th, 50th and 75th percentiles, so the quartiles are missing.
+C=agg with count: it returns a single number, the row count, and not the other statistics unless each one is written explicitly.
+D=dropDuplicates(): it returns a DataFrame with duplicate rows removed, not statistics.
+T: describe() gives count, mean, stddev, min, max; summary() adds approximate quartiles and lets you choose the statistics.
+
+@ DBX-DEA D3 T3.4 advanced use-case
+S: A Structured Streaming job reads events from a source that sometimes delivers the same event twice, up to 30 minutes apart. Every event has a unique `event_id` and an `event_time`. The job must drop duplicates without keeping unbounded state, and the two copies may carry slightly different `event_time` values. Which approach fits?
+A: Apply `withWatermark("event_time", "1 hour")` and `dropDuplicatesWithinWatermark(["event_id"])`
+B: Use `dropDuplicates(["event_id", "event_time"])` and no watermark, because the key then identifies every copy
+C: Use `distinct()` after the read, because distinct deduplicates streams exactly the same way it does batch tables
+D: Run `dropDuplicates(["event_id"])` in the batch pipeline only, because streams cannot be deduplicated
+K: A
+G: ## Duplicates in a stream
+Structured Streaming provides exactly-once processing, but it does not remove duplicates that are already in the source. Deduplication needs state: the engine must remember the keys it has seen. Without a bound, that state grows forever.
+## Bounding state with a watermark
+A watermark (`withWatermark(column, delay)`) tells Spark how late data can be, so it can drop old state. `dropDuplicatesWithinWatermark(["event_id"])` removes duplicates on a unique identifier even when other fields such as the event time differ between copies, and it needs a watermark. Choose a delay greater than the largest gap between copies (here 30 minutes) to guarantee all duplicates are removed.
+W: Watermark plus dropDuplicatesWithinWatermark: it deduplicates on `event_id` even though `event_time` differs, and the one-hour watermark exceeds the 30-minute gap while letting Spark discard old keys.
+X: B=dropDuplicates on both columns: the copies have different event times, so the pair is different each time and no copy is removed; without a watermark the state would also grow without bound.
+C=distinct() on a stream: distinct on a stream also needs state and a watermark, and deduplicating every column fails for copies whose columns differ.
+D=Batch only: streams can be deduplicated with dropDuplicates and dropDuplicatesWithinWatermark; the statement is wrong.
+T: Streaming deduplication needs state: use a watermark with dropDuplicatesWithinWatermark on a unique id, and set the delay above the maximum duplicate gap.
+
+@ DBX-DEA D3 T3.4 applied troubleshooting
+S: Before adding a primary-key-like rule, a data engineer must find which `invoice_id` values appear more than once in the silver table `invoices`, together with how many times each appears. Which SQL does that?
+A: `SELECT invoice_id, count(*) AS n FROM invoices GROUP BY invoice_id HAVING count(*) > 1`
+B: `SELECT invoice_id, count(*) AS n FROM invoices WHERE count(*) > 1 GROUP BY invoice_id`
+C: `SELECT DISTINCT invoice_id, count(*) AS n FROM invoices WHERE n > 1`
+D: `SELECT invoice_id FROM invoices GROUP BY invoice_id ORDER BY invoice_id LIMIT 1`
+K: A
+G: ## Filtering before and after grouping
+`WHERE` filters individual rows before grouping, so it cannot use aggregate results. `HAVING` filters groups after the aggregation, so it can test `count(*)`. The usual duplicate-finding pattern groups by the key and keeps groups with more than one row. Once you know the keys, you can inspect those rows and choose a deduplication strategy.
+W: GROUP BY with HAVING: grouping by `invoice_id` computes the number of rows per key, and `HAVING count(*) > 1` keeps only the keys that repeat, with their counts.
+X: B=WHERE on count(*): aggregate functions are not allowed in a WHERE clause, so the query is rejected.
+C=DISTINCT with count and no GROUP BY: mixing a plain column with an aggregate without GROUP BY is invalid, and the alias `n` cannot be used in WHERE.
+D=LIMIT 1 after GROUP BY: it returns a single key whether or not it is duplicated, and gives no counts.
+T: Use GROUP BY key HAVING count(*) > 1 to list duplicate keys; WHERE cannot filter on aggregates.
+
+@ DBX-DEA D3 T3.5 applied troubleshooting
+S: A batch job aggregates about 600 GB of data. In the Spark UI the shuffle stage of the `groupBy` has 200 tasks, each processing several GB, and the tasks spill heavily to disk. The cluster has enough cores to run many more tasks. The job uses DataFrame APIs only. Which setting is the most direct fix?
+A: Increase `spark.sql.shuffle.partitions` (or set it to `auto`) so the shuffle creates more, smaller partitions
+B: Increase `spark.default.parallelism` so the DataFrame shuffle uses more partitions
+C: Lower `spark.sql.autoBroadcastJoinThreshold` so that the aggregation stage broadcasts less data to every executor
+D: Decrease `spark.sql.shuffle.partitions` to 20 so fewer, larger tasks avoid scheduling overhead
+K: A
+G: ## Shuffle partitions
+A shuffle (for `groupBy`, joins, `distinct`) redistributes rows into a fixed number of partitions, and each partition becomes one task. `spark.sql.shuffle.partitions` sets that number for DataFrame and SQL queries; the documented default is 200, and the value `auto` lets Databricks pick a number from the query plan and input size.
+- Too few partitions: each task is large, memory runs out and tasks spill to disk.
+- Too many partitions: many tiny tasks, with scheduling overhead and small output files.
+Adaptive query execution (enabled by default) can already coalesce small shuffle partitions, but it cannot reliably split a few oversized ones, so a low starting number remains the limit here.
+W: More shuffle partitions: raising `spark.sql.shuffle.partitions` (or using `auto`) cuts the data per task so each fits in memory and spill decreases.
+X: B=spark.default.parallelism: it sets the default partition count for RDD operations such as `parallelize` and `reduceByKey`; DataFrame and SQL shuffles use the SQL setting, so the stage stays at 200 tasks.
+C=Lower autoBroadcastJoinThreshold: that threshold only decides whether a join side is broadcast; this is an aggregation without a join and the setting does not touch the number of shuffle partitions.
+D=Decrease to 20: that would put even more data in each task, so the spill gets worse.
+T: spark.sql.shuffle.partitions controls the number of tasks after a DataFrame shuffle; too few gives spill, too many gives small tasks.
+
+@ DBX-DEA D3 T3.5 applied comparison
+S: A developer sets `spark.default.parallelism` to 800 in the notebook and then runs a pure SQL aggregation with `GROUP BY customer_id`. The Spark UI still shows 200 tasks in the shuffle stage. What explains this?
+A: The setting applies to RDD-level operations, while shuffles in DataFrame and SQL queries use `spark.sql.shuffle.partitions`
+B: Spark ignores all configuration changes made in notebooks, so the only place to change settings is the cluster library list
+C: The value 800 is above the number of cores, so Spark silently falls back to the documented default of 200
+D: `spark.default.parallelism` can only lower the partition count, never raise it, so 800 cannot take effect
+K: A
+G: ## Two partition settings
+- `spark.default.parallelism`: the default number of partitions for RDD transformations such as `join`, `reduceByKey` and `parallelize` when the code does not pass a number. DataFrame and SQL work does not read it.
+- `spark.sql.shuffle.partitions`: the number of partitions after a shuffle in DataFrame and SQL queries (default 200, or `auto`).
+Because modern Databricks code uses DataFrames and SQL, the SQL setting is the one to tune for shuffles; the RDD setting matters only for low-level RDD code.
+W: RDD setting versus SQL setting: parallelism affects RDD operations only, so a `GROUP BY` still creates the shuffle partitions defined by `spark.sql.shuffle.partitions`.
+X: B=Notebook changes ignored: session-level Spark configuration set in a notebook takes effect for properties that can be changed at runtime; the issue is which property was set.
+C=Value above core count: Spark does not cap partition counts to cores or revert to 200; you can run more partitions than cores and they queue.
+D=Only lowers: nothing in the setting limits it to lowering; it is simply not used by DataFrame shuffles.
+T: Tune spark.sql.shuffle.partitions for DataFrame and SQL shuffles; spark.default.parallelism affects RDD operations only.
+
+@ DBX-DEA D3 T3.5 advanced use-case
+S: A classic-compute job joins a 20 GB fact table with a 150 MB dimension table. The query plan shows a sort merge join with a full shuffle of the 20 GB table, and the table statistics are accurate. The workers have plenty of memory, and the team does not want to change the SQL text. Which change makes Spark broadcast the dimension table automatically?
+A: Set `spark.sql.autoBroadcastJoinThreshold` above 150 MB so the dimension qualifies for a broadcast
+B: Set `spark.sql.autoBroadcastJoinThreshold` to `-1`, because that value forces every join to use a broadcast
+C: Increase `spark.default.parallelism` to 150, so that the dimension table is split into many small broadcast pieces
+D: Reduce `spark.sql.shuffle.partitions` to 1, so the single remaining partition can be broadcast to all workers
+K: A
+G: ## Automatic broadcast joins
+In a broadcast hash join, Spark sends a copy of the small side to every executor and joins the large side in place, with no shuffle of the large table. Spark chooses it automatically when the estimated size of one side is below `spark.sql.autoBroadcastJoinThreshold`. A join hint such as `BROADCAST(table)` forces the choice regardless of that threshold, but it changes the query text.
+## Risks of a high threshold
+The broadcast table is collected on the driver and held in executor memory, so a threshold that is too high can cause out-of-memory errors. Raise it only to a size that the driver and executors can hold, and check the plan afterward. Adaptive query execution can also switch a sort merge join to a broadcast at runtime using its own adaptive threshold.
+W: Raise autoBroadcastJoinThreshold: with accurate statistics showing 150 MB, a threshold above that size lets the planner pick a broadcast hash join and skip the shuffle of the 20 GB table, with no change to the SQL.
+X: B=Threshold -1: that value disables automatic broadcast joins, which is the opposite of the goal.
+C=Raise default parallelism: it is an RDD setting that has nothing to do with join strategy, and tables are not split into broadcast pieces.
+D=Shuffle partitions of 1: that would move all shuffled data into one partition and does not make the planner broadcast anything.
+T: A table is broadcast automatically when its size is under spark.sql.autoBroadcastJoinThreshold; raise it carefully, or use a hint, and set -1 only to disable.
+
+@ DBX-DEA D3 T3.5 applied troubleshooting
+S: A notebook on a classic all-purpose cluster ends with `df.collect()` on a result of about 40 GB, because the code then loops over the rows in Python. The notebook fails with an out-of-memory error on the driver while the workers sit almost idle. Which action best fits Databricks guidance?
+A: Write the result to a table, and if rows must reach the driver, pick a driver node type with more memory
+B: Raise `spark.executor.memory` in the cluster Spark config so the workers can hold the collected rows
+C: Raise `spark.sql.shuffle.partitions` to 2000 so that the collected data is spread across many more driver partitions in memory
+D: Add more worker nodes of the same type, because collected rows are then stored across the workers
+K: A
+G: ## What the driver holds
+The driver runs the notebook code, holds the SparkContext and coordinates the executors. `collect()` brings every row of a DataFrame into the driver process, so the full result must fit in driver memory. Executors play no part, so their memory and count do not help.
+## Options
+- Avoid `collect()` on large data: write the result to a table or process it in Spark.
+- If the data must be on the driver, choose a larger driver node type; Databricks lets you set the driver type separately from the workers and notes that a bigger driver is useful when you `collect()` a lot of data.
+W: Distribute or enlarge the driver: writing to a table removes the need to hold 40 GB on the driver, and a driver with more memory is the supported way to handle data that must be collected.
+X: B=Executor memory: `collect()` moves rows to the driver, so executor memory is not the limit, and Databricks advises against hardcoding Spark memory settings that override its defaults.
+C=Shuffle partitions: that setting controls tasks after a shuffle; it does not change how much the driver must store after `collect()`.
+D=More workers: extra workers do not store collected rows; the collected result always lands in one driver process.
+T: collect() makes the driver hold everything: avoid it for large results or choose a driver node type with more memory, since worker size and count do not help.
+
+@ DBX-DEA D3 T3.5 advanced tradeoff
+S: A transformation on a classic job cluster spills a lot of shuffle data to local disk because each executor has too little memory per core. An engineer proposes adding `spark.executor.memory 28g` to the job's Spark config. Another suggests following the Databricks compute best practices. What should the team do?
+A: Choose a memory-optimized worker instance type and avoid hardcoding `spark.executor.memory`
+B: Hardcode `spark.executor.memory` for every job, because Databricks recommends setting it explicitly to override its built-in sizing
+C: Set `spark.driver.memory` to a higher value, since spill is controlled by the driver heap rather than by executors
+D: Disable adaptive query execution, because AQE is the reason that executors spill to local disk
+K: A
+G: ## Where executor memory comes from
+On Databricks, executor memory is determined by the worker instance type. Total executor memory decides how much data can sit in memory before it spills to disk; the ratio of memory to cores per worker also matters, because each running task shares the executor memory.
+## Fix spill through compute choice
+Databricks guidance says not to hardcode properties such as `spark.executor.memory` or `spark.dynamicAllocation.*` in compute or job definitions, because hardcoded values override built-in optimizations and often waste money or reduce performance. To give tasks more memory, pick a memory-optimized instance family or an instance with fewer cores per GB of memory, or reduce data per task with more shuffle partitions.
+W: Memory-optimized workers: a different instance type raises memory per core within supported sizing, which is the recommended way to reduce spill without hardcoding executor settings.
+X: B=Hardcode everywhere: the best practices page says the opposite; hardcoded Spark settings override Databricks optimizations.
+C=Driver memory: spill during shuffles happens on executors using their local disks; the driver heap does not affect it.
+D=Disable AQE: AQE re-optimizes plans from runtime statistics and typically reduces shuffle cost; it is not the cause of spill.
+T: Fix executor memory pressure by choosing the instance type (memory per core) and adding shuffle partitions, not by hardcoding spark.executor.memory.
+
+@ DBX-DEA D3 T3.5 advanced troubleshooting
+S: A job takes 40 minutes. After changing `spark.sql.shuffle.partitions` from 200 to 2000, one run finishes in 31 minutes, and the engineer wants to roll the setting out to all jobs. The input volume of that run was lower than usual. What should the engineer do before concluding the change helped?
+A: Re-run both settings on the same input, changing only one at a time, and compare stage times and spill in the Spark UI
+B: Apply the new setting to all jobs immediately, because any run that finishes faster proves that a higher partition count is better
+C: Treat the 31-minute run as proof and also raise the executor memory, since more changes give better results
+D: Compare the run durations of two different days, since the input size has no effect on the run time of a Spark job
+K: A
+G: ## Measure before and after
+Tuning settings interact with data volume, skew, cluster size and caching, so a single faster run says little. A reliable comparison:
+- Use the same input (or the same date range) for both settings.
+- Change one parameter at a time so the effect can be attributed.
+- Compare stage durations, shuffle read/write sizes, spill and the number and duration of tasks in the Spark UI, and repeat if run times vary.
+## Why the lower input matters
+Here the run that finished in 31 minutes processed less data, so the speedup may come from the input and not from the setting. Settings that help one job (a large shuffle) can hurt another (many tiny tasks on small data).
+W: Controlled re-measurement: running both settings on the same input and comparing Spark UI metrics separates the effect of the setting from the effect of the smaller input.
+X: B=Roll out immediately: a faster run on lower input proves nothing, and the same value may add overhead to small jobs.
+C=Add executor memory too: changing several settings together makes it impossible to tell which change had an effect.
+D=Compare different days: input size strongly affects run time, so different inputs do not give a fair comparison.
+T: After a tuning change, re-measure on the same data with one change at a time and read the Spark UI; one faster run is not evidence.
+
+@ DBX-DEA D3 T3.6 applied use-case
+S: A gold layer must offer a regional sales summary built from a join and an aggregation over silver tables with hundreds of millions of rows. Fifty analysts open a dashboard on it all day, and the data only needs to be refreshed after each nightly load. Recomputing the query for every dashboard click is too slow and expensive. Which gold object fits?
+A: A materialized view, which stores the query result and is refreshed after the source tables change
+B: A standard view over the query, which stores the result of the first execution for later queries
+C: A temporary view in the analysts' notebooks, which Unity Catalog shares with all other users
+D: A streaming table that reads the silver tables and recomputes the summary again on each dashboard request
+K: A
+G: ## Choosing a gold object
+- **Table**: stores data that a job writes and maintains itself.
+- **View**: stores only a query; results are computed on every access, so the cost is paid each time.
+- **Materialized view**: stores the precomputed result of a query as a Unity Catalog managed table and updates it when refreshed; Databricks often does this incrementally. It suits transformations, aggregations and results used by many consumers, such as dashboards.
+- **Streaming table**: processes each record of an append-only source once and is suited to ingestion and incremental processing, not to recomputing aggregates.
+W: Materialized view: it precomputes the join and aggregation, so dashboard queries read stored results, and a refresh after the nightly load keeps them current.
+X: B=Standard view: a view stores only the query text and is evaluated on demand, so every dashboard click reruns the full join and aggregation.
+C=Temporary view: it exists only in one session, is not shared through Unity Catalog and has no stored results.
+D=Streaming table: it handles append-only sources and processes each row once; it does not recompute the aggregate per request, and a regional summary needs recalculation when inputs change.
+T: Use a materialized view for expensive, widely consumed aggregates; a view recomputes on every query, and a streaming table suits append-only incremental ingestion.
+
+@ DBX-DEA D3 T3.6 applied comparison
+S: A retail company keeps a silver table of order lines and a customer dimension. A gold table must show revenue per customer segment. Customers are reassigned to new segments every week, and the figures must always reflect the current segment of each customer, including for past orders. Which gold object keeps the join correct?
+A: A materialized view over the join, because it recomputes affected results when the dimension changes
+B: A streaming table over the join, because it re-reads previous rows whenever the dimension changes
+C: A streaming table, with a full refresh avoided, because stream joins are always correct without any reprocessing
+D: A standard view, because only a view can store both the join and its results at the same time
+K: A
+G: ## Streaming tables and changing dimensions
+A streaming table reads each source row once. When it joins a stream with a dimension table, the join result is fixed at the time the row is processed; later changes in the dimension do not update rows already written. That can be useful for point-in-time history, and is described in the docs as potentially "fast but wrong" if you need current values.
+## Materialized views recompute
+A materialized view is always correct as of its last refresh: when the dimension changes, Databricks recomputes the affected parts of the result (incrementally when it can) so past orders reflect the new segment.
+W: Materialized view: it keeps joins correct when the dimension changes, since refresh recomputes results for the affected rows.
+X: B=Streaming table re-reading: a streaming table does not revisit processed rows when the dimension changes; only a full refresh would reprocess them.
+C=Stream joins always correct: the docs state that joins in streaming tables do not recompute when dimensions change, so they can be stale.
+D=Standard view stores results: a view stores no results at all; it recomputes each time and is not the object that precomputes.
+T: Choose a materialized view when joins must stay correct as dimensions change; streaming tables freeze the join result at processing time.
+
+@ DBX-DEA D3 T3.6 applied use-case
+S: Raw clickstream events (append-only, high volume) land continuously in a silver streaming table. A gold dataset must hold one enriched row per event, with a few derived columns computed from that row only. Each event must be processed exactly once as it arrives, with low latency, and rows that are already processed must not be recomputed. Which gold object fits?
+A: A streaming table that reads the silver table and applies the row-level transformations
+B: A materialized view that recomputes the whole result set on every refresh from the beginning
+C: A standard view that is queried by the dashboards when the data is needed
+D: A temporary table that is created at the start of each notebook session
+K: A
+G: ## Where streaming tables fit
+A streaming table is a Unity Catalog managed table and a streaming target. It processes each record of an append-only source exactly one time and handles large volumes with low latency, so it suits incremental processing of continuously growing data when the logic works row by row (or over bounded windows).
+## Why not the alternatives
+- A materialized view is a batch target; Databricks tries to update it incrementally but it is built for results that must stay correct as data changes, such as aggregations and joins.
+- A view stores no data, so nothing is processed once.
+W: Streaming table: it processes each new silver row once, appends the enriched row to the gold table and never recomputes rows it has already written.
+X: B=Materialized view: it is designed to keep results correct, which may mean recomputing; it does not give the append-once, per-event semantics that is required here.
+C=Standard view: a view stores nothing and recomputes at query time, so there is no stored gold dataset or exactly-once processing.
+D=Temporary table per session: it disappears at the end of the session and cannot be a shared, persistent gold dataset.
+T: A streaming table fits append-only, row-by-row, low-latency enrichment; a materialized view fits aggregates and joins that must stay correct.
+
+@ DBX-DEA D3 T3.6 applied use-case
+S: Auditors need a gold object that exposes only the columns `order_id`, `order_date` and `total` of a silver `orders` table with 60 other columns. It must always show current silver data, needs no extra storage or refresh schedule, and the query is cheap. Which object do you create?
+A: A view that selects the three columns from the silver table
+B: A materialized view that stores a copy of the three columns and is refreshed every night
+C: A streaming table that appends the three columns for each new order only once
+D: A deep clone of the silver table, with the other 60 columns dropped by hand
+K: A
+G: ## Views for light, always-current logic
+A view is a read-only object defined by a query over tables or other views. Creating it writes no data; only the query is stored, so every access runs it against the current source tables. That is ideal when the transformation is cheap (a projection or simple filter), when freshness matters more than speed, or when you want to expose a subset of columns.
+## When a view is not enough
+If the query is expensive and read often, a materialized view stores results to save compute, at the price of refresh lag and storage.
+W: View: it projects the three columns on demand, so consumers always see current silver data with no storage or schedule to maintain.
+X: B=Materialized view: it keeps a stored copy that is only as fresh as the last refresh, and adds storage and refresh management, which the requirement excludes.
+C=Streaming table: it copies data once per row and does not reflect later updates to silver rows.
+D=Deep clone: it creates a separate physical copy at a point in time that goes stale, and editing columns by hand is not a maintained definition.
+T: Use a view for cheap, always-current projections or filters; use a materialized view when the query is expensive and a refresh lag is acceptable.
+
+@ DBX-DEA D3 T3.6 advanced tradeoff
+S: A gold table `customer_360` is maintained by a Lakeflow Jobs task that must apply updates from several upstream systems with custom `MERGE INTO` logic, delete rows on request, and be written by more than one job. BI tools only read it. Which gold object is appropriate?
+A: A Delta table that jobs write with `MERGE INTO`, because jobs control its writes directly
+B: A materialized view, because jobs can run `MERGE INTO` and `DELETE` statements on it directly
+C: A standard view, because a view accepts `MERGE INTO` and routes the changes to the silver tables
+D: A streaming table, because several separate pipelines can write to a streaming table at the same time
+K: A
+G: ## Who owns the writes
+- A Delta **table** can be written by any job or user with privileges, using `INSERT`, `MERGE`, `UPDATE` and `DELETE`.
+- A **materialized view** is defined by its query; its contents are produced by refreshes and you do not modify it with DML.
+- A **streaming table** is owned and updated by a single pipeline; tables defined by a pipeline can't be changed by any other pipeline.
+- A **view** stores no data.
+When different processes need to write, correct or delete rows with custom logic, a regular Delta table is the gold object; BI tools read it like any other table.
+W: Delta table: it accepts `MERGE`, `UPDATE` and `DELETE` from any authorized job, so several writers and on-request deletions are possible.
+X: B=Materialized view: its content comes from the defining query on refresh, not from DML statements run against it.
+C=Standard view: a view holds only a query and does not accept MERGE; it cannot route changes into the sources.
+D=Streaming table: it is owned and updated by one pipeline, and other pipelines cannot modify a table the pipeline defines.
+T: When several jobs must write or delete with custom DML, gold is a Delta table; materialized views and streaming tables are controlled by their defining pipeline.
+
+@ DBX-DEA D3 T3.6 applied troubleshooting
+S: A gold materialized view `daily_revenue` is queried by dashboards. After the nightly silver load finished at 02:00, analysts still see yesterday's numbers at 08:00. The view was created without a refresh schedule. Which action brings it up to date and prevents the problem in future?
+A: Run `REFRESH MATERIALIZED VIEW daily_revenue` now, and add a `SCHEDULE` clause or run the refresh as a task after the silver load
+B: Run `INSERT INTO daily_revenue SELECT ...` for the missing day, because materialized views accept inserts like tables
+C: Run `VACUUM daily_revenue`, because vacuum recomputes stored query results from the source tables
+D: Drop the silver tables and recreate them, because a materialized view refreshes only when its source tables are recreated
+K: A
+G: ## Refreshing a materialized view
+A materialized view stores the result of its query and shows data as of its last refresh. Databricks processes only the changed data when it can, but a refresh must still be triggered:
+- manually with `REFRESH MATERIALIZED VIEW name`,
+- on a schedule defined in the view (for example `SCHEDULE CRON '0 30 3 * * ?' AT TIME ZONE 'UTC'` or `SCHEDULE EVERY`),
+- as a pipeline task in a Lakeflow Jobs workflow right after the upstream load, so the refresh follows the data.
+## No manual DML
+You cannot add rows with `INSERT`; the result is derived from the query.
+W: REFRESH plus scheduling: refreshing reads the new silver data into the view, and a schedule or a job task after the load keeps it from going stale again.
+X: B=INSERT: materialized views are produced by their query and refreshes, not by DML statements.
+C=VACUUM: it removes old data files that are no longer referenced; it does not recompute query results.
+D=Recreating silver: that is destructive and not needed; a refresh reads changes from the sources without recreating them.
+T: A materialized view is current only as of its last refresh; use REFRESH, a SCHEDULE clause or a job task after the upstream load.
+
+@ DBX-DEA D3 T3.7 applied use-case
+S: A Lakeflow Declarative Pipelines silver streaming table `clean_orders` must not contain rows where `order_id` is NULL. The team wants those rows removed from the target automatically, and the number of dropped rows visible as a data quality metric. The pipeline must keep running. Which declaration fits?
+A: `CONSTRAINT valid_order_id EXPECT (order_id IS NOT NULL) ON VIOLATION DROP ROW`
+B: `CONSTRAINT valid_order_id EXPECT (order_id IS NOT NULL)` with no violation action
+C: `CONSTRAINT valid_order_id EXPECT (order_id IS NOT NULL) ON VIOLATION FAIL UPDATE`
+D: `CONSTRAINT valid_order_id CHECK (order_id IS NOT NULL)` added with `ALTER TABLE` after the pipeline run
+K: A
+G: ## Expectations in pipelines
+An expectation is a named SQL boolean condition on a dataset in a pipeline (streaming table, materialized view or view). It has three parts: a name, a constraint and an action when a record violates it.
+- Default (`EXPECT`, Python `expect`): warn. Invalid records are written to the target, and metrics count them.
+- `ON VIOLATION DROP ROW` (Python `expect_or_drop`): invalid records are dropped before the write, and the count of dropped records is logged with the dataset metrics.
+- `ON VIOLATION FAIL UPDATE` (Python `expect_or_fail`): an invalid record makes the update fail, and the run needs manual intervention.
+W: DROP ROW: rows with a NULL id are removed before they reach the table, the dropped count is recorded as a metric, and the pipeline continues.
+X: B=No action: that is the default warn behavior; invalid records are still written to the target, so NULL ids stay in the silver table.
+C=FAIL UPDATE: the update stops on the first invalid record, which conflicts with the requirement that the pipeline keeps running.
+D=CHECK constraint after the run: a Delta `CHECK` makes a write transaction fail when violated, and it is not a drop-and-count expectation; adding it later does not remove existing rows.
+T: Use EXPECT for warn, ON VIOLATION DROP ROW to remove bad rows and count them, and FAIL UPDATE to stop the update.
+
+@ DBX-DEA D3 T3.7 applied use-case
+S: In a gold materialized view of a Lakeflow pipeline, any negative `revenue` value means that a broken upstream calculation ran, and finance does not want a partial or wrong report published. The refresh must stop and leave the previous good result untouched. Which expectation action is correct?
+A: `ON VIOLATION FAIL UPDATE`, which makes the update fail and prevents invalid records from being published
+B: `ON VIOLATION DROP ROW`, which removes negative rows so that the rest of the data is published
+C: The default `EXPECT` with no action, which records metrics and writes the invalid rows to the view
+D: A temporary view with a comment documenting the rule, which Databricks enforces during refresh
+K: A
+G: ## Choosing the action by impact
+- Warn (default): use when bad rows are tolerable and you want visibility, for example optional fields.
+- Drop: use when invalid rows can be excluded safely; watch the dropped count, because a silent drop changes totals.
+- Fail: use when invalid data is unacceptable. The update fails, and for table updates the transaction is rolled back atomically, so the previous result remains. A person must fix the code or data before rerunning.
+A gold report that finance relies on is a classic case for failing: a partial report with missing rows is worse than a delayed one.
+W: FAIL UPDATE: any negative revenue stops the refresh and rolls the update back, so the published result stays at the previous correct state.
+X: B=DROP ROW: the refresh would succeed with the negative rows removed, publishing a report that silently misses data from the broken calculation.
+C=Default warn: the invalid rows are written into the view, so the wrong values are published, only counted in metrics.
+D=Commented temporary view: a comment is not enforced anywhere; nothing checks the rule at refresh time.
+T: Use FAIL UPDATE when invalid data must never be published; DROP ROW and warn let the update succeed.
+
+@ DBX-DEA D3 T3.7 applied troubleshooting
+S: A team runs `ALTER TABLE main.silver.payments ADD CONSTRAINT positive_amount CHECK (amount > 0)` on a Delta table that has been in production for a year. The statement fails. Which is the most likely cause and the correct next step?
+A: Some existing rows have `amount <= 0`; fix or remove those rows, then add the constraint
+B: CHECK constraints cannot be added after table creation, so the table must be recreated with the constraint
+C: CHECK constraints are informational only, so the statement fails until the table is registered as external
+D: The constraint name `positive_amount` is reserved by Unity Catalog, so a different name will make it succeed
+K: A
+G: ## Enforced Delta constraints
+Delta tables support two enforced constraint types:
+- `NOT NULL` on a column.
+- `CHECK (boolean expression)`: the expression must be true for each row.
+When a write violates an enforced constraint the transaction fails with an error. `ALTER TABLE ... ADD CONSTRAINT` first verifies that all existing rows satisfy the new CHECK; if any row violates it, the statement fails and nothing is added. Cleaning the offending rows (update, delete or quarantine them) and then running the statement again solves it.
+W: Existing violations: adding a CHECK validates all current rows, so a single row with a non-positive amount makes the statement fail; fix those rows and retry.
+X: B=Only at creation: CHECK constraints can be added and dropped later with ALTER TABLE ADD/DROP CONSTRAINT.
+C=Informational only: enforced constraints are NOT NULL and CHECK; only primary key, foreign key and unique are informational, and external registration is irrelevant.
+D=Reserved name: nothing reserves that name; the failure comes from the data checked when the constraint is added.
+T: ALTER TABLE ADD CONSTRAINT CHECK validates existing rows first; clean violating rows, then add it.
+
+@ DBX-DEA D3 T3.7 applied comparison
+S: A silver table is created with `id BIGINT PRIMARY KEY, name STRING` in Unity Catalog. A job later inserts two rows with the same `id`, and the insert succeeds. The engineer expected an error. Why did it succeed?
+A: Primary key constraints on Databricks are informational and not enforced; only NOT NULL and CHECK are enforced
+B: Primary keys are enforced only when the table is partitioned by the key column, which this table is not
+C: The insert bypassed the constraint because serverless compute never evaluates Delta constraints
+D: Unity Catalog enforces primary keys only at read time, so the duplicate appears only when someone queries it
+K: A
+G: ## Enforced versus informational
+- **Enforced**: `NOT NULL` and `CHECK`. Violating writes fail.
+- **Informational**: `PRIMARY KEY`, `FOREIGN KEY` and unique constraints. They document relationships and can help the optimizer, but Databricks does not check them, so duplicate keys can be written.
+To guarantee unique keys, deduplicate before writing (for example with `row_number` and `QUALIFY` or `MERGE` on the key), or add a quality check that finds duplicates.
+W: Informational primary key: Databricks does not enforce primary keys, so duplicates insert without error; uniqueness must be ensured by the pipeline logic or a check.
+X: B=Partitioning requirement: no such rule exists; primary keys are informational regardless of partitioning.
+C=Serverless skips constraints: enforced constraints are evaluated on all compute; the primary key is simply not an enforced type.
+D=Read-time enforcement: nothing is checked at read time either; the constraint has no enforcement at all.
+T: Only NOT NULL and CHECK are enforced on Databricks; primary and foreign keys are informational, so ensure uniqueness in the pipeline.
+
+@ DBX-DEA D3 T3.7 advanced use-case
+S: A silver streaming table in a Lakeflow pipeline must reject orders whose `customer_id` does not exist in the `customers` table. An engineer writes `EXPECT (customer_id IN (SELECT customer_id FROM customers))` and the pipeline fails validation. What is the correct approach?
+A: Subqueries on other tables are not allowed in expectations, so join with `customers` in the query and test the result
+B: Replace the subquery with a custom Python UDF that looks up the customers table for each record
+C: Move the rule to an external REST service that the expectation calls for each record
+D: Use a `NOT NULL` constraint on `customer_id`, because it also checks that the value exists in the customers table
+K: A
+G: ## What a constraint may contain
+An expectation constraint is a SQL boolean evaluated per record. The documentation says constraints cannot contain custom Python functions, external service calls or subqueries referencing other tables. Rules about row content, such as ranges, formats and null checks, fit well.
+## Referential checks
+To validate against another table, express the rule in the query: join (or `LEFT SEMI JOIN`) the orders with `customers` so that only matching rows pass, or left join and set a flag column that a simple expectation (`customer_exists`) then checks. The expectation tracks the metric on the resulting column.
+W: Join in the query: the existence test moves into the dataset query, and a plain boolean expectation on the joined result then validates it.
+X: B=Python UDF: custom Python functions are not allowed in constraints.
+C=External service: calls to external services are not allowed in constraints.
+D=NOT NULL: it only checks that a value is present, not that the value exists in another table.
+T: Expectation constraints cannot reference other tables; do referential checks with a join in the query and test the result.
+
+@ DBX-DEA D3 T3.7 advanced tradeoff
+S: A silver streaming table in a Lakeflow pipeline receives payments, and about 1% fail the rule `amount > 0 AND currency IS NOT NULL`. Compliance wants valid rows in `payments_clean` and the invalid rows kept in a separate table for review, with no row lost and no pipeline failure. Which design fits?
+A: Define the rule once, load valid rows with an expect-or-drop expectation and invalid rows into a second table using the negated rule
+B: Put an expect-or-drop expectation on `payments_clean` only, because dropped rows are stored automatically in a hidden review table
+C: Use a fail-update expectation on `payments_clean` so that invalid rows stop the pipeline and are saved inside the failure message
+D: Use the default warn expectation on `payments_clean` and tell reviewers to filter invalid rows out of it in every dashboard
+K: A
+G: ## Dropping loses the rows
+`ON VIOLATION DROP ROW` removes invalid records before the write. Databricks records only the count of dropped records as a metric, not the records themselves. If the business must review the bad rows, a dropped row is simply gone from the pipeline output.
+## Quarantine pattern
+Keep the rows in two datasets from one rule. Define the validity condition once, use it with an expect-or-drop expectation for the clean table, and build a second dataset filtered with the negated condition (`NOT(rule)`) for the quarantine table. Both are derived from the same input, so every record lands in exactly one place, and the pipeline keeps running.
+W: Clean plus quarantine datasets: the same rule feeds the drop expectation for valid rows and its negation for the review table, so no record is lost and nothing fails.
+X: B=Drop only: the expectation logs just the number of dropped records; there is no hidden table that stores them.
+C=Fail update: the update stops on the first invalid row, which violates the no-failure requirement, and the failure message is not a review table.
+D=Warn only: invalid rows stay in the clean table, so every consumer has to filter them out, which is error-prone and defeats the purpose of a validated layer.
+T: To review bad records, split the data with a rule and its negation (quarantine); expect-or-drop only counts what it removes.
