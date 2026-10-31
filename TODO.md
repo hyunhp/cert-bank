@@ -3,8 +3,8 @@
 ## Now (warm start — keep this section current; update it with every merge)
 Updated 2026-10-30.
 - In progress: nothing. GCP-PCA bank and study guide merged. Open gaps: Gemini app and Gems (GAIL T2.2, blocked hosts);
-  CDL golden signals / CapEx-OpEx / data types use generally accepted meanings; Gemini Cloud Assist investigations are
-  private preview on the product page but taught by the PCA bank (re-check); PCA docs re-check list below.
+  CDL golden signals / CapEx-OpEx / data types use generally accepted meanings; Gemini Cloud Assist capabilities are
+  private preview on the product page (noted in PCA G: and study days 2, 23; re-check status).
 - Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; GCP-CDL bank and study guide; MLA-C02 study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). www.databricks.com is still
@@ -226,8 +226,9 @@ published questions: ingest batches one by one and tell running reviewers). Stud
 Human in the Loop deprecated 2024-01-16; Binary Authorization continuous validation Preview (not keyed); Migration Center rapid cost estimate
 Preview (not keyed); gsutil legacy, `gcloud storage` recommended; Service Catalog not keyed (Deployment Manager ended 2026-03-31);
 Cloud SQL Managed Connection Pooling needs Enterprise Plus; NotebookLM is now "Gemini Notebook Enterprise".
-PCA claims checked only from general knowledge (re-check against docs): Workload Identity Federation details, Apigee SpikeArrest/Quota in b09,
-CUD vs Spot trade-off in b09, Cloud Trace.
+PCA docs re-check DONE 2026-10-31: Workload Identity Federation, Apigee SpikeArrest/Quota and hybrid, CUD vs Spot, Cloud Trace, VPC-SC/firewall
+policy/IAP, Cloud Logging all match docs. Gemini Cloud Assist: product page says investigations/proactive operations are private preview, docs
+overview shows no label; kept (named in the exam guide) with an Availability note in G: (Q009002, Q009003, Q009038, e01) and study days 2, 23.
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
