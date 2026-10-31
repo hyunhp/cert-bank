@@ -44,6 +44,7 @@ Writing rules (in addition to the shared ones below):
 - Well-Architected Framework pillars (operational excellence, security, reliability, performance optimization, cost
   optimization, sustainability) frame the answers; use the guide's names: Gemini Enterprise Agent Platform / Agent Platform,
   Gemini Cloud Assist, Model Armor, Chrome Enterprise Premium, Migration Center, Cloud Run functions.
+- Gemini Cloud Assist is named in the exam guide but its product page labels the investigations tool, proactive investigations and cost-anomaly monitoring "private preview" (docs overview: no label; checked 2026-10-31): the PCA bank keeps them and says so in G: (Q009002, Q009003, Q009038, e01); other previews stay out.
 - Preview or deprecated features stay out of keys (Deployment Manager ended 2026-03-31; Infrastructure Manager or Terraform instead).
 - Overlap: GCP-ACE (hands-on) and GCP-CDL / GCP-GAIL share product facts; read their published questions first, test the
   architect's choice (which design and why), not the console step.
