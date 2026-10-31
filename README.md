@@ -2,7 +2,7 @@
 
 **[Open the site →](https://hyunhp.github.io/cert-bank/)** · [한국어](README.ko.md)
 
-Free, original practice material for AWS, Palantir, Microsoft Azure and Google Cloud certifications. Unofficial: not
+Free, original practice material for AWS, Palantir, Microsoft Azure, Google Cloud and Databricks certifications. Unofficial: not
 affiliated with Amazon Web Services, Palantir Technologies, Microsoft or Google, and no real exam questions (no dumps).
 
 ## What's here
@@ -15,7 +15,7 @@ affiliated with Amazon Web Services, Palantir Technologies, Microsoft or Google,
 ## How to use
 
 **Question Bank**
-1. Pick a vendor (AWS, Palantir, Azure or Google Cloud), a level, then an exam.
+1. Pick a vendor (AWS, Palantir, Azure, Google Cloud or Databricks), a level, then an exam.
 2. Optionally narrow to one exam section (domain).
 3. Click a question to see the answer and why each option is right or wrong. Many explanations include an
    architecture diagram.
@@ -62,6 +62,7 @@ affiliated with Amazon Web Services, Palantir Technologies, Microsoft or Google,
 | | | GCP-GAIL Generative AI Leader | 274 | 15 |
 | | Associate | GCP-ACE Associate Cloud Engineer | 275 | 22 |
 | | Professional | GCP-PCA Professional Cloud Architect | 274 | 26 |
+| Databricks | Associate | DBX-DEA Data Engineer Associate | 225 | 20 |
 
 Some questions belong to more than one exam. Palantir publishes no section weights, so its sections count equally;
 Azure publishes weight ranges, and the mock exam uses their midpoints. Google Cloud publishes no pass mark (results are
@@ -74,7 +75,7 @@ sent to a server. To move bookmarks to another browser or device, use the backup
 
 ## Accuracy
 
-Content is checked against official AWS, Palantir, Microsoft Learn and Google Cloud documentation. Services that AWS has closed to new customers
+Content is checked against official AWS, Palantir, Microsoft Learn, Google Cloud and Databricks documentation. Services that AWS has closed to new customers
 are marked as such in explanations and study notes, because exams may still mention them. Found a mistake? Please
 [open an issue](https://github.com/hyunhp/cert-bank/issues) with the question id (for example `Q001234`) or the
 exam and day.

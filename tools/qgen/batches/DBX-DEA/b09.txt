@@ -1,0 +1,407 @@
+# DBX-DEA batch 09: D7 (T7.3 column masks, row filters and row-level security by group; T7.4 Unity Catalog ABAC policies and governed tags), single answer, detailed explanations
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/filters-and-masks/
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/filters-and-masks/manually-apply
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/abac/
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/abac/core-concepts
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/abac/policies
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/abac/best-practices
+# src: https://docs.databricks.com/aws/en/admin/governed-tags/
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/is_account_group_member
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/is_member
+
+@ DBX-DEA D7 T7.3 applied use-case
+S: The `hr.people.employees` table has a STRING column `ssn`. A SQL function `ssn_mask(ssn STRING)` returns the real value for members of the account group `HumanResourceDept` and `'***-**-****'` for everyone else. The table owner wants every query on this one table to apply that function to `ssn`. Which statement does that?
+A: ALTER TABLE hr.people.employees ALTER COLUMN ssn SET MASK ssn_mask
+B: ALTER TABLE hr.people.employees SET ROW FILTER ssn_mask ON (ssn)
+C: ALTER TABLE hr.people.employees ALTER COLUMN ssn SET TAGS ('mask' = 'ssn_mask')
+D: GRANT EXECUTE ON FUNCTION ssn_mask TO `account users`
+K: A
+G: ## Column masks
+A column mask is a Unity Catalog control that decides what value a user sees in one column. The mask is a SQL user-defined function (UDF). Its first parameter receives the column value and it returns either the original value or a masked version; the return type must match, or be castable to, the column type. Each column can have one mask.
+## Applying a table-level mask
+The table owner (or a user with `MANAGE` and `SELECT`) binds the function to the column:
+- `ALTER TABLE t ALTER COLUMN ssn SET MASK ssn_mask` on an existing table
+- `ssn STRING MASK ssn_mask` inside `CREATE TABLE`
+- `ALTER TABLE t ALTER COLUMN ssn DROP MASK` to remove it
+The function itself often calls `is_account_group_member('HumanResourceDept')`, so the same query returns different values for different people. This page concerns the table-level form; for many tables, ABAC policies are the recommended approach.
+W: Column mask: SET MASK binds the UDF to the ssn column, so every query that reads that column, by any user, runs through the function and non-HR users receive the redacted string.
+X: B=Row filter: SET ROW FILTER expects a function that returns a BOOLEAN and removes whole rows; a function returning a STRING cannot filter rows and does not change the displayed column value.
+C=Tags: a tag only labels the column as metadata; it never runs a function, and a plain tag by itself changes nothing about the values a query returns.
+D=GRANT EXECUTE: this lets users call the function directly, but it does not attach the function to the column, so queries still return the unmasked ssn.
+T: Table-level masking is `ALTER COLUMN ... SET MASK function`; the function returns the original or masked value per user.
+V: Unity Catalog
+
+@ DBX-DEA D7 T7.3 applied use-case
+S: A `sales(region STRING, id INT)` table must show members of the account group `admin` every row and everyone else only rows where `region = 'US'`. Which function, applied with `ALTER TABLE sales SET ROW FILTER f ON (region)`, implements this?
+A: CREATE FUNCTION f(region STRING) RETURN IF(is_account_group_member('admin'), region = 'US', true)
+B: CREATE FUNCTION f(region STRING) RETURN IF(is_account_group_member('admin'), true, region = 'US')
+C: CREATE FUNCTION f(region STRING) RETURN CASE WHEN is_account_group_member('admin') THEN region ELSE 'US' END
+D: CREATE FUNCTION f(region STRING) RETURN region = 'US' OR NOT is_account_group_member('admin') OR region IS NULL
+K: B
+G: ## Row filters
+A row filter is a SQL UDF that returns a BOOLEAN. Unity Catalog evaluates it for each row at query time. Rows where the function returns `TRUE` are returned and rows where it returns `FALSE` are excluded. Each parameter of the function is bound to a table column through `ON (column, ...)`.
+## Group-based filtering
+Because the function can call identity functions, one filter can give different groups different views. `is_account_group_member('group')` returns true when the querying user is a direct or indirect member of the account-level group. Pattern: `IF(is_account_group_member('admin'), true, <row condition>)`. Admins always get TRUE, so no row is removed for them.
+W: Admin first, then condition: admins hit the true branch and see every row, while all other users are evaluated with `region = 'US'`, so only US rows return.
+X: A=Branches swapped: admins would see only US rows and every other user would see all rows, the exact opposite of the requirement.
+C=Returns a STRING: a row filter must return a BOOLEAN; this CASE returns a region string, which cannot be used to keep or drop rows.
+D=Extra OR terms: for non-admins, `NOT is_account_group_member('admin')` is true, so every row passes for them and the filter would let non-admins see all regions.
+T: A row filter returns TRUE for rows to keep; use `IF(is_account_group_member(...), true, condition)` to exempt a group.
+V: Unity Catalog
+
+@ DBX-DEA D7 T7.3 applied definition
+S: A workspace has a legacy workspace-local group named `analysts`, and a separate group `analysts` synced to the account from the identity provider. A column mask must follow the account-level group membership in Unity Catalog and keep working when the table is queried from other workspaces. Which function should the mask call?
+A: is_member('analysts'), which checks account-wide groups only and ignores local groups
+B: current_user() = 'analysts', which compares the user name with the group name
+C: is_account_group_member('analysts'), which checks membership of the group at the account level
+D: session_user('analysts'), which returns whether the connected user belongs to the named group
+K: C
+G: ## Identity functions in masks and filters
+Masks and filters decide per user by calling identity functions inside the SQL UDF.
+- `is_account_group_member('g')` returns true when the connected user is a direct or indirect member of the account-level group `g`. It is available with Unity Catalog and is what Databricks recommends for access checks.
+- `is_member('g')` also matches workspace-local groups or account groups assigned to that workspace; the documentation says that in most cases you should use `is_account_group_member` instead.
+- `current_user()` and `session_user()` return the user name, not group membership.
+Using account-level groups means one membership list governs the same table in every workspace attached to the metastore.
+W: is_account_group_member: it tests membership of the account-level group directly, so the result does not depend on a workspace-local group with the same name or on which workspace runs the query.
+X: A=is_member: it also matches workspace-local groups, which is why Databricks says to prefer the account-level function; it does not check account groups only.
+B=current_user() comparison: current_user() returns a user name, so comparing it to a group name never expresses membership and would be false for everyone.
+D=session_user with an argument: session_user() takes no group argument and returns the user name of the connected user, it is not a membership test.
+T: For group-based masks and filters in Unity Catalog, call `is_account_group_member('group')`.
+V: Unity Catalog
+
+@ DBX-DEA D7 T7.3 advanced tradeoff
+S: Compliance asks for two restrictions on the `orders` table: sales staff may only see rows for their own region, and rows with `status = 'TEST'` must be hidden from everybody except the `qa` group. A data engineer tries to run a second `ALTER TABLE orders SET ROW FILTER` for the second rule and sees that this replaces the first rule. What is the correct design?
+A: Create a second table with the test rows removed, because a table supports a single row filter and nothing can combine two rules
+B: Attach the regional rule to the table and enforce the test-row rule with a column mask on the `status` column
+C: Create one row filter function that combines both conditions with AND and bind it to the `region` and `status` columns
+D: Keep two row filter functions on the table, because the one that was applied last takes priority for each user
+K: C
+G: ## One filter per table
+A table can have only one row filter. Setting a new one replaces the existing one. When several rules apply, Databricks documents the common pattern of combining the logic into a single function, usually with `AND`.
+## Multiple inputs
+A row filter function can take several parameters, each bound to a column through `ON (c1, c2)`. Example: `ALTER TABLE orders SET ROW FILTER f ON (region, status)`.
+## Keep it simple
+The more conjuncts a filter has, the harder it is for the engine to optimize, so keep the combined filter short and deterministic.
+W: Combined row filter: one function receives both columns, returns TRUE only when the region rule and the test-row rule are both satisfied, and is bound with `ON (region, status)`.
+X: A=Second table: the single-filter limit is real, but it does not mean the rules cannot be combined; a copy would also duplicate data and drift from the source.
+B=Column mask for rows: a column mask changes the value shown in one column and cannot remove rows from the result.
+D=Two filters on one table: only one row filter exists per table, so setting a second one replaces the first and there is no priority order between them.
+T: One row filter per table: combine multiple row rules into a single function bound to all needed columns.
+V: Unity Catalog
+
+@ DBX-DEA D7 T7.3 applied troubleshooting
+S: A data engineer holds `SELECT` and `MODIFY` on `finance.core.payments`, `EXECUTE` on the function `finance.core.region_filter`, and `USE CATALOG` and `USE SCHEMA` on the parents. The engineer is not the table owner. `ALTER TABLE finance.core.payments SET ROW FILTER finance.core.region_filter ON (region)` fails with a permission error. Which missing privilege explains this?
+A: CREATE FUNCTION on the schema, because the filter function is created again when it is attached
+B: MANAGE on the table, because a non-owner needs MANAGE together with SELECT to add or remove a filter
+C: USE CONNECTION on the metastore, because filters are evaluated through a governed connection
+D: ALL PRIVILEGES on the catalog, because row filters can only be attached by catalog owners
+K: B
+G: ## Who may attach a filter or mask
+Attaching a filter or mask is an access-control change, so it needs more than `SELECT`. Documented requirements:
+- `EXECUTE` on the function, `USE SCHEMA` on its schema and `USE CATALOG` on its catalog.
+- To add or remove a filter or mask on an existing table: be the table owner, or hold both `MANAGE` and `SELECT` on the table.
+- When creating a new table with a filter or mask: `CREATE TABLE` on the schema.
+- If the same statement also changes the schema (for example adds a masked column): `MODIFY` as well.
+W: MANAGE on the table: the engineer already has SELECT and the function privileges, but not ownership or MANAGE, which is what authorizes changing a table's filter.
+X: A=CREATE FUNCTION: the function already exists and is only referenced; attaching it needs EXECUTE on it, not the right to create functions.
+C=USE CONNECTION: that privilege relates to Lakehouse Federation connections and has nothing to do with row filters on a regular table.
+D=ALL PRIVILEGES on the catalog: no catalog-owner requirement exists; ownership or MANAGE on the table itself is enough.
+T: To attach a filter or mask to an existing table you must own it or hold MANAGE and SELECT, plus EXECUTE on the function.
+V: Unity Catalog
+
+@ DBX-DEA D7 T7.3 applied troubleshooting
+S: A team applies a row filter to table `t` with `ALTER TABLE t SET ROW FILTER dept_filter ON (dept)`. The `dept` column is a STRING, but the function was written as `CREATE FUNCTION dept_filter(d INT) RETURNS BOOLEAN RETURN d IS NULL`. With ANSI mode off, every user now sees all rows, including those with non-null departments. What is the cause and the fix?
+A: Strings cannot be passed to filters at all; convert `dept` to a numeric code column
+B: The filter function is not marked deterministic; adding DETERMINISTIC will make the filter restrict rows
+C: Row filters are ignored for owners; run the query as a user who does not own the table
+D: STRING values fail the cast to INT and become NULL, so every row passes; declare the parameter as STRING
+K: D
+G: ## Types in filter and mask functions
+The data type of each column passed to the UDF should match the UDF's parameter type. If it does not, Databricks implicitly casts the column value to the parameter type.
+## Silent failure
+With ANSI mode disabled (`spark.sql.ansi.enabled = false`), a value that cannot be cast becomes `NULL` without an error. A filter like `d IS NULL` then returns TRUE for every non-castable value, so all rows are returned, and a mask can mask the wrong values.
+## Fix
+Match the parameter type to the column (`d STRING`). Databricks also recommends enabling ANSI mode so a failed cast raises an error instead of producing NULL.
+W: Cast to NULL: the STRING department values cannot be cast to INT, so the function receives NULL, `d IS NULL` is true, and no rows are filtered. Declaring the parameter as STRING and enabling ANSI mode removes the problem.
+X: A=Strings unsupported: filters and masks work with STRING columns; the problem is the mismatched parameter type, not the column type.
+B=Determinism: marking a function DETERMINISTIC helps optimization and ordering, but it would not change the cast to NULL that makes the predicate true.
+C=Owner bypass: ownership of the table does not exempt the owner from its row filter, and the stem says every user sees all rows.
+T: Declare filter and mask parameters with the same type as the bound column and enable ANSI mode so cast failures are errors, not NULLs.
+V: Unity Catalog
+
+@ DBX-DEA D7 T7.3 applied troubleshooting
+S: An engineer wrote a Python UDF `email_mask_python(email STRING)` in Unity Catalog and runs `ALTER TABLE contacts ALTER COLUMN email SET MASK email_mask_python`. The statement fails with a `ROUTINE_NOT_FOUND` error. What resolves it?
+A: Create a SQL UDF that calls the Python UDF and set that SQL UDF as the mask
+B: Grant `SELECT` on the `contacts` table to the Python UDF so it can read the column
+C: Re-create the Python UDF as a temporary function in the notebook session
+D: Convert the `contacts` table to an external table before binding the mask
+K: A
+G: ## Masks must be SQL UDFs
+The function that is bound to a table as a row filter or column mask has to be a SQL UDF registered in Unity Catalog. To use Python or Scala logic, first create that UDF, then create a SQL UDF that calls it and bind the SQL wrapper.
+## Tips
+- Mark the Python UDF `DETERMINISTIC` where possible; it improves performance and lets query filters run before the mask.
+- SQL UDFs are preferred overall; Python UDFs are less performant and give the optimizer fewer options.
+W: SQL wrapper: Databricks documents that only a SQL UDF can be the mask, so a wrapper such as `email_mask_sql(email) RETURN email_mask_python(email)` is bound and the Python logic still runs.
+X: B=Granting SELECT to a function: privileges are granted to principals, not functions; the problem is the function kind, not data access.
+C=Temporary function: a session-scoped function is not registered in Unity Catalog, so it cannot be bound to a table that every user and workspace queries.
+D=External table: the mask works on managed and external tables alike, and table type has no effect on this error.
+T: A mask or filter must be a Unity Catalog SQL UDF; wrap Python logic in a SQL function.
+V: Unity Catalog
+
+@ DBX-DEA D7 T7.3 advanced use-case
+S: A `customers` table has `email STRING`, and `consent BOOLEAN` that says whether the customer agreed to be contacted. Analysts should see an email only when `consent` is true for that row. A function `mask_email(email STRING, consent BOOLEAN)` returns the email when `consent` is true, otherwise `'****'`. How is it bound to the column?
+A: ALTER TABLE customers ALTER COLUMN consent SET MASK mask_email USING COLUMNS (email)
+B: ALTER TABLE customers SET ROW FILTER mask_email ON (email, consent)
+C: ALTER TABLE customers ALTER COLUMN email SET MASK mask_email USING COLUMNS (consent)
+D: ALTER TABLE customers ALTER COLUMN email SET MASK mask_email, consent SET MASK mask_email
+K: C
+G: ## Mask with extra inputs
+The first parameter of a mask function is always the column being masked. Further parameters are supplied by `USING COLUMNS (...)`, which accepts other column names of the same table or constant values, in the order the function expects.
+## Example
+`ALTER TABLE customers ALTER COLUMN email SET MASK mask_email USING COLUMNS (consent)` passes the row's `consent` value as the second argument. The same pattern covers masks that depend on a country column or a constant such as a group suffix.
+W: Mask on email with USING COLUMNS: email goes in automatically as the first argument and `consent` is passed as the extra argument, so each row is masked according to its own consent flag.
+X: A=Mask on consent: this would mask the boolean column and pass email as the extra argument, so the wrong column would be redacted.
+B=Row filter: it would hide entire rows when the function returns FALSE; the email function returns a STRING and the requirement is to keep rows and mask one value.
+D=Two masks: a column mask is one function on one column, and the extra column is supplied through USING COLUMNS, not through a second mask.
+T: Use `SET MASK fn USING COLUMNS (other_col, constant)` when a mask depends on other columns of the row.
+V: Unity Catalog
+
+@ DBX-DEA D7 T7.3 applied comparison
+S: Analysts in a group have no privilege on the base table `claims`. They should query a curated slice that joins `claims` with `providers`, shows only rows of their own group and hides the diagnosis column. The base table must stay locked down. Which approach fits the requirement best?
+A: Put a column mask on `claims` and grant analysts SELECT on the table, so the function is the only protection
+B: Create a dynamic view that joins the tables and uses is_account_group_member, and grant analysts access to the view only
+C: Apply a row filter on `providers`, because a filter on one table of a join controls the rows of the other table
+D: Share the table through a path-based file read, because path access applies filters and masks of the table to the files
+K: B
+G: ## Row filters and masks versus dynamic views
+- Table-level row filters and column masks attach to one table; they follow the table wherever it is queried.
+- Dynamic views wrap one or more base tables in a view that filters rows, masks columns or reshapes data, usually gated by group functions such as `is_account_group_member()`. Use them to expose a curated, transformed or joined version of data to users who do not have access to the underlying tables.
+## Limit worth knowing
+You cannot apply row filters or column masks to a view, and path-based access to files of tables that have policies is not supported.
+W: Dynamic view: it joins the sources, branches on group membership for the rows and the diagnosis column, and analysts need access only to the view, so the base tables stay unreachable.
+X: A=Mask on the base table: analysts would then hold SELECT on the base table, which contradicts the locked-down requirement, and the join and row slice are not provided.
+C=Filter on providers: a filter belongs to its own table and restricts rows of that table; it does not shape claims rows or remove the diagnosis column.
+D=Path-based reads: Databricks states that path-based access to files in tables with policies is not supported, so it would not apply any filter or mask.
+T: Use a dynamic view to expose a curated, joined, group-gated slice to users who cannot touch the base tables.
+V: Unity Catalog
+
+@ DBX-DEA D7 T7.3 advanced use-case
+S: Row access to the `accounts` table depends on an access list of about 300 people that the security team edits daily, and the list is already stored in a table `acl(username STRING)`. The team does not want to redeploy a SQL function for every change. Which row filter design fits this?
+A: A function using `EXISTS (SELECT 1 FROM acl WHERE username = SESSION_USER())`, so editing mapping rows changes access
+B: A function with a long `OR` of 300 `current_user() = '...'` tests, rewritten after every list change, in place of a lookup
+C: A column mask on every column of `accounts` that returns NULL unless the user name appears in the `acl` table
+D: A row filter defined on the `acl` table itself, so that its rows control which `accounts` rows are visible
+K: A
+G: ## Mapping tables as access-control lists
+For complex or fast-changing rules, Databricks documents a mapping table (an access-control list) that encodes which users or groups may see which rows. The row filter function looks up the current user in that table, for example:
+`RETURN EXISTS (SELECT 1 FROM valid_users v WHERE v.username = SESSION_USER())`
+Then access is changed by inserting or deleting rows, not by editing the function.
+## Details
+Filters run with definer's rights, except for functions that check user context (such as `SESSION_USER` and `IS_ACCOUNT_GROUP_MEMBER`), which run as the invoker. Keep the lookup simple and deterministic for performance.
+W: Mapping-table filter: the function looks up the invoking user in `acl`, so the security team changes access by editing table rows and the function stays untouched.
+X: B=Hard-coded list: it works logically but turns every daily change into a function edit and a larger expression that is harder to optimize, the exact maintenance cost to avoid.
+C=Masks on all columns: masks keep every row visible with NULL values and need to be set on each column, which is not row-level access control.
+D=Filter on acl: a filter on the `acl` table restricts rows of `acl` only, not of `accounts`; the filter has to be bound to the table it protects.
+T: For frequently changing ACLs, a row filter that looks the user up in a mapping table avoids function redeployments.
+V: Unity Catalog
+
+@ DBX-DEA D7 T7.3 applied troubleshooting
+S: A table `payroll` has a column mask on `salary` and a row filter on `dept`. A pipeline step runs `CREATE OR REPLACE TABLE payroll AS SELECT ...` with the same column names. The data lead worries that the replacement dropped the protections. What actually happens?
+A: Both are dropped, because replacing a table creates a new object that has no policy
+B: The row filter is dropped, but the mask is kept because masks are stored on the column
+C: The row filter is retained, and masks are retained on same-named columns of the new table
+D: Both are retained only if the pipeline runs as the table owner, otherwise both are removed
+K: C
+G: ## Replacing a table
+Databricks designed filters and masks so that a replacement does not silently remove data protection:
+- `REPLACE TABLE` keeps an existing row filter regardless of schema changes.
+- Column masks are kept when the new table has columns with the same names as those that had masks.
+## Caveat
+If a retained policy refers to a column that was removed or changed, later queries can fail. Update or drop the policy with `ALTER TABLE` (for example `DROP ROW FILTER`) to fix it.
+W: Retained policies: the row filter survives the replace, and the salary mask is retained because the new table has a column with the same name.
+X: A=Both dropped: the opposite is documented; replacement preserves the policies to prevent accidental loss of access controls.
+B=Filter dropped: the row filter is retained, and the mask is not what is conditional; its retention depends on matching column names.
+D=Owner-dependent: retention does not depend on which principal runs the statement.
+T: REPLACE TABLE keeps the row filter and the masks of same-named columns; drop them explicitly with ALTER TABLE if they are no longer wanted.
+V: Unity Catalog
+
+@ DBX-DEA D7 T7.4 applied comparison
+S: A governance team must mask every column holding an email address in about 400 tables spread across many schemas of the `prod` catalog, and new tables arrive every week. Maintaining a separate `SET MASK` statement per table is unsustainable. Which Unity Catalog approach is designed for this?
+A: Table-level column masks, each applied by its table owner, with a runbook that tells owners to repeat the step
+B: Dynamic views over each table, regenerated by a nightly job whenever a new table appears in the catalog
+C: A mapping table of email column names that every query joins against to hide the sensitive values
+D: An ABAC column mask policy on the catalog that targets columns carrying a governed tag such as `pii = email`
+K: D
+G: ## What ABAC is for
+Attribute-based access control (ABAC) in Unity Catalog uses governed tags as attributes and policies to decide access. A policy is attached to a catalog, schema or table and applies to all matching tables below it. Matching is done by tag conditions, for example "columns that have the tag `pii` with value `email`".
+## ABAC versus table-level controls
+- Table-level row filters and column masks: set by the table owner per table; good for table-specific logic.
+- ABAC policies: defined once by a governance admin (with `MANAGE` on the securable), applied automatically wherever the tag conditions match, including tables created later and tagged afterward.
+Availability: ABAC row filter and column mask policies on tables are documented as the recommended approach for consistent rules across many tables. Newer additions such as metastore-level policies, DENY policies, views and identity attributes are marked Beta; this question does not depend on them.
+W: ABAC column mask policy: one `CREATE POLICY` on the catalog targets every column tagged `pii = email`, so existing tagged columns are masked and new tables are covered once their columns get the tag.
+X: A=Per-table masks: this is the manual approach that does not scale; repeating the step relies on every owner and misses new tables until someone acts.
+B=Dynamic views: views multiply objects, need generation code, and users with access to the base tables bypass them.
+C=Mapping table join: a mapping table suits row-level access lists, but nothing in it masks column values automatically across 400 tables.
+T: Use ABAC policies on governed tags for consistent masking and filtering across many tables; use table-level masks for table-specific logic.
+V: Unity Catalog, ABAC
+
+@ DBX-DEA D7 T7.4 applied definition
+S: Different teams tag sensitive columns with values such as `PII`, `pii`, `Pii-Data` and `personal`, so the ABAC policy that looks for one value covers only part of the data. The governance team wants only approved values and only approved people able to assign them. What should they create?
+A: A governed tag with a defined set of allowed values and permissions that control who can assign it
+B: A column comment standard, enforced by reviewing comments before each release
+C: A workspace-local tag on each table, which the workspace admin approves manually
+D: A compute policy that rejects clusters whose custom tags contain unapproved sensitive-data values
+K: A
+G: ## Governed tags
+Governed tags are account-level tags with built-in rules. Creating one also creates a tag policy that sets:
+- the allowed values for the tag, and
+- which users and groups can assign it and manage its definition.
+Governed tags can be applied to Unity Catalog objects such as catalogs, schemas, tables and columns (and some workspace objects), but not to compute resources such as SQL warehouses or jobs, which use a separate tagging mechanism.
+## Why ABAC needs them
+ABAC conditions use `has_tag()` and `has_tag_value()` against governed tags. A fixed vocabulary keeps policies matching what you intend. If you create a governed tag with the same key as existing tags, the existing assignments become governed.
+W: Governed tag: the tag policy limits values to the approved list and restricts assignment to authorized users, so the ABAC policy matches one consistent value.
+X: B=Comments: comments are free text, not matched by policies and not enforced by the platform.
+C=Workspace-local tag: a tag that is not governed accepts any value from anyone with the privilege, so manual approval does not enforce a vocabulary.
+D=Compute policy: compute policies and cluster tags concern compute resources, and governed tags cannot even be applied to compute.
+T: Governed tags enforce allowed values and who can assign them, giving ABAC policies a consistent attribute vocabulary.
+V: Unity Catalog, ABAC
+
+@ DBX-DEA D7 T7.4 applied use-case
+S: An ABAC column mask policy on the catalog `hr` masks all columns tagged `pii = ssn` for `account users`. The compliance team must continue to see the real SSN values in every table the policy covers. How should the policy be written?
+A: Drop the policy and grant compliance members the MANAGE privilege on every table
+B: Name the compliance group in the EXCEPT clause, in addition to the TO clause for account users
+C: Add the compliance group to the TO clause so that the policy treats it as a trusted audience
+D: Put compliance members in a new catalog and attach the policy only to the old one
+K: B
+G: ## Principals of a policy
+A row filter or column mask policy names who is affected:
+- `TO` lists the users, groups or service principals subject to the policy (for everyone use `account users`).
+- `EXCEPT` lists principals exempt from the policy; they are not subject to any filtering or masking and see the original data.
+Example: `CREATE POLICY mask_ssn_columns ON CATALOG hr COLUMN MASK mask_ssn TO account users EXCEPT compliance_team FOR TABLES MATCH COLUMNS has_tag_value('pii','ssn') AS c ON COLUMN c`.
+## Best practice
+Prefer `TO` and `EXCEPT` for targeting, which keeps the UDF simple. Group checks inside UDFs with `is_account_group_member()` remain valid for complex conditional logic.
+W: EXCEPT clause: principals in EXCEPT are exempt from the policy, so compliance members are not masked while all other account users are.
+X: A=Dropping the policy: removing the policy would unmask the data for everyone, and MANAGE is an administrative privilege that does not control how values are displayed.
+C=TO clause: TO selects who is subject to the policy, so adding compliance there would mask their view too.
+D=Separate catalog: it restructures data and breaks the shared tables instead of using the built-in exemption mechanism.
+T: In an ABAC policy, TO names who is masked or filtered and EXCEPT names who sees the data unchanged.
+V: Unity Catalog, ABAC
+
+@ DBX-DEA D7 T7.4 applied use-case
+S: A column mask ABAC policy on the catalog `prod` masks columns tagged `pii = email`. Next week the ingestion team will create a new table `prod.crm.leads` with an `email` column. What must happen for that column to be masked for regular users?
+A: A governance admin creates a new policy for the `leads` table, because policies only cover tables that existed at creation
+B: The ingestion team runs `ALTER TABLE ... SET MASK` on `leads`, because ABAC requires a table-level mask for each table
+C: The mask applies after a metastore restart, when policies are re-evaluated against all tables
+D: The column gets the `pii = email` governed tag, and the existing policy then matches it with no policy change
+K: D
+G: ## Automatic coverage
+ABAC policies are evaluated dynamically at query time. When a securable object has the attributes (tags) a policy targets, the policy applies automatically. A policy attached to a catalog evaluates against all tables in that catalog, so new tables are covered as soon as the right tags are on them.
+## Implication
+Correct tagging is the essential first step. Column tags are applied directly on the column, either by a data steward, by the table creator or by an automated classifier. Missing tags leave data unprotected, which is why best practice recommends default restrictive tags for unclassified data.
+W: Tag the column: the existing catalog policy already scopes over `prod.crm.leads`, so once `email` carries `pii = email` the policy masks it with no new policy.
+X: A=New policy per table: this defeats ABAC; a policy attached to the catalog covers all current and future tables whose tags match.
+B=Table-level mask: that is the manual approach ABAC replaces, and it is not required for the policy to take effect.
+C=Restart: Unity Catalog evaluates policies at query time; there is no restart or batch re-evaluation step.
+T: ABAC policies apply automatically to anything that carries the matching governed tag, so new tables only need the right tags.
+V: Unity Catalog, ABAC
+
+@ DBX-DEA D7 T7.4 advanced troubleshooting
+S: A schema-level ABAC column mask policy uses `MATCH COLUMNS has_tag('pii') AS c`. A steward tagged the table `customers` with the governed tag `pii` and expected all its columns to be masked, but queries show clear values. What explains this?
+A: has_tag in MATCH COLUMNS sees only column-level tags; column tags do not inherit from the table
+B: ABAC policies never apply to tables that already hold data when the policy is created
+C: A policy matches only tags with a value, and a tag without value is always ignored
+D: The steward needs to restart the SQL warehouse so the tag reaches the policy engine
+K: A
+G: ## Tag inheritance
+By default, securables inherit governed tags from their parent catalog or schema; the child can override. Column tags are the exception: they do not inherit from the parent table and must be applied directly to the column.
+## Conditions
+- `WHEN` conditions (table-level) check tags set on the table or inherited from catalog or schema.
+- `MATCH COLUMNS` conditions check tags on the column only; `has_tag()` there does not match a table tag.
+So tag the individual columns that hold sensitive data (for example with `pii`), or use a table tag in `WHEN` to choose which tables the policy applies to.
+W: Column tags only: MATCH COLUMNS looks at column-level tags, so the table-level tag does nothing for column selection and no column is masked until columns are tagged.
+X: B=Existing data: policies are evaluated at query time and cover existing and new rows alike.
+C=Value required: has_tag matches a tag key regardless of value; has_tag_value is the function that tests the value.
+D=Warehouse restart: Unity Catalog evaluates tags and policies at query time, so no restart is involved.
+T: In MATCH COLUMNS, has_tag sees only column-level tags; column tags don't inherit from tables, so tag the columns themselves.
+V: Unity Catalog, ABAC
+
+@ DBX-DEA D7 T7.4 advanced troubleshooting
+S: A governance steward holds `MANAGE` on the catalog `prod` and wants to create an ABAC row filter policy there that uses the existing function `prod.sec.region_filter`. `CREATE POLICY` fails with a permission error. The steward can see the function in Catalog Explorer. Which missing privilege is the likely cause?
+A: USE CONNECTION on the metastore, which is required to attach any policy
+B: CREATE TABLE on the catalog, since the policy is stored as a table-level object
+C: EXECUTE on the function, which a policy creator must hold
+D: SELECT on all tables of the catalog, so that the policy can be tested against live data
+K: C
+G: ## Permissions to create a policy
+Creating a row filter or column mask policy requires:
+- `MANAGE` on the securable where the policy is attached (catalog, schema or table), or ownership of it,
+- `EXECUTE` on the UDF that implements the logic (unless the function is defined inline in the policy),
+- compute that supports it (serverless or a current Databricks Runtime).
+## Separation of duties
+ABAC splits roles: account admins or tag creators define the tag taxonomy, stewards apply tags (needs `ASSIGN` on the tag and `APPLY TAG` on the object), and governance admins write policies. This lets data consumers and table owners stay out of policy changes.
+W: EXECUTE on the function: the steward has MANAGE on the catalog, but creating the policy that calls `region_filter` also needs EXECUTE on that UDF, and being able to see it does not grant that.
+X: A=USE CONNECTION: it concerns external connections in Lakehouse Federation and is not part of creating policies.
+B=CREATE TABLE: a policy is not a table and its creation needs MANAGE or ownership at its scope.
+D=SELECT everywhere: policy creation does not require reading the data of the tables in scope.
+T: Creating an ABAC row filter or column mask policy needs MANAGE (or ownership) on the scope and EXECUTE on the UDF.
+V: Unity Catalog, ABAC
+
+@ DBX-DEA D7 T7.4 applied troubleshooting
+S: A table owner in the `prod.sales` schema sees no row filter or column mask in the table definition, yet analysts report that some values in the table come back masked. The team suspects a policy defined at a higher level. Which command lists the policies that apply to this table, including those inherited from the schema and catalog?
+A: SHOW EFFECTIVE POLICIES ON TABLE prod.sales.orders
+B: SHOW POLICIES ON TABLE prod.sales.orders
+C: SHOW GRANTS ON TABLE prod.sales.orders
+D: DESCRIBE HISTORY prod.sales.orders LIMIT 20
+K: A
+G: ## Seeing ABAC policies
+ABAC policies are dynamic: unlike table-level filters and masks they are not shown in the table definition, because they live on the catalog, schema or table scope and are matched by tags at query time.
+## Commands
+- `SHOW POLICIES ON <securable>` lists policies defined directly on that object.
+- `SHOW EFFECTIVE POLICIES ON <securable>` also includes policies from parent scopes, for example catalog-level policies that affect a table.
+- `DESCRIBE POLICY name ON ...` shows one policy's principals, conditions and function.
+- `abac_policy_definitions` in information schema audits policies at scale (needs `MANAGE`).
+W: SHOW EFFECTIVE POLICIES: it returns policies defined on the table plus those inherited from its schema and catalog, which exposes the hidden catalog-level mask.
+X: B=SHOW POLICIES: valid, but it lists only policies defined directly on the table, so the catalog- and schema-level policy behind the masked values is missing.
+C=SHOW GRANTS: it lists privileges granted on the table; masks and filters are not privileges.
+D=DESCRIBE HISTORY: it lists Delta transactions of the table, not policies from higher scopes.
+T: Use `SHOW EFFECTIVE POLICIES ON TABLE` to see every ABAC policy that affects a table, including inherited ones.
+V: Unity Catalog, ABAC
+
+@ DBX-DEA D7 T7.4 applied tradeoff
+S: A security architect worries that a data engineer who can edit tags on a column could remove the `pii` tag and so unmask the column under an ABAC policy. Which design choice addresses this concern directly?
+A: Restrict who may create and assign the governed tag to stewards, and audit tag changes in the audit log system table
+B: Switch to table-level masks, since they do not use tags and every table owner is fully trusted
+C: Give engineers MANAGE on the catalog so they can restore policies whenever tags are changed
+D: Store the policy function as a Python UDF so that removing the tag fails the function
+K: A
+G: ## Tagging is a security boundary
+In ABAC, the tags decide which policies apply. If a user may change tags on an asset, they can change which policies cover it. Databricks best practices therefore say:
+- Restrict tag creation and modification to authorized data stewards or governance admins, using governed tag permissions.
+- Audit tag assignments and deletions regularly with the audit log system table (`system.access.audit`).
+- Apply a default restrictive tag to new objects until a steward has classified them, with a policy that restricts access to the default tag.
+Permissions: assigning a governed tag value needs `ASSIGN` on the tag and `APPLY TAG` on the object.
+W: Control and audit tagging: limiting `ASSIGN` on the governed tag to stewards prevents engineers from removing it, and the audit log records tag assignment events for review.
+X: B=Table-level masks: they are not tag based, but they pass control to each table owner, which loses central governance, and table owners can change or drop their own masks.
+C=MANAGE for engineers: this widens power over policies and does not stop the tag from being removed first.
+D=Python UDF: the function runs after a policy matched; it cannot detect or restore a removed tag, and Python UDFs are less performant.
+T: Tags are the security boundary of ABAC: limit who can assign governed tags and audit tag changes.
+V: Unity Catalog, ABAC
+
+@ DBX-DEA D7 T7.4 applied comparison
+S: An architect compares two ways to hide the `ssn` column from non-HR users: a table-level mask set by each table owner, and one ABAC column mask policy at catalog level. Which statement about ownership and override behavior is accurate?
+A: With table-level masks the catalog owner controls the policy; with ABAC each table owner can freely drop the policy on their table
+B: ABAC policies are defined by higher-level admins at catalog or schema scope, so table owners cannot override or remove them
+C: Both approaches are controlled only by the table owner, and the only difference is the SQL keyword used
+D: ABAC policies apply to a single table at a time and must be repeated, like table-level masks
+K: B
+G: ## Scope and ownership
+- Table-level masks and filters: bound by the table owner (or a user with `MANAGE`) to a single table or column. Table-specific logic, harder to scale.
+- ABAC policies: attached at catalog, schema or table by an owner or a user with `MANAGE` on that scope, then applied automatically to every table whose tags match. Because they are defined by higher-level admins, table owners cannot override or remove them.
+## Separation of duties
+Different roles can own the tag taxonomy, the tagging, the policy and the data, which suits large organizations. Databricks also notes ABAC evaluation is more efficient than many table-specific UDFs.
+W: Admin-controlled ABAC: the policy sits at a higher scope than the table, so the table owner has no permission to remove it, giving central, consistent enforcement.
+X: A=Reversed roles: table-level masks are the ones managed by the table owner; ABAC is what a higher-level admin controls.
+C=Same owner for both: ABAC policies are managed at catalog, schema or table scope by owners or MANAGE holders of that scope, not by table owners of every table.
+D=Single table: the main point of ABAC is that one policy covers many tables by tag conditions; a table-scoped policy is the exception.
+T: ABAC gives central, tag-driven enforcement that table owners cannot override; table-level masks stay with table owners.
+V: Unity Catalog, ABAC

@@ -1,0 +1,451 @@
+# DBX-DEA batch 02: D2 ingestion patterns, COPY INTO, Auto Loader (T2.1-T2.3)
+# src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/copy-into/index
+# src: https://docs.databricks.com/aws/en/sql/language-manual/delta-copy-into
+# src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/index
+# src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/schema
+# src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/file-detection-modes
+# src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/directory-listing-mode
+# src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/file-notification-mode
+# src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/production
+# src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/options
+# src: https://docs.databricks.com/aws/en/structured-streaming/triggers
+# src: https://docs.databricks.com/aws/en/structured-streaming/checkpoints
+
+@ DBX-DEA D2 T2.1 applied use-case
+S: JSON files land in a Unity Catalog volume every hour. The business needs each new file loaded into a bronze Delta table within a few hours, only new files must be processed, and the team wants no cluster running between loads. Which design fits?
+A: An Auto Loader stream with trigger(availableNow=True) run by a job every hour
+B: An Auto Loader stream with trigger(processingTime="1 second") on an always-on cluster
+C: A job that runs spark.read.json on the full folder and overwrites the table each hour
+D: A job that runs COPY INTO with the force option enabled every hour
+K: A
+G: ## Batch, streaming and incremental
+- **Batch** reads a fixed input and finishes. Re-running it on a growing folder re-reads everything unless you track what was already processed.
+- **Streaming** keeps a query running and processes data as it arrives.
+- **Incremental batch** is the middle path: a scheduled run that processes only what is new since the last run, then stops. In Structured Streaming this is `trigger(availableNow=True)`: it consumes everything available when the run starts and then shuts down.
+Auto Loader (`cloudFiles` source) records which files it has seen in the checkpoint, so each run picks up only new files. Run it on a schedule with `availableNow` and you pay for compute only while it runs.
+## Example
+```
+(spark.readStream.format("cloudFiles")
+  .option("cloudFiles.format", "json")
+  .option("cloudFiles.schemaLocation", chk)
+  .load("/Volumes/main/raw/events")
+  .writeStream.option("checkpointLocation", chk)
+  .trigger(availableNow=True).toTable("main.bronze.events"))
+```
+W: Auto Loader with availableNow: it is incremental (checkpoint tracks processed files), and the compute stops after each run, which matches an hourly arrival pattern with a relaxed freshness need.
+X: B=Always-on short trigger: this gives near real-time freshness the requirement does not ask for, and the cluster runs idle between hourly files, so cost is higher than necessary.
+C=Full read and overwrite: every run re-reads all historic files, so runtime and cost grow with the folder. It is not incremental.
+D=COPY INTO with force: force disables idempotency, so every file is loaded again on each run and the bronze table would fill with duplicates.
+T: Files arrive in batches and freshness can wait: run an incremental load on a schedule (Auto Loader with availableNow) instead of a stream that never stops.
+V: Auto Loader, Lakeflow Jobs
+
+@ DBX-DEA D2 T2.1 applied tradeoff
+S: A pipeline calls trigger(once=True) on a Structured Streaming query that ingests files with Auto Loader. A reviewer asks the team to move to the recommended trigger for scheduled incremental batch processing. Which should they use?
+A: trigger(processingTime="0 seconds")
+B: trigger(continuous="1 second")
+C: trigger(availableNow=True)
+D: trigger(once=True) with a larger maxFilesPerTrigger
+K: C
+G: ## Trigger types
+A trigger decides when a streaming query runs a micro-batch.
+- Default (unspecified) and `processingTime` run continuously; `processingTime='10 seconds'` checks for new data on that interval.
+- `availableNow=True` processes all data available when the query starts, possibly in several micro-batches, then stops. Sizing options such as `maxBytesPerTrigger` still apply, so large backlogs are split into manageable batches.
+- `once=True` ran a single micro-batch over everything available. It is deprecated; Databricks recommends `availableNow` for all incremental batch workloads. On serverless notebooks and jobs only these two run-to-completion triggers are supported.
+W: availableNow is the replacement for once. It stops after catching up, as scheduled batch needs, and it honors rate limits such as maxBytesPerTrigger, so a big backlog does not become one giant micro-batch.
+X: A=processingTime with zero interval: this is the continuous default behavior. The query never stops, so it is not a scheduled run-to-completion pattern.
+B=Continuous trigger: it is an experimental low-latency mode, not a replacement for a batch-style run, and it keeps running until stopped.
+D=once with larger limit: once is the deprecated trigger that Databricks tells you to replace, so keeping it with a bigger batch limit is not the recommended trigger.
+T: Scheduled incremental batch on a streaming source: use availableNow, not the deprecated once.
+V: Structured Streaming
+
+@ DBX-DEA D2 T2.1 applied use-case
+S: An operations dashboard must show events within about a minute of each file landing in cloud storage. Files arrive continuously all day. Which ingestion setup matches this requirement?
+A: A daily job that runs COPY INTO against the landing folder, loading each day's files in one pass
+B: An hourly job that overwrites the table with spark.read on all files in the landing folder
+C: An Auto Loader stream with trigger(availableNow=True) scheduled once per day by a job
+D: A continuous Auto Loader stream with a processingTime trigger near 30 seconds
+K: D
+G: ## Latency decides streaming versus scheduled
+The freshness requirement picks the pattern. If data may be hours old, scheduled incremental batch is cheapest. If the target is minutes or seconds, the query must run continuously, with a trigger interval that balances latency and how often the source is checked.
+`processingTime` sets that interval. A longer interval reduces the number of checks and small files; a shorter one reduces latency. Continuous triggers on Auto Loader in directory listing mode list the whole directory each interval, so the file detection mode matters for cost (file notification mode with file events is recommended for such workloads).
+W: A continuous Auto Loader stream with a short processingTime trigger discovers and loads new files every interval, which meets a latency target of about a minute.
+X: A=Daily COPY INTO: data would be up to a day old, far from the one-minute target.
+B=Hourly overwrite: it is not incremental and the freshness is up to an hour at best, so it fails both cost and latency goals.
+C=availableNow once per day: it is incremental, but it runs only once a day, so the dashboard would be hours behind.
+T: Minutes of latency on continuously arriving files: run a continuous Auto Loader stream with a short processingTime trigger.
+V: Auto Loader
+
+@ DBX-DEA D2 T2.1 applied comparison
+S: A silver job must process only rows newly appended to an append-only Delta table named main.bronze.orders each run, without re-reading old rows. Which code does that?
+A: spark.read.table("main.bronze.orders").write.mode("overwrite").saveAsTable("main.silver.orders")
+B: spark.readStream.table("main.bronze.orders") with a checkpoint and availableNow
+C: spark.read.option("versionAsOf", 0).table("main.bronze.orders") run on every execution
+D: COPY INTO main.silver.orders FROM main.bronze.orders with default options
+K: B
+G: ## Delta tables as streaming sources
+A Delta table can be read as a stream with `spark.readStream.table(...)`. Structured Streaming remembers in the checkpoint which table versions it has already processed, so each run reads only rows added since the last one. Combined with `availableNow` this gives incremental batch between tables, with the same exactly-once guarantee as for files.
+- `spark.read` is a batch read: it always returns the table as it is now.
+- `COPY INTO` loads from files in a storage location, not from another table.
+- Time travel (`versionAsOf`) reads one fixed historic version; it does not track progress.
+W: Streaming read of the table with a checkpoint: the checkpoint stores progress, so only new appended rows are read on each availableNow run.
+X: A=Batch read and overwrite: this reads the entire bronze table on every run and rewrites silver, which is the opposite of incremental.
+C=versionAsOf 0: time travel pins the read to the first version, so every run returns the same old snapshot and never advances.
+D=COPY INTO from a table: COPY INTO reads files from a path in cloud storage or a volume; its source is not a Delta table.
+T: Incremental processing from a Delta table: readStream plus a checkpoint, optionally with availableNow.
+V: Delta Lake, Structured Streaming
+
+@ DBX-DEA D2 T2.1 applied definition
+S: A SQL-only team currently loads files with scheduled COPY INTO statements and wants a more scalable and robust file ingestion approach that they can still write in SQL. What does Databricks recommend?
+A: Switching to INSERT OVERWRITE from read_files each night
+B: Creating an external table over the folder and querying it directly
+C: Loading files with spark.read in a notebook cell
+D: Streaming tables that ingest the files incrementally
+K: D
+G: ## Where COPY INTO fits
+`COPY INTO` is a simple, retriable, idempotent SQL command: files that were already loaded are skipped. It works well for modest file counts, but Databricks notes that for a more scalable and robust file ingestion experience, SQL users should use **streaming tables**. A streaming table is defined in SQL, processes new files incrementally (using Auto Loader underneath) and keeps track of progress for you.
+W: Streaming tables are the documented recommendation for SQL users who outgrow COPY INTO: they stay SQL-only, ingest incrementally and manage the tracking state.
+X: A=INSERT OVERWRITE nightly: it rewrites the full table from all files each night, so it is neither incremental nor more scalable.
+B=External table over the folder: it exposes files for queries but does not load them into a managed Delta table or track which files were ingested.
+C=spark.read in a notebook: this is Python/Scala code, not SQL, and it is a plain batch read with no file tracking.
+T: SQL ingestion beyond COPY INTO scale: streaming tables.
+V: Streaming tables, COPY INTO
+
+@ DBX-DEA D2 T2.1 advanced troubleshooting
+S: Update files for customers land in cloud storage and an Auto Loader stream merges each file into a Delta table. After a backlog, an older customer record overwrote a newer one in the target. What explains this and what is the right fix?
+A: Auto Loader sorts files by name, so older files must be renamed to sort before newer ones
+B: Order is not guaranteed, so compare each record's update timestamp to the target row's
+C: The checkpoint was corrupted, so delete it and reprocess every file from scratch
+D: File notification mode reorders events; switch back to directory listing mode, which is ordered
+K: B
+G: ## Auto Loader and ordering
+Auto Loader provides exactly-once processing of files, but it does **not** guarantee the order in which files are discovered or processed, in either file detection mode. A late-discovered older file can therefore be applied after a newer one.
+Design for this in the pipeline:
+- When upserting with `MERGE`, compare the incoming record's update timestamp with the target row's and only update when the incoming one is newer.
+- Prefer soft deletes (a `deleted` flag and timestamp) so a late delete does not conflict with earlier records.
+W: Order is not guaranteed, so the merge logic must be order-tolerant: apply an update only when its timestamp is newer than the stored one.
+X: A=Renaming files: Auto Loader does not process files in name order, so renaming does not enforce ordering and is operationally fragile.
+C=Deleting the checkpoint: a fresh checkpoint reprocesses every file again, which makes the ordering problem and duplicates worse.
+D=Directory listing is ordered: neither file detection mode guarantees order, so switching modes does not fix the stale overwrite.
+T: Auto Loader is exactly-once but unordered: make merges conditional on a timestamp.
+V: Auto Loader, Delta Lake
+
+@ DBX-DEA D2 T2.1 applied tradeoff
+S: A landing folder in a Unity Catalog volume has accumulated millions of processed files and Auto Loader (directory listing) discovery is slowing down. Compliance requires keeping the files, and file events cannot be enabled yet. Which Auto Loader setting helps?
+A: cloudFiles.cleanSource = MOVE with an archive path in the same volume
+B: cloudFiles.cleanSource = DELETE applied to every processed file
+C: cloudFiles.includeExistingFiles = false on the already running stream
+D: cloudFiles.maxFilesPerTrigger raised to a very large value per batch
+K: A
+G: ## Source data retention
+In directory listing mode, every run lists the source folder, so discovery slows down as processed files pile up. Databricks recommends file notification with file events to avoid this. When that is not possible, `cloudFiles.cleanSource` can archive or delete files after Auto Loader has processed them, so fewer files must be listed.
+- `MOVE` (with `cloudFiles.cleanSource.moveDestination`) archives files and keeps them for audit; the destination must be in the same external location, volume or mount.
+- `DELETE` removes them; use bucket versioning as a safety net.
+- Optionally `cloudFiles.cleanSource.retentionDuration` delays the cleanup.
+Setting this option moves or deletes files in the source, so confirm no other consumer needs them there.
+W: MOVE archives processed files out of the listed folder and keeps them for compliance, which shortens discovery without losing data.
+X: B=DELETE: removing the files would satisfy discovery speed but violates the requirement to keep them for compliance.
+C=includeExistingFiles false: it is evaluated only the first time a stream starts, so changing it on a running stream has no effect, and it never reduces listing.
+D=Higher maxFilesPerTrigger: it only controls batch size; discovery still lists the same large directory.
+T: Large processed backlog in directory listing mode: archive with cleanSource MOVE (or move to file events).
+V: Auto Loader
+
+@ DBX-DEA D2 T2.1 applied comparison
+S: Data engineers argue about reading a cloud folder incrementally with spark.readStream.format("json").load(path) versus Auto Loader (format "cloudFiles"). Which is a real advantage of Auto Loader?
+A: It guarantees files are processed in the exact order they were written
+B: It removes the need for any checkpoint location in production jobs
+C: It adds schema inference and evolution with a rescued data column
+D: It can only read files that arrived after the first run starts
+K: C
+G: ## Why Auto Loader instead of the plain file source
+Both are Structured Streaming sources. Auto Loader adds:
+- **Scalability**: discovery cost scales with the number of files ingested, not directories, and it handles billions of files.
+- **Schema inference and evolution**: detects schema drift, can add new columns, and rescues unexpected data into a rescued data column instead of dropping it.
+- **Cheaper discovery**: native cloud APIs and, in file notification mode, no directory listing at all.
+It still needs a checkpoint to track progress (outside Lakeflow pipelines, which manage it), and it does not guarantee order.
+W: Schema inference, evolution and the rescued data column are built-in Auto Loader features that the plain file source lacks.
+X: A=Ordered processing: Auto Loader explicitly makes no guarantee about the order files are processed.
+B=No checkpoint: the checkpoint is where Auto Loader stores discovered-file state (a RocksDB store); only Lakeflow pipelines set it for you.
+D=Only new files: by default includeExistingFiles is true, so files already in the folder are processed on the first start.
+T: Auto Loader = scalable file discovery plus schema inference/evolution and rescued data.
+V: Auto Loader
+
+@ DBX-DEA D2 T2.2 applied definition
+S: A scheduled notebook runs this statement and times out after loading about half of the files. The team reruns it. What happens?
+```
+COPY INTO main.bronze.sales
+FROM 's3://acme-raw/sales/'
+FILEFORMAT = CSV
+```
+A: The rerun fails because the target table already contains rows
+B: All files are loaded again and duplicate the rows from the first run
+C: Files already loaded are skipped and the remaining files are loaded
+D: The rerun truncates the table and loads every file again
+K: C
+G: ## COPY INTO is retriable and idempotent
+`COPY INTO` records the files it has loaded for the target table. On any later run it skips files already loaded and loads only the rest, by default (the `force` copy option is `false`). That makes it safe to schedule repeatedly and to retry after a failure, with exactly-once processing per file.
+This is file-level tracking, not row-level: it does not detect that two different files contain the same rows.
+W: Because COPY INTO skips already-loaded files, the rerun completes the remaining files and creates no duplicates.
+X: A=Fails on existing rows: COPY INTO appends into existing tables; a non-empty target is the normal case.
+B=Reloads all files: that happens only when force is set to true; by default loaded files are skipped.
+D=Truncate and reload: COPY INTO never truncates the target; it only adds rows from new files.
+T: COPY INTO is idempotent per file: rerun after failure is safe.
+V: COPY INTO
+
+@ DBX-DEA D2 T2.2 applied troubleshooting
+S: The source system rewrote one already-loaded CSV file in place with corrected values, keeping the same name. The next COPY INTO run loaded nothing for that file. The team must reload just that file. What should they do?
+A: Run the same statement again, since modified files are detected automatically
+B: Add force = true to FORMAT_OPTIONS for the corrected file
+C: Add VALIDATE ALL so the corrected file is checked and reloaded
+D: FILES = ('corrected.csv') plus COPY_OPTIONS ('force' = 'true')
+K: D
+G: ## Skipped even if modified
+COPY INTO skips a file that was already loaded **even if the file has been modified since**. To load it again, disable idempotency with the copy option `force = true`, which belongs in `COPY_OPTIONS` (not `FORMAT_OPTIONS`, which hold file-reader settings).
+Force applies to all files the statement selects, so restrict the selection with `FILES = (...)` or `PATTERN`; otherwise every file in the folder is loaded again. Also delete or correct the previously loaded rows, or the target will contain both versions.
+W: force in COPY_OPTIONS reloads the file and FILES limits the reload to the corrected one. Delete or correct the old rows first, otherwise the table keeps both the old and the corrected versions.
+X: A=Rerun unchanged: loaded files are skipped even if modified, so nothing would be loaded.
+B=force in FORMAT_OPTIONS: FORMAT_OPTIONS are passed to the file reader; the force switch is a copy option.
+C=VALIDATE ALL: validation checks the data without writing it to the table, so it loads nothing.
+T: Reload an already-loaded file: COPY_OPTIONS force=true, scoped with FILES or PATTERN.
+V: COPY INTO
+
+@ DBX-DEA D2 T2.2 applied use-case
+S: Before loading a new vendor's CSV files into a production table, an engineer wants to check that the files parse and satisfy the table's constraints without writing any rows. Which change to the COPY INTO statement does this?
+A: Add COPY_OPTIONS ('force' = 'false')
+B: Add VALIDATE ALL
+C: Add FORMAT_OPTIONS ('mode' = 'DROPMALFORMED')
+D: Add PATTERN = '*.csv'
+K: B
+G: ## Dry-running a load
+`VALIDATE` makes COPY INTO check the data that would be loaded but not write it. Checks include whether the data can be parsed, whether the schema matches and whether nullability and check constraints hold. The default is to validate all data; `VALIDATE 15 ROWS` checks only the first 15 rows and returns a preview of up to 50 rows. After the dry run succeeds, remove `VALIDATE` and run the load.
+W: VALIDATE ALL validates parsing and constraints for all data and does not write to the table.
+X: A=force false: this is already the default, and the statement would still load the rows.
+C=DROPMALFORMED: it silently drops bad records and still writes the rest, so it is neither a check nor a dry run.
+D=PATTERN: it selects which files are read; the load still writes rows.
+T: Dry run a COPY INTO: VALIDATE (optionally N ROWS).
+V: COPY INTO
+
+@ DBX-DEA D2 T2.2 applied use-case
+S: A vendor adds a new column channel to its JSON files. The target Delta table lacks it, and the team wants COPY INTO to add the column automatically on the next run. What should they set?
+A: COPY_OPTIONS ('force' = 'true') so that the changed files are loaded again
+B: mergeSchema = 'true' in both COPY_OPTIONS and FORMAT_OPTIONS
+C: FILEFORMAT = DELTA instead of JSON, to let the table absorb the new column
+D: PATTERN = '*channel*' to select only the files that contain the column
+K: B
+G: ## Schema evolution in COPY INTO
+By default the target schema is fixed and the load fails or ignores columns that do not fit. Setting the copy option `mergeSchema = 'true'` lets the target schema evolve according to the incoming data. For file formats where the schema comes from the files, also set `mergeSchema = 'true'` in `FORMAT_OPTIONS` so that the schemas of the files read are merged. Databricks documents both in the schemaless table example.
+W: mergeSchema in COPY_OPTIONS evolves the table, and in FORMAT_OPTIONS merges the schemas of the source files, so the new column is added.
+X: A=force true: it reloads files already loaded and creates duplicates; it does not change the schema.
+C=FILEFORMAT DELTA: the source files are JSON; the format must describe the source files, and changing it would fail.
+D=PATTERN on the name: it only filters file names; it does not affect schema.
+T: New columns in COPY INTO: mergeSchema in COPY_OPTIONS (and FORMAT_OPTIONS).
+V: COPY INTO
+
+@ DBX-DEA D2 T2.2 applied comparison
+S: A landing folder holds tens of thousands of files, among them sales_2026-01.csv, sales_2026-02.csv and so on, mixed with returns_*.csv files. Only the sales files should be loaded. Which clause fits?
+A: FILES = ('sales_*.csv')
+B: FILES = (...) listing every sales file and PATTERN = 'sales_*.csv' together
+C: PATTERN = 'sales_*.csv'
+D: FORMAT_OPTIONS ('pathGlobFilter' = 'returns_*')
+K: C
+G: ## Choosing files in COPY INTO
+- `FILES = (name, ...)` takes an explicit list, with a limit of 1000 files. Names are literal, not wildcards.
+- `PATTERN = 'glob'` selects files from the source directory by glob expression.
+- `FILES` and `PATTERN` cannot be used in the same statement.
+With thousands of matching files, a glob pattern is the practical choice.
+W: A glob in PATTERN selects every sales file from the directory with one clause, regardless of how many exist.
+X: A=FILES with a glob: FILES expects literal file names (and has a 1000-file limit), so a wildcard does not select the sales files.
+B=Both clauses: FILES and PATTERN cannot be specified together, and a list would exceed the 1000-file limit anyway.
+D=pathGlobFilter on returns: it is a reader option and matching returns files would select the wrong files.
+T: Many files by name rule: PATTERN. A short explicit list: FILES. Never both.
+V: COPY INTO
+
+@ DBX-DEA D2 T2.2 applied troubleshooting
+S: An engineer creates an empty placeholder table with CREATE TABLE IF NOT EXISTS main.bronze.bookings; (no columns) and runs COPY INTO with mergeSchema enabled to infer the schema. Before the first load completes, a colleague runs INSERT INTO main.bronze.bookings. What happens?
+A: The insert succeeds, and a background job reconciles the schema afterwards
+B: The insert succeeds and defines the schema from the first inserted row
+C: It fails: a schemaless table accepts writes only from COPY INTO at first
+D: The insert waits until COPY INTO commits, then both statements succeed
+K: C
+G: ## Schemaless target tables
+An empty placeholder Delta table with no columns can be created and COPY INTO with `mergeSchema = 'true'` in `COPY_OPTIONS` infers the schema on the first load. Until then the empty table is not usable outside COPY INTO: `INSERT INTO` and `MERGE INTO` are not supported to write into schemaless Delta tables. After COPY INTO has loaded data, the table is a normal queryable table.
+The statement is still idempotent, so it can be scheduled repeatedly.
+W: A table with no schema can be filled only by COPY INTO until it has data, so a direct insert is rejected.
+X: A=Background reconcile: no background job exists; Auto Loader is a separate streaming source and does not touch this table.
+B=Schema from insert: INSERT INTO does not infer a schema for an empty placeholder table.
+D=Waits and succeeds: there is no such queuing; the unsupported write fails.
+T: Schemaless placeholder tables are written only by COPY INTO first.
+V: COPY INTO
+
+@ DBX-DEA D2 T2.2 applied troubleshooting
+S: A COPY INTO statement reading from s3://acme-raw/sales/ fails with an access error for a data engineer. The path is not registered in Unity Catalog. What is the Unity Catalog-based fix?
+A: Register the path as an external location and grant READ FILES
+B: Grant the engineer SELECT on the target table and on its schema
+C: Grant the engineer MODIFY on the source bucket's catalog and schema
+D: Set the copy option force to true so permission checks are bypassed
+K: A
+G: ## Reading files with COPY INTO
+COPY INTO needs permission to read the source files. With Unity Catalog, you either:
+- Define the source path as an **external location** and have `READ FILES` on it (no inline credentials needed), or
+- Use a named storage credential with `READ FILES`, or provide inline temporary credentials.
+Permissions on the target table (such as `MODIFY`) control writing, but they do not grant access to the source path.
+W: An external location plus READ FILES lets Unity Catalog authorize the read of the source path.
+X: B=SELECT on the target: it permits reading the table, not the source files, and not writing rows.
+C=MODIFY on a catalog: MODIFY applies to tables; it does not authorize reading storage paths.
+D=force true: it only controls idempotency and does nothing about authorization.
+T: COPY INTO source access: external location (or credential) with READ FILES.
+V: Unity Catalog, COPY INTO
+
+@ DBX-DEA D2 T2.2 applied tradeoff
+S: To load faster, a team starts 40 concurrent COPY INTO commands against the same table, one per file, from a single producer. Which guidance applies?
+A: Concurrency is unsupported, so the extra statements fail with a syntax error
+B: Concurrent runs on the very same files are fine because each file loads once
+C: Use one COPY INTO per file for better parallelism, since each statement releases its lock
+D: One COPY INTO over many files is usually faster; concurrency suits uncoordinated producers
+K: D
+G: ## Concurrent COPY INTO
+COPY INTO supports concurrent invocations on the same table as long as they target **distinct sets of input files**; otherwise you can hit transaction conflicts. It should not be used concurrently to improve performance: one command over multiple files typically performs better than many single-file commands. Valid uses are multiple data producers that cannot coordinate a single call, or a very large directory ingested sub-directory by sub-directory. For directories with a very large number of files, Databricks recommends Auto Loader.
+W: A single command over many files is faster, and concurrency is documented only for cases that cannot be coordinated.
+X: A=Unsupported: concurrent calls are supported on distinct files, they are not a syntax error.
+B=Same files concurrently: overlapping file sets can cause transaction conflicts; each file should be in one invocation.
+C=Per-file commands: this is the pattern the docs advise against because it usually performs worse.
+T: Do not parallelize COPY INTO for speed; give it many files in one statement.
+V: COPY INTO
+
+@ DBX-DEA D2 T2.3 applied comparison
+S: A stream ingests millions of files per hour from S3 with a continuous trigger. LIST calls dominate the cost, and the external location is managed in Unity Catalog. What change does Databricks recommend?
+A: Switch to file notification mode with file events on the external location
+B: Keep directory listing and lengthen the trigger interval to one second
+C: Replace Auto Loader with spark.read.json each run
+D: Disable the checkpoint so Auto Loader stops tracking files
+K: A
+G: ## File detection modes
+Auto Loader discovers new files in one of two ways:
+- **Directory listing** (default): lists the input directory. It starts quickly with no setup beyond storage access, but continuous triggers re-list the whole directory every interval, which drives LIST cost.
+- **File notification**: subscribes to file events and reads them from a queue instead of listing. Recommended form is with **file events** enabled on the external location: one queue per location serves all streams, no extra credentials per stream, and incremental discovery. It is more performant and scalable and is set with `cloudFiles.useManagedFileEvents`.
+Both modes keep exactly-once processing, and you can switch modes across restarts.
+W: File notification mode with file events avoids listing altogether, so LIST cost drops and it scales to millions of files per hour.
+X: B=One-second trigger: that makes listing more frequent, not less; the longer trigger would help more but the fix is not to list.
+C=spark.read.json: a plain batch read lists and re-reads all files each run and loses incremental tracking.
+D=Disabling the checkpoint: Auto Loader needs it for exactly-once state, and it does not change how files are discovered.
+T: High-volume, continuous Auto Loader: file notification with file events, not directory listing.
+V: Auto Loader, Unity Catalog
+
+@ DBX-DEA D2 T2.3 applied troubleshooting
+S: An Auto Loader stream reads JSON files with no schema. The amount column holds numbers, but the target table shows it as STRING. How do they get typed columns?
+A: Set cloudFiles.schemaEvolutionMode to rescue
+B: Set cloudFiles.inferColumnTypes to true
+C: Set cloudFiles.includeExistingFiles to false
+D: Delete the schemaLocation directory before every run
+K: B
+G: ## Default inferred types
+For formats that do not encode types (JSON, CSV, XML), Auto Loader infers **all columns as strings**, including nested JSON fields. This avoids evolution problems caused by type mismatches. Typed formats (Parquet, Avro) keep their encoded types.
+To get Spark-style inference from sampled data, set `cloudFiles.inferColumnTypes` to `true`. To fix specific columns, use schema hints, for example `.option("cloudFiles.schemaHints", "amount DOUBLE, ts TIMESTAMP")`.
+W: inferColumnTypes makes Auto Loader infer exact column types from sampled data instead of strings, for JSON and CSV.
+X: A=rescue mode: it controls what happens to new columns (they are stored in the rescued data column); it does not change type inference.
+C=includeExistingFiles false: it only decides whether files existing at the first start are processed.
+D=Deleting schemaLocation: it discards the stored schema, and the next run would infer strings again.
+T: JSON and CSV come in as strings: use inferColumnTypes or schemaHints.
+V: Auto Loader
+
+@ DBX-DEA D2 T2.3 applied definition
+S: An engineer writes spark.readStream.format("cloudFiles").option("cloudFiles.format", "json").load(path) with no schema and no further options, and the stream fails at start. Which option enables schema inference and evolution?
+A: mergeSchema set to true as a reader option on the stream
+B: cloudFiles.includeExistingFiles set to true on the reader
+C: checkpointLocation configured on the readStream reader side
+D: cloudFiles.schemaLocation pointing to a directory
+K: D
+G: ## What schemaLocation does
+Setting `cloudFiles.schemaLocation` turns on schema inference and evolution. Auto Loader samples the first 50 GB or 1000 files (whichever limit is crossed first), infers the schema and stores it, with every change over time, in a `_schemas` directory in that location. The directory can be the same as the `checkpointLocation`. In Lakeflow pipelines Databricks manages it for you.
+Without a location there is nowhere to keep the inferred schema, so inference needs it. `checkpointLocation` is a writer option that tracks stream progress; it is not the schema store.
+W: schemaLocation is the option that enables schema inference and evolution and stores the inferred schema.
+X: A=mergeSchema on the reader: it is a Delta write/COPY INTO option, not how Auto Loader stores or evolves a schema.
+B=includeExistingFiles: it defaults to true and only decides whether old files are read at first start.
+C=checkpointLocation on the reader: it is set on the writeStream and tracks progress, not the schema.
+T: Auto Loader inference/evolution needs cloudFiles.schemaLocation.
+V: Auto Loader
+
+@ DBX-DEA D2 T2.3 applied troubleshooting
+S: A running Auto Loader stream (default schema evolution mode) fails with UnknownFieldException the first time a new column appears in the JSON files. What is the expected behavior and the recommended handling?
+A: A bug: the schema location is corrupted and must be deleted before restarting
+B: The new column is added to the schema and the stream stops; restarting resumes with it
+C: The new column is dropped permanently, so no restart is needed afterwards
+D: The stream changes all existing column types to string and keeps running
+K: B
+G: ## addNewColumns (the default)
+When no schema is provided, `cloudFiles.schemaEvolutionMode` defaults to `addNewColumns`. On seeing a new column Auto Loader infers the schema of the latest micro-batch, updates the schema location by merging the new columns at the end of the schema (existing column types stay unchanged), and then the stream **stops** with `UnknownFieldException`. Restarting resumes with the updated schema. Databricks recommends configuring Auto Loader streams in Lakeflow Jobs so that they restart automatically after such schema changes.
+W: Failing once is the designed behavior: the new schema is already stored, and a restart (automatic via a job with retries) continues with the new column.
+X: A=Corrupted location: the failure is the normal evolution signal; deleting the location would lose schema history.
+C=Dropped column: in this mode the column is added to the schema, not dropped.
+D=All strings: existing column types are unchanged; nothing is re-typed.
+T: addNewColumns = stop once, schema updated, restart continues.
+V: Auto Loader, Lakeflow Jobs
+
+@ DBX-DEA D2 T2.3 applied use-case
+S: Some JSON records have "age": "N/A" while the schema hint declares age INT. The pipeline must not fail and no data may be lost. What happens to the "N/A" value with the rescued data column enabled?
+A: The whole record is dropped silently and counted as a bad record
+B: The stream fails with a parse error on the first mismatching record
+C: It is kept as JSON in _rescued_data along with the source file path
+D: The value is converted to 0 so the column stays numeric
+K: C
+G: ## The rescued data column
+Auto Loader adds `_rescued_data` to an inferred schema. It receives data that could not be parsed into the schema because a column is missing from the schema, has a type mismatch, or differs in case. The column contains a JSON blob with the rescued values and the source file path. With rescuedDataColumn set, a type mismatch does not drop the record in `DROPMALFORMED` mode or fail it in `FAILFAST` mode; only truly corrupt records (malformed JSON or CSV) do.
+Downstream you can inspect or reprocess rescued values instead of losing them.
+W: The mismatching value is kept in _rescued_data (with file path), and the stream keeps running.
+X: A=Dropped record: a type mismatch does not discard the record. The rescued data column exists precisely so that unexpected values are preserved instead of being lost.
+B=Failure: type mismatches do not throw when the rescued column is present, even with FAILFAST.
+D=Defaults to 0: Auto Loader does not substitute values; it preserves the original text in the rescued blob.
+T: Mismatched or unexpected values go to _rescued_data, not into the void.
+V: Auto Loader
+
+@ DBX-DEA D2 T2.3 applied tradeoff
+S: A compliance team insists that the bronze table schema never changes automatically and that the stream never fails when producers add columns, but values for new columns must remain available for later review. Which schema evolution mode fits?
+A: addNewColumns, the default mode when no schema is given
+B: failOnNewColumns, which fails until the schema is updated
+C: none, with no rescued data column configured
+D: rescue, writing new columns to the rescued data column
+K: D
+G: ## Schema evolution modes in Auto Loader
+`cloudFiles.schemaEvolutionMode` values:
+- `addNewColumns` (default without a provided schema): updates the schema, fails once, then continues after restart.
+- `rescue`: never evolves the schema and never fails because of schema changes; new columns are written to the rescued data column.
+- `failOnNewColumns`: fails and keeps failing until you update the schema or remove the file.
+- `none`: does not evolve, ignores new columns and does not rescue unless `rescuedDataColumn` is set; does not fail.
+W: rescue keeps the schema fixed, never stops the stream and keeps the new columns' data in _rescued_data.
+X: A=addNewColumns: it changes the schema and fails the stream once, both of which are ruled out.
+B=failOnNewColumns: it fails the stream until someone intervenes.
+C=none without rescue: the stream keeps running and the schema stays fixed, but the new columns' values are ignored and lost.
+T: Fixed schema, no failures, keep new data: rescue.
+V: Auto Loader
+
+@ DBX-DEA D2 T2.3 applied troubleshooting
+S: After a refactor an engineer points checkpointLocation of a running Auto Loader job to a new directory. The next run loads every historic file again and duplicates rows in the target. Why?
+A: The new directory forced file notification mode, which re-sends every event
+B: Auto Loader tracks files in the checkpoint, so a new location starts fresh
+C: Auto Loader stores all of its progress only in the target Delta table
+D: The schema location was moved, and a moved schema always reprocesses files
+K: B
+G: ## What the checkpoint stores
+The checkpoint holds offsets, commits, state and the query ID. For Auto Loader, metadata for discovered files is persisted in a RocksDB key-value store in the checkpoint location; this is what gives exactly-once file processing and lets a failed stream resume where it stopped. If you delete the checkpoint files or point to a new location, the next run begins fresh. `cloudFiles.includeExistingFiles` (default true) is evaluated when a stream starts for the first time, so the new run processes all existing files again.
+Treat the checkpoint as part of the table's state: keep it stable, and only create a new one on purpose (for example, a full backfill with target truncation).
+W: A new checkpoint has no record of processed files, so everything existing is picked up again.
+X: A=Notification mode: the detection mode is independent of the checkpoint path and does not replay events.
+C=Progress in the target table: progress is in the checkpoint, not in the table.
+D=Moving the schema location: it affects the stored schema, not which files count as processed.
+T: New or deleted checkpoint = full reprocessing; keep it stable.
+V: Auto Loader, Structured Streaming
+
+@ DBX-DEA D2 T2.3 applied use-case
+S: Two Auto Loader streams ingest from /landing/orders and /landing/returns into the same bronze table. A developer wants to reuse one checkpointLocation for both to save setup. What is the correct approach?
+A: Share the checkpoint, because both write to the same table
+B: Share the checkpoint but use different schemaLocation values
+C: Use a checkpoint location for each stream, since each query needs its own
+D: Skip checkpoints for the second stream because the first one tracks the table
+K: C
+G: ## One checkpoint per query
+Each streaming query must have its own checkpoint location; multiple queries must never share one. Even with several source folders feeding the same target, each Auto Loader ingestion workload needs a separate checkpoint, because it holds that query's offsets, commits and discovered-file state. Sharing one would mix up progress and can lose or duplicate data.
+W: A separate checkpoint per stream keeps each query's offsets, commits and discovered-file state independent, so the two streams cannot overwrite each other's progress.
+X: A=Sharing for the same table: the target does not matter; the checkpoint belongs to the query.
+B=Different schema locations: the schema is separate from the progress state, so the shared checkpoint still conflicts.
+D=No checkpoint for the second stream: without one the stream has no fault tolerance and re-reads files.
+T: One checkpoint per streaming query, always.
+V: Structured Streaming, Auto Loader

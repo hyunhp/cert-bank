@@ -33,7 +33,7 @@ with sync_playwright() as p:
     pg.route("**/fonts.googleapis.com/**", lambda r: r.abort())
     pg.goto(BASE + "#exam=SAA-C03"); pg.wait_for_selector(".qcard")
     tabs = pg.eval_on_selector_all(".vtab", "els => els.map(e => [e.dataset.vendor, e.getAttribute('aria-selected'), e.querySelector('.cnt').textContent])")
-    check("vendor tabs", [t[0] for t in tabs] == ["aws", "palantir", "azure", "gcp"], tabs)
+    check("vendor tabs", [t[0] for t in tabs] == ["aws", "palantir", "azure", "gcp", "databricks"], tabs)
     check("aws selected for AWS exam link", tabs[0][1] == "true" and tabs[1][1] == "false", tabs)
     # index.html keeps its own exam list (EXAMS, EXAM_LEVEL): it must match exam-specs.json
     ex = pg.evaluate("EXAMS.map(([c, n, v]) => [c, v, EXAM_LEVEL[c] || null])")
@@ -41,7 +41,7 @@ with sync_playwright() as p:
     check("EXAMS lists every exam in exam-specs.json", sorted(c for c, _, _ in ex) == sorted(spec_exams), sorted(set(spec_exams) ^ {c for c, _, _ in ex}))
     check("EXAMS vendor and EXAM_LEVEL match exam-specs.json", all(spec_exams.get(c, {}).get("vendor") == v and spec_exams.get(c, {}).get("level") == l for c, v, l in ex),
           [(c, v, l) for c, v, l in ex if spec_exams.get(c, {}).get("vendor") != v or spec_exams.get(c, {}).get("level") != l])
-    check("tab totals", [int(t[2]) for t in tabs] == [total(v) for v in ("aws", "palantir", "azure", "gcp")], tabs)
+    check("tab totals", [int(t[2]) for t in tabs] == [total(v) for v in ("aws", "palantir", "azure", "gcp", "databricks")], tabs)
     codes = pg.eval_on_selector_all("#chipRow .chip[data-code]", "els => els.map(e => e.dataset.code)")
     check("aws chips only", "SAA-C03" in codes and not any(c.startswith("PLTR-") for c in codes), codes)
     check("bookmarks is an icon, not an exam chip", "__BOOKMARKS__" not in codes and pg.is_visible("#bmIcon"), codes)

@@ -1,0 +1,558 @@
+# DBX-DEA batch 04: D3 Transformation and Modeling (T3.1 bronze to silver cleaning, T3.2 joins and unions, T3.3 columns and rows), single answer, detailed explanations
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/try_cast
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/cast
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/coalesce
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/nullif
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/try_to_timestamp
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/split
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/lteqgtsign
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/isdistinct
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/posexplode
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/explode
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-join
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-setops
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-hints
+# src: https://docs.databricks.com/aws/en/transform/join
+# src: https://docs.databricks.com/aws/en/pyspark/basics
+# src: https://docs.databricks.com/aws/en/delta/delta-column-mapping
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-alter-table-manage-column
+
+@ DBX-DEA D3 T3.1 applied troubleshooting
+S: A nightly job reads a bronze table where every column was ingested as STRING and writes a typed silver table with `CAST(quantity AS INT)`. The job now fails with a CAST_INVALID_INPUT error because a few rows contain values such as `N/A` and `12x`. The team wants the job to keep running and wants the unparseable values to become NULL so they can be reviewed. Which change fits?
+A: Replace `CAST(quantity AS INT)` with `try_cast(quantity AS INT)`, which returns NULL for values that cannot be converted
+B: Replace `CAST(quantity AS INT)` with `CAST(quantity AS DOUBLE)`, which accepts any text and returns 0.0 for values that cannot be converted
+C: Add `nullif(quantity, 'N/A')` around the existing cast, which removes every invalid value the source can ever contain
+D: Wrap the existing cast in `coalesce(CAST(quantity AS INT), 0)`, which catches the error and substitutes zero for bad rows
+K: A
+G: ## Why a cast fails
+`CAST` converts a value from one type to another. When the text cannot be parsed (for example `N/A` to `INT`), a strict cast raises an error such as `CAST_INVALID_INPUT` and the whole query fails. That is what you want when bad data must stop a pipeline, but not when a bronze layer deliberately keeps raw, messy values.
+## Tolerant casting
+`try_cast(expr AS type)` behaves like `cast`, except that a value which is malformed or does not fit the target type returns `NULL` instead of an error. In a bronze-to-silver step this is the usual pattern: convert what you can, keep NULL for what you cannot, then compare with the source column to find the rejected rows.
+```
+SELECT order_id, try_cast(quantity AS INT) AS quantity, quantity AS quantity_raw
+FROM bronze.orders
+```
+W: try_cast: it returns NULL for `N/A` and `12x` instead of raising an error, so the job keeps running and rows where the raw value is non-null but the typed value is NULL can be reviewed later.
+X: B=Cast to DOUBLE: a string that is not numeric is not converted to 0.0; a strict cast still raises an error (or yields NULL only where the engine is configured to be lenient), and the type would be wrong for a quantity anyway.
+C=nullif: `nullif(a, b)` returns NULL only when `a` equals `b`, so it removes a single known literal such as `N/A` but not `12x` or any value you did not list. The cast inside would still fail on the others.
+D=coalesce around the cast: `coalesce` only replaces NULL results. The error is raised while the inner cast is evaluated, before `coalesce` runs, so it cannot catch it; substituting zero would also hide bad data as a real quantity.
+T: Use try_cast when unparseable values should become NULL for later review instead of failing the job; plain cast is for data that must stop the pipeline when invalid.
+V: Databricks SQL, Delta Lake
+
+@ DBX-DEA D3 T3.1 applied use-case
+S: In a silver table, the `country` column should never be NULL for downstream reports. Rows from one source system arrive with a NULL country, and the business agreed that these rows should show the label `UNKNOWN`. All other values must stay unchanged. Which expression does this?
+A: `nullif(country, 'UNKNOWN')`, which returns the label for rows where country is NULL and leaves other values unchanged
+B: `coalesce(country, 'UNKNOWN')`, which returns country when it is not NULL and the label `UNKNOWN` otherwise
+C: `country <=> 'UNKNOWN'`, which returns the label for rows where country is NULL and the original value elsewhere
+D: `isnull(country)`, which returns the label for rows where country is NULL and the original value elsewhere
+K: B
+G: ## Handling NULL values in silver
+Bronze data often has missing values. The silver layer decides, per column, whether to keep NULL, replace it with a default, or reject the row. Replacing NULL with a default is done with `coalesce(a, b, ...)`, which returns the first non-NULL argument.
+## Look-alike functions
+- `nullif(a, b)` does the opposite job: it returns NULL when `a` equals `b`, otherwise `a`. It is used to turn placeholders into NULL.
+- `isnull(a)` and the null-safe equality `a <=> b` return a BOOLEAN, not a value.
+```
+SELECT order_id, coalesce(country, 'UNKNOWN') AS country FROM bronze.orders
+```
+W: coalesce: it returns the first non-NULL argument, so a NULL country becomes `UNKNOWN` and every existing country is returned as it is.
+X: A=nullif: it turns the label `UNKNOWN` into NULL, the reverse of the requirement, and a NULL country stays NULL.
+C=Null-safe equality: `<=>` compares two values and returns true or false (true when both are NULL); it never returns the label or the original country.
+D=isnull: it returns a BOOLEAN flag that is true for NULL rows, not the label, so the column would turn into true/false values.
+T: Replace NULL with a default using coalesce; use nullif for the reverse, turning a placeholder value into NULL.
+V: Databricks SQL
+
+@ DBX-DEA D3 T3.1 applied use-case
+S: A CSV source writes a missing e-mail address as an empty string or as spaces (`''` or `'   '`), and the silver table should store a real NULL instead so that `email IS NULL` finds all missing values. Which expression produces that result for a column named `email`?
+A: `coalesce(trim(email), '')`, which returns an empty string when the e-mail is blank or NULL
+B: `trim(nullif(email, ''))`, which turns only exactly-empty strings into NULL before trimming
+C: `nullif(trim(email), '')`, which trims the text first and then returns NULL when what remains is empty
+D: `regexp_replace(email, ' ', '')`, which removes spaces and turns blank values into NULL automatically
+K: C
+G: ## Placeholders that mean "missing"
+Files often encode missing data as an empty string, spaces, `N/A` or `-`. Left alone, these look like real values: `IS NULL` does not find them and `COUNT(email)` counts them. The silver layer should turn them into NULL once, so later queries behave as expected.
+## Order of operations
+`nullif(a, b)` returns NULL when `a = b`. To also catch spaces, normalize first with `trim`, then compare the result with the placeholder:
+```
+SELECT nullif(trim(email), '') AS email FROM bronze.contacts
+```
+W: nullif around trim: `trim` makes `'   '` an empty string and `nullif(..., '')` returns NULL for it, while real addresses are returned trimmed; a value that was already NULL stays NULL.
+X: A=coalesce with an empty string: it does the reverse, replacing NULL with `''`, which makes the problem worse because even real NULLs become empty strings.
+B=nullif before trim: `nullif(email, '')` only matches exactly-empty text, so `'   '` is not equal to `''`, survives as spaces, and `trim` then turns it into an empty string rather than NULL.
+D=regexp_replace: removing spaces leaves an empty string, not NULL; the function replaces text and never creates a NULL for an empty result.
+T: Turn placeholder strings into NULL with nullif, and trim first so values made only of spaces match the placeholder.
+V: Databricks SQL
+
+@ DBX-DEA D3 T3.1 advanced troubleshooting
+S: An analyst builds a silver view with `SELECT * FROM bronze.tickets WHERE status <> 'CLOSED'` to list open work. Operations reports that tickets with no status value are missing from the result, although they should count as open. What explains this, and what is the fix?
+A: Comparisons with NULL evaluate to unknown, so those rows are filtered out; use `status IS DISTINCT FROM 'CLOSED'`
+B: `<>` is case sensitive, so the tickets are lost when status is `closed`; wrap the column in `lower()` and compare with `'closed'`
+C: Rows with NULL are always removed by SELECT *; replace the star with an explicit column list to keep them
+D: `<>` is not supported for strings in a WHERE clause; replace it with `NOT LIKE 'CLOSED'` to keep every unmatched row
+K: A
+G: ## Three-valued logic
+SQL compares with three possible outcomes: true, false or unknown. Any ordinary comparison where one side is NULL (`NULL <> 'CLOSED'`, `NULL = 'CLOSED'`) is unknown, and `WHERE` keeps only rows where the condition is true. So rows with a NULL status satisfy neither `status = 'CLOSED'` nor `status <> 'CLOSED'`.
+## Null-safe alternatives
+- `status IS DISTINCT FROM 'CLOSED'` treats NULL as a comparable value and returns true for NULL rows.
+- `status IS NOT DISTINCT FROM x` (or `status <=> x`) is the null-safe equality.
+- `coalesce(status, '') <> 'CLOSED'` also works when a default is acceptable.
+W: Unknown comparison: `NULL <> 'CLOSED'` is not true, so `WHERE` drops those tickets; `IS DISTINCT FROM` returns true when status is NULL and when it differs from `CLOSED`, which includes exactly the tickets that should count as open.
+X: B=Case sensitivity: that could affect `Closed` versus `CLOSED`, but it does not explain tickets that have no status at all, and lowering the column would not make NULL rows pass.
+C=SELECT *: the star only chooses columns and never removes rows; the rows are lost in the WHERE clause.
+D=NOT LIKE: `<>` is valid for strings, and `NOT LIKE` with a NULL value is also unknown, so it would drop the same tickets.
+T: A plain comparison with NULL is unknown and WHERE drops the row; use IS DISTINCT FROM (or coalesce) when NULL rows must be kept.
+V: Databricks SQL
+
+@ DBX-DEA D3 T3.1 applied use-case
+S: A bronze table stores event times as strings. Source A writes `2026-03-14 08:30:00`, source B writes `03/14/2026`, and some rows hold text such as `unknown`. The silver table needs a TIMESTAMP column that is NULL for anything that matches neither pattern, without the job failing. Which expression fits?
+A: `to_timestamp(ts)`, which raises no error for the second pattern and rejects `unknown` rows into a quarantine location automatically
+B: `cast(ts AS DATE)`, which accepts both patterns and returns a date at midnight for the text values
+C: `coalesce(try_to_timestamp(ts, 'yyyy-MM-dd HH:mm:ss'), try_to_timestamp(ts, 'MM/dd/yyyy'))`
+D: `try_to_timestamp(ts, 'yyyy-MM-dd HH:mm:ss')`, which also parses the slash pattern because the format is only a hint
+K: C
+G: ## Parsing text into timestamps
+`to_timestamp(expr, fmt)` parses a string with a datetime pattern and can raise an error when the text does not match. `try_to_timestamp(expr, fmt)` returns NULL when the cast fails, so it is safe for mixed or dirty data.
+## Several formats in one column
+The format is a real pattern, not a hint: text that does not match returns NULL. To support several known formats, try each and take the first that works with `coalesce`; whatever matches none stays NULL and can be reviewed.
+```
+coalesce(try_to_timestamp(ts, 'yyyy-MM-dd HH:mm:ss'),
+         try_to_timestamp(ts, 'MM/dd/yyyy'))
+```
+W: coalesce of two try_to_timestamp calls: each call returns NULL when its pattern does not fit, so the first matching pattern wins and the values like `unknown` end up NULL, with no failure.
+X: A=to_timestamp: it has no automatic quarantine, it does not recognise an extra pattern on its own, and a strict parse can raise an error for `unknown` instead of returning NULL.
+B=Cast to DATE: the result is a date, not a timestamp, so the time of day in source A is lost, and `unknown` is not converted to a midnight date but fails or becomes NULL.
+D=Single try_to_timestamp: the pattern is applied exactly, so every slash-formatted value returns NULL and source B would be lost entirely.
+T: Use try_to_timestamp so bad text becomes NULL, and combine several patterns with coalesce when a column has mixed formats.
+V: Databricks SQL
+
+@ DBX-DEA D3 T3.1 applied use-case
+S: A PySpark job loads a bronze DataFrame `df`. Business rules say a row is unusable if either `order_id` or `customer_id` is NULL, but NULLs in other columns are acceptable. Which statement removes exactly the unusable rows?
+A: `df.dropna(how="all", subset=["order_id", "customer_id"])`, which drops a row only when both columns are NULL
+B: `df.na.drop()`, which drops a row when the two named columns are NULL and ignores the others
+C: `df.fillna({"order_id": 0, "customer_id": 0})`, which removes rows where either column is NULL
+D: `df.dropna(subset=["order_id", "customer_id"])`, which drops a row when either column is NULL
+K: D
+G: ## Dropping rows with NULLs in PySpark
+`DataFrame.dropna` (alias `na.drop`) has two parameters that change what is removed:
+- `how="any"` (default) drops a row if any examined column is NULL; `how="all"` drops it only if every examined column is NULL.
+- `subset` limits the columns that are examined; without it, every column of the row is examined.
+```
+clean = df.dropna(subset=["order_id", "customer_id"])
+```
+`fillna` does not remove rows: it replaces NULLs with a given value.
+W: dropna with subset: the default `how="any"` removes a row when either named key is NULL, and the subset keeps NULLs in other columns from causing a drop.
+X: A=how="all": it removes a row only when both keys are NULL, so rows with just one missing key would stay in silver.
+B=na.drop() without subset: it examines every column, so a NULL in an optional column such as `coupon_code` would also remove an otherwise valid row.
+C=fillna: it fills NULL keys with `0` and keeps those rows, creating fake identifiers instead of removing unusable records.
+T: Use dropna with subset to choose the columns that must be present; the default how=any removes rows missing any of them.
+V: Apache Spark, Databricks
+
+@ DBX-DEA D3 T3.1 advanced tradeoff
+S: Compliance requires that no record from the bronze `payments` table silently disappears when the silver table is built. About 2% of rows fail the rules (negative amount, unparseable date). Analysts want to see why each row failed and to reprocess fixed rows later. Which design meets this?
+A: Filter the failing rows out of the silver load, then recover them from the bronze table's Delta time travel when needed
+B: Write valid rows to silver, and write failing rows to a separate quarantine table with the reason for rejection
+C: Keep all rows in silver and replace invalid values with the column average so aggregates stay close to correct
+D: Fail the whole job whenever any row is invalid and leave the entire bronze table unprocessed until the source is fixed
+K: B
+G: ## Quarantine pattern
+Bronze keeps raw data; silver keeps clean, typed data. Dropping bad rows is the simplest option but loses information about *why* data was rejected. A common alternative is to split the batch by a validity flag:
+- valid rows go to the silver table;
+- invalid rows go to a quarantine (or "rejected") table, with a column holding the failure reason, so they can be reviewed, corrected and re-run through the same logic.
+```
+flagged = df.withColumn("is_valid", F.col("amount") >= 0)
+flagged.filter("is_valid").write.mode("append").saveAsTable("silver.payments")
+flagged.filter("NOT is_valid").write.mode("append").saveAsTable("quarantine.payments")
+```
+W: Quarantine table: every bronze row ends up in exactly one place, the rejection reason is stored with it, and corrected rows can be reprocessed without disturbing the clean silver data.
+X: A=Filter and time travel: time travel is limited by the retention period and is a recovery tool, not an audit trail; nothing records the failure reason, so analysts would have to recompute it.
+C=Replace with the average: this invents data and hides the problem; the silver table would contain values that were never in the source.
+D=Fail the whole job: 98% valid data would be blocked by a few bad rows, and nothing would be processed or labeled either.
+T: To keep every record accountable, route invalid rows to a quarantine table with a reason instead of silently dropping or inventing values.
+V: Delta Lake, Databricks
+
+@ DBX-DEA D3 T3.1 applied use-case
+S: A bronze column `price` holds text like `$1,234.50`. The silver table needs an exact numeric type for money, with two decimal places. Which expression produces it?
+A: `CAST(price AS DOUBLE)`, which parses the dollar sign and thousands separator directly
+B: `CAST(regexp_replace(price, '[$,]', '') AS DECIMAL(12,2))`
+C: `CAST(regexp_replace(price, '[$,]', '') AS INT)`, which keeps the cents as a separate column automatically
+D: `format_number(price, 2)`, which returns a numeric value with two decimals after removing the currency symbol
+K: B
+G: ## Cleaning text before casting
+A cast only understands plain numbers. Symbols such as `$` and thousands separators must be removed first with `regexp_replace(str, pattern, replacement)`; `[$,]` matches either character.
+## Choosing the numeric type
+- `DECIMAL(p, s)` stores exact values with `s` digits after the decimal point, which is what money needs.
+- `DOUBLE` is binary floating point and can introduce rounding errors in sums.
+- `INT` drops the fraction.
+- `format_number` returns a formatted STRING (with separators), not a number.
+```
+CAST(regexp_replace(price, '[$,]', '') AS DECIMAL(12,2))
+```
+W: Remove symbols, then cast to DECIMAL: after the replace the text is `1234.50`, which converts to an exact value with two decimals.
+X: A=Direct cast to DOUBLE: the `$` and comma make the text invalid for a numeric cast, so it errors or returns NULL depending on settings, and DOUBLE is also not exact for money.
+C=Cast to INT: the cents are truncated or the cast fails on the decimal point, and no second column is created.
+D=format_number: it converts a number to a formatted string, so it does not parse the text and the result is not numeric.
+T: Strip symbols with regexp_replace, then cast to DECIMAL(p, s) for exact currency values.
+V: Databricks SQL
+
+@ DBX-DEA D3 T3.2 applied use-case
+S: A silver `orders` table must keep every order, including orders whose customer id is missing from the `customers` dimension; for those orders the customer columns should be NULL. Which join achieves this?
+A: `orders o INNER JOIN customers c ON o.customer_id = c.customer_id`
+B: `orders o LEFT JOIN customers c ON o.customer_id = c.customer_id`
+C: `orders o LEFT SEMI JOIN customers c ON o.customer_id = c.customer_id`
+D: `orders o CROSS JOIN customers c`
+K: B
+G: ## Join types in one picture
+Take `orders` as the left table and `customers` as the right one.
+- **INNER** returns only rows with a match on both sides.
+- **LEFT (OUTER)** returns every left row; right columns are NULL when no match exists.
+- **LEFT SEMI** returns left rows that have a match, with left columns only.
+- **LEFT ANTI** returns left rows that have no match.
+- **CROSS** returns every combination of left and right rows.
+## Applying it
+To keep all orders and fill customer columns with NULL when the customer is unknown, you need a left join. The right table is the optional side.
+W: LEFT JOIN: every order is returned, with `c.*` columns NULL where no customer matches, so no order disappears from silver.
+X: A=INNER JOIN: orders without a matching customer are discarded, which is exactly what must not happen.
+C=LEFT SEMI JOIN: it keeps only orders that do have a customer and returns only order columns, so unmatched orders are dropped and no customer columns appear.
+D=CROSS JOIN: it pairs each order with every customer, multiplying the row count instead of matching on the key.
+T: Use a LEFT JOIN when every row of the main table must survive and the lookup columns may be NULL.
+V: Databricks SQL
+
+@ DBX-DEA D3 T3.2 applied use-case
+S: Data engineers need the list of orders whose `customer_id` has no row in the `customers` table, to send to the data steward. The result should contain only order columns. Which query does this most directly?
+A: `SELECT o.* FROM orders o LEFT SEMI JOIN customers c ON o.customer_id = c.customer_id`
+B: `SELECT o.* FROM orders o INNER JOIN customers c ON o.customer_id <> c.customer_id`
+C: `SELECT o.* FROM orders o FULL OUTER JOIN customers c ON o.customer_id = c.customer_id`
+D: `SELECT o.* FROM orders o LEFT ANTI JOIN customers c ON o.customer_id = c.customer_id`
+K: D
+G: ## Anti and semi joins filter, they do not add columns
+- A **left semi join** keeps left rows that have at least one match and never repeats a left row, no matter how many matches there are.
+- A **left anti join** keeps left rows that have no match.
+Both return only the left table's columns, so they replace `WHERE EXISTS` and `WHERE NOT EXISTS` style filters. The same result can be written as a LEFT JOIN followed by `WHERE c.customer_id IS NULL`, but the anti join says it directly.
+W: LEFT ANTI JOIN: it returns precisely the orders that have no matching customer and only order columns, which is the list the steward needs.
+X: A=LEFT SEMI JOIN: it returns the opposite set, orders that do have a customer.
+B=Inner join with <>: it pairs each order with every customer having a different id, so almost every order appears many times, including orders that do have a customer.
+C=FULL OUTER JOIN: it keeps matched and unmatched rows from both sides, so the output mixes valid orders with unmatched orders and unmatched customers.
+T: LEFT ANTI JOIN returns left rows with no match; LEFT SEMI returns left rows with a match, each at most once.
+V: Databricks SQL
+
+@ DBX-DEA D3 T3.2 advanced use-case
+S: A silver job joins a 3 TB `transactions` table with a 4 MB `currency_codes` lookup table in PySpark. The team wants Spark to send the small table to all executors so that the large table is not shuffled across the network for this join. Which code expresses that intent?
+A: `from pyspark.sql.functions import broadcast; tx.join(broadcast(codes), "currency")`
+B: `tx.repartition(2000, "currency").join(codes, "currency")`
+C: `from pyspark.sql.functions import broadcast; broadcast(tx).join(codes, "currency")`
+D: `tx.join(codes.cache(), "currency")`
+K: A
+G: ## Broadcast joins
+In a **broadcast hash join**, Spark copies the small side to every executor and joins it locally against each partition of the large side. The large table is not shuffled, which is much cheaper when one side is small.
+- Spark can pick this strategy on its own when it estimates a side to be below a size threshold, and adaptive query execution can switch to it at run time.
+- You can request it explicitly with `broadcast(df)` in PySpark or `/*+ BROADCAST(t) */` in SQL. Join hints are suggestions: Spark may ignore one if the strategy does not support the join type.
+- Broadcast the *small* side. Broadcasting the large table would try to ship terabytes to each executor.
+```
+tx.join(broadcast(codes), "currency")
+```
+W: broadcast on the small table: `broadcast(codes)` hints that the 4 MB table is copied to each executor, so the 3 TB table is joined in place without a shuffle.
+X: B=Repartition on the large side: it triggers exactly the shuffle of the 3 TB table that the team wants to avoid.
+C=broadcast on the large side: it marks the 3 TB table for broadcasting, which cannot fit in executor memory and is the reverse of the intent.
+D=cache: it keeps data in memory for reuse but does not change the join strategy; the join may still shuffle both sides.
+T: To avoid shuffling a large table, hint a broadcast on the small side with broadcast(df) or /*+ BROADCAST(t) */.
+V: Apache Spark, Databricks
+
+@ DBX-DEA D3 T3.2 applied troubleshooting
+S: A join of `store_sales` to `store_prices` on `sku` alone produces about 10 times more rows than `store_sales` has. Each store sets its own price: `store_prices` has one row per (`store_id`, `sku`) pair. Sales totals are now overstated. What is the correct fix?
+A: Add `DISTINCT` to the final SELECT list so duplicated rows collapse, keeping the join condition on `sku`
+B: Switch from an inner join to a left join so unmatched rows no longer multiply, keeping the condition on `sku`
+C: Change the join condition to `s.store_id = p.store_id AND s.sku = p.sku` so each sale matches one price row
+D: Use a CROSS JOIN with a WHERE clause on `sku` so Spark enumerates every price row before filtering
+K: C
+G: ## Joining on the full key
+A join matches a left row with every right row that satisfies the condition. If the condition is only part of the right table's key, one sale matches the prices of every store that carries that `sku`, and the output grows by the number of matches.
+For a composite key (`store_id`, `sku`), include every column in the condition:
+```
+FROM store_sales s
+JOIN store_prices p
+  ON s.store_id = p.store_id AND s.sku = p.sku
+```
+A quick check is to compare `count(*)` before and after the join, or to confirm the right side is unique on the join columns.
+W: Multi-column condition: with both columns in `ON`, a sale matches only its own store's price row, so each sale appears once and totals are right.
+X: A=DISTINCT: duplicates are removed only where rows are identical, and the multiplied rows carry different prices, so wrong rows remain; it also hides the faulty condition.
+B=Left join: the multiplication comes from several matches, not from unmatched rows, and a left join returns all matches too.
+D=Cross join with a filter: the optimizer treats it as the same incomplete condition, and `sku` alone yields the same multiplied rows.
+T: Join on every column of a composite key; matching on part of the key multiplies rows and inflates aggregates.
+V: Apache Spark, Databricks SQL
+
+@ DBX-DEA D3 T3.2 advanced troubleshooting
+S: A silver build joins `shipments` to `regions` with `ON s.region = r.region`. The `region` column is NULL in 5% of both tables, and the business wants NULL regions to be matched to NULL regions (both mean "unassigned"). Currently those shipments get no region data. Which condition fixes this?
+A: `s.region = r.region OR s.region IS NULL`, which matches every shipment with a NULL region to every region row
+B: `coalesce(s.region, r.region) = r.region`, which sends NULL shipment regions to the region on the right table
+C: `s.region == r.region`, which treats NULL values on both sides as equal in Spark
+D: `s.region <=> r.region`, which is true when both sides are equal or both are NULL
+K: D
+G: ## NULL never equals NULL in a join
+A join with `=` keeps a pair only when the condition is true. `NULL = NULL` is unknown, so rows with NULL keys never match each other, even though both sides look the same.
+## Null-safe equality
+`a <=> b` (or `a IS NOT DISTINCT FROM b`) returns true when both values are equal or both are NULL, and false when only one is NULL. Using it in the join condition lets NULL keys pair up:
+```
+ON s.region <=> r.region
+```
+W: Null-safe equality: it is true for equal values and for NULL against NULL, so unassigned shipments pair with the unassigned region row and nothing else changes.
+X: A=OR IS NULL: this matches each NULL shipment with all region rows, not only the NULL one, multiplying rows and attaching the wrong regions.
+B=coalesce on one side: when the shipment region is NULL, the expression becomes `r.region = r.region`, which is true for every non-NULL region row, again producing wrong matches.
+C=Double equals: in Spark SQL `==` is a synonym for `=`, so NULL keys are still unknown and still do not match.
+T: Use <=> (IS NOT DISTINCT FROM) in the join condition when NULL keys must match each other; plain = never matches NULL.
+V: Databricks SQL, Apache Spark
+
+@ DBX-DEA D3 T3.2 applied use-case
+S: A reporting table needs one row per combination of the 300 active stores and the 12 months of the year, so that months without sales still show up with zero revenue after a later left join. Which operation creates the 3,600 combinations from a `stores` table and a `months` table?
+A: `stores CROSS JOIN months`
+B: `stores FULL OUTER JOIN months ON stores.store_id = months.month_id`
+C: `stores UNION ALL months`
+D: `stores LEFT SEMI JOIN months`
+K: A
+G: ## Cartesian products on purpose
+A cross join returns the Cartesian product: every row of the left side paired with every row of the right side, so 300 x 12 = 3,600 rows. It needs no join condition.
+This is the standard way to build a "scaffold" (stores x months, products x days) so a later left join of real facts does not lose empty periods.
+Be careful with large tables: the output size is the product of the inputs. Databricks also treats a join without any condition as a cross join, which is a frequent cause of a surprise explosion in row count.
+```
+SELECT s.store_id, m.month
+FROM stores s CROSS JOIN months m
+```
+W: CROSS JOIN: it pairs each of the 300 stores with each of the 12 months, giving all 3,600 combinations without needing a shared key.
+X: B=Full outer join on unrelated keys: it matches a store id to a month number, so a few rows pair up by coincidence and the rest are unmatched rows with NULLs, not a complete grid.
+C=UNION ALL: it stacks rows (300 + 12) and requires the same column structure; it combines rows vertically, not combination by combination.
+D=LEFT SEMI JOIN: it filters stores that have a match and returns store columns only, so months never appear.
+T: Use CROSS JOIN to create all combinations of two small sets; the result size is the product of both row counts.
+V: Databricks SQL
+
+@ DBX-DEA D3 T3.2 applied tradeoff
+S: Two regional tables, `sales_emea` and `sales_apac`, have the same schema and hold distinct orders (an order never appears in both). A job appends the combined rows to a 900-million-row silver table every day. What is the best way to combine them?
+A: `SELECT * FROM sales_emea UNION SELECT * FROM sales_apac`, because UNION is the only operator that preserves duplicates
+B: `SELECT * FROM sales_emea INTERSECT SELECT * FROM sales_apac`, because INTERSECT combines both tables with the least data movement
+C: `SELECT * FROM sales_emea UNION ALL SELECT * FROM sales_apac`, because no duplicates between the tables exist to remove
+D: `SELECT * FROM sales_emea EXCEPT SELECT * FROM sales_apac`, because EXCEPT keeps rows that appear in either table
+K: C
+G: ## UNION versus UNION ALL
+- `UNION ALL` appends the rows of the second query to the first and keeps every row, duplicates included. It is a simple concatenation and needs no extra work.
+- `UNION` (same as `UNION DISTINCT`) also removes duplicate rows from the combined result. To find duplicates Spark must compare whole rows, which adds a shuffle and an aggregation step on all columns.
+Use `UNION` when you really need to deduplicate across the inputs, and `UNION ALL` when the inputs are known to be disjoint or duplicates are wanted.
+## Other set operators
+`INTERSECT` returns rows found in both inputs and `EXCEPT` returns rows of the first input missing from the second.
+W: UNION ALL: the tables hold distinct orders, so nothing needs removing, and skipping the whole-row comparison avoids an unnecessary shuffle on a very large result.
+X: A=UNION: it removes duplicates, not preserves them (UNION ALL preserves them), and here that deduplication does costly work and finds nothing to remove.
+B=INTERSECT: it returns only rows present in both tables, which is an empty set for distinct orders, and it is not a way to combine tables.
+D=EXCEPT: it returns rows of the first table that are absent from the second, so all APAC orders would be missing.
+T: Use UNION ALL to concatenate inputs known to be distinct; UNION adds a whole-row deduplication that costs a shuffle.
+V: Databricks SQL
+
+@ DBX-DEA D3 T3.2 advanced troubleshooting
+S: Two PySpark DataFrames have the same columns with the same types, but in different order: `df_a` is (`id`, `region`, `amount`) and `df_b` is (`id`, `amount`, `region`). The pipeline runs `df_a.union(df_b)`. The job succeeds, but `region` in the result sometimes contains numbers. What is the best fix?
+A: Use `df_a.unionByName(df_b)` so the columns are matched by name instead of by position
+B: Use `df_a.union(df_b).distinct()` so the engine reconciles columns while deduplicating
+C: Sort both DataFrames by `id` before the union so that Spark aligns the values correctly
+D: Use `df_a.join(df_b, "id", "outer")` because union cannot combine DataFrames with reordered columns
+K: A
+G: ## union matches by position
+`DataFrame.union` (like SQL `UNION`) lines up columns by **position**, not by name. If the order differs, values from the wrong column end up together, and Spark only checks that the types can be reconciled (for example it widens types to a common one), so no error may appear.
+## unionByName
+`unionByName` matches columns by name, so column order no longer matters. Use it whenever two sources are produced separately and their layouts may drift.
+```
+combined = df_a.unionByName(df_b)
+```
+W: unionByName: it pairs `region` with `region` and `amount` with `amount` regardless of position, so values stay in their own columns.
+X: B=distinct: deduplication happens after the combine and does not change which columns are paired, so the values are still misplaced.
+C=Sorting rows: sorting changes the row order only; the column order of each DataFrame is unchanged and `union` still pairs the second column with the second column.
+D=Outer join: a join matches rows by key and returns the other columns side by side (with duplicate names) instead of stacking rows, and union can combine reordered columns; the issue is how they are matched.
+T: union matches columns by position and can silently mix data; use unionByName when column order can differ.
+V: Apache Spark
+
+@ DBX-DEA D3 T3.2 applied use-case
+S: A new version of an upstream feed adds a column `channel` that older files do not have. The pipeline must combine the old DataFrame `df_old` (without `channel`) and the new DataFrame `df_new` (with `channel`), filling NULL for old rows. Which call does that?
+A: `df_old.union(df_new)`, which pads the missing column with NULL automatically
+B: `df_old.unionByName(df_new)`, which pads the missing column with NULL by default
+C: `df_old.join(df_new, "id", "left_anti")`, which returns old rows with the new column added
+D: `df_old.unionByName(df_new, allowMissingColumns=True)`
+K: D
+G: ## Schemas that differ
+`union` requires the same number of columns on both sides and fails with an analysis error otherwise. `unionByName` matches by name but, by default, also requires the same set of columns.
+Setting `allowMissingColumns=True` lets one side lack columns: the missing columns are filled with NULL in the rows from that side.
+```
+combined = df_old.unionByName(df_new, allowMissingColumns=True)
+```
+In SQL, the equivalent is to add `CAST(NULL AS STRING) AS channel` to the older query before a `UNION ALL`.
+W: unionByName with allowMissingColumns: matching by name keeps columns aligned and the flag fills `channel` with NULL for rows from the older DataFrame.
+X: A=union: it needs the same number of columns on both sides, so a DataFrame with an extra column fails with an analysis error and nothing is padded.
+B=unionByName by default: without the flag it fails because the column sets differ; NULL padding only happens when the flag is enabled.
+C=left_anti join: it filters rows of the old DataFrame that have no match in the new one, and it never adds columns from the right side.
+T: unionByName(allowMissingColumns=True) combines DataFrames with different column sets and fills the missing ones with NULL.
+V: Apache Spark
+
+@ DBX-DEA D3 T3.2 applied troubleshooting
+S: A PySpark join `orders.join(customers, orders.customer_id == customers.customer_id)` succeeds, but the next step `.select("customer_id")` fails with an ambiguous reference error because both DataFrames contribute a column with that name. Which change avoids the error and keeps a single `customer_id` column?
+A: `orders.join(customers, on="customer_id")`, which merges the key into one output column
+B: `orders.join(customers, orders.customer_id == customers.customer_id, "cross")`
+C: `orders.join(customers, orders.customer_id == customers.customer_id).dropDuplicates()`
+D: `orders.join(customers, orders.customer_id == customers.customer_id).distinct("customer_id")`
+K: A
+G: ## Duplicate column names after a join
+When the condition is an expression, the result contains the key from both inputs. Selecting that name by string is then ambiguous, and writing the result to a table also fails when two columns share a name.
+## Ways to avoid it
+- Join with `on="customer_id"` (or a list of names). Like SQL `USING (customer_id)`, this returns the key once.
+- Keep the expression form and drop one side: `.drop(customers.customer_id)`.
+- Rename the columns of one DataFrame before joining, or select with qualified names or aliases.
+W: Join with `on="customer_id"`: equal-named key columns are merged into a single column, so selecting `customer_id` is no longer ambiguous.
+X: B=Cross join type: this changes the join type and ignores the intended matching semantics, while both key columns still remain in the output.
+C=dropDuplicates: it removes duplicate rows and has nothing to do with duplicated column names; the ambiguity stays.
+D=distinct with a column: `DataFrame.distinct()` takes no arguments and does not rename or remove columns, so this call is invalid.
+T: Join on column names (on="key" or USING) to get one key column; with expression conditions, drop or alias one of the duplicates.
+V: Apache Spark
+
+@ DBX-DEA D3 T3.3 applied use-case
+S: A bronze `orders` table has a column `items` of type `ARRAY<STRING>`. The silver table needs one row per order and item. Some orders have an empty array or a NULL array, and those orders must still appear once with a NULL item. Which expression does this?
+A: `SELECT order_id, explode(items) AS item FROM bronze.orders`
+B: `SELECT order_id, size(items) AS item FROM bronze.orders`
+C: `SELECT order_id, explode_outer(items) AS item FROM bronze.orders`
+D: `SELECT order_id, array_distinct(items) AS item FROM bronze.orders`
+K: C
+G: ## Flattening arrays into rows
+`explode(array)` produces one output row per element. If the array is NULL or empty, it produces **no rows** for that input row, so the order disappears from the output.
+`explode_outer(array)` behaves the same but, for a NULL or empty array, returns one row with a NULL element, so the parent row survives.
+```
+SELECT order_id, explode_outer(items) AS item FROM bronze.orders
+```
+The same functions exist in PySpark as `F.explode` and `F.explode_outer`. When the array holds structs, `inline` expands each struct into columns.
+W: explode_outer: it creates one row per item and keeps orders with a NULL or empty array as a single row with a NULL item.
+X: A=explode: orders whose array is NULL or empty produce no rows, so they would vanish from silver.
+B=size: it returns the number of elements (an integer), not one row per item.
+D=array_distinct: it removes duplicate elements but returns an array in one row; nothing is flattened.
+T: explode drops rows with NULL or empty arrays; explode_outer keeps them with a NULL element.
+V: Databricks SQL, Apache Spark
+
+@ DBX-DEA D3 T3.3 applied use-case
+S: A table has an array column `steps` holding the ordered stages of a customer journey, for example `['visit','cart','buy']`. The silver table needs one row per stage together with its zero-based position in the array so the order can be restored. Which function is the most direct choice?
+A: `explode(steps)` followed by `row_number() OVER (ORDER BY step)`, which restores the original array order
+B: `array_position(steps, 'buy')`, which returns the position of each element in turn
+C: `posexplode(steps)`, which returns both the position and the element for each array entry
+D: `sort_array(steps)`, which returns each element with its position in a separate column
+K: C
+G: ## Exploding with position
+`explode` returns only the element (in a column named `col`), and relying on row order afterwards is unsafe because Spark does not guarantee row order across partitions.
+`posexplode(array)` returns two columns: `pos` (the zero-based index) and `col` (the element). Ordering by `pos` restores the sequence.
+```
+SELECT journey_id, posexplode(steps) AS (pos, step) FROM silver.journeys
+```
+W: posexplode: it emits one row per entry with its index, so the original order is kept as data.
+X: A=explode plus row_number: numbering the rows by `step` orders by the text value (alphabetical), not by original position, so the order would be wrong.
+B=array_position: it looks up the position of one named value in an array and returns a single number per row; it does not produce one row per stage.
+D=sort_array: it sorts an array into ascending value order, which destroys the original order, and it returns an array, not rows.
+T: posexplode returns the element and its index per row; plain explode loses the order information.
+V: Databricks SQL, Apache Spark
+
+@ DBX-DEA D3 T3.3 advanced troubleshooting
+S: A silver job splits a pipe-delimited address column in PySpark with `F.split("addr", "|")`. Instead of `['12 Main St', 'Austin', 'TX']`, each row gets an array of single characters such as `['1','2',' ','M',...]`. What is the problem and the correct call?
+A: Separators must be a single quoted character, so use `F.split("addr", '"|"')` to pass it as a string
+B: The second argument is a regular expression where `|` means alternation of empty patterns; use `F.split("addr", r"\|")`
+C: `split` accepts only whitespace separators, so replace pipes with spaces first and split on `" "`
+D: The limit argument defaults to 1, so use `F.split("addr", "|", -1)` to return all parts
+K: B
+G: ## split takes a regex
+`split(str, regex [, limit])` splits a string around matches of a **regular expression** and returns an array. Characters such as `|`, `.`, `(` and `+` are special in a regex:
+- `|` means "or" between alternatives, so `"|"` is an empty pattern that matches between every pair of characters.
+- To split on a literal pipe, escape it: `r"\|"` (or `"[|]"`).
+Elements can then be read by index (`F.col("parts")[0]` is zero-based) or `element_at(parts, 1)` (one-based).
+```
+parts = F.split("addr", r"\|")
+df.select(parts[0].alias("street"), parts[1].alias("city"), parts[2].alias("state"))
+```
+The optional `limit` caps the number of array elements; a value of -1 or zero means no limit.
+W: Escape the pipe: the argument is a regex, so the unescaped `|` matches the empty string between characters; `r"\|"` matches a literal pipe and gives the three address parts.
+X: A=Extra quotes: that would search for a literal quote-pipe-quote sequence and match nothing, leaving the whole string in one element.
+C=Whitespace only: `split` works with any regex, not only whitespace, and the address parts themselves contain spaces such as `12 Main St`, so splitting on spaces would break them.
+D=Limit: the limit is not 1 by default (it is unlimited) and does not change what the separator matches; the pattern would still split between characters.
+T: split uses a regular expression, so escape special characters such as the pipe (r"\|") to split on them literally.
+V: Apache Spark, Databricks
+
+@ DBX-DEA D3 T3.3 applied use-case
+S: A large Delta table `silver.events` has a column `usr_id` that should be named `user_id` for all consumers. The team wants a metadata-only change that does not rewrite the data files. What should they do?
+A: Run `df.withColumnRenamed("usr_id", "user_id")` in the notebook, which updates the column name stored in the table
+B: Run `CREATE TABLE silver.events_new AS SELECT usr_id AS user_id, ... FROM silver.events`, then drop the old table
+C: Run `ALTER TABLE silver.events ADD COLUMN user_id` and copy the old values with a nightly job
+D: Enable Delta column mapping on the table, then run `ALTER TABLE silver.events RENAME COLUMN usr_id TO user_id`
+K: D
+G: ## Renaming in a DataFrame versus in a table
+`withColumnRenamed` renames a column only in that DataFrame result; the table's stored schema is unchanged unless you write the DataFrame out.
+## Renaming a Delta column in place
+Delta stores data in Parquet files whose column names are fixed in the files. With **column mapping** enabled, the table maps logical column names to physical names kept in metadata, so renaming or dropping a column is a metadata-only change and old files stay as they are.
+```
+ALTER TABLE silver.events SET TBLPROPERTIES ('delta.columnMapping.mode' = 'name');
+ALTER TABLE silver.events RENAME COLUMN usr_id TO user_id;
+```
+`name` mode can be set on an existing table; `id` mode can only be set when the table is created. Enabling it upgrades the table protocol (readers need reader version 2 or above), so check that all readers support it first. A CTAS copy also works but rewrites all the data.
+W: Column mapping plus RENAME COLUMN: the logical name changes in the Delta log only, with no data rewrite.
+X: A=withColumnRenamed: it changes the DataFrame in memory; the Delta table keeps `usr_id` until data is written again.
+B=CTAS copy: it creates the right name but rewrites every file and creates a new table that consumers, permissions and history must be moved to.
+C=ADD COLUMN and a copy job: it leaves both columns in the table and needs ongoing maintenance; the original column is never removed or renamed.
+T: In-place Delta column rename or drop is metadata-only once column mapping is enabled; withColumnRenamed affects only the DataFrame.
+V: Delta Lake, Databricks SQL
+
+@ DBX-DEA D3 T3.3 applied use-case
+S: A bronze `customers` table has 80 columns. The silver table must keep all of them except `ssn` and `birth_date`, and new columns added to bronze later should flow through automatically. The bronze table itself must stay untouched. Which query is the best fit?
+A: `SELECT * EXCEPT (ssn, birth_date) FROM bronze.customers`
+B: `ALTER TABLE bronze.customers DROP COLUMNS (ssn, birth_date)`
+C: `SELECT * FROM bronze.customers EXCEPT SELECT ssn, birth_date FROM bronze.customers`
+D: `SELECT * FROM bronze.customers WHERE ssn IS NULL AND birth_date IS NULL`
+K: A
+G: ## Dropping columns from a projection
+`SELECT * EXCEPT (col1, col2)` returns all columns except the listed ones. New columns added to the source later are included automatically, which an explicit list of 78 names would not do. In PySpark the equivalent is `df.drop("ssn", "birth_date")`.
+## Do not confuse these
+- `EXCEPT` as a *set operator* (`query1 EXCEPT query2`) compares rows and requires matching column counts.
+- `ALTER TABLE ... DROP COLUMN` changes the source table's schema.
+- A `WHERE` clause removes rows, not columns.
+W: SELECT * EXCEPT: it drops the two sensitive columns from the result, keeps every other column including later additions, and leaves the bronze table unchanged.
+X: B=ALTER TABLE DROP COLUMN: it alters the bronze table itself (and needs column mapping), which violates the requirement to keep it untouched.
+C=Set-operator EXCEPT: this form compares rows and needs both queries to have the same number of columns, so it fails here and is not a way to drop columns.
+D=WHERE IS NULL: it removes customers whose values are present, and the columns would still be in the result.
+T: Use SELECT * EXCEPT (cols) in SQL or drop() in PySpark to remove columns from a result without touching the source table.
+V: Databricks SQL, Apache Spark
+
+@ DBX-DEA D3 T3.3 applied use-case
+S: A bronze table has a STRUCT column `address` with fields `street`, `city` and `postal_code`. Silver should have these as three top-level columns next to `customer_id`, and new fields added to the struct later should appear automatically. Which query fits?
+A: `SELECT customer_id, explode(address) FROM bronze.customers`
+B: `SELECT customer_id, address[city] FROM bronze.customers`
+C: `SELECT customer_id, split(address, '.') FROM bronze.customers`
+D: `SELECT customer_id, address.* FROM bronze.customers`
+K: D
+G: ## Flattening a struct
+A STRUCT groups several named fields in one column. Fields are read with dot notation (`address.city`), and `address.*` expands all fields of the struct into separate top-level columns. In PySpark the same is `df.select("customer_id", "address.*")`.
+## Which function for which type
+- STRUCT to columns: `struct.*` or dot notation.
+- ARRAY to rows: `explode`, and for an array of structs `inline`.
+- STRING to array: `split`.
+- MAP to rows: `explode` returns `key` and `value` columns.
+W: address.*: it expands every field of the struct into its own column in one step, and at query time includes any fields added later.
+X: A=explode on a struct: `explode` accepts arrays and maps only, so passing a STRUCT is a type error.
+B=Bracket access: `address[city]` is the syntax for an array index or map key, and it returns one value rather than expanding all three fields.
+C=split: it splits a string into an array and a struct is not a string; the result would not be three columns anyway.
+T: Expand a STRUCT into columns with struct.*; use explode only for arrays and maps.
+V: Databricks SQL, Apache Spark
+
+@ DBX-DEA D3 T3.2 advanced use-case
+S: A streaming silver job reads new rows from the bronze `clicks` table and must enrich each click with attributes from the `products` Delta table, a slowly changing dimension of a few thousand rows. The team does not want to hold join state or define watermarks. Which join design fits?
+A: A stream-stream join of `clicks` with a streaming read of `products`, with a watermark on both inputs
+B: A full outer join between the two sources after converting `clicks` into a static DataFrame with a batch read
+C: A cross join of the stream with `products`, filtered afterwards by product id to keep matching rows
+D: A stream-static join: the streaming `clicks` DataFrame joined with `products` read as a static (batch) table
+K: D
+G: ## Stream-static versus stream-stream joins
+- A **stream-static join** joins an incremental source (a facts stream) with a static table. It is stateless: each micro-batch joins only the newly received streaming rows with the current version of the static table, so no join state or watermark has to be managed.
+- A **stream-stream join** joins two streaming sources. It is stateful: Spark keeps state for both inputs and needs watermarks and careful configuration to bound it.
+A small, slowly changing dimension fits the stream-static pattern:
+```
+clicks = spark.readStream.table("bronze.clicks")
+products = spark.read.table("silver.products")
+enriched = clicks.join(products, "product_id", "left")
+```
+W: Stream-static join: only new click rows flow through each micro-batch and are matched against the current dimension table, with no state or watermarks to maintain.
+X: A=Stream-stream join: it keeps state for both inputs and requires watermarks, which is the complexity the team wants to avoid for a small dimension.
+B=Batch conversion: turning the click stream into a static DataFrame gives up incremental processing, so every run would reprocess all clicks.
+C=Cross join: it pairs every click with every product, producing a huge intermediate result, and is not how a lookup is expressed.
+T: Join a stream to a small, slowly changing table with a stream-static join; it is stateless, unlike stream-stream joins.
+V: Apache Spark Structured Streaming, Delta Lake

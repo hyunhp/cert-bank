@@ -28,8 +28,9 @@ const STUDY_EXAMS = [
   ["GCP-GAIL", "Generative AI Leader", "foundational", "gcp"],
   ["GCP-ACE", "Associate Cloud Engineer", "associate", "gcp"],
   ["GCP-PCA", "Professional Cloud Architect", "professional", "gcp"],
+  ["DBX-DEA", "Data Engineer Associate", "associate", "databricks"],
 ].map(([code, name, level, vendor]) => [code, name, level, vendor || "aws"]);
-const VENDORS = [["aws", "AWS"], ["palantir", "Palantir"], ["azure", "Azure"], ["gcp", "Google Cloud", "GCP"]];   // [id, name, short name on phones]
+const VENDORS = [["aws", "AWS"], ["palantir", "Palantir"], ["azure", "Azure"], ["gcp", "Google Cloud", "GCP"], ["databricks", "Databricks", "DBX"]];   // [id, name, short name on phones]
 const vendorOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[3];
 const isNewVersion = name => / \(new\)$/.test(name);
 const shortName = name => name.replace(/ – (Associate|Professional|Expert|Specialty)( \(new\))?$/, "");
