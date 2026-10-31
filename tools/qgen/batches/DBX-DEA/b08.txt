@@ -71,7 +71,7 @@ The I/O columns of the stage table (Input, Output, Shuffle Read, Shuffle Write) 
 - High output: reduce rewrites (optimize merges, use deletion vectors), use Photon, or add compute.
 - High shuffle: set `spark.sql.shuffle.partitions` to `auto`.
 ## Why clustering helps
-Liquid clustering organizes files by the clustering keys, so a filter on `store_id` can skip files whose min/max statistics rule them out.
+Liquid clustering organizes files by the clustering keys, so a filter on `store_id` can skip files whose min/max statistics rule them out. On an existing table, previously written data is clustered only after `OPTIMIZE ... FULL`.
 W: Liquid clustering on `store_id`: the stage is limited by input, and clustering lets the selective filter skip most files so that much less data is read.
 X: B=More shuffle partitions: the stage has almost no shuffle, so this setting is not the bottleneck and would only create more, smaller tasks.
 C=REBALANCE hint: it splits skewed output partitions when a stage writes a table; this stage is dominated by input and shows no skew or large output.
@@ -141,7 +141,7 @@ V: Liquid Clustering, Delta Lake
 @ DBX-DEA D6 T6.4 applied use-case
 S: A catalog has predictive optimization enabled, but a team's `clicks` table never gets compaction or statistics maintenance even after months. DESCRIBE EXTENDED shows the table is an external Delta table in the team's own S3 bucket. What explains this, and what is the durable fix?
 A: Predictive optimization runs only on Unity Catalog managed tables, so convert the table to a managed table
-B: Predictive optimization skips tables with more than 1 TB, so the team must split the table into smaller tables
+B: Predictive optimization skips tables above a certain data size, so the team must split the table into smaller tables
 C: Predictive optimization needs a Python notebook that calls `OPTIMIZE` once, so the team must add one to a job
 D: Predictive optimization only maintains Iceberg tables, so the team must rewrite the table in the Iceberg format
 K: A
@@ -149,11 +149,11 @@ G: ## What predictive optimization does
 Predictive optimization automatically runs `OPTIMIZE` (including incremental clustering), `VACUUM` and `ANALYZE` on Unity Catalog managed tables, using serverless compute for jobs. Databricks identifies which tables benefit, queues the work, and collects statistics on write, so no one has to schedule maintenance jobs.
 ## Requirements
 - Only Unity Catalog managed tables are supported (Delta and Iceberg); external and foreign tables are not maintained.
-- The workspace must be on the Premium plan or above in a supported region, and compute must be a SQL warehouse or Databricks Runtime 12.2 LTS or above.
+- The workspace must be on a plan and in a region where the feature is available; the feature itself runs on serverless compute for jobs.
 - Predictive optimization is a setting that can be enabled at account, catalog, schema or table level and is inherited.
 For an external Delta table, `ALTER TABLE ... SET MANAGED` converts it to a managed table so that Databricks maintains it.
 W: Managed tables only: the table is external, so Databricks does not maintain it; converting it to a managed table brings it under predictive optimization.
-X: B=Size limit: there is no rule that skips tables above a data-size threshold; the table type is what matters.
+X: B=Size limit: the documented requirement is the table type, not a data-size cutoff; the table type is what matters.
 C=Manual notebook: the feature runs automatically on eligible tables; the table type, not a missing job, is why nothing runs here.
 D=Iceberg only: predictive optimization supports both Delta Lake and Iceberg managed tables, so Delta is not the problem.
 T: Predictive optimization maintains only Unity Catalog managed tables; external tables need manual maintenance or conversion to managed.
@@ -183,17 +183,17 @@ T: `CLUSTER BY AUTO` makes Databricks pick and adapt clustering keys for managed
 V: Liquid Clustering, Predictive optimization
 
 @ DBX-DEA D6 T6.4 applied tradeoff
-S: A schema contains managed tables with predictive optimization enabled through the catalog. A nightly Lakeflow Jobs task still runs `OPTIMIZE` on each liquid-clustered table in that schema, and the team asks if it is still needed. What does Databricks recommend?
+S: A schema contains managed tables with predictive optimization enabled through the catalog. A nightly Lakeflow Jobs task still runs `OPTIMIZE` on each liquid-clustered table in that schema, and the team asks if it is still needed. Which decision is best?
 A: Remove the scheduled OPTIMIZE task, because predictive optimization runs OPTIMIZE for enabled tables automatically
 B: Keep the task and add a nightly VACUUM as well, because predictive optimization only maintains statistics
 C: Replace the task with `OPTIMIZE ... ZORDER BY`, because predictive optimization performs Z-ordering on clustered tables
 D: Keep the task, because predictive optimization can run only when the scheduled task is paused
 K: A
 G: ## Predictive optimization and scheduled maintenance
-Predictive optimization decides which tables need `OPTIMIZE`, `VACUUM` and `ANALYZE`, queues them and runs them on serverless compute for jobs. For liquid-clustered tables, its `OPTIMIZE` triggers incremental clustering. Databricks recommends disabling manually scheduled `OPTIMIZE` jobs when predictive optimization is in use. Scheduled jobs add compute cost you pay yourself and duplicate work.
+Predictive optimization decides which tables need `OPTIMIZE`, `VACUUM` and `ANALYZE`, queues them and runs them on serverless compute for jobs. For liquid-clustered tables, its `OPTIMIZE` triggers incremental clustering. A manually scheduled `OPTIMIZE` job on the same tables therefore duplicates what the feature already does, so the schedule can be removed.
 ## Notes
 - When `OPTIMIZE` is run by predictive optimization it does not run `ZORDER`; Z-ordered files are ignored. This is another reason to prefer liquid clustering.
-- Without predictive optimization, schedule `OPTIMIZE` yourself (for busy tables, every one or two hours).
+- Without predictive optimization, Databricks recommends scheduling `OPTIMIZE` yourself (for tables with many updates or inserts, every one or two hours).
 W: Remove the schedule: predictive optimization already triggers incremental clustering and file optimization for enabled managed tables, so the manual job is redundant.
 X: B=Add VACUUM: predictive optimization runs `OPTIMIZE`, `VACUUM` and `ANALYZE`, not only statistics.
 C=ZORDER replacement: predictive optimization does not run `ZORDER`, and `ZORDER` is not compatible with liquid clustering.
@@ -263,7 +263,7 @@ T: A daemon ping timeout on a first cluster points to blocked network paths to t
 V: Databricks compute, Networking
 
 @ DBX-DEA D6 T6.5 applied troubleshooting
-S: A notebook on a classic cluster upgrades a library with `%pip install --upgrade pandas` in cell 1. In cell 2, `pandas.__version__` still prints the old version, although the install log reports success. What is the cause and the fix?
+S: A notebook on a classic cluster has already run `import pandas` in an earlier cell. Cell 1 then upgrades the library with `%pip install --upgrade pandas`, and in cell 2 `pandas.__version__` still prints the old version, although the install log reports success. What is the cause and the fix?
 A: `%pip` does not restart the Python process; call `dbutils.library.restartPython()` so the notebook imports the new version
 B: The install only applies to the next cluster start, so the cluster must be terminated and started again
 C: `%pip` installs only on the driver of another cluster, so the library must be added through the Jobs API
@@ -506,7 +506,7 @@ A principal in a Unity Catalog statement can be a user, a group, or a service pr
 - `MODIFY` inserts, updates and deletes data in a table (the older, general data-change privilege).
 - `ALL PRIVILEGES` is broad and does not include `MANAGE`; `MANAGE` allows privilege management, ownership transfer, rename and drop, which a pipeline does not need.
 - Grants on the schema are inherited by current and future tables there.
-W: `SELECT` plus `MODIFY` on the schema: it covers reading and appending to all tables in the schema and nothing else.
+W: `SELECT` plus `MODIFY` on the schema: it covers reading and writing, including appends, to the tables in that schema and does not reach other schemas or privilege management.
 X: B=`ALL PRIVILEGES` on the catalog: it hugely exceeds the need and covers every schema of the catalog.
 C=`SELECT` only: the pipeline would be able to read, but appends need `MODIFY`.
 D=`MANAGE`: it controls permissions and lifecycle of the object; it does not grant read or write access to data by itself.
@@ -521,16 +521,16 @@ C: The statement succeeds, and the deny is inherited by `main.hr` schema and eve
 D: The statement succeeds but only for users who are not metastore admins, because admins bypass the deny
 K: A
 G: ## Unity Catalog grants are additive
-In Unity Catalog, access starts at none. A principal gets access only through `GRANT` (directly, through a group, or by inheritance from a parent), and access is removed with `REVOKE` at the level where it was granted. The SQL `DENY` statement, which in the legacy Hive metastore takes precedence over any grant and flows down the hierarchy, applies only to `hive_metastore` and its objects. Databricks documents the `DENY` statement as not supported by Unity Catalog.
+In Unity Catalog, access starts at none. A principal gets access only through `GRANT` (directly, through a group, or by inheritance from a parent), and access is removed with `REVOKE` at the level where it was granted. The SQL `DENY` statement, which in the legacy Hive metastore takes precedence over any grant and flows down the hierarchy, applies only to `hive_metastore` and its objects. The `DENY` reference page states that the statement is not supported by Unity Catalog. The exam guide still lists `DENY` next to `GRANT` and `REVOKE`: read it as the legacy statement, which you should recognize and not expect to work on Unity Catalog objects.
 ## What to do instead
 - Do not grant access to the groups that should not have it, and revoke grants they currently hold.
 - Put sensitive data in a separate catalog or schema, and grant only the groups that need it.
-- For finer rules based on tags or per-row/column logic, use the dedicated governance features (row filters, column masks, ABAC policies), which are covered separately.
+- For finer rules based on tags or per-row/column logic, use the dedicated governance features (row filters, column masks, ABAC policies), which are covered separately. ABAC `DENY` policies in Unity Catalog are a different mechanism from the SQL statement and are documented as Beta.
 W: `hive_metastore` only: the Unity Catalog documentation says the `DENY` statement applies to the legacy metastore, so in Unity Catalog the team manages access by granting and revoking.
 X: B=Deny wins: that precedence is how `DENY` behaves in the legacy metastore; it is not a Unity Catalog behavior.
 C=Inherited deny: inheritance of a deny down the hierarchy is a legacy metastore property as well, not something Unity Catalog applies.
-D=Admin exception: Unity Catalog has no deny to begin with, so there is no admin-bypass mechanism for a deny.
-T: In Unity Catalog there is no `DENY` statement: manage access through grants, revokes, separation of data and fine-grained controls.
+D=Admin exception: the SQL `DENY` statement does not apply to Unity Catalog objects, so there is no admin-bypass behavior to describe.
+T: The SQL `DENY` statement is for `hive_metastore` only: in Unity Catalog manage access through grants, revokes, separation of data and fine-grained controls.
 V: Unity Catalog, Hive metastore
 
 @ DBX-DEA D7 T7.2 applied troubleshooting
@@ -546,7 +546,7 @@ A privilege that was granted on a catalog is inherited by every schema and table
 1. Revoke at the level of the original grant: `REVOKE SELECT ON CATALOG main FROM interns`.
 2. Re-grant at a narrower level for the objects that should stay: `GRANT SELECT ON SCHEMA main.sales TO interns`, and so on.
 3. Check with `SHOW GRANTS ON CATALOG main` or on the schema, to see the effective rights.
-Since `DENY` is not available in Unity Catalog, restructuring grants is the way to carve out an exception.
+Since the SQL `DENY` statement does not apply to Unity Catalog, restructuring grants is the way to carve out an exception.
 W: Revoke on the catalog, re-grant on the schemas: the original grant is on the catalog, so only revoking there removes inherited access, and narrower grants restore what interns should keep.
 X: B=Metadata only: a revoke on the table does not leave a partial access state; the problem is that no grant was removed at all.
 C=Per-user revoke: grants on a group apply to the group; there are no per-member copies to revoke.
