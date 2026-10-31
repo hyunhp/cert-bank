@@ -48,7 +48,7 @@ A: Dynamic secrets, such as database credentials generated on demand
 B: Static key/value entries written with `vault kv put`
 C: Service type authentication tokens
 D: Policies attached to an auth method role
-E: Response-wrapped values kept in cubbyhole storage only
+E: Batch type authentication tokens
 K: A,C
 G: ## Where leases come from
 Vault creates a lease with every dynamic secret and with every `service` type authentication token. All dynamic secrets are required to have one, even when the data is meant to live a long time, because the lease forces the consumer to check in routinely.
@@ -58,7 +58,7 @@ W: A=Dynamic secrets: every dynamic secret must have a lease, which carries its 
 C=Service tokens: service type tokens carry a lease, so they can be renewed and are revoked when they expire.
 X: B=KV entries: the key/value engine does not issue leases; the data stays until someone deletes it.
 D=Policies: a policy is an access rule set; it has no TTL or lease to renew or revoke.
-E=Wrapped values: a wrapping token has its own short TTL, but cubbyhole content is not a leased secret issued by an engine.
+E=Batch tokens: they are lightweight and not tracked in storage, so they carry no lease of their own; only service tokens get one.
 T: Dynamic secrets and service tokens have leases; static KV data does not.
 V: Vault
 
@@ -119,17 +119,17 @@ T: Lease metadata comes from `POST /sys/leases/lookup`; change comes from renew 
 V: Vault
 
 @ VLT-VA003 D4 T4.1 applied troubleshooting
-S: A developer reads a secret from the `kv` engine and sees a `lease_duration` of 768h, but `vault lease lookup` finds no lease for it. What explains this?
-A: KV issues no lease; the duration is only a hint for re-reading
+S: A developer reads a secret from a version 1 `kv` mount and the response includes a `lease_duration`, but `vault lease lookup` finds no lease for it. What explains this?
+A: KV issues no lease; the duration is only a hint of how often to check back
 B: The lease was created but lookup works only for leases that were renewed at least once
 C: The duration is wrong because KV leases are stored per namespace and not per mount
 D: Lookup finds only leases of tokens, while KV leases are tracked by the audit log
 K: A
 G: ## KV returns a duration, not a lease
-The lease documentation notes that the key/value backend does not issue leases, although it sometimes returns a lease duration. The number is an advisory refresh hint for clients; nothing expires and nothing is revoked at that time.
+The lease documentation notes that the key/value backend does not issue leases, although it sometimes returns a lease duration. The KV v1 page explains that the `lease_duration` is a hint for how often consumers should check back for a new value (a `ttl` key in the data is also only advisory); the engine never removes data on its own, so nothing expires and nothing is revoked at that time.
 - Dynamic engines (database, AWS) create real leases that Vault enforces.
 - KV data stays until deleted, so there is no lease to look up.
-W: No lease for KV: the returned duration is advice, so lookup has nothing to find and no automatic revocation happens.
+W: No lease for KV: the returned duration is only a refresh hint, so lookup has nothing to find and no automatic revocation happens.
 X: B=Renewal requirement: lookup finds any existing lease whether or not it was renewed, and KV simply has none.
 C=Per-namespace storage: leases are not what limits KV, and no per-namespace KV lease exists.
 D=Tokens only: lookup handles leases of dynamic secrets too, and audit logs do not hold leases.
@@ -155,21 +155,23 @@ T: Increment means "make the remaining TTL this long, starting now", and it is o
 V: Vault
 
 @ VLT-VA003 D4 T4.2 applied tradeoff
-S: A batch job finished early and still holds database credentials with a lease that has 6 hours left. It does not need them any longer but wants them to expire sooner without an explicit revoke. Which action does this?
-A: Renew it with a small increment such as `-increment=60`
-B: Renew the lease with `-increment=0` so the lease ends right away
-C: Look up the lease repeatedly until its TTL drops under a minute
-D: Read the secret again, which makes Vault shorten the previous lease on its own
+S: A team asks why every dynamic secret must carry a lease even when the credential is meant to stay valid for a very long time. Which reason does the lease documentation give?
+A: A lease forces the consumer to check in with Vault routinely, which makes audit logs more valuable and key rolling easier
+B: A lease lets the consumer cache the credential indefinitely because Vault pushes a notification when it changes
+C: A lease makes the credential static, so it can be stored in the key/value engine and read without renewal
+D: A lease encrypts the credential with the requesting token so that only that token can use it
 K: A
-G: ## Shortening with renew
-Because the increment is measured from now, requesting less than the remaining time reduces the lease. The credentials then expire early and Vault cleans up the resources. This is advisory, so the backend decides, but it is a supported pattern.
-- For immediate invalidation use `vault lease revoke` instead.
-- A request of 0 means no specific increment, so the default lease duration applies.
-W: Small increment: asking for one minute remaining moves the expiry from six hours to about one minute from now, if the backend honors it.
-X: B=`-increment=0`: zero means no specific request; it does not terminate the lease.
-C=Repeated lookups: lookup is read-only and does not change expiry.
-D=Re-reading: a new read issues a separate credential with its own lease, leaving the old one running.
-T: A smaller increment shortens a lease; revoke ends it immediately.
+G: ## Why leases are mandatory
+All dynamic secrets in Vault are required to have a lease. Even if the data is meant to be valid for eternity, a lease is required to force the consumer to check in routinely: either renew the lease (if allowed) or request a replacement secret.
+- Routine check-ins appear in the audit logs, so the logs show who still uses which credential.
+- Key rolling gets easier because consumers already expect to fetch new credentials.
+## What a lease does not do
+A lease is metadata (TTL, renewability) about a secret. It does not encrypt the secret, push changes to clients or turn a dynamic credential into stored data.
+W: Routine check-in: the documented benefit is that consumers must come back to Vault to renew or request a replacement, which improves auditing and makes rotating credentials simple.
+X: B=Indefinite caching: Vault does not push notifications; the lease tells the consumer when it must check back, which is the opposite of caching forever.
+C=Static data: a lease belongs to dynamic secrets; the key/value engine stores static data and does not issue leases.
+D=Token encryption: a lease is metadata with a duration and renewability, not an encryption wrapper bound to a token.
+T: Leases make consumers check in routinely, so audits improve and rotation is easy.
 V: Vault
 
 @ VLT-VA003 D4 T4.2 applied troubleshooting
@@ -208,15 +210,15 @@ V: Vault
 @ VLT-VA003 D4 T4.2 applied use-case
 S: A script holds the lease ID of AWS credentials and must extend them so that about half an hour remains. Which HTTP request does this?
 A: `POST /v1/sys/leases/renew` with `{"lease_id": "...", "increment": 1800}`
-B: `POST /v1/sys/leases/renew` with `{"lease_id": "...", "increment": "30m"}`
+B: `POST /v1/auth/token/renew` with `{"token": "<lease_id>", "increment": 1800}`
 C: `PUT /v1/sys/leases/extend` with `{"lease_id": "...", "ttl": 1800}`
 D: `POST /v1/sys/leases/lookup` with `{"lease_id": "...", "increment": 1800}`
 K: A
 G: ## Renew via API
 `POST /sys/leases/renew` takes `lease_id` (required, in the body or as a path parameter) and `increment`, the requested time in **seconds**. If both body and path carry the ID, the body wins. The response returns `lease_id`, `renewable` and `lease_duration`.
-Thirty minutes is 1800 seconds. The CLI flag accepts a duration, but the API documents an integer of seconds.
+Thirty minutes is 1800 seconds.
 W: Renew with seconds: the renew endpoint and an integer `increment` of 1800 request half an hour.
-X: B=Duration string: the API parameter is documented as an integer number of seconds.
+X: B=Token renew: `auth/token/renew` renews tokens and takes a token, so a secret's lease ID is not a valid input there.
 C=`extend` path: there is no such endpoint; renewal lives under `sys/leases/renew`.
 D=Lookup with increment: lookup is read-only and ignores an increment.
 T: API renewal is `POST /sys/leases/renew` with `lease_id` and `increment` in seconds.
@@ -258,21 +260,21 @@ E=Revoke first: revoking invalidates the secret and prevents further renewals, s
 T: Renewal keeps the secret and the lease ID and sets the remaining time from now.
 V: Vault
 
-@ VLT-VA003 D4 T4.2 applied troubleshooting
-S: An application renews its lease every 20 minutes, but one night it paused for two hours and the lease had a one-hour TTL. When it wakes up, `vault lease renew` returns an error. What is the right recovery?
-A: The lease expired and was revoked, so read the path again for a new secret
-B: Renew once more with a higher increment, since the old lease record still exists in Vault
-C: Use `vault lease lookup` to reactivate the lease, then renew
-D: Restart the Vault server so that the stored lease data is reloaded from storage
+@ VLT-VA003 D4 T4.3 applied definition
+S: A script calls `POST /v1/sys/leases/revoke/aws/creds/deploy/abcd-1234` and also sends the JSON body `{"lease_id": "aws/creds/deploy/efgh-5678"}`. Which lease does Vault revoke?
+A: The one in the body, because the JSON `lease_id` takes precedence over the path parameter
+B: The one in the URL path, because the path parameter takes precedence over the body
+C: Both leases, because Vault revokes every lease named in the request
+D: Neither, because a request that names the lease twice is rejected as ambiguous
 K: A
-G: ## Expiry ends the lease
-When a lease reaches the end of its TTL, Vault automatically revokes it. Revocation invalidates the secret (an AWS key is deleted from AWS, a database user is dropped) and prevents any further renewal. A client that missed the window cannot bring the old lease back.
-The consumer must request a replacement and use its new credentials.
-W: Read again: the old lease is gone, so only a fresh read produces a usable secret.
-X: B=Higher increment: renewal needs a live lease, and this one has been revoked.
-C=Lookup to reactivate: lookup only reads metadata and cannot revive anything.
-D=Restart: restarting does not undo revocation of an expired lease.
-T: A missed renewal means expiry and revocation; get a new secret.
+G: ## Two places for the lease ID
+The revoke and renew endpoints accept `lease_id` either in the JSON payload or as a path parameter, like `/sys/leases/revoke/:lease_id`. When both are present, the lease ID in the request JSON takes precedence.
+- The body form is easier to script because lease IDs contain slashes.
+W: Body wins: the API reference states that when the lease ID is supplied both ways, the one in the request JSON takes precedence.
+X: B=Path wins: the documentation says the opposite; the JSON payload overrides the path parameter.
+C=Both: a single request revokes the one lease it resolves; revoking several needs a prefix.
+D=Rejected: Vault does not treat the double specification as an error, it simply uses the JSON value.
+T: When a lease ID is given in both body and path, the body wins.
 V: Vault
 
 @ VLT-VA003 D4 T4.3 applied use-case
@@ -296,7 +298,7 @@ V: Vault
 S: Intrusion detection suggests an attacker may hold AWS keys generated through the `aws/` mount. What is the fastest way to invalidate all of them?
 A: `vault lease revoke -prefix aws/`, which revokes every lease under that path
 B: `vault lease revoke aws/`, which treats the path as the lease to revoke
-C: `vault secrets disable aws/`, which leaves existing keys valid until their TTL passes
+C: `vault lease renew -increment=1 aws/`, which shortens every lease under the mount to one second
 D: Wait for lease expiry, since expired leases cannot be abused
 K: A
 G: ## Prefix-based revocation
@@ -305,7 +307,7 @@ Since lease IDs start with the request path, operators with proper access can re
 - Use a narrower prefix such as `aws/creds/deploy/` to hit one role.
 W: Prefix revoke: one command invalidates all keys issued under the mount, instead of one at a time.
 X: B=No `-prefix`: the path is treated as an exact lease ID, which does not exist.
-C=Disable mount: disabling a mount also revokes its leases, but it removes the whole engine configuration; it is heavier than the stated aim, and the option as written claims keys remain valid.
+C=Renew a path: renew takes one exact lease ID and only requests a duration, so a mount path is not a lease and nothing under it is revoked.
 D=Wait: waiting leaves the keys usable for their remaining TTL, which is the exposure being closed.
 T: `-prefix` turns a path into a tree-wide revoke for incident response.
 V: Vault
@@ -382,7 +384,7 @@ T: Revocation is queued unless `sync=true`/`-sync` is set.
 V: Vault
 
 @ VLT-VA003 D4 T4.3 applied troubleshooting
-S: A token used to read many database credentials is revoked. What happens to the leases created with that token?
+S: A service token used to read many database credentials is revoked. What happens to the leases created with that token?
 A: Vault revokes every lease created with that token, removing the users
 B: The leases run on until their own TTL ends, since leases are independent of the token
 C: The leases are re-parented to the root token so that applications keep working
@@ -477,7 +479,7 @@ C: `POST /v1/sys/leases/lookup` with an empty body
 D: `LIST /v1/sys/leases/lookup/irrevocable`
 K: A
 G: ## Irrevocable leases
-A lease becomes irrevocable when revocation keeps failing. `GET /sys/leases/count` returns the total count of a type and the count per mount; currently only `irrevocable` is supported. `GET /sys/leases?type=irrevocable` lists them, with a default maximum of 10,000 unless `limit=none`. Both can include child namespaces.
+Irrevocable leases are leases that Vault could not revoke. `GET /sys/leases/count` returns the total count of a type and the count per mount; currently only `irrevocable` is supported. `GET /sys/leases?type=irrevocable` lists them, with a default maximum of 10,000 unless `limit=none`. Both can include child namespaces.
 W: Count endpoint: it returns the total number of irrevocable leases and a count per mount point, which shows the mounts that cause them.
 X: B=Type expired: the only lease type the count endpoint currently supports is irrevocable, so this request is rejected.
 C=Empty lookup: lookup requires one lease ID and returns metadata of that single lease, not counts by mount.
@@ -485,22 +487,20 @@ D=List irrevocable: this treats a type as a prefix and returns nothing useful.
 T: Use `/sys/leases/count?type=irrevocable` to find mounts producing stuck leases.
 V: Vault
 
-@ VLT-VA003 D4 T4.3 applied comparison
-S: Only the `deploy` role of the AWS engine is compromised, while the `audit` role is fine. Which command limits the revocation to the `deploy` role's keys?
-A: `vault lease revoke -prefix aws/creds/deploy/`, because lease IDs start with the role's request path
-B: `vault lease revoke -prefix aws/`, because the role name is always matched inside the lease ID
-C: `vault lease revoke aws/creds/deploy/`, because a trailing slash turns an ID into a prefix
-D: `vault lease revoke -prefix aws/creds/audit/`, because Vault inverts the prefix to find the other role
+@ VLT-VA003 D4 T4.3 applied tradeoff
+S: A team retires the `database/` mount with `vault secrets disable database/` while applications still hold unexpired credentials from it. What happens to those credentials?
+A: Vault revokes every secret the engine created, immediately, and removes the engine's data
+B: They stay valid until their own TTL ends, because disabling only stops new reads
+C: Only credentials that were never renewed are revoked; renewed ones are kept
+D: Vault refuses to disable the mount until every lease under it has expired
 K: A
-G: ## Choosing the prefix
-Prefix revocation matches the beginning of lease IDs, and that beginning is the path the secret was requested from. The longer the prefix, the narrower the blast radius:
-- `aws/` revokes every lease of the mount.
-- `aws/creds/deploy/` revokes only credentials issued through the `deploy` role.
-- A full lease ID with `-prefix` revokes exactly one lease.
-Without `-prefix`, the argument must be an exact lease ID. The call needs `sudo` when made through the API.
-W: Role-level prefix: the `deploy` role path selects exactly the leases issued from it and leaves the `audit` role untouched.
-X: B=Mount-wide prefix: `aws/` is a prefix of every lease under the mount, so the `audit` credentials would be revoked too.
-C=Trailing slash: the slash does not change how the argument is read; without `-prefix` Vault looks for an exact lease with that ID and finds none.
-D=Other role: that prefix would revoke the healthy `audit` keys and leave the compromised ones valid; Vault has no inverse matching.
-T: Pick the longest prefix that covers the compromised leases: mount, role path or one lease ID.
+G: ## Disabling a mount
+Disabling a secrets engine is the heaviest form of revocation. The command takes the enabled path, not the engine type, and all secrets created by that engine are revoked immediately and its Vault data is removed.
+- With many outstanding leases, revocation can put high load on the system, so plan the timing.
+- To revoke credentials but keep the engine and its roles, use `vault lease revoke -prefix database/` instead.
+W: Immediate revoke and removal: the documentation states that disabling a secrets engine revokes everything it generated and deletes its data.
+X: B=Run until TTL: disabling does not wait for expiry; the leases are revoked at once.
+C=Only unrenewed: renewal status is irrelevant; every secret generated by the engine is revoked.
+D=Refuses: Vault does not require leases to expire first; the command proceeds and revokes them.
+T: `vault secrets disable` revokes all of the engine's secrets and deletes its data; prefix revoke keeps the mount.
 V: Vault
