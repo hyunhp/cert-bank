@@ -22,7 +22,7 @@ K: A
 G: ## Parts of a managed connector
 Lakeflow Connect managed connectors (built and run by Databricks) are made of a few Unity Catalog governed pieces:
 - A **connection**: a Unity Catalog securable object that stores the authentication details for the source.
-- An **ingestion pipeline**: a Lakeflow pipeline that runs on serverless compute and writes to the destination.
+- An **ingestion pipeline**: a Lakeflow pipeline that reads from the source and writes to the destination.
 - **Destination tables**: streaming tables that hold the ingested data.
 Database connectors that use change data capture (CDC) add two more parts: an **ingestion gateway** and **staging storage**. The gateway extracts the change data continuously and stages it, so it runs in its own job as a continuous task, separate from the scheduled pipeline.
 ## Example
@@ -106,19 +106,19 @@ T: Treat managed ingestion pipelines as code: define them in a bundle and deploy
 V: Lakeflow Connect, Declarative Automation Bundles
 
 @ DBX-DEA D2 T2.4 applied use-case
-S: The security team forbids database passwords in pipeline definitions, notebooks and Git. A team plans to ingest an on-premises PostgreSQL database with a Lakeflow Connect managed connector. Where is the source authentication supposed to live?
+S: The security team forbids database passwords in pipeline definitions, notebooks and Git. A team plans to ingest an on-premises relational database with a Lakeflow Connect managed connector. Where is the source authentication supposed to live?
 A: In a Unity Catalog connection that the ingestion pipeline references
 B: In widget parameters of the pipeline that operators type before each run
 C: In a CSV file in the workspace root that only the pipeline owner can open
-D: In an environment variable that is exported inside the ingestion gateway notebook
+D: In a plain-text environment variable that is set in the code of the ingestion pipeline
 K: A
 G: ## Connections hold the credentials
-A managed connector uses a **Unity Catalog connection**: a securable object that stores the authentication details for the source. The ingestion pipeline refers to the connection, so credentials do not appear in pipeline configuration. Access to the connection is governed with Unity Catalog privileges, and the credentials are hidden from the people who use the pipeline.
+A managed connector uses a **Unity Catalog connection**: a securable object that stores the authentication details for the source. The ingestion pipeline refers to the connection, so credentials do not appear in pipeline configuration. Access to the connection is governed with Unity Catalog privileges, and the managed connector uses it to authenticate without requiring credentials in the pipeline configuration.
 This also works for the other layers of the stack: with plain Spark code you would instead keep secrets in a **secret scope** and read them with `dbutils.secrets.get`, never in the notebook text.
 W: Unity Catalog connection: it is the designed place for source authentication, is reusable, governed by privileges and keeps credentials out of code and Git.
 X: B=Widget parameters: typing passwords before runs would expose them in run parameters and history and cannot support unattended scheduled runs.
 C=CSV file in the workspace: credentials in a file are unmanaged, easy to copy and not integrated with Unity Catalog access control.
-D=Environment variable in a notebook: managed connectors have no gateway notebook to edit, and plain-text variables in code are the pattern the security team wants to avoid.
+D=Environment variable in code: managed connectors take their credentials from a connection rather than from code, and a plain-text variable set in pipeline code is the pattern the security team wants to avoid.
 T: Managed connectors authenticate through a governed Unity Catalog connection; never place source passwords in code, parameters or files.
 V: Lakeflow Connect, Unity Catalog
 
@@ -155,41 +155,41 @@ S: An engineer sets `partitionColumn=id`, `lowerBound=1000`, `upperBound=2000` a
 A: The bounds only set the partition stride, so the first and last partitions also take ids outside the range
 B: The JDBC source ignores the bounds whenever the source table has an index on the partition column
 C: Spark applies the bounds only when `fetchSize` has also been set to a value above 1000 rows
-D: The cluster uses a Unity Catalog connection, and that connection type disables all partitioning options
+D: Spark applies the bounds only when `numPartitions` equals the number of cores in the cluster
 K: A
 G: ## What lowerBound and upperBound do
 With a partitioned JDBC read, Spark splits the range between `lowerBound` and `upperBound` into `numPartitions` strides. The first partition gets all rows below the first stride boundary and the last partition all rows above the last one, so **no rows are filtered out**. The bounds only decide how evenly the work is divided.
-To load a subset, filter explicitly: a `WHERE` condition in a `query` or in a subquery given as `dbtable`, or a DataFrame filter that Spark can push down.
+To load a subset, filter explicitly: a `WHERE` condition in a parenthesized subquery with an alias given as `dbtable`, or a DataFrame filter that Spark can push down.
 ## Example
 `dbtable = "(SELECT * FROM orders WHERE id BETWEEN 1000 AND 2000) AS o"` reads only that range, and the partition bounds can then match it.
 W: Stride only: the bounds shape the partitions and the edge partitions are open ended, so rows outside the range are still read; filtering needs its own condition.
 X: B=Index ignored: an index on the partition column helps the source answer range queries quickly but has no effect on how Spark treats the bounds.
 C=fetchSize dependence: `fetchSize` only controls rows per round trip and is unrelated to bounds.
-D=Connection disables options: a Unity Catalog JDBC connection allows `partitionColumn`, `lowerBound`, `upperBound` and `numPartitions` among its default option allowlist, and this behavior is not about connections.
+D=Core count dependence: `numPartitions` only sets how many range queries are issued; the bounds work the same way for any value and never become a filter.
 T: lowerBound and upperBound split the work and do not filter; add a WHERE condition to limit the rows read.
 V: Spark JDBC
 
 @ DBX-DEA D2 T2.5 applied tradeoff
 S: A daily job must load the result of a join between two large tables in a source Oracle database plus a GROUP BY that reduces 2 billion rows to 3 million. Which JDBC read design moves the least data over the network?
-A: Read both tables in full with two JDBC reads and run the join and aggregation in Spark
-B: Read the first table in full and join the second one inside a Spark UDF row by row
-C: Read both tables with a high `numPartitions` and `fetchSize`, then cache the result in memory
-D: Use the `query` option with the join and aggregation SQL so that the source database computes it
+A: Read both tables in full with two parallel JDBC reads and run the join and the aggregation in Spark
+B: Read the first table in full, then look up each matching row of the second table inside a Spark UDF
+C: Read both tables with a high `numPartitions` and a larger `fetchSize`, then cache the joined result in cluster memory
+D: Pass the join and aggregation as a parenthesized subquery with an alias in `dbtable` so that the source database computes it
 K: D
 G: ## Pushing work down to the source
-The JDBC source can send a complete SQL statement to the database: use the `query` option (or a parenthesized subquery with an alias in `dbtable`). The database then runs the join and the aggregation and returns only the 3 million result rows. Pushing down is attractive when the source is well indexed and the result is much smaller than the input.
+The JDBC source can send a complete SQL statement to the database: give a parenthesized subquery with an alias as `dbtable`. The database then runs the join and the aggregation and returns only the 3 million result rows. Pushing down is attractive when the source is well indexed and the result is much smaller than the input.
 Trade-offs: the work runs on the source system, which may also serve an application, and the SQL is written in the source dialect. For very large results you can still combine it with partitioned reads.
 ## Example
 ```
 spark.read.format("jdbc").option("url", url)
-  .option("query", "SELECT region, SUM(amt) AS amt FROM o JOIN c USING (cid) GROUP BY region")
+  .option("dbtable", "(SELECT region, SUM(amt) total FROM o JOIN c USING (cid) GROUP BY region) agg")
   .load()
 ```
-W: Query pushdown: the database executes the join and aggregation, and only the small aggregated result crosses the network.
+W: Subquery pushdown: the database executes the join and aggregation, and only the small aggregated result crosses the network.
 X: A=Two full reads: all 2 billion rows (plus the second table) are transferred before Spark reduces them, which is the opposite of the goal.
 B=Row-by-row UDF join: it still reads one table in full and makes the join slow and non-distributed in the worst way; the source never helps.
 C=High parallelism and caching: more partitions and fetch speed make the full transfer faster but do not reduce the amount transferred, and caching billions of rows is costly.
-T: When the source can shrink the data, push the SQL down with the query option and move only the result.
+T: When the source can shrink the data, push the SQL down as a subquery in dbtable and move only the result.
 V: Spark JDBC
 
 @ DBX-DEA D2 T2.5 applied use-case
@@ -200,7 +200,7 @@ C: A COPY INTO statement with the API URL as file location and the token written
 D: A managed database connector configured with the API endpoint as the source database to read
 K: A
 G: ## REST sources
-Databricks has no connector that reads arbitrary REST endpoints for you, so the usual pattern is code orchestrated by **Lakeflow Jobs**: a Python or notebook task calls the API with an HTTP client (for example `requests`), handles pagination and retries, and writes the responses to a Delta table. Keeping the **raw JSON string** in a bronze table preserves the source exactly and lets you parse and fix types later.
+Auto Loader, COPY INTO and the managed database connectors do not call arbitrary REST endpoints, so the usual pattern is code orchestrated by **Lakeflow Jobs**: a Python or notebook task calls the API with an HTTP client (for example `requests`), handles pagination and retries, and writes the responses to a Delta table. Keeping the **raw JSON string** in a bronze table preserves the source exactly and lets you parse and fix types later.
 Credentials belong in a **secret scope** and are read with `dbutils.secrets.get("scope", "key")`; the value is redacted in notebook output.
 ## Example
 Nightly job schedule -> task `pull_api` (notebook) -> task `parse_to_silver`.
@@ -359,7 +359,7 @@ SELECT v:user.id::int FROM events;
 W: VARIANT: it tolerates changing fields and types without pre-processing, and its optimized encoding reads faster than parsing a JSON string each time.
 X: A=Raw STRING column: it is flexible but the worst for reads, since the full string is parsed on every query.
 B=Fixed STRUCT: producers change types and add fields, so writes would fail or drop data, and hundreds of fields hurts performance.
-C=MAP of strings: it throws away type information and does not collect statistics, so it is flexible but not better for reads.
+C=MAP of strings: keys and values are typed and enforced on write, so a field that changes type breaks the load or must be cast to text, and statistics cannot be collected; it is not the recommended pattern for evolving JSON.
 T: For evolving JSON with frequent reads choose VARIANT; keep STRING for raw archives and STRUCT for stable, known schemas.
 V: VARIANT, Delta Lake
 

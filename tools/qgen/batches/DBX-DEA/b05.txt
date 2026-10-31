@@ -90,7 +90,7 @@ Most aggregate functions skip NULL inputs. `avg(col)` sums the non-NULL values a
 `coalesce(rating, 0)` returns 0 when `rating` is NULL. Those rows now count as real ratings of 0, so the sum stays the same but the count grows, and the average falls. Only fill NULLs with a default when the business meaning really is "zero".
 W: NULL is ignored by avg: the original query divides by the number of rated reviews, while the rewrite adds a zero rating for each comment-only review, which raises the denominator and lowers every average.
 X: B=NULL treated as zero: avg does not do that; it skips NULLs, which is exactly why the two queries differ.
-C=Error on NULL: avg handles NULL without errors; it only raises an arithmetic overflow error for very large sums, and NULLs are not a cause.
+C=Error on NULL: avg handles NULL inputs without any error; it skips them, so the original query returns results.
 D=coalesce removes rows: coalesce never removes rows; it substitutes a value, so the rows stay in the group and the count of values goes up, not down.
 T: Aggregates such as avg and sum skip NULLs; filling NULL with 0 before aggregating changes the result.
 
@@ -154,7 +154,7 @@ G: ## Shuffle partitions
 A shuffle (for `groupBy`, joins, `distinct`) redistributes rows into a fixed number of partitions, and each partition becomes one task. `spark.sql.shuffle.partitions` sets that number for DataFrame and SQL queries; the documented default is 200, and the value `auto` lets Databricks pick a number from the query plan and input size.
 - Too few partitions: each task is large, memory runs out and tasks spill to disk.
 - Too many partitions: many tiny tasks, with scheduling overhead and small output files.
-Adaptive query execution (enabled by default) can already coalesce small shuffle partitions, but it cannot reliably split a few oversized ones, so a low starting number remains the limit here.
+Adaptive query execution (enabled by default) can coalesce small shuffle partitions after the shuffle, but the configured starting number still limits how finely the data is split here.
 W: More shuffle partitions: raising `spark.sql.shuffle.partitions` (or using `auto`) cuts the data per task so each fits in memory and spill decreases.
 X: B=spark.default.parallelism: it sets the default partition count for RDD operations such as `parallelize` and `reduceByKey`; DataFrame and SQL shuffles use the SQL setting, so the stage stays at 200 tasks.
 C=Lower autoBroadcastJoinThreshold: that threshold only decides whether a join side is broadcast; this is an aggregation without a join and the setting does not touch the number of shuffle partitions.
@@ -162,9 +162,9 @@ D=Decrease to 20: that would put even more data in each task, so the spill gets 
 T: spark.sql.shuffle.partitions controls the number of tasks after a DataFrame shuffle; too few gives spill, too many gives small tasks.
 
 @ DBX-DEA D3 T3.5 applied comparison
-S: A developer sets `spark.default.parallelism` to 800 in the notebook and then runs a pure SQL aggregation with `GROUP BY customer_id`. The Spark UI still shows 200 tasks in the shuffle stage. What explains this?
+S: A developer adds `spark.default.parallelism 800` to the cluster's Spark config and then runs a pure SQL aggregation with `GROUP BY customer_id`. The Spark UI still shows 200 tasks in the shuffle stage. What explains this?
 A: The setting applies to RDD-level operations, while shuffles in DataFrame and SQL queries use `spark.sql.shuffle.partitions`
-B: Spark ignores all configuration changes made in notebooks, so the only place to change settings is the cluster library list
+B: Spark ignores cluster-level Spark config for SQL queries, so every SQL setting has to be changed inside each notebook
 C: The value 800 is above the number of cores, so Spark silently falls back to the documented default of 200
 D: `spark.default.parallelism` can only lower the partition count, never raise it, so 800 cannot take effect
 K: A
@@ -173,7 +173,7 @@ G: ## Two partition settings
 - `spark.sql.shuffle.partitions`: the number of partitions after a shuffle in DataFrame and SQL queries (default 200, or `auto`).
 Because modern Databricks code uses DataFrames and SQL, the SQL setting is the one to tune for shuffles; the RDD setting matters only for low-level RDD code.
 W: RDD setting versus SQL setting: parallelism affects RDD operations only, so a `GROUP BY` still creates the shuffle partitions defined by `spark.sql.shuffle.partitions`.
-X: B=Notebook changes ignored: session-level Spark configuration set in a notebook takes effect for properties that can be changed at runtime; the issue is which property was set.
+X: B=Cluster config ignored for SQL: properties in the cluster's Spark config are applied when the cluster starts and are read by SQL queries too; the issue is which property was set.
 C=Value above core count: Spark does not cap partition counts to cores or revert to 200; you can run more partitions than cores and they queue.
 D=Only lowers: nothing in the setting limits it to lowering; it is simply not used by DataFrame shuffles.
 T: Tune spark.sql.shuffle.partitions for DataFrame and SQL shuffles; spark.default.parallelism affects RDD operations only.
@@ -288,7 +288,7 @@ T: Choose a materialized view when joins must stay correct as dimensions change;
 @ DBX-DEA D3 T3.6 applied use-case
 S: Raw clickstream events (append-only, high volume) land continuously in a silver streaming table. A gold dataset must hold one enriched row per event, with a few derived columns computed from that row only. Each event must be processed exactly once as it arrives, with low latency, and rows that are already processed must not be recomputed. Which gold object fits?
 A: A streaming table that reads the silver table and applies the row-level transformations
-B: A materialized view that recomputes the whole result set on every refresh from the beginning
+B: A materialized view, which is built to keep an aggregate or join result correct as the source data changes
 C: A standard view that is queried by the dashboards when the data is needed
 D: A temporary table that is created at the start of each notebook session
 K: A
@@ -298,7 +298,7 @@ A streaming table is a Unity Catalog managed table and a streaming target. It pr
 - A materialized view is a batch target; Databricks tries to update it incrementally but it is built for results that must stay correct as data changes, such as aggregations and joins.
 - A view stores no data, so nothing is processed once.
 W: Streaming table: it processes each new silver row once, appends the enriched row to the gold table and never recomputes rows it has already written.
-X: B=Materialized view: it is designed to keep results correct, which may mean recomputing; it does not give the append-once, per-event semantics that is required here.
+X: B=Materialized view: its content is defined by the query and kept correct on refresh, which may mean recomputing results; it does not give append-once, per-event processing.
 C=Standard view: a view stores nothing and recomputes at query time, so there is no stored gold dataset or exactly-once processing.
 D=Temporary table per session: it disappears at the end of the session and cannot be a shared, persistent gold dataset.
 T: A streaming table fits append-only, row-by-row, low-latency enrichment; a materialized view fits aggregates and joins that must stay correct.
@@ -409,7 +409,7 @@ Delta tables support two enforced constraint types:
 When a write violates an enforced constraint the transaction fails with an error. `ALTER TABLE ... ADD CONSTRAINT` first verifies that all existing rows satisfy the new CHECK; if any row violates it, the statement fails and nothing is added. Cleaning the offending rows (update, delete or quarantine them) and then running the statement again solves it.
 W: Existing violations: adding a CHECK validates all current rows, so a single row with a non-positive amount makes the statement fail; fix those rows and retry.
 X: B=Only at creation: CHECK constraints can be added and dropped later with ALTER TABLE ADD/DROP CONSTRAINT.
-C=Informational only: enforced constraints are NOT NULL and CHECK; only primary key, foreign key and unique are informational, and external registration is irrelevant.
+C=Informational only: enforced constraints are NOT NULL and CHECK; only primary and foreign keys are informational, and external registration is irrelevant.
 D=Reserved name: nothing reserves that name; the failure comes from the data checked when the constraint is added.
 T: ALTER TABLE ADD CONSTRAINT CHECK validates existing rows first; clean violating rows, then add it.
 
@@ -422,7 +422,7 @@ D: Unity Catalog enforces primary keys only at read time, so the duplicate appea
 K: A
 G: ## Enforced versus informational
 - **Enforced**: `NOT NULL` and `CHECK`. Violating writes fail.
-- **Informational**: `PRIMARY KEY`, `FOREIGN KEY` and unique constraints. They document relationships and can help the optimizer, but Databricks does not check them, so duplicate keys can be written.
+- **Informational**: `PRIMARY KEY` and `FOREIGN KEY`. They document relationships and can help the optimizer, but Databricks does not check them, so duplicate keys can be written.
 To guarantee unique keys, deduplicate before writing (for example with `row_number` and `QUALIFY` or `MERGE` on the key), or add a quality check that finds duplicates.
 W: Informational primary key: Databricks does not enforce primary keys, so duplicates insert without error; uniqueness must be ensured by the pipeline logic or a check.
 X: B=Partitioning requirement: no such rule exists; primary keys are informational regardless of partitioning.
