@@ -1,0 +1,573 @@
+# VLT-VA003 b09: D9 Access management architecture (T9.1-T9.2)
+# src: https://developer.hashicorp.com/vault/docs/agent-and-proxy/agent
+# src: https://developer.hashicorp.com/vault/docs/agent-and-proxy/autoauth
+# src: https://developer.hashicorp.com/vault/docs/agent-and-proxy/autoauth/methods/kubernetes
+# src: https://developer.hashicorp.com/vault/docs/agent-and-proxy/agent/caching
+# src: https://developer.hashicorp.com/vault/docs/agent-and-proxy/agent/caching/persistent-caches
+# src: https://developer.hashicorp.com/vault/docs/agent-and-proxy/agent/template
+# src: https://developer.hashicorp.com/vault/docs/agent-and-proxy/agent/process-supervisor
+# src: https://developer.hashicorp.com/vault/docs/deploy/kubernetes/injector
+# src: https://developer.hashicorp.com/vault/docs/deploy/kubernetes/vso
+# src: https://developer.hashicorp.com/vault/docs/deploy/kubernetes/vso/sources/vault
+# src: https://developer.hashicorp.com/vault/docs/deploy/kubernetes/vso/sources/vault/auth
+# src: https://developer.hashicorp.com/vault/docs/deploy/kubernetes/vso/api-reference
+
+@ VLT-VA003 D9 T9.1 applied definition
+S: A legacy application reads its database password from a local properties file and cannot be changed to call Vault. Which capability of Vault Agent lets it use Vault without code changes?
+A: Templating, which renders secrets into a file the application already reads, using the token from auto-auth
+B: Tokenization, which replaces the password in the properties file with a lookup key that Vault resolves at read time
+C: Seal wrapping, which makes the host file system decrypt the properties file with a key held in Vault
+D: Namespace mapping, which makes the application's file reads appear as requests to a Vault KV mount
+K: A
+G: ## Why Vault Agent exists
+Vault Agent is a client daemon that sits next to an application. Its goal is to remove the hurdle of adopting Vault: the application does not need Vault client code, because Agent talks to Vault on its behalf.
+- Auto-auth logs in and keeps the token renewed.
+- Templating renders secrets into files using Consul Template markup, authenticated with the auto-auth token.
+- Caching holds tokens and leased secrets, and Process Supervisor Mode injects secrets as environment variables.
+## Example
+A template such as `{{ with secret "secret/db" }}{{ .Data.data.password }}{{ end }}` writes the password to the file the legacy application already opens. When the secret changes, Agent re-renders the file.
+W: Templating: Agent renders the secret into a file the application already reads, so the application stays unaware of Vault.
+X: B=Tokenization: Agent does not swap values for lookup keys. It writes real secret values into files or environment variables.
+C=Seal wrapping: seal wrap protects values inside Vault's own storage. It has nothing to do with decrypting files on the application host.
+D=Namespace mapping: namespaces partition Vault's data. Agent does not translate file reads into Vault requests.
+T: Agent templating renders Vault secrets into files so unmodified applications can consume them.
+V: Vault Agent
+
+@ VLT-VA003 D9 T9.1 applied troubleshooting
+S: Vault Agent uses AppRole auto-auth with a role created with token_num_uses=3. After a short time the agent fails to renew its token and secrets stop updating. What is the most likely cause?
+A: The role needs a longer secret_id_ttl, because the agent logs in again with the same expired secret ID after each renewal
+B: The sink must be changed to a wrapped file sink, since a limited-use token cannot be written to disk in plain form
+C: Auto-auth does not track remaining uses, so the limited-use token can run out before a renewal; use token_num_uses=0
+D: The template stanza must set a lower lease_renewal_threshold so the token is renewed after only three requests
+K: C
+G: ## Tokens with limited uses and auto-auth
+Auto-auth keeps one token alive by renewing it and every renewal consumes a use. The Vault Agent docs state that auto-auth does not support tokens with a limited number of uses: it does not track the uses remaining and may allow the token to expire before it attempts to renew.
+## Fix
+Create the AppRole with `token_num_uses=0` (unlimited). Control exposure with `token_ttl`, `token_max_ttl` and policies instead. The AppRole bootstrap secret (`secret_id`) can still be limited, because it is used only at login.
+W: Limited-use token: auto-auth cannot count uses, so the token is exhausted before renewal. The documented value for AppRole auto-auth is `token_num_uses=0`.
+X: A=Longer secret_id_ttl: an expiring secret ID would break new logins, but the described failure is a token running out of uses during renewal, not a login problem.
+B=Wrapped file sink: tokens with limited uses can be written to any sink. Wrapping a sink does not change how many uses the token has.
+D=Lower lease_renewal_threshold: that setting controls when templates refresh leased secrets, not how many times a token can be used.
+T: Use token_num_uses=0 for AppRole auto-auth, because Agent does not track remaining token uses.
+V: Vault Agent
+
+@ VLT-VA003 D9 T9.1 advanced comparison
+S: A platform team response-wraps the auto-auth token with wrap_ttl set in the method block, not in the sink block. Which statement is accurate about the trade-off?
+A: Method wrapping lets the end client verify the creation_path, but auto-auth cannot renew the token, so the client must do it
+B: Method wrapping keeps the token renewed by Agent, but the creation_path is always sys/wrapping/wrap and cannot be validated
+C: Method wrapping is only possible with several sinks, since the wrap occurs after the token reaches each sink
+D: Method wrapping encrypts the token with AES-GCM, so the client does not need to unwrap it before using it
+K: A
+G: ## Two places to wrap the token
+Tokens written by auto-auth can be response-wrapped in two ways.
+- Wrapped by the auth method (`wrap_ttl` in the `method` block): Vault wraps the token as it is returned, so the client can inspect `creation_path` and detect a man-in-the-middle. Auto-auth cannot unwrap and rewrap without changing the `creation_path`, so it cannot renew the token; the end client must renew it.
+- Wrapped by a sink (`wrap_ttl` in the `sink` block): the token is wrapped after it is fetched, so `creation_path` is always `sys/wrapping/wrap`. This is less secure, but auto-auth keeps the token renewed and re-authenticates on expiry.
+W: Method wrapping: the client can verify the creation_path, and renewal falls to the client because Agent cannot rewrap without altering it.
+X: B=Sink-wrapping properties: that description (renewed by Agent, fixed sys/wrapping/wrap path) belongs to wrapping in a sink, not in the method.
+C=Needs several sinks: sinks wrap tokens after they are fetched, which is why several sinks can be used. Method wrapping happens at login and needs no sink.
+D=AES-GCM encryption: encryption is a separate sink option based on a Diffie-Hellman exchange. It is not part of response wrapping, and a wrapped token must be unwrapped before use.
+T: Wrapping in the method allows creation_path validation but stops Agent from renewing; wrapping in the sink keeps renewal.
+V: Vault Agent
+
+@ VLT-VA003 D9 T9.1 applied use-case
+S: A Vault Agent template renders a KV v2 secret to a file. An operator updates the secret in Vault and sees the file change only after several minutes, and nothing else in the config is set. Why?
+A: The secret has no lease, so Agent polls it on a five-minute default render interval
+B: KV v2 secrets are leased for one hour, and Agent refreshes them when two thirds of the lease has passed
+C: Agent subscribes to KV events and applies each change as soon as the secret's lease is revoked
+D: The sink must be restarted, as the template engine reads KV v2 data only when a new token is written
+K: A
+G: ## How templates refresh secrets
+Template renewal depends on the kind of secret.
+- Renewable secrets or tokens: renewed after 2/3 of the lease duration has elapsed.
+- Non-renewable, non-leased secrets such as KV v2: fetched every 5 minutes by default. `template_config { static_secret_render_interval = "10m" }` changes the interval.
+- Non-renewable leased secrets, such as many database credentials: fetched again at about 90% of the TTL (with jitter); `lease_renewal_threshold` changes the fraction.
+- Static roles with a `rotation_period`: re-fetched as their TTL runs down.
+W: Static render interval: KV v2 has no lease, so Agent polls it on `static_secret_render_interval`, five minutes by default.
+X: B=Hour-long lease: KV v2 values are not leased, so the two-thirds rule for renewable leases does not apply.
+C=Event subscription: Agent templating polls. It does not subscribe to Vault events, and a KV update does not revoke any lease.
+D=Sink restart: templates and sinks are independent. Templating runs with the auto-auth token and does not wait for a new token to be written.
+T: Non-leased secrets such as KV v2 are re-rendered by polling every five minutes unless static_secret_render_interval says otherwise.
+V: Vault Agent
+
+@ VLT-VA003 D9 T9.1 applied troubleshooting
+S: A Vault Agent template for secret/app reads .Data.data.apikey, but the secret has the key api_key. The file renders "<no value>" and Agent keeps running. What makes Agent fail instead?
+A: Setting error_on_missing_key = true in the template stanza alone, since a missing key then stops the agent process
+B: Setting exit_on_err = true in the auto_auth method, since a template error counts as an authentication failure
+C: Setting num_retries = -1 in the vault stanza, since disabling retries makes Agent exit on a missing key
+D: Setting both error_on_missing_key = true in the template and exit_on_retry_failure = true in template_config
+K: D
+G: ## Missing key vs missing secret
+- If the secret itself does not exist, the templating engine always errors.
+- If the secret exists but the key is absent, the engine by default prints `<no value>` and continues.
+- `error_on_missing_key = true` in the `template` stanza makes the engine error on a missing key. The docs recommend it.
+- Whether Agent exits after a templating error depends on `exit_on_retry_failure` in `template_config` (default `false`). With only the first setting, Agent keeps retrying until the key exists.
+So both settings are needed to make Agent fail and exit.
+W: Both settings: `error_on_missing_key` turns the missing key into an error, and `exit_on_retry_failure` makes Agent exit once template retries fail.
+X: A=Template setting alone: the template then errors, but without `exit_on_retry_failure` Agent retries until the key appears or the process is stopped.
+B=exit_on_err: it affects login attempts for new tokens in auto-auth, not template rendering errors.
+C=num_retries -1: retries are disabled for requests, but templating does not treat a missing key as a request failure, and the key error is controlled by the two template settings.
+T: To exit on a missing key, set error_on_missing_key in the template and exit_on_retry_failure in template_config.
+V: Vault Agent
+
+@ VLT-VA003 D9 T9.1 applied comparison
+S: Which TWO statements about Vault Agent caching are accurate? (Select TWO)
+A: Agent can cache a new token from a login request when the parent token is already managed by Agent, or the new token is an orphan
+B: Agent caching caches KV v1 and KV v2 reads without a lease, so repeated reads never reach the Vault server
+C: Agent renews cached tokens and leases in memory, and these renewals stop immediately when Agent shuts down
+D: Agent writes its renewal state to Vault, so a restarted Agent resumes every renewal where the old one stopped
+E: Responses are matched by path only, so a different header on a repeated request still returns the same entry
+K: A,C
+G: ## What Agent caching does
+Caching holds responses that contain newly created tokens and leased secrets generated from those tokens. Agent also renews the cached tokens and leases.
+- Tokens: cached only when the token creation request goes through Agent and the parent token is already managed by Agent, or the new token is an orphan.
+- Leased secrets: cached when the request uses a token that Agent manages.
+- Not cached: static KV secrets. The docs recommend Vault Proxy for static secret caching.
+- Uniqueness: a hash of the request, including headers and body, is the cache index.
+- Shutdown: renewals run in memory only, so they end when Agent stops. Shutdown does not revoke anything, but renewal responsibility returns to the client.
+W: A=Managed parents and orphans: those are the cases in which Agent keeps a new token and its leases and renews them.
+C=In-memory renewals: Agent keeps no renewal state outside memory, so renewals end when the process stops (unless persistent caching restores them).
+X: B=Static KV caching: Vault Agent does not support static secret caching. Vault Proxy is recommended for that purpose.
+D=State in Vault: Agent performs all operations in memory and persists nothing to Vault. Only the optional persistent cache file can bring state back.
+E=Path-only matching: the request is serialized and hashed together with its headers and body, so any difference creates a different cache entry.
+T: Agent caches tokens and leased secrets of tokens it manages and renews them in memory, but it does not cache static KV reads.
+V: Vault Agent
+
+@ VLT-VA003 D9 T9.1 advanced troubleshooting
+S: An operator revokes a lease by running vault lease revoke directly against Vault, bypassing Agent. Applications that use Agent's cache still receive the credentials from it. What explains this and what is the remedy?
+A: Agent learns of revocations through a Vault event stream, so the credentials will be evicted after the next renewal fails
+B: Agent cannot see revocations made directly on the server, so the entry is stale; clear it with the cache-clear endpoint
+C: The cache keeps entries until the secret's maximum TTL even when the server revokes them, and nothing can remove them early
+D: Revoking directly on Vault also revokes the token owned by Agent, so the cache is refilled with a new token automatically
+K: B
+G: ## Cache eviction
+Agent evicts cache entries when it can no longer renew them (maximum TTL reached, or a renewal error) and by best effort when a revoke request passes through it: a token or lease revocation made via Agent that succeeds on the server evicts the related entries.
+## Direct revocations
+Revocations made straight against the Vault server are invisible to Agent, so entries can go stale. The `POST /agent/v1/cache-clear` endpoint lets an operator evict entries by `type` (`request_path`, `lease`, `token`, `token_accessor`, or `all`) and `value`.
+W: Stale entry: Agent cannot observe revocations made directly on the server, and the cache-clear API removes entries by lease, token, accessor, path or all.
+X: A=Event stream: Agent does not subscribe to events. It evicts entries only when renewal fails or when it sees a revoke request pass through it.
+C=No early removal: entries can be removed early, both by intercepted revocations and manually through cache-clear.
+D=Token revoked too: revoking a single lease leaves the token intact, and Agent does not mint a replacement for a cache entry in that way.
+T: Agent can serve stale entries after a direct revocation; use /agent/v1/cache-clear to evict them.
+V: Vault Agent
+
+@ VLT-VA003 D9 T9.1 advanced use-case
+S: A Kubernetes pod restarts, and Vault Agent should reuse the tokens and leases of its previous run instead of requesting new ones. Which TWO statements about the persistent cache are accurate? (Select TWO)
+A: It restores only leased secrets, so a KV v2 secret is read from Vault again after the restart
+B: It works on any platform, and the cache file may be placed on any shared network drive
+C: It can be used without auto-auth, because the restored token comes from the file itself
+D: It is invalidated if the auto-auth token has expired by the time the cache is restored, and secrets are fetched again
+E: It stores secret values unencrypted in the file so the application can read them directly
+K: A,D
+G: ## Persistent caching
+Agent can restore tokens and leases from a cache file created by a previous Agent process. The file is a BoltDB file whose tuples (the token, leases for tokens and secrets, and secret values) are encrypted with a generated key.
+- Only leased secrets are restored. Non-renewable secrets such as KV v2 are not persisted.
+- Auto-auth must be used. If the auto-auth token expired before the restore, the cache is invalidated and secrets are re-fetched.
+- It is currently supported only in a Kubernetes environment (`persist "kubernetes"`), typically on a volume shared by the Agent init and sidecar containers.
+- With templating enabled, template requests are routed through the cache automatically.
+W: A=Leased secrets only: non-leased data such as KV v2 is not stored, so it is fetched from Vault again.
+D=Expired auto-auth token: the token that unlocks the restored state is no longer valid, so the cache is dropped.
+X: B=Any platform: persistent caching is supported only in Kubernetes at present, using the `kubernetes` type.
+C=No auto-auth: auto-auth is required, because the restored entries belong to the auto-auth token.
+E=Unencrypted values: the stored tuples are encrypted with a generated encryption key, not written in plain text.
+T: The persistent cache restores leased entries in Kubernetes, requires auto-auth, and is discarded if the auto-auth token has expired.
+V: Vault Agent
+
+@ VLT-VA003 D9 T9.1 applied use-case
+S: Vault Agent runs in process supervisor mode with an exec block and one env_template. A static secret behind the env_template changes. With default settings, what does Agent do?
+A: It updates the variable inside the running child process, which keeps its PID
+B: It stops rendering and leaves the child running with the old value until Agent is restarted
+C: It exits with code 0 and relies on the init system to start the child again
+D: It restarts the child with SIGTERM, then SIGKILL after 30 seconds if it does not stop
+K: D
+G: ## Process supervisor mode
+Agent renders each `env_template` at least once and then starts the child defined in the single top-level `exec` block. Environment variables cannot be changed in a running process, so:
+- `restart_on_secret_changes` defaults to `always`: when a static secret updates (on `static_secret_render_interval`) or a dynamic secret nears expiry, Agent restarts the child.
+- `restart_stop_signal` defaults to `SIGTERM`; after 30 seconds Agent sends `SIGKILL`.
+- Agent forwards stdin, stdout and stderr, and exits with the child's exit code when the child exits on its own.
+The mode needs at least one `env_template` and is incompatible with file `template` stanzas.
+W: Restart with SIGTERM: Agent stops the child with the configured signal, SIGTERM by default, and kills it after 30 seconds, then starts it with new values.
+X: A=In-place update: a process cannot have its environment changed from outside. Agent must restart the child.
+B=Leaves it alone: that only happens with `restart_on_secret_changes = "never"`, which is not the default.
+C=Agent exit: Agent itself keeps running. It exits only when the child exits on its own, and then with the child's exit code.
+T: In process supervisor mode Agent restarts the child on secret changes by default, using SIGTERM and then SIGKILL after 30 seconds.
+V: Vault Agent
+
+@ VLT-VA003 D9 T9.1 applied use-case
+S: A batch job needs secrets rendered once before it starts, and the Agent must then stop so the job pod can finish. Which Agent setting does this when it runs as an init-style process?
+A: exit_after_auth = true, so Agent renders its templates and then exits with code 0
+B: pid_file set to a path, so Agent quits as soon as that file is deleted by the job
+C: disable_keep_alives set for templating, so Agent closes after each rendered template
+D: A listener with the agent_api quit endpoint, so Agent exits when the job calls it
+K: A
+G: ## Running Agent once
+`exit_after_auth` (default `false`) makes Agent exit with code `0` after one successful authentication, where success means a token was retrieved and all sinks wrote it. When `template` stanzas exist, Agent waits until the templates have rendered successfully before exiting. This suits init containers and one-off jobs.
+Exceptions and notes:
+- With `env_template` in process supervisor mode and `exit_after_auth = true`, Agent does not run the child process in `exec`.
+- The Vault Agent Injector uses an init container to pre-populate secrets and a sidecar to keep them updated; the init container can run once and exit.
+W: exit_after_auth: Agent authenticates, waits for templates to render, and exits with code 0, which lets an init container finish.
+X: B=pid_file: it only records the process ID. It does not control when Agent exits.
+C=disable_keep_alives: this turns off HTTP keep-alive connections for the listed features. It has no influence on process lifetime.
+D=Quit endpoint: `/agent/v1/quit` is disabled by default and can be enabled, but it is a manual shutdown call with no authorization, not a run-once setting, and the job would have to call it.
+T: exit_after_auth = true makes Agent render templates once and exit with code 0.
+V: Vault Agent
+
+@ VLT-VA003 D9 T9.1 applied comparison
+S: A Vault Agent template issues TLS certificates from a PKI role. The agent process restarts every few hours, and the team wants to avoid issuing a new certificate each time. Which template function fits?
+A: secret, because it fetches a certificate only when its lease reaches 90% of its TTL, regardless of restarts
+B: pkiCert, because it fetches on startup only if none was rendered or the rendered one has expired
+C: secret, because it never fetches again after the first render until the template file is deleted
+D: pkiCert, because it fetches a fresh certificate on every re-authentication to keep the chain current
+K: B
+G: ## Certificates in templates
+Both `secret` and `pkiCert` can render PKI certificates, but they behave differently around restarts and re-authentication:
+- `pkiCert`: on startup, fetch only if no certificate has been rendered yet or the current one has expired. After auto-auth re-authentication (for example a token expiry), skip fetching unless the current certificate has expired. Rotation happens at a share of the certificate validity period, set by `lease_renewal_threshold`.
+- `secret`: fetches a new certificate on startup even if the old one is still valid, and fetches and re-renders after re-authentication.
+The docs recommend `pkiCert` to avoid needlessly generating certificates.
+W: pkiCert: it keeps a still-valid rendered certificate across Agent restarts and re-authentication, so no extra certificates are issued.
+X: A=secret on restart: with `secret`, startup always fetches a new certificate, so each restart issues another one.
+C=Never fetches again: secret re-fetches by certificate validity (or by lease rules when `generate_lease` is true), so nothing waits for a deleted file.
+D=Fresh on re-authentication: that is how `secret` behaves. `pkiCert` skips the fetch on re-authentication unless the certificate expired.
+T: Use pkiCert in Agent templates to avoid reissuing a valid certificate on every restart or re-authentication.
+V: Vault Agent, PKI
+
+@ VLT-VA003 D9 T9.1 advanced troubleshooting
+S: Vault Agent is started on a host where VAULT_ADDR is exported as the Agent's own listener address, while the config file sets address in the vault stanza to the Vault cluster. Agent logs show repeated connection attempts and port exhaustion. What is wrong?
+A: The listener stanza must use type unix, because a tcp listener cannot be combined with the vault stanza
+B: The variable overrides the vault stanza, so Agent dials itself; unset it or point it at Vault
+C: The vault stanza overrides the environment variable, so VAULT_ADDR is ignored and the retry stanza loops
+D: The token in the sink points at a different cluster, and Agent retries with an incremented port number each time
+K: B
+G: ## Address precedence
+The Vault address can be set in three places. In increasing order of priority: the configuration file, environment variables, CLI flags. If `VAULT_ADDR` is exported where Agent runs, it takes precedence over `address` in the `vault` stanza.
+Agent's own listener is where applications send requests. If `VAULT_ADDR` is set to that listener (a common habit so that the CLI uses Agent), Agent tries to connect to itself. The connection fails, and Agent increments the port and tries again, which leads to port exhaustion.
+Use `VAULT_AGENT_ADDR` for CLI clients that should talk to the Agent listener, and keep `VAULT_ADDR` out of the Agent's own environment.
+W: Environment override: the variable outranks the config file, so Agent's upstream is itself. Removing it or pointing it at the Vault cluster fixes the loop.
+X: A=Unix listener: a tcp listener is valid with a vault stanza. The problem is which address the Agent dials.
+C=Config wins: the opposite is true. The environment variable has a higher priority than the config file.
+D=Sink token mismatch: the sink holds a token and has no address. The port increments come from Agent redialing itself.
+T: VAULT_ADDR in Agent's environment overrides the vault stanza; do not point it at Agent itself.
+V: Vault Agent
+
+@ VLT-VA003 D9 T9.1 applied use-case
+S: Pods in a cluster get secrets from the Vault Agent Injector, and an application needs its credentials in place before its container starts and kept fresh while it runs. Which injector behavior provides that?
+A: Only a sidecar is injected, and it renders the files once the application container reports healthy
+B: An init container fills a shared memory volume first, then a sidecar keeps rendering to it
+C: An init container renders the files and stays running, while the sidecar is used only for TLS settings
+D: A mutating webhook writes the secrets into the pod specification as environment variables at admission time
+K: B
+G: ## What the injector adds to a pod
+The Vault Agent Injector is a Kubernetes mutating webhook. It watches pod `CREATE` and `UPDATE` events and, when the annotation `vault.hashicorp.com/agent-inject: "true"` is present, changes the pod:
+- Every container mounts a shared memory volume at `/vault/secrets`.
+- An init container pre-populates that volume with the requested secrets before the other containers start.
+- A sidecar container keeps authenticating and rendering to the same location while the pod runs.
+Annotations can disable either container. Secrets are requested with `vault.hashicorp.com/agent-inject-secret-<name>` annotations, or with a ConfigMap of Agent configuration (`vault.hashicorp.com/agent-configmap`) for advanced cases.
+The pod's service account is the default way to authenticate with Kubernetes auth; the role should not be bound to the `default` service account.
+W: Init plus sidecar: the init container makes secrets available before startup, and the sidecar refreshes them for the pod's lifetime.
+X: A=Sidecar only: a sidecar alone cannot guarantee files exist before the application starts. The init container is what provides that.
+C=Long-lived init container: init containers run to completion before the app starts. The sidecar is what keeps running and renders updates.
+D=Environment variables at admission: the injector does not put secret values in the pod spec. It renders them to a memory volume at runtime.
+T: The injector uses an init container for the first render and a sidecar for continuous refresh in a shared memory volume.
+V: Vault Agent, Kubernetes
+
+@ VLT-VA003 D9 T9.2 applied use-case
+S: A KV v2 secret holds the keys user, password and internal_note. A VaultStaticSecret syncs it, and the destination Kubernetes Secret must not contain internal_note. Which setting does this?
+A: destination.transformation.excludes with a regex pattern that matches internal_note
+B: destination.transformation.excludeRaw set to true, which drops every field Vault marks as internal
+C: hmacSecretData set to false, which stops VSO from copying fields it cannot compute a MAC for
+D: refreshAfter set to a short value, which makes VSO discard fields that did not change on a sync
+K: A
+G: ## Shaping the destination Secret
+By default VSO copies every top-level key of the source secret into the destination Kubernetes Secret, and may also add a raw copy of the whole source response. The `destination.transformation` block changes this before the Secret is written.
+- `excludes`: regex patterns for top-level source fields to leave out. Exclusions are applied before inclusions.
+- `includes`: regex patterns for fields to keep.
+- `templates`: build new keys from the source data.
+- `excludeRaw`: leave out only the raw copy of the source data.
+## Example
+`transformation: { excludes: ["^internal_note$"] }` leaves `user` and `password` in the Secret and drops `internal_note`.
+W: excludes: the regex pattern filters top-level source fields out of the destination Secret, so internal_note is never written.
+X: B=excludeRaw: it removes only the raw copy of the whole response. It does not know which fields are internal, and the individual keys stay in the Secret.
+C=hmacSecretData false: the HMAC is only used for drift detection and comparison with Vault, and has no role in choosing which fields are copied.
+D=Short refreshAfter: it only sets how often VSO syncs. Every sync copies the same fields, whatever changed.
+T: Use destination.transformation.excludes (or includes) to control which source fields reach the Kubernetes Secret.
+V: Vault Secrets Operator
+
+@ VLT-VA003 D9 T9.2 applied definition
+S: A platform administrator configures VSO and wants one resource to hold the address and TLS settings of the Vault server, and another to hold the login method, mount and role. Which pair of CRDs is this?
+A: VaultAuth holds the address and TLS settings, and VaultConnection holds the login method, mount and role
+B: VaultConnection and VaultStaticSecret, with the secret resource also storing the login role
+C: VaultConnection holds the address and TLS settings, and VaultAuth holds the login method, mount and role
+D: VaultAuth and VaultDynamicSecret, with the dynamic resource also storing the Vault address
+K: C
+G: ## The foundation resources
+Two CRDs describe how the operator reaches and logs in to Vault; every secret-sync resource builds on them.
+- `VaultConnection`: a single Vault server. Required `address`; optional headers, `tlsServerName`, `skipTLSVerify` and `caCertSecretRef` for the CA chain.
+- `VaultAuth`: how to authenticate to that server. It refers to a connection with `vaultConnectionRef`, and sets `method` (kubernetes, jwt, appRole, aws or gcp), `mount`, and method settings such as the Kubernetes `role` and `serviceAccount`.
+The secret resources (`VaultStaticSecret`, `VaultDynamicSecret`, `VaultPKISecret`) point to a VaultAuth with `vaultAuthRef`. If no connection is named, the operator uses the `default` VaultConnection in its own namespace.
+W: Connection and auth: VaultConnection carries the server address and TLS options, and VaultAuth carries the method, mount and role.
+X: A=Swapped: the address and TLS settings belong to the connection, and the login configuration belongs to the auth resource.
+B=Secret resource as login holder: VaultStaticSecret only names a VaultAuth with `vaultAuthRef`. It does not store roles.
+D=Dynamic resource as address holder: VaultDynamicSecret refers to a VaultAuth, which refers to the connection. The Vault address is not set there.
+T: VaultConnection defines where Vault is, and VaultAuth defines how VSO logs in.
+V: Vault Secrets Operator
+
+@ VLT-VA003 D9 T9.2 applied use-case
+S: An application needs a PostgreSQL username and password issued on request from the database secrets engine at db/creds/readonly, delivered as a Kubernetes Secret. Which VSO custom resource syncs it?
+A: VaultStaticSecret with type kv-v2, since all engine paths can be read as static key-value data
+B: VaultPKISecret with mount db, since it covers every engine that issues credentials
+C: VaultConnection with path creds/readonly, since it points at the engine
+D: VaultDynamicSecret with mount db and path creds/readonly, since Vault issues and leases them
+K: D
+G: ## Choosing the secret CRD
+Each secret CRD handles one class of source:
+- `VaultStaticSecret`: KV v1 and KV v2 (`type: kv-v1` or `kv-v2`).
+- `VaultDynamicSecret`: engines that issue credentials, such as database, AWS, Azure and GCP. `mount` is the engine mount and `path` is the endpoint (`creds/readonly`).
+- `VaultPKISecret`: certificates from the PKI engine (`role`, `commonName`, `ttl`).
+All have `destination` (with `create: true` and `name`) for the target Kubernetes Secret.
+W: VaultDynamicSecret: it requests credentials from the database role path and tracks the lease, renewing or re-issuing as needed.
+X: A=VaultStaticSecret: it reads KV v1 and v2 only. The database engine generates credentials with leases.
+B=VaultPKISecret: it requests certificates from the PKI engine, not credentials from other engines.
+C=VaultConnection: it defines the server address. It does not select secrets or a destination.
+T: Credentials issued by an engine such as database or AWS are synced with VaultDynamicSecret.
+V: Vault Secrets Operator, Database
+
+@ VLT-VA003 D9 T9.2 applied use-case
+S: A VaultStaticSecret syncs a KV v2 secret and sets refreshAfter: 60s. An engineer changes the secret in Vault. What happens?
+A: Vault pushes the change to the operator right away, as KV v2 events are enabled on every Vault server
+B: The operator ignores the setting, because a KV v2 secret is leased and follows the lease duration
+C: The Secret is updated at the next sync, up to a minute later, and no restart occurs unless configured
+D: The Kubernetes Secret is deleted until the next sync, and pods lose access to it for 60 seconds
+K: C
+G: ## Refresh without leases
+KV secrets have no lease TTL, so VSO needs a schedule: `refreshAfter` is the period between syncs. The API reference says it needs to be set when the secret engine does not give a lease TTL in its response; a lease duration greater than 0 takes precedence.
+- On each sync, VSO compares the source with the destination and updates the Kubernetes Secret when the data changed.
+- Pods that use the Secret as a volume see updated data after the kubelet refreshes; environment variables are not updated in running pods.
+- `rolloutRestartTargets` are only triggered if you configure them.
+- Instant updates through Vault events are a Vault Enterprise feature (1.13+ for KV), and `refreshAfter` is still recommended.
+W: Scheduled resync: the operator polls on `refreshAfter` and updates the destination Secret when the data differs. Restarts happen only with configured rollout targets.
+X: A=Immediate push: instant updates need Vault Enterprise and `syncConfig`, and event delivery is not guaranteed. Without them the operator polls.
+B=Leased KV v2: KV v2 returns no lease, which is why `refreshAfter` is needed.
+D=Delete and recreate: the operator updates the destination Secret in place. It does not remove it between syncs.
+T: With KV, VSO resyncs every refreshAfter interval and updates the Kubernetes Secret when the data changed.
+V: Vault Secrets Operator
+
+@ VLT-VA003 D9 T9.2 applied use-case
+S: An application reads a database password from an environment variable and cannot reload it while running. Which TWO statements about VSO rolloutRestartTargets are accurate? (Select TWO)
+A: It is meant for applications that cannot reload a rotated secret, and each listed target is restarted when the Vault secret changes
+B: It restarts every pod in the namespace of the destination Secret whenever the operator reconciles, even if nothing changed
+C: It is set on the VaultAuth resource, so all secrets using that login restart together
+D: It supports resource kinds such as Deployment and StatefulSet, and triggers a rollout restart of the named target
+E: It also restarts bare Pods and Jobs, because the operator can delete them and let the controller recreate them
+K: A,D
+G: ## Restarting workloads after rotation
+Environment variables are fixed when a container starts, so an application that reads secrets from them (or cannot reload files) needs a restart after the secret changes.
+- `rolloutRestartTargets` is a list on `VaultStaticSecret`, `VaultDynamicSecret` and `VaultPKISecret`.
+- Each target has a `kind` and `name`. The API reference lists `Deployment`, `DaemonSet`, `StatefulSet` and `argo.Rollout`.
+- When the Vault secret changes between reconciliations, VSO patches `spec.template.metadata.annotations` of each target with `vso.secrets.hashicorp.com/restartedAt` and a timestamp. Kubernetes then performs a normal rolling restart.
+- On `VaultStaticSecret` the targets are ignored if `hmacSecretData` is false, because drift detection relies on it.
+W: A=Meant for non-reloading apps: the field exists for applications that cannot pick up a rotated secret, and VSO restarts each target when the data changes.
+D=Supported kinds: Deployment and StatefulSet are in the supported list, and the restart is a rollout restart triggered by an annotation patch.
+X: B=Restart on every reconcile: restarts happen when the Vault secret changes between reconciliation events, not on each pass.
+C=Configured on VaultAuth: the field belongs to the secret resources, not to the login resource.
+E=Pods and Jobs: the supported kinds are workload controllers that roll out pods. Bare Pods and Jobs are not valid targets.
+T: rolloutRestartTargets patches a restart annotation on listed workloads when a synced secret changes.
+V: Vault Secrets Operator
+
+@ VLT-VA003 D9 T9.2 advanced troubleshooting
+S: A VaultAuth named vault-auth lives in the namespace platform. A VaultStaticSecret in namespace team-a with vaultAuthRef: platform/vault-auth is not syncing. The VaultAuth has no allowedNamespaces. What is the fix?
+A: Move the VaultConnection into team-a, since a VaultAuth can serve only the namespace of its connection
+B: Create a Vault policy for team-a, because Kubernetes namespaces are mapped to Vault namespaces by the operator
+C: Set the VaultStaticSecret to type kv-v1, because kv-v2 resources cannot reference a VaultAuth in another namespace
+D: Add team-a to allowedNamespaces on the VaultAuth, or use "*" to allow every namespace
+K: D
+G: ## Who may use a VaultAuth
+By default a VaultAuth can be used by secret resources in its own namespace (and the operator's namespace). Resources in other namespaces are refused. `allowedNamespaces` on the VaultAuth (or VaultAuthGlobal) lists the Kubernetes namespaces allowed to reference it, or `["*"]` for all.
+- Unset: no other namespaces. This is the default.
+- `["team-a", "team-b"]`: only those.
+- Vault still enforces its own rules, so the role and policies must also allow the access.
+A shared login in an admin namespace is a common pattern: teams reference it with `vaultAuthRef: platform/vault-auth` once it allows their namespaces.
+W: allowedNamespaces: the default blocks cross-namespace use, so naming team-a (or a wildcard) lets the secret resource use the shared VaultAuth.
+X: A=Move the connection: the connection can be referenced across namespaces with a prefix, and the block is on the VaultAuth reference, not the connection.
+B=Vault policy mapping: Kubernetes namespaces are not mapped to Vault namespaces by default, and the fault is an operator-side allow list.
+C=Switch to kv-v1: the KV version has no relation to which VaultAuth a resource may reference.
+T: A VaultAuth is private to its namespace unless allowedNamespaces lists others.
+V: Vault Secrets Operator
+
+@ VLT-VA003 D9 T9.2 advanced comparison
+S: A VaultDynamicSecret syncs a database static role that Vault rotates every 24 hours. Which setting is needed so VSO treats it correctly, and how does it differ from leased dynamic credentials?
+A: allowStaticCreds: true; VSO reads each rotation, while leased credentials are renewed or re-issued
+B: revoke: true; VSO revokes the static role each day, while leased credentials are never revoked by the operator
+C: renewalPercent: 0; VSO renews the static role immediately, while leased credentials are only renewed once
+D: allowStaticCreds: false; VSO issues new credentials on every sync, while leased credentials keep their value
+K: A
+G: ## Two credential patterns in VaultDynamicSecret
+- Static roles (database, LDAP and similar) are rotated by Vault on a schedule, with a request path containing `static-creds`. Set `spec.allowStaticCreds: true`; VSO reads the updated value on each rotation.
+- Leased dynamic credentials leave `allowStaticCreds: false` (default). Vault issues a new set on every request and gives it a TTL; VSO renews the lease at `renewalPercent` (default 67% plus jitter) or requests new credentials when the lease expires or is revoked.
+`revoke: true` is separate: it revokes the lease when the VaultDynamicSecret resource is deleted.
+W: allowStaticCreds: it tells VSO the credentials are rotated by Vault, so VSO tracks the rotation instead of managing a lease.
+X: B=revoke: that setting revokes the existing lease only when the resource is deleted. It is not a schedule.
+C=renewalPercent 0: it applies to lease renewal timing and does not turn on static role handling.
+D=allowStaticCreds false: that is the leased-credential mode, where each request creates new credentials with a TTL.
+T: Use allowStaticCreds: true for rotated static roles; leave it false for leased dynamic credentials.
+V: Vault Secrets Operator, Database
+
+@ VLT-VA003 D9 T9.2 applied definition
+S: Which TWO Vault authentication methods can a VSO VaultAuth resource use? (Select TWO)
+A: LDAP, using the directory password of the operator's service account
+B: Kubernetes, using short-lived service account tokens
+C: AppRole, using static AppRole credentials
+D: Userpass, using a username stored in a Kubernetes Secret
+E: TLS certificates, using the client certificate of the operator pod
+K: B,C
+G: ## How VSO authenticates
+`VaultAuth.spec.method` accepts `kubernetes`, `jwt`, `appRole`, `aws` and `gcp`.
+- Kubernetes: relies on short-lived ServiceAccount tokens; the `role` and `serviceAccount` are set on the VaultAuth. It is recommended to give each application its own service account.
+- JWT: static JWT tokens or short-lived Kubernetes ServiceAccount tokens.
+- AppRole: static AppRole credentials.
+- AWS and GCP: the cloud credentials of the environment.
+Other methods such as LDAP, userpass and TLS certificates are not available to the operator.
+W: B=Kubernetes: VSO presents a short-lived service account token to the Kubernetes auth method.
+C=AppRole: VSO can log in with static AppRole credentials stored in a Kubernetes Secret.
+X: A=LDAP: the method list for VaultAuth is kubernetes, jwt, appRole, aws and gcp, so a directory password login is not offered to the operator.
+D=Userpass: it is not in the supported list either, and a stored username and password is not how the operator proves its identity to Vault.
+E=TLS certificate: the cert auth method is not among the five methods VSO supports, so a client certificate on the operator pod cannot be used for login.
+T: VSO logs in with kubernetes, jwt, appRole, aws or gcp.
+V: Vault Secrets Operator
+
+@ VLT-VA003 D9 T9.2 applied comparison
+S: A platform team runs hundreds of Kubernetes workloads and wants application teams to consume Vault secrets as native Kubernetes Secrets, with no per-pod sidecar and no code changes. Which approach fits best?
+A: Vault Secrets Operator, which syncs secrets into Kubernetes Secrets from CRDs with one operator deployment
+B: Vault Agent Injector, since a sidecar in each pod writes native Kubernetes Secrets for the pod
+C: Direct API calls from every application, using the Vault client library and a service account token
+D: Vault Agent in process supervisor mode, run as a separate host process outside the cluster
+K: A
+G: ## Choosing the delivery model
+- Direct API (or client library): the application authenticates and reads secrets itself. Most control (transit calls, per-request secrets), but the application must be Vault-aware.
+- Vault Agent: a client daemon (sidecar, init container, host process) that authenticates, caches, and renders templates or environment variables. No application changes, but one Agent per workload or host.
+- Vault Agent Injector: automates the Agent sidecar/init container in Kubernetes; secrets go to a per-pod memory volume.
+- Vault Secrets Operator: one operator per cluster that syncs Vault secrets into Kubernetes Secrets declared in CRDs; workloads use normal Kubernetes mechanisms.
+The scenario (native Kubernetes Secrets, no sidecar per pod, no code changes) matches the operator.
+W: Secrets Operator: a single controller reconciles CRDs for all namespaces, and workloads read ordinary Kubernetes Secrets.
+X: B=Injector: it adds containers to every pod and renders files into a memory volume, not into Kubernetes Secrets.
+C=Direct calls: that requires code changes in every application, which the team wants to avoid.
+D=Host process supervisor: it injects variables into one child process on a host. It does not create Kubernetes Secrets for cluster workloads.
+T: Choose VSO for native Kubernetes Secrets without sidecars or code changes.
+V: Vault Secrets Operator, Vault Agent
+
+@ VLT-VA003 D9 T9.1 applied comparison
+S: A service already uses the Vault client library and must call transit/encrypt/orders for each customer record it processes. A colleague proposes replacing this with Vault Agent templating. Which statement is accurate?
+A: Templating suits this need, because a template can call transit encrypt for each record and write the ciphertext
+B: Keep the direct API calls, because templates render secrets from fixed paths and cannot perform per-request operations
+C: Use Vault Secrets Operator, because a VaultStaticSecret can encrypt each record and sync the result
+D: Use Agent caching, because the cache can store the plaintext of each record so Vault is called once
+K: B
+G: ## When direct API calls remain the right choice
+Agent templates and VSO resources read secrets at a configured path and write them to files, environment variables or Kubernetes Secrets. They are poor fits for operations whose input comes from the application at run time.
+- Transit encrypt/decrypt, signing and similar calls take application data per request, so the application (or its library) must call Vault directly.
+- An already Vault-aware service gains little from a sidecar, although Agent can still handle its authentication and token renewal.
+- Agent and VSO are best where the secrets can be fetched ahead of time and the application should stay Vault-unaware.
+W: Direct API: the application supplies the data to encrypt for each call, which a fixed template or CRD cannot do.
+X: A=Templating transit calls: templates fetch secrets from paths and render them. They do not take application data per record.
+C=VaultStaticSecret: it syncs KV data into a Kubernetes Secret and has no encryption operation.
+D=Agent caching: the cache holds tokens and leased secrets. It does not store application data or replace encrypt calls.
+T: Per-request operations such as transit encryption need direct API calls, while Agent and VSO deliver pre-fetched secrets.
+V: Vault Agent, Transit
+
+@ VLT-VA003 D9 T9.1 applied comparison
+S: Applications run on virtual machines outside Kubernetes. Each reads a config file at startup and cannot be modified, and secrets rotate every few hours. Which approach fits?
+A: Vault Secrets Operator on the VMs, with a VaultStaticSecret that writes the file
+B: Vault Agent as a service on each VM, with auto-auth and a template for the config file
+C: Vault Agent Injector, with annotations on each VM to add a sidecar that renders the file
+D: Direct API calls from a startup script that reads the secret once and never refreshes it
+K: B
+G: ## Agent outside Kubernetes
+Vault Agent is an ordinary daemon: it can run under systemd or as a Windows service, authenticate with a method suited to the host (for example AppRole, AWS or cert), and render templates to files. With `command` or `exec` in the template stanza it can also signal the application to reload after a change.
+- Vault Secrets Operator and the Agent Injector are Kubernetes-only: they work with CRDs and pod specifications.
+- A one-time script cannot follow rotation, so the application would run with outdated secrets.
+W: Agent on the VM: auto-auth keeps a token, and the template re-renders the file as secrets change, with no application changes.
+X: A=Operator on VMs: VSO runs in a Kubernetes cluster and writes Kubernetes Secrets. It cannot render files on a VM.
+C=Injector on VMs: the injector mutates Kubernetes pods. VMs have no pod specification to change.
+D=One-time script: it reads once and never refreshes, so it falls out of date when the secret rotates.
+T: On VMs, run Vault Agent as a service with auto-auth and a template for the config file.
+V: Vault Agent
+
+@ VLT-VA003 D9 T9.2 advanced tradeoff
+S: A security review compares delivering secrets through VSO and through the Vault Agent Injector. Which TWO statements are accurate? (Select TWO)
+A: With VSO the secret becomes a Kubernetes Secret, so Kubernetes RBAC and cluster storage protection apply to it
+B: With the injector the secret becomes a Kubernetes Secret in etcd, so it is visible to anyone who can list Secrets
+C: The injector adds Agent containers to each annotated pod, while VSO runs one operator that serves many workloads
+D: VSO requires every application to be recompiled with the Vault client library to read the synced Secret
+E: The injector cannot renew dynamic credentials, so VSO is the only option for leased secrets
+K: A,C
+G: ## Trade-offs
+- VSO: secrets exist as Kubernetes Secrets, so who can read them is governed by Kubernetes RBAC, and they are stored in the cluster's data store. Protect the Secrets with RBAC and encryption at rest. One operator serves many namespaces.
+- Injector: the secrets are rendered to a shared memory volume in each pod and are not Kubernetes Secrets. The cost is an Agent init/sidecar container per annotated pod.
+- Both keep the application unaware of Vault, and both can serve dynamic credentials.
+- The VSO CSI driver (Vault Enterprise) mounts secrets directly without creating Kubernetes Secrets.
+W: A=Kubernetes Secret: VSO output is a Secret, so RBAC and the cluster's own protections decide who reads it.
+C=Footprint: the injector adds containers to every annotated pod, while VSO is a single operator for many workloads.
+X: B=Injector secret in etcd: the injector renders to a memory volume in the pod. It does not create Kubernetes Secrets.
+D=Needs client library: the point of VSO is that applications use native Secrets without Vault code.
+E=Injector cannot renew: Agent renews and re-renders dynamic credentials in the sidecar, so the injector handles leased secrets.
+T: VSO produces Kubernetes Secrets under RBAC and one operator; the injector adds a container to every pod and uses a memory volume.
+V: Vault Secrets Operator, Vault Agent
+
+@ VLT-VA003 D9 T9.1 applied definition
+S: A pod runs Vault Agent with the kubernetes auto-auth method and only role set in the method config. Where does Agent read the credential it sends to Vault?
+A: From the Vault token that the Kubernetes API server places in a secret named after the role
+B: From an AppRole secret ID that Agent requests from the kubelet when the pod starts
+C: From the service account token at its default path, unless token_path overrides it
+D: From the pod's environment variable VAULT_TOKEN, which the kubernetes method copies into the sink
+K: C
+G: ## Kubernetes auto-auth
+The `kubernetes` auto-auth method reads the pod's service account token and sends it, with the configured role, to the Kubernetes auth method in Vault. Vault validates the token against the cluster and returns a Vault token.
+- `role` (required): the Vault role to log in to.
+- `token_path` (optional): file path of a custom JWT; if omitted, the default service account token path `/var/run/secrets/kubernetes.io/serviceaccount/token` is used.
+- `mount_path` defaults to `auth/kubernetes`.
+No secret has to be copied into the pod, because the platform supplies the service account token.
+W: Service account token: Agent reads the pod's token file and presents it to Vault as proof of the pod's identity.
+X: A=Token from the API server: Kubernetes issues service account JWTs, not Vault tokens. The Vault token only comes from the login.
+B=AppRole from the kubelet: the kubelet does not hand out AppRole secret IDs, and the kubernetes method does not use AppRole.
+D=VAULT_TOKEN variable: auto-auth exists to obtain a token, so none is expected up front. The sink receives the new token, not a copied variable.
+T: Kubernetes auto-auth sends the pod's service account token and a role, and returns a Vault token.
+V: Vault Agent, Kubernetes
+
+@ VLT-VA003 D9 T9.1 advanced troubleshooting
+S: Vault is rebooting for maintenance. Agent auto-auth is set with min_backoff 1s and max_backoff 5m, and an operator expects Agent to stop trying after five minutes. What does Agent do?
+A: It gives up after five minutes and exits, because max_backoff caps the total time spent retrying
+B: It fails once and waits for a manual restart, since retries are used only for template requests
+C: It retries at a fixed one second interval until Vault answers, since min_backoff disables the doubling
+D: It retries with doubling delays up to five minutes, and exits only if exit_on_err is true
+K: D
+G: ## Auto-auth backoff
+When login fails, auto-auth retries with exponential backoff.
+- `min_backoff` (default `1s`): the first delay. It doubles, with some randomness, after each failure.
+- `max_backoff` (default `5m`): the cap on the delay between attempts, not on the total time spent retrying.
+- `exit_on_err` (default `false`): when true, Agent and Proxy exit on errors when logging in for a new or expired token. Errors during renewals of valid tokens do not cause exit.
+The same backoff values are used by the templating server when templating is in use.
+W: Doubling backoff: Agent keeps trying with growing delays capped at max_backoff, and exits only when exit_on_err is true.
+X: A=Total cap: max_backoff is the duration between retries, not the duration that retries last before giving up.
+B=Template-only retries: auto-auth has its own retry logic, separate from the retry stanza used for templates and proxied requests.
+C=Fixed delay: the delay starts at min_backoff and grows. It does not remain at the minimum.
+T: Auto-auth retries with doubling backoff capped by max_backoff and exits only when exit_on_err is true.
+V: Vault Agent
+
+@ VLT-VA003 D9 T9.2 applied use-case
+S: A web deployment needs a TLS certificate from the Vault PKI engine at pki/issue/default, kept as a Kubernetes Secret and renewed before expiry. Which VSO resource is designed for this?
+A: VaultPKISecret, with mount, role, commonName and ttl, and a destination Secret
+B: VaultStaticSecret with type kv-v2, because certificates are stored in KV paths
+C: VaultAuth with method pki, because certificates authenticate the operator
+D: VaultConnection with caCertSecretRef, because that field issues certificates for workloads
+K: A
+G: ## VaultPKISecret
+`VaultPKISecret` asks the PKI secrets engine to issue a certificate and syncs it into a Kubernetes Secret.
+- `mount` (for example `pki`), `role` (for example `default`), `commonName`, `ttl` and `format`.
+- `expiryOffset` makes VSO renew before the certificate expires.
+- `destination` names the Kubernetes Secret (`create: true`).
+- `rolloutRestartTargets` can restart workloads that read the certificate once.
+- `revoke: true` revokes the certificate when the resource is deleted.
+W: VaultPKISecret: it issues certificates from the PKI role and re-issues them before expiry into the destination Secret.
+X: B=VaultStaticSecret: it reads KV v1 and v2 only. PKI certificates are issued on request by the PKI engine.
+C=VaultAuth with pki: the supported VaultAuth methods are kubernetes, jwt, appRole, aws and gcp, and a VaultAuth does not issue certificates.
+D=caCertSecretRef: this field on VaultConnection only tells VSO which CA to trust when it connects to Vault.
+T: Use VaultPKISecret to issue and renew PKI certificates into a Kubernetes Secret.
+V: Vault Secrets Operator, PKI

@@ -18,6 +18,7 @@ Palantir exams publish a percent pass mark (`passingPct`) and no domain weights 
 exam guide only.
 **Before any `DBX-*` (Databricks) work read `tools/qgen/DATABRICKS.md`**; facts are checked on docs.databricks.com and the exam guide only.
 **Before any `TF-*` (HashiCorp Terraform) work read `tools/qgen/TERRAFORM.md`**; facts are checked on developer.hashicorp.com only.
+**Before any `VLT-*` (HashiCorp Vault) work read `tools/qgen/VAULT.md`**; facts are checked on developer.hashicorp.com only.
 Markdown notes (TODO.md, handoffs, PR bodies, reports) are written as compressed key summaries: follow `.claude/skills/md-summary/SKILL.md`.
 Open work items are in `TODO.md` — read it at the start of a session, starting with its **Now** section (warm
 start: what is in progress, on which branch, what comes next). Update that section in every PR you merge.

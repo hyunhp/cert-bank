@@ -2,9 +2,9 @@
 
 ## Now (warm start — keep this section current; update it with every merge)
 Updated 2026-10-30.
-- In progress: nothing. Databricks DBX-DEA merged; HashiCorp TF-TA004 in the PR that updates this line. Next candidates: other Google Cloud
-  Professional exams, Terraform Infrastructure Engineer Professional, Vault Associate (developer.hashicorp.com reachable). Open gaps: Gemini app and Gems
-  (GAIL T2.2); Gemini Cloud Assist is private preview (noted in PCA); Spark API pages are blocked (403) for the DBX bank.
+- In progress: nothing. HashiCorp TF-TA004 and VLT-VA003 merged. Next candidates: Terraform Infrastructure Engineer Professional, other Google Cloud
+  Professional exams (developer.hashicorp.com and cloud.google.com reachable). Open gaps: Gemini app and Gems (GAIL T2.2); Gemini Cloud Assist is
+  private preview (noted in PCA); Spark API pages are blocked (403) for the DBX bank.
 - Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; GCP-CDL bank and study guide; MLA-C02 study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). www.databricks.com is still
@@ -251,6 +251,12 @@ for the thin 004-new topics), each reviewed (about 50 fixes; reviewers replaced 
 `-replace`); S3 DynamoDB locking deprecated (`use_lockfile`); write-only arguments need 1.11, ephemeral values 1.10, check blocks 1.5; `removed` block needs
 `from` + `lifecycle` and destroys by default; kept out of keys: generated configuration (experimental), `const` variables, Terraform policy, anything tier/edition-bound.
 Checked only from general knowledge (re-check): Vault provider dynamic credentials (Learn tutorial only), `terraform plan -detailed-exitcode` is verified.
+VLT-VA003 DONE 2026-10-31: Vault Associate 003 (content list read 2026-10-31; 9 objectives, 40 sub-objectives; 1 h, online proctored, Vault 1.19; question count, weights
+and pass mark NOT published: mock uses 50 questions, equal weights), 253 questions in b01-b09 (one batch per section), each reviewed (about 60 fixes; reviewers replaced ~15
+duplicates). Study guide 15 days, 3 writers + 3 reviewers (about 25 fixes); glossary +14 `vlt-*` terms, 19 tagged. Docs facts: default max TTL 32 days; `generate-root -init`
+returns a nonce; policy matching: different patterns use only the highest-priority match (first glob occurring later wins), identical patterns merge; SSH dynamic keys removed in
+1.13; Agent API proxy deprecated; Agent persistent cache Kubernetes-only; VSO instant updates and CSI driver Enterprise-only; replication, performance standbys, Seal HA Enterprise;
+raft-wal experimental. Checked only from memory (re-check): Seal HA seal-count limit; hvs./hvb./hvr. token prefixes are on the tokens docs (confirmed).
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
