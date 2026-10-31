@@ -1,0 +1,528 @@
+# VLT-VA003 b06: D6 Encryption as a service (T6.1-T6.2)
+# src: https://developer.hashicorp.com/vault/docs/secrets/transit
+# src: https://developer.hashicorp.com/vault/api-docs/secret/transit
+
+@ VLT-VA003 D6 T6.1 applied use-case
+S: An application must encrypt the string `4111 1111 1111 1111` with the key `orders` from the CLI. Which command is correct?
+A: `vault write transit/encrypt/orders plaintext="4111 1111 1111 1111"`
+B: `vault write transit/encrypt/orders plaintext=$(echo -n "4111 1111 1111 1111" | base64)`
+C: `vault write transit/orders/encrypt plaintext=$(echo -n "4111 1111 1111 1111" | base64)`
+D: `vault write transit/encrypt/orders ciphertext=$(echo -n "4111 1111 1111 1111" | base64)`
+K: B
+G: ## The encrypt endpoint
+The transit engine encrypts through `transit/encrypt/<key name>`. The request carries one parameter, `plaintext`, and Vault answers with a `ciphertext` field.
+## Why base64
+Vault does not require the plaintext to be text; it could be a PDF or an image. Base64 is the safe way to carry arbitrary bytes inside a JSON payload, so every plaintext sent to transit must already be base64-encoded. The CLI does not do this for you.
+W: Base64-encoded plaintext sent to `transit/encrypt/orders`: the path has the operation first and the key name second, and the `plaintext` parameter holds the encoded bytes.
+X: A=Raw text: transit rejects plaintext that is not valid base64, because the API contract is base64 input only. The CLI does not encode it for you.
+C=Swapped path: the layout is `transit/encrypt/<key>`, not `transit/<key>/encrypt`, so this writes to a path that is not a transit endpoint.
+D=Wrong parameter: `ciphertext` is the input of the decrypt and rewrap endpoints and the output of encrypt. Encrypt expects `plaintext`.
+T: Encrypt with `transit/encrypt/<key>` and send `plaintext` as base64; the CLI will not encode it.
+
+@ VLT-VA003 D6 T6.1 applied definition
+S: Vault returns the ciphertext `vault:v1:8SDd3W...`. What does the `v1` segment tell Vault?
+A: That the ciphertext was produced by the first version of the transit engine API.
+B: That the value is the first of a numbered series of ciphertexts from the same key.
+C: That key version 1 in the key ring encrypted the plaintext, so decryption uses that version.
+D: That the key is a version 1 key type, which cannot be upgraded after a later rotation.
+K: C
+G: ## Anatomy of a transit ciphertext
+A transit ciphertext has three parts separated by colons.
+- `vault` marks the value as wrapped by Vault.
+- `v1` is the version of the named key that encrypted the data.
+- The rest is the base64 of the initialization vector (IV) joined with the encrypted bytes.
+## Why the version is embedded
+A named key is a key ring that can hold many versions after rotation. Because each ciphertext records its version, Vault knows which key in the ring to use at decrypt time without the caller tracking it.
+W: Key version: `v1` names the ring entry that encrypted the data, which is what lets old ciphertext keep decrypting after the key rotates to `v2` or `v3`.
+X: A=API version: the segment is not tied to the HTTP API version; it changes only when a newer key version encrypts the data.
+B=Sequence number: the value does not count ciphertexts. Every encryption done with key version 1 carries the same `v1`.
+D=Key type version: key types such as `aes256-gcm96` are chosen at creation and are not named in the prefix. A rotation adds a version and does not strand old ciphertext.
+T: In `vault:vN:...`, N is the key version that encrypted the data, so Vault picks the right key at decrypt time.
+
+@ VLT-VA003 D6 T6.1 applied troubleshooting
+S: A developer runs `vault write transit/decrypt/orders ciphertext=vault:v1:8SDd3W...`, and the output shows `plaintext  bXkgc2VjcmV0IGRhdGEK`. Their application expected `my secret data`. What is the correct next step?
+A: Base64-decode the returned plaintext, because transit always returns decrypted data base64-encoded.
+B: Re-run the command with `-format=json`, which makes Vault return the plaintext in its original form.
+C: Rotate the `orders` key, because the output shows that the ciphertext was decrypted with a stale version.
+D: Call the rewrap endpoint, which converts the decrypted value into readable text for the caller.
+K: A
+G: ## Symmetry of the base64 rule
+Transit treats data as bytes. The caller base64-encodes the data going in, and the decrypt response is base64-encoded coming out, for the same reason: the plaintext might be binary.
+## In practice
+A script can decode in one step, for example `vault write -field=plaintext transit/decrypt/orders ciphertext=... | base64 --decode`. Decoding `bXkgc2VjcmV0IGRhdGEK` gives `my secret data`.
+W: Base64 decode: the value was decrypted correctly; the caller only has to undo the base64 encoding it applied before encryption.
+X: B=JSON output: `-format=json` changes how the response is displayed, not the data. The `plaintext` field stays base64 in every format.
+C=Rotation: the output is the correct decryption and a new key version would not change it. A stale version would give an error, not encoded text.
+D=Rewrap: rewrap re-encrypts ciphertext with the latest key version and returns ciphertext. It never returns plaintext of any kind.
+T: Transit returns decrypted data base64-encoded; decode it in the caller.
+
+@ VLT-VA003 D6 T6.1 applied use-case
+S: An operator runs `vault write -f transit/keys/orders/rotate`. A record encrypted yesterday is `vault:v1:...`. What happens next?
+A: New encryptions use the new key version, and the old `vault:v1:` record still decrypts via the key ring.
+B: The existing `vault:v1:` record stops decrypting, and it works again only after an operator rewraps it to the new version.
+C: Vault re-encrypts every stored record on its own and replaces the old prefix with `vault:v2:`.
+D: New encryptions keep using version 1 until the application passes `key_version=2` explicitly on each request.
+K: A
+G: ## The key ring
+A transit key is a ring of versions. Rotation generates fresh key material and adds it as the newest version; older versions stay in the ring.
+- Encrypt requests use the latest version by default.
+- Decrypt requests read the version from the ciphertext prefix and use that ring entry.
+## What rotation does not do
+Vault does not store the application's ciphertext, so it cannot go back and update it. Upgrading old ciphertext is the job of the rewrap endpoint, called by the application or a script.
+W: Ring behavior: rotation adds a version; encryption switches to it immediately, and old ciphertext keeps decrypting because its version is still in the ring.
+X: B=Old data blocked: old versions stay available until `min_decryption_version` is raised or the versions are trimmed. Rotation by itself does not block them.
+C=Automatic re-encryption: Vault does not hold the ciphertext, so it has nothing to rewrite. Records change only when the caller rewraps and stores the result.
+D=Pinned to v1: the latest version is the default for encryption. `key_version` is an optional override and is not needed to start using the new key.
+T: Rotate adds a key version: new data uses it, old data still decrypts, and rewrap upgrades old ciphertext.
+
+@ VLT-VA003 D6 T6.1 applied use-case
+S: Which TWO statements about the transit rewrap endpoint are accurate? (Select TWO)
+A: The caller receives the plaintext only if the policy also allows decrypt on the same key.
+B: The caller supplies ciphertext and receives new ciphertext produced with the latest key version.
+C: The endpoint decrypts with the latest key version and re-encrypts with the oldest version.
+D: A token allowed to call rewrap can safely be given to an untrusted process, as the plaintext is never returned.
+E: The endpoint rotates the named key before re-encrypting, so each call adds a key version.
+K: B,D
+G: ## What rewrap does
+`transit/rewrap/<key>` takes ciphertext in and returns ciphertext out. Inside Vault, it decrypts with whichever key version the prefix names and encrypts again with the newest version in the ring, then returns the new `vault:vN:` value.
+## Why it is safe to delegate
+The plaintext exists only inside Vault during the operation and is never returned. A policy can therefore grant rewrap to a batch job without granting decrypt, and the job can upgrade ciphertext without ever being able to read it.
+W: B=Ciphertext in, new ciphertext out: the response holds the same data under the latest key version, for example `vault:v2:...`.
+D=Safe to delegate: because plaintext never leaves Vault during rewrap, the capability on `transit/rewrap/<key>` is separate from decrypt and can go to less trusted workloads.
+X: A=Plaintext with decrypt rights: rewrap never returns plaintext, whatever other capabilities the token holds. Decrypt is a different endpoint.
+C=Oldest version: it re-encrypts with the newest version; moving to an older one would defeat the point of upgrading.
+E=Rotates the key: rewrap changes ciphertext only. Adding a version is the job of the rotate endpoint.
+T: Rewrap upgrades ciphertext to the latest key version without exposing plaintext, so it can be delegated.
+
+@ VLT-VA003 D6 T6.1 applied use-case
+S: After rotating the `customers` key, a security team must move 20 million stored `vault:v1:` values to the new key version. The batch job must never be able to read customer data. What is the best design?
+A: Give the job decrypt and encrypt on the key, then have it re-encrypt each value with the newest key version.
+B: Give the job only update on `transit/rewrap/customers` and have it store each returned ciphertext.
+C: Give the job read on `transit/keys/customers` so it can export the key and re-encrypt locally.
+D: Delete the old key version so Vault re-encrypts remaining values the next time they are read.
+K: B
+G: ## Rewrap with least privilege
+Transit separates operations by path, so each can be granted alone:
+- `transit/encrypt/<key>` for encryption
+- `transit/decrypt/<key>` for decryption
+- `transit/rewrap/<key>` for upgrading ciphertext without seeing plaintext
+Policies for these endpoints use the `update` capability (and `create` for encrypt upsert).
+## The workflow
+1. Rotate the key.
+2. Loop over stored ciphertext, call rewrap, and write the returned value back to the application's own datastore.
+3. Optionally raise `min_decryption_version` once no `vault:v1:` values remain.
+W: Rewrap-only policy: the job can upgrade every value to the latest version, and as it holds no decrypt capability it can never see a customer's data.
+X: A=Decrypt plus encrypt: this works technically, but it gives the job plaintext access, which the requirement forbids.
+C=Export: reading key metadata does not export material, and exporting works only if the key was created `exportable`. It would also move cryptography out of Vault.
+D=Delete the old version: Vault cannot re-encrypt on read because it stores no ciphertext. Removing a version would make the old values undecryptable.
+T: Rewrap-only access lets a job move ciphertext to the newest key version without any ability to read the data.
+
+@ VLT-VA003 D6 T6.1 applied troubleshooting
+S: A key `orders` has versions 1 to 4. An operator sets `min_decryption_version` to 3 after old backups containing `vault:v1:` values leaked. What happens to those leaked values and to the data?
+A: The `vault:v1:` and `vault:v2:` values stop decrypting, and the setting can be lowered again in an emergency.
+B: Versions 1 and 2 are permanently deleted from the key ring, so those leaked values can never be recovered.
+C: Vault rewraps the v1 and v2 values to version 4 when they are next decrypted.
+D: Only `vault:v1:` values stop decrypting, since version 2 is always kept in the working set as a fallback.
+K: A
+G: ## Working set and archive
+Versions older than `min_decryption_version` are archived and drop out of the working set. This keeps key loading fast and acts as a safety control: found ciphertext for obsolete data cannot be decrypted by normal callers.
+## Reversible
+Archived versions are still kept. In an emergency the operator can lower `min_decryption_version` so legitimate old data can be decrypted again. The setting is changed through `transit/keys/<key>/config`.
+W: Setting the minimum to 3 archives versions 1 and 2, so their ciphertext is rejected, while version 3 and 4 values still work; moving the setting back restores access.
+X: B=Permanent deletion: raising the minimum archives versions rather than deleting them. Only the trim operation removes versions permanently.
+C=Automatic rewrap: decryption never changes stored ciphertext, and a rejected value returns an error rather than being upgraded.
+D=Version 2 fallback: there is no special fallback. Every version below the minimum is archived, including 2.
+T: Raising min_decryption_version blocks old ciphertext reversibly; trim is what deletes versions for good.
+
+@ VLT-VA003 D6 T6.1 applied definition
+S: A key has versions 1 to 5. An operator sets `min_encryption_version` to 4 on the key. Which statement is accurate?
+A: Encryption may only use version 4 or later, and unpinned requests still use the latest version.
+B: Decryption of ciphertext that was made with key versions 1 to 3 is now blocked for all callers.
+C: Versions 1 to 3 are permanently removed from the key ring once the new setting is saved.
+D: The value must be lower than the current `min_decryption_version`, or the API rejects the change.
+K: A
+G: ## Two separate minimums
+- `min_decryption_version` is the lowest key version that may decrypt. Raising it blocks old ciphertext.
+- `min_encryption_version` is the lowest key version that may be used to encrypt, sign or generate HMACs. Its default of `0` means "use the latest version".
+## Rules
+The value must be `0` or greater than or equal to `min_decryption_version`. A request that pins `key_version` must pass a value at or above the minimum. Neither setting deletes anything; trim does that.
+W: Encryption floor: version 4 or 5 can be used to encrypt, an unpinned request still picks the latest, and decryption of earlier versions is untouched.
+X: B=Blocks decryption: that is the job of `min_decryption_version`. The encryption minimum does not affect decrypting.
+C=Permanent removal: neither minimum deletes versions. Only the trim endpoint does, and it has its own parameter.
+D=Lower than min_decryption_version: it is the opposite. The value must be 0 or greater than or equal to `min_decryption_version`.
+T: min_encryption_version limits which versions can encrypt; min_decryption_version limits which can decrypt; trim deletes.
+
+@ VLT-VA003 D6 T6.1 applied comparison
+S: A team wants to remove key versions 1 and 2 permanently so that nobody can ever recover them, even in an emergency. Which action does that?
+A: Set `min_decryption_version` to 3, which erases older versions after a short grace period.
+B: Rotate the key twice more, since each rotation overwrites the oldest version.
+C: Set `deletion_allowed` to true and call the delete endpoint, which removes only the oldest versions.
+D: Call `transit/keys/<name>/trim` with `min_available_version` set to 3.
+K: D
+G: ## Archive versus delete
+Raising `min_decryption_version` hides old versions but keeps them; it is reversible. The trim endpoint, `POST transit/keys/<name>/trim`, deletes them.
+## Trim rules
+- `min_available_version` is required. All versions below it are permanently deleted.
+- It can be at most the lesser of `min_decryption_version` and `min_encryption_version`, and is not allowed when either is `0`. So an operator raises the minimums first, then trims.
+W: Trim: removing everything below version 3 is permanent, and the ring can no longer decrypt or recover those versions.
+X: A=Raise the minimum: the older versions are archived, not erased, and the operator can still lower the setting to restore them.
+B=More rotations: rotation only adds versions. Old versions stay in the ring until trimmed.
+C=Delete endpoint: deletion removes the whole named key, and not just old versions. It also needs `deletion_allowed` set in the key's config.
+T: Archive with min_decryption_version (reversible); delete versions with trim (permanent).
+
+@ VLT-VA003 D6 T6.1 applied troubleshooting
+S: An operator runs `vault delete transit/keys/legacy` and gets an error even though the token has `delete` on the path. What is the most likely reason?
+A: The key must be rotated first, because a key can be deleted only after it has more than one version.
+B: The key was created with `exportable=true`, which blocks deletion until export is disabled.
+C: The key has `deletion_allowed` set to false, so the operator must enable it in the key's config first.
+D: The transit engine must be disabled first, since single keys can be removed only with the mount.
+K: C
+G: ## A guard on a catastrophic action
+Deleting a named key means no ciphertext made with it can ever be decrypted again. Because that is so damaging, transit requires an explicit step: `deletion_allowed` must be set to true on the key through `transit/keys/<name>/config`. Only then does `DELETE transit/keys/<name>` succeed.
+## Typical flow
+1. `vault write transit/keys/legacy/config deletion_allowed=true`
+2. `vault delete transit/keys/legacy`
+W: The `deletion_allowed` tunable defaults to false, so the delete fails until the operator turns it on in the key configuration.
+X: A=Version count: a key with a single version can be deleted just like any other once deletion is allowed.
+B=Exportable flag: `exportable` controls whether key material can be exported, and it cannot be switched off once set. It does not affect deletion.
+D=Disable the mount: individual keys are deleted through their own endpoint. Disabling the mount would remove all keys at once.
+T: Deleting a transit key requires `deletion_allowed=true` first; the guard protects against losing all data.
+
+@ VLT-VA003 D6 T6.1 applied comparison
+S: A team needs a transit key to encrypt and decrypt application records. Which key type fits?
+A: `ecdsa-p256`, because elliptic-curve keys can encrypt records and are quick to use in practice.
+B: `ed25519`, because it supports key derivation, so it can encrypt per-tenant records.
+C: `hmac`, because the keyed value it produces can later be reversed to recover the original plaintext.
+D: `aes256-gcm96`, the default key type, which supports encryption, decryption, derivation and convergent encryption.
+K: D
+G: ## Key types by purpose
+- **Symmetric encryption:** `aes128-gcm96`, `aes256-gcm96` (default) and `chacha20-poly1305`. They encrypt, decrypt, and support key derivation and convergent encryption.
+- **Asymmetric encryption and signing:** `rsa-2048`, `rsa-3072` and `rsa-4096` can encrypt, decrypt, sign and verify.
+- **Signing only:** `ed25519`, `ecdsa-p256`, `ecdsa-p384` and `ecdsa-p521`.
+- **MAC only:** `hmac`, which generates and verifies HMACs.
+Every key type also gets a separate HMAC key.
+W: AES-256-GCM: the default type is an authenticated symmetric cipher built for encrypting application data and covers derivation and convergent encryption too.
+X: A=ECDSA: `ecdsa-p256` supports signing and verification only, so an encrypt request on it fails.
+B=Ed25519: it supports derivation, but only for signing. It cannot encrypt or decrypt.
+C=HMAC: an HMAC is a one-way keyed digest. It can verify data but can never be reversed to recover plaintext.
+T: Encrypt data with aes256-gcm96 (default), aes128-gcm96, chacha20-poly1305 or an RSA key; ed25519 and ECDSA keys only sign.
+
+@ VLT-VA003 D6 T6.1 applied comparison
+S: Which TWO transit key types support convergent encryption? (Select TWO)
+A: `aes128-gcm96`
+B: `ed25519`
+C: `rsa-4096`
+D: `chacha20-poly1305`
+E: `ecdsa-p384`
+K: A,D
+G: ## What convergent encryption needs
+Convergent encryption makes the same plaintext and context always produce the same ciphertext. It works by deriving a key from a context and deterministically deriving the nonce, so it is available only for symmetric AEAD key types that support derivation: `aes128-gcm96`, `aes256-gcm96` and `chacha20-poly1305`.
+## Why the others fail
+`ed25519` supports derivation, but as a signing analogue (the same context gives the same signature), not for encrypting. RSA keys use OAEP padding and ECDSA keys only sign, so neither has a key-derivation mode.
+W: A=AES-128-GCM: a symmetric AEAD key with derivation, so convergent encryption can be switched on.
+D=ChaCha20-Poly1305: a symmetric AEAD key listed as supporting derivation and convergent encryption.
+X: B=Ed25519: derivation applies to signing only; it cannot encrypt.
+C=RSA-4096: it can encrypt, but it has no derivation or convergent mode.
+E=ECDSA P-384: it supports signing and verification only, with no encryption and no derivation mode.
+T: Convergent encryption is for the symmetric AEAD types (AES-GCM and ChaCha20-Poly1305) with derivation enabled.
+
+@ VLT-VA003 D6 T6.1 applied use-case
+S: A customer table stores encrypted email addresses, and the application must run `WHERE email = ?` without decrypting the column. Which transit setup supports this?
+A: A key created with `derived=true` and `convergent_encryption=true`, encrypting each email with a fixed context.
+B: A default key, as every encryption of the same email returns the same ciphertext.
+C: A key with `exportable=true`, so the application can hash the email itself before it queries the table.
+D: A key rotated daily, so equal emails produce matching ciphertext within one rotation window.
+K: A
+G: ## Randomized versus deterministic encryption
+By default transit uses a random nonce, so encrypting the same plaintext twice gives different ciphertext. That is the secure default, but it means equality search on an encrypted column is impossible.
+## Convergent encryption
+With convergent encryption the key is derived from a context and the nonce is derived from the plaintext, so the same plaintext plus the same context always gives the same ciphertext. The application encrypts the search value with the same key, version and context, then queries for that ciphertext.
+## Trade-off
+Equal values are visible as equal ciphertext, which leaks that two rows match. Use it only for fields that need lookup.
+W: Derived plus convergent: the same email under the same context always yields the same ciphertext, so the database can match rows on the stored value.
+X: B=Default key: encryption with the default settings is randomized, so two encryptions of the same value differ and equality queries fail.
+C=Exportable: exporting key material would pull cryptography out of Vault and does nothing to make ciphertext repeatable.
+D=Daily rotation: a new version changes the ciphertext prefix and bytes, so matches across versions would be lost rather than created.
+T: Encrypted equality lookups need convergent encryption (which requires derived keys and a consistent context).
+
+@ VLT-VA003 D6 T6.1 applied troubleshooting
+S: An engineer runs `vault write transit/keys/emails type=aes256-gcm96 convergent_encryption=true` and the request fails. What is the cause?
+A: Convergent encryption is supported only by `aes128-gcm96`, so the type must be changed.
+B: Convergent encryption requires key derivation, so the key must also be created with `derived=true`.
+C: Convergent encryption must be enabled by the first encrypt call and cannot be given at creation.
+D: Convergent encryption requires `exportable=true` so that the nonce can be read back by clients.
+K: B
+G: ## Dependencies between key options
+Convergent encryption builds on key derivation, so a key created with `convergent_encryption=true` must also have `derived=true`. With derivation on, every encrypt, decrypt and rewrap call must also pass a base64 `context`.
+## Fixed at creation
+The type, derivation and convergent settings cannot be changed on an existing key, so a wrong choice means creating a new key and rewrapping or re-encrypting the data.
+W: Missing derivation: `convergent_encryption` is only valid together with `derived=true`; add it and the command succeeds.
+X: A=AES-128 only: `aes256-gcm96`, the default type, supports convergent encryption as well as `aes128-gcm96` and `chacha20-poly1305`.
+C=Enable at first encrypt: the setting is part of key creation. The encrypt parameter only applies when an encrypt call creates the key.
+D=Exportable: exportability is unrelated. Vault derives the nonce itself and never needs the client to read key material.
+T: convergent_encryption=true needs derived=true, and both are fixed at key creation.
+
+@ VLT-VA003 D6 T6.1 applied use-case
+S: A SaaS provider encrypts data for many tenants with one transit key and wants each tenant's data protected by a different effective key. Which feature does this?
+A: Creating the key with `derived=true`, then passing each tenant's own base64 `context` on every encrypt and decrypt.
+B: Setting `min_encryption_version` to a different value for each tenant before encrypting that tenant's data.
+C: Enabling `allow_plaintext_backup`, so each tenant has its own backup of the key to restore from.
+D: Using the `rewrap` endpoint to assign a tenant tag to each ciphertext.
+K: A
+G: ## Key derivation
+With a derived key, transit uses the base key and a user-supplied context to derive the key that actually encrypts. Different contexts give different effective keys, so one named key can serve many purposes or tenants.
+## Rules
+- The key must be created with `derived=true`.
+- Every encrypt, decrypt and rewrap request must carry the `context` as a base64 string.
+- Decrypting with a different or missing context fails, so one tenant's context cannot open another tenant's ciphertext.
+W: Derived key plus per-tenant context: each context derives a distinct encryption key from the same ring, and decryption needs the same context.
+X: B=Per-tenant minimum version: that setting is stored on the key, not per request, and it only limits version choice.
+C=Plaintext backup: this allows backing up the key in plaintext form and has nothing to do with separating tenants.
+D=Rewrap tagging: rewrap upgrades ciphertext to the latest version. It does not add tenant labels.
+T: Derived keys use a base64 context to make one named key behave as many.
+
+@ VLT-VA003 D6 T6.2 applied definition
+S: Which statement describes where the data lives when an application uses the transit secrets engine?
+A: Vault stores the encrypted data in its storage backend and returns it when the application asks.
+B: Vault stores the ciphertext only until the application confirms receipt, then deletes it.
+C: Vault does not store the data; the app keeps the ciphertext in its own datastore and sends it back to decrypt.
+D: Vault keeps the plaintext in memory for a lease period so that the app can request it again.
+K: C
+G: ## Cryptography as a service
+Transit handles cryptographic functions on data in transit. Vault holds the keys, performs encrypt and decrypt operations, and returns the result. It does not hold on to the payload.
+## Division of labor
+- The application stores the ciphertext, for example in a database column, object store or file.
+- Vault stores only the named keys (in its barrier-encrypted storage).
+- To read the data again, the application sends the ciphertext back and receives the plaintext.
+This is why transit is a poor fit for storing secrets for later retrieval; the KV engine does that.
+W: Application owns the ciphertext: transit keeps only the key ring, so encrypted data sits in the app's own datastore and never needs space in Vault.
+X: A=Stored in Vault: that describes KV-style storage. Transit has no endpoint that returns data it kept.
+B=Temporary hold: Vault never keeps a copy at all, not even briefly, so no confirmation or delete step exists.
+D=Plaintext in memory: transit has no leases and does not cache plaintext for later requests.
+T: Transit keeps keys, not data: the application stores the ciphertext and sends it back to decrypt.
+
+@ VLT-VA003 D6 T6.2 applied use-case
+S: A team wants developers to stop writing their own cryptographic code in each service while data stays in the existing PostgreSQL database. Which approach matches the stated primary use case of transit?
+A: Developers call Vault to encrypt a field and store the ciphertext in PostgreSQL; operators manage keys.
+B: Developers store each field in the KV engine and keep only a reference to it in PostgreSQL.
+C: Developers request a dynamic database credential from Vault for every row that they want to protect.
+D: Developers fetch the key from Vault and run their own AES code locally for every field.
+K: A
+G: ## Encryption as a service
+The transit engine's main purpose is to let applications encrypt data and still keep it in their normal primary datastore. Application developers do not need to choose algorithms, handle key storage or write rotation logic; operators of Vault own that part.
+## What the app does
+1. Base64-encode the value and call `transit/encrypt/<key>`.
+2. Store the returned `vault:vN:...` string in the database column.
+3. When reading, send the string to `transit/decrypt/<key>` and decode the result.
+W: Encrypt through Vault, store ciphertext locally: the app keeps its database, and key handling and cryptography move to Vault operators.
+X: B=KV references: this moves the data itself into Vault and changes the storage design, which is not what transit does.
+C=Dynamic credentials per row: the database engine issues short-lived database logins, not encryption of stored fields.
+D=Local AES with a fetched key: developers would still write and maintain cryptographic code and handle plaintext key material, which is exactly what transit removes.
+T: Transit lets apps encrypt via API and keep ciphertext in their own datastore; operators own keys and rotation.
+
+@ VLT-VA003 D6 T6.2 applied use-case
+S: An application should be able to encrypt and decrypt with the `orders` key and nothing else in transit; operators manage keys separately. Which policy stanzas meet this?
+A: Paths `transit/encrypt/orders` and `transit/decrypt/orders`, each with the `update` capability.
+B: Path `transit/keys/orders` with the `update` capability, which covers encrypt and decrypt.
+C: Path `transit/*` with the `read` capability, since reading a key allows its use.
+D: Paths `transit/encrypt/orders` and `transit/decrypt/orders`, each with only the `read` capability.
+K: A
+G: ## Policies follow API paths
+Transit operations are writes to endpoints, so the capability that allows them is `update` (and `create` when an encrypt call may create a key). The relevant paths are:
+- `transit/encrypt/<key>` and `transit/decrypt/<key>` for using a key
+- `transit/rewrap/<key>` for rewrap
+- `transit/keys/<key>` and `transit/keys/<key>/rotate` for managing it
+## Example
+```
+path "transit/encrypt/orders" { capabilities = ["update"] }
+path "transit/decrypt/orders" { capabilities = ["update"] }
+```
+The same rule applies to the CLI, API and UI, as all call the same endpoints.
+W: Encrypt and decrypt paths with update: the application can use only that key for those two operations, and nothing in the key management paths.
+X: B=Key path: `transit/keys/orders` manages the key (create, read metadata, configure); it does not authorize encrypt or decrypt calls.
+C=Wildcard read: `read` does not allow writing to the encrypt or decrypt endpoints, and `transit/*` would cover every key, which breaks least privilege.
+D=Read-only: encryption is a write request, so `read` cannot call the endpoints.
+T: Grant `update` on transit/encrypt/<key> and transit/decrypt/<key>; keep key management for operators.
+
+@ VLT-VA003 D6 T6.1 applied definition
+S: Which curl request encrypts base64 data with the key `orders` through the transit HTTP API?
+A: `curl --request GET --header "X-Vault-Token: $TOKEN" $VAULT_ADDR/v1/transit/encrypt/orders?plaintext=aGk=`
+B: `curl --request POST --header "X-Vault-Token: $TOKEN" --data '{"plaintext":"aGk="}' $VAULT_ADDR/v1/transit/decrypt/orders`
+C: `curl --request POST --header "X-Vault-Token: $TOKEN" --data '{"plaintext":"aGk="}' $VAULT_ADDR/v1/transit/encrypt/orders`
+D: `curl --request POST --header "Authorization: Basic $TOKEN" --data '{"ciphertext":"aGk="}' $VAULT_ADDR/v1/encrypt/orders`
+K: C
+G: ## The HTTP form
+The API endpoint is `POST /transit/encrypt/:name`, mounted under `/v1/`. The token goes in the `X-Vault-Token` header (or `Authorization: Bearer`), and the body is JSON with `plaintext` holding base64 data. The response contains `data.ciphertext`.
+## The same call from the CLI
+`vault write transit/encrypt/orders plaintext=aGk=` sends the same request.
+W: POST to the encrypt path: the request uses the right method, the token header, a base64 `plaintext` field and the `/v1/transit/encrypt/orders` path.
+X: A=GET with a query string: encrypt is a write operation and only accepts POST (or PUT) with a body.
+B=Decrypt path: this calls decrypt and sends `plaintext`, but decrypt expects `ciphertext`, so the call is rejected.
+D=Wrong header and path: Vault does not accept a Basic authorization header, and the path is missing the `transit` mount. `ciphertext` is also the wrong field.
+T: Encrypt over HTTP is POST /v1/transit/encrypt/<key> with a JSON plaintext in base64.
+
+@ VLT-VA003 D6 T6.1 applied use-case
+S: An operator enables automatic rotation of a transit key with `vault write transit/keys/orders/config auto_rotate_period=720h`. Which statement is accurate?
+A: Vault now re-encrypts all stored ciphertext every 720 hours and replaces the version prefix.
+B: Vault adds a new key version about every 720 hours, so new data uses it while older ciphertext still decrypts.
+C: The key is recreated every 720 hours, so existing ciphertext must be rewrapped first.
+D: The setting is valid only for values of at least one day, so Vault rejects 720h.
+K: B
+G: ## Scheduled rotation
+`auto_rotate_period` tells Vault to rotate a key at that interval. The default of `0` turns it off, and the value cannot be shorter than one hour. It can be given when creating a key or on its config endpoint.
+## Why rotate
+Periodic rotation limits how much data one key version protects. For AES-GCM keys, NIST SP 800-38D guidance is to rotate before about 2^32 encryptions with one key version, so operators estimate the encryption rate to choose an interval.
+## After a rotation
+A rotation, manual or automatic, only adds a version. Applications still need rewrap to upgrade stored ciphertext.
+W: Automatic rotation: 720 hours is a valid period, Vault adds versions on schedule, and the key ring keeps old versions for decryption.
+X: A=Automatic re-encryption: Vault does not hold the ciphertext, so no scheduled job can rewrite it.
+C=Delete and recreate: rotation adds a version to the same key ring; the key and its history stay.
+D=Minimum of one day: the minimum is one hour, so 720 hours (30 days) is valid.
+T: auto_rotate_period (at least 1h) adds key versions on a schedule; rewrap is still how old ciphertext is upgraded.
+
+@ VLT-VA003 D6 T6.1 applied troubleshooting
+S: A new service has a token allowed `create` on `transit/encrypt/*` only, and it calls `transit/encrypt/newkey`, which does not exist. Another service has only `update` and does the same. What happens?
+A: Both calls fail, since a key must be created through `transit/keys/newkey` before it is used.
+B: Both calls succeed, because `create` and `update` are interchangeable on transit paths.
+C: The first call creates `newkey` with default settings and encrypts; the second call returns an error.
+D: The first call fails and the second one creates the key, since `update` is the stronger capability.
+K: C
+G: ## Upsert on encrypt
+The encrypt endpoint supports `create` and `update`. If the caller has `create` and the key does not exist, transit creates it with default values (derivation depends on whether a `context` is passed) and then encrypts. A caller with only `update` gets an error when the key is missing.
+## Turning it off
+Operators who do not want applications creating keys can set `disable_upsert=true` through `transit/config/keys`. Then `create` requests behave like `update` requests.
+W: Upsert behavior: `create` allows the missing key to be made on the fly; `update` can only act on a key that already exists.
+X: A=Always pre-create: upsert is a documented behavior, so creation through the encrypt path is possible with the right capability.
+B=Interchangeable: the capabilities differ here; `update` alone cannot create a missing key.
+D=Stronger update: capabilities are not ranked this way. Creating a missing object needs `create`.
+T: With create on the encrypt path a missing key is auto-created (unless disable_upsert is set); update-only gets an error.
+
+@ VLT-VA003 D6 T6.1 applied definition
+S: A key was created with `exportable=false` (the default) and later an auditor asks for it to be exportable. After an operator sets `exportable=true` on the key config, the auditor asks to set it back to false. What is the outcome?
+A: The operator can switch it back, but only after the key has been rotated at least once.
+B: The operator can switch it back by using a token with `sudo` on the key's config path.
+C: The setting resets by itself as soon as the first export of the key has finished.
+D: The setting cannot be switched back to false; once enabled it stays enabled for that key.
+K: D
+G: ## One-way switches
+Some key options can only be tightened at creation, not loosened later. `exportable` allows all valid versions in the key ring to be exported, and `allow_plaintext_backup` allows backups in plaintext form. Both are one-way: once set to true, they cannot be disabled.
+## Practical impact
+Leave both false unless a documented need exists. If exposure is a concern after enabling them, create a new key and move the data with rewrap-like re-encryption.
+W: Once exportable is true it cannot be disabled, so the key material stays exportable for the life of that key.
+X: A=Rotate first: rotation adds a version and does not reset the flag.
+B=Sudo: no capability can reverse it; the API does not offer a way back.
+C=Self-reset: the flag is not tied to an export event and stays set.
+T: exportable and allow_plaintext_backup are one-way: once enabled they cannot be disabled.
+
+@ VLT-VA003 D6 T6.1 applied use-case
+S: An import job must encrypt 5,000 small values. Which approach reduces round trips while keeping results matched to inputs?
+A: Send one request with `batch_input`, a list of items; the response keeps the order of the input.
+B: Send one request with a comma-separated `plaintext` string; Vault splits it and returns one ciphertext.
+C: Open one lease on the key and reuse its lease ID for 5,000 encrypt calls.
+D: Rotate the key before each value so that every ciphertext has its own version.
+K: A
+G: ## Batch processing
+Encrypt, decrypt and rewrap accept `batch_input`, an array of objects such as `{"plaintext": "...", "context": "..."}`. Vault processes all items in one request and returns `batch_results` in the same order. A `reference` string on each item can also be echoed back to help match results.
+## Why it helps
+Each call to Vault is a network request. Batching reduces latency and load for bulk jobs. The request size is limited (the HTTP API caps requests at 32 MB by default, tunable per listener), so very large jobs are split.
+W: batch_input: one request carries many items, and the results come back in input order, optionally with a reference for each.
+X: B=Comma-separated string: `plaintext` is a single base64 value. Batching needs the structured `batch_input` list.
+C=Lease reuse: transit has no leases for encryption; each call is an independent request.
+D=Rotate per value: rotation adds versions to the key ring and does not reduce calls. Many versions would also grow the archive.
+T: Use batch_input to encrypt, decrypt or rewrap many values per request; output order follows input order.
+
+@ VLT-VA003 D6 T6.2 applied comparison
+S: Which statement about the transit engine's other cryptographic functions is accurate?
+A: Transit can generate random bytes, hash data and compute HMACs, and keys such as `ecdsa-p256` can sign data.
+B: Transit can sign data with any key type, including `aes256-gcm96`, as every key supports every operation.
+C: Transit can hash and generate random bytes, but cannot sign or verify signatures.
+D: Transit random bytes are returned only after the caller proves ownership of an encryption key.
+K: A
+G: ## More than encryption
+Besides encrypt, decrypt and rewrap, the engine offers:
+- **Signing and verification** with `ed25519`, `ecdsa-*` and `rsa-*` keys.
+- **Hashing** (`transit/hash`), **HMAC** (`transit/hmac/<key>`) and **random bytes** (`transit/random`).
+- **Data keys** for envelope-style use.
+What an endpoint can do depends on the key type: for example, an ECDSA key signs but cannot encrypt, and an AES-GCM key encrypts but cannot sign.
+W: Wide function set: random bytes, hashing and HMAC are available, and signing is available on signing-capable key types like ECDSA.
+X: B=Any key signs: each key type supports a specific set of operations, and an AES-GCM key cannot sign.
+C=No signing: transit signs and verifies with ed25519, ECDSA and RSA keys.
+D=Key ownership for random: the random endpoint does not use a named key; it needs only a policy that allows the path.
+T: Transit also signs, verifies, hashes, computes HMACs and creates random bytes; the key type limits which operations work.
+
+@ VLT-VA003 D6 T6.2 applied use-case
+S: An application wants a fresh data key per file so it can encrypt large files locally, with a copy of each key that only Vault can open. Which TWO statements about the transit data key endpoints are accurate? (Select TWO)
+A: `transit/datakey/plaintext/files` returns the key in plaintext together with a copy encrypted by the named key.
+B: `transit/datakey/wrapped/files` returns only the encrypted copy, which a trusted caller can later send to decrypt.
+C: `transit/datakey/wrapped/files` returns the plaintext key once and then deletes it from Vault memory after use.
+D: Both datakey paths store the generated key in Vault so that it can be read again later by the same token.
+E: The encrypted copy of a data key can be opened only by calling rewrap, never by calling decrypt.
+K: A,B
+G: ## Data keys
+The `datakey` endpoint generates a high-entropy key and returns it encrypted with the named transit key. The path decides what else comes back:
+- `transit/datakey/plaintext/<key>` returns the plaintext data key and the wrapped (ciphertext) copy. The app encrypts locally with the plaintext, then stores only the wrapped copy.
+- `transit/datakey/wrapped/<key>` returns only the wrapped copy, so ACLs can let an untrusted caller create keys that a trusted caller unwraps later.
+## Unwrapping
+To use the key again, the app sends the wrapped key to `transit/decrypt/<key>`. Vault does not keep the generated keys.
+W: A=Plaintext path: the caller gets a usable key and a Vault-protected copy to store next to the file; ACLs control who may use this path.
+B=Wrapped path: only the encrypted copy is returned, and a trusted caller recovers the key later through decrypt.
+X: C=One-time plaintext: the wrapped path never returns plaintext at all, so there is nothing to delete.
+D=Stored in Vault: Vault does not store generated data keys; the application keeps the wrapped copy.
+E=Rewrap only: the wrapped key is opened with decrypt. Rewrap would only return another encrypted copy.
+T: datakey/plaintext returns a key plus a wrapped copy; datakey/wrapped returns only the wrapped copy; decrypt unwraps it.
+
+@ VLT-VA003 D6 T6.2 applied tradeoff
+S: Which TWO statements are trade-offs of using transit instead of encrypting inside each application with a local library? (Select TWO)
+A: Transit keeps keys, rotation and audit logging in one place, while applications never hold the key.
+B: Every encrypt or decrypt becomes a network request, so the application depends on Vault being reachable.
+C: Transit stores a copy of every encrypted value, which increases Vault storage use over time.
+D: Transit makes the ciphertext format independent of key rotation, so no rewrap is ever needed.
+E: Transit requires each application to implement its own key rotation, as Vault cannot rotate keys.
+K: A,B
+G: ## Central versus local cryptography
+With transit, keys never leave Vault, and every operation passes through Vault's authentication, policy and audit device. That gives one place to rotate keys, revoke access and review who decrypted what.
+## The cost
+Each operation is a request to Vault, which adds latency and ties availability to Vault (a sealed or unreachable Vault cannot encrypt or decrypt). Bulk work can use `batch_input`, and data keys let an app encrypt large files locally.
+W: A=Central control: keys, rotation and audit sit with Vault operators, and the application only sees ciphertext.
+B=Availability dependency: each cryptographic call needs a reachable, unsealed Vault, so the application inherits that dependency.
+X: C=Stores values: transit does not store the data, so its storage use does not grow with the volume encrypted.
+D=No rewrap needed: ciphertext carries a key version, and moving old data to a newer version still takes rewrap.
+E=App-side rotation: rotation is a Vault operation on the key, manual or via `auto_rotate_period`.
+T: Transit centralizes keys, rotation and audit but makes each operation a request to Vault.
+
+@ VLT-VA003 D6 T6.1 applied troubleshooting
+S: An application encrypted a value with the key `orders` and later sends the ciphertext to `transit/decrypt/payments`, which fails. What is the cause?
+A: Decrypt endpoints accept only ciphertext that was created earlier by the very same client token.
+B: Ciphertext is bound to its key, so only `orders` can decrypt it.
+C: The payments key must be rotated once before it is able to read ciphertext made by other keys.
+D: The ciphertext prefix `vault:v1:` must first be edited to read `vault:payments:` before the call.
+K: B
+G: ## Ciphertext belongs to one key
+The `vault:vN:` prefix names a key version, not a key name. The caller selects the key by the path, so the application must remember which named key encrypted each value, typically by using a single key per application or per data class.
+A different key holds different key material, so decryption fails with an error, and no amount of rotation changes that.
+## Design hint
+Keep the key name in configuration, or store it in a column next to the ciphertext, so the right decrypt path is always known.
+W: Key binding: only the key material that encrypted the value can decrypt it, so a different named key cannot.
+X: A=Token binding: decryption is not tied to the token that encrypted. Any token with policy access to the right key can decrypt.
+C=Rotate the other key: rotation adds new material for that key only and never imports another key's material.
+D=Edit the prefix: the prefix carries a key version, not a name. Changing it does not select another key and would corrupt the value.
+T: Decrypt with the same named key that encrypted; the prefix gives the version, not the key name.
+
+@ VLT-VA003 D6 T6.1 applied use-case
+S: Which TWO of the following can an operator do from the Vault CLI, API or UI without changing any application code? (Select TWO)
+A: Rotate the `orders` key so that new encryptions use a newer key version.
+B: Raise `min_decryption_version` on the `orders` key to block decryption of obsolete versions.
+C: Read the plaintext of ciphertext in the application's database without decrypt permission.
+D: Change the `orders` key from `aes256-gcm96` to `rsa-4096` while keeping existing ciphertext valid.
+E: Move the application's ciphertext from its database into Vault's storage backend.
+K: A,B
+G: ## Key lifecycle is an operator task
+Rotation and the version minimums are changes to the key ring. They happen through `transit/keys/<name>/rotate` and `transit/keys/<name>/config`. The application keeps calling the same encrypt and decrypt paths, and the ciphertext prefix tells Vault which version to use.
+## What cannot be changed
+The key type is fixed when the key is created. Vault also never exposes plaintext to a caller without the decrypt capability, and it does not store the application's ciphertext at all.
+W: A=Rotate: a new version is added, applications keep the same endpoints, and old ciphertext decrypts.
+B=Raise the minimum: this blocks old versions for decryption centrally, and it can be lowered again if needed.
+X: C=Bypass decrypt: reading plaintext requires the decrypt capability on the key; policies enforce it.
+D=Change key type: the type is chosen at creation and cannot be changed. A new key is needed.
+E=Move data into Vault: transit keeps keys, not data, so there is nothing to move.
+T: Operators rotate keys and adjust version minimums centrally; type is fixed and data stays in the app.

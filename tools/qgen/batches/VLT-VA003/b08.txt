@@ -1,0 +1,573 @@
+# VLT-VA003 b08: D8 Deployment architecture (T8.1-T8.5)
+# src: https://developer.hashicorp.com/vault/docs/configuration/storage
+# src: https://developer.hashicorp.com/vault/docs/internals/integrated-storage
+# src: https://developer.hashicorp.com/vault/docs/concepts/seal
+# src: https://developer.hashicorp.com/vault/docs/enterprise/replication
+# src: https://developer.hashicorp.com/vault/docs/concepts/ha
+# src: https://developer.hashicorp.com/vault/docs/internals/high-availability
+# src: https://developer.hashicorp.com/hcp/docs/vault
+# src: https://developer.hashicorp.com/vault/docs/commands/operator/init
+
+@ VLT-VA003 D8 T8.1 applied use-case
+S: A team runs a self-managed Vault cluster with Integrated Storage on five nodes. Two nodes fail at the same time because of a rack power loss. What is the state of the cluster?
+A: The remaining three nodes still form a quorum, so the cluster keeps electing a leader and committing writes
+B: The remaining three nodes are read-only until the two failed peers are removed with a manual peer-removal command
+C: The remaining three nodes stay available only if the failed pair held no more than one of the unseal key shares
+D: The remaining three nodes lose quorum because Raft needs every voting peer to acknowledge each committed write
+K: A
+G: ## Quorum in Integrated Storage
+Integrated Storage uses the Raft consensus protocol. A log entry is committed only when a majority of the peer set has stored it. Quorum is the smallest majority: for a peer set of `N` voters it is `ceil((N + 1) / 2)`.
+- 3 servers: quorum 2, failure tolerance 1
+- 5 servers: quorum 3, failure tolerance 2
+- 7 servers: quorum 4, failure tolerance 3
+If quorum is lost the cluster cannot elect a leader, commit writes or change membership, and recovery is manual.
+## Why five nodes is a common production size
+Losing two of five leaves three, which is still a majority, so the cluster rides through two simultaneous failures without operator action.
+W: Quorum survives: three of five is a majority, so the remaining peers keep a leader and commit new writes. A five-node cluster is designed to tolerate two failures.
+X: B=Read-only until manual removal: loss of quorum would stop writes, but quorum is not lost here. No manual peer removal is needed for the cluster to keep working.
+C=Depends on unseal key shares: unseal key shares are held by operators and are used to unseal a node. They play no role in Raft quorum, which counts running voting peers.
+D=Every peer must acknowledge: Raft needs only a majority, not all peers. If every peer had to acknowledge, one failed node would stop the cluster.
+T: Quorum is a majority of voters, so a five-node Raft cluster tolerates two failed nodes.
+V: Vault
+
+@ VLT-VA003 D8 T8.1 applied tradeoff
+S: An architect proposes growing a three-node Integrated Storage cluster to four nodes "for more resilience". Which statement about this change is accurate?
+A: Four nodes raise failure tolerance to two, since the extra node can vote on behalf of a failed peer
+B: Four nodes keep failure tolerance at one, so the extra node adds cost and no extra fault tolerance
+C: Four nodes lower failure tolerance to zero because Raft needs an odd number of nodes to elect a leader
+D: Four nodes keep failure tolerance at one and also double read throughput, because standbys serve reads
+K: B
+G: ## Quorum size and failure tolerance
+Failure tolerance is the cluster size minus quorum size.
+- 3 servers: quorum 2, tolerance 1
+- 4 servers: quorum 3, tolerance 1
+- 5 servers: quorum 3, tolerance 2
+An even-sized cluster adds a node without adding tolerance, and it can produce voting stalemates, so HashiCorp recommends an odd number of nodes. For production, five servers keep a tolerance of two.
+## Standby nodes and scale
+In HA mode only the active node handles requests; standbys forward or redirect. HA improves availability, not throughput.
+W: Same tolerance, more cost: quorum for four voters is three, so only one node can fail, exactly as with three. The fourth node adds cost without more resilience; five nodes is the next useful step.
+X: A=Tolerance of two: a fourth voter raises quorum to three, so a second failure would still lose quorum. A node cannot vote on behalf of another.
+C=Tolerance of zero: an even-sized cluster is not broken and still tolerates one failure. Odd sizes are recommended to avoid voting stalemates, not required for election.
+D=Doubled read throughput: standbys in Vault Community do not serve requests; they forward or redirect to the active node. HA does not provide increased scalability.
+T: Failure tolerance is size minus quorum, so adding a fourth node to three gains nothing.
+V: Vault
+
+@ VLT-VA003 D8 T8.1 applied troubleshooting
+S: A two-node Integrated Storage cluster was built for a lab. One node crashes. The remaining node still answers `vault status` but cannot accept writes. What explains this?
+A: The surviving node sealed itself automatically, since a Shamir seal requires both nodes to stay online
+B: The surviving node is a standby that never held the HA lock, so it must wait for the lease to expire
+C: The peer set of two has a quorum of two, so one node alone cannot commit entries or elect a leader
+D: The surviving node lacks the Enterprise license that is needed to run a cluster of fewer than three
+K: C
+G: ## Why two nodes are not fault tolerant
+Quorum for a peer set of two is two, so both nodes must take part in every commit. If one fails, the other cannot commit log entries, elect a leader or change membership; the peer set is unavailable. Recovery is manual: remove the failed node and restart the remaining node in bootstrap mode so it elects itself leader.
+The same math shows why a single server or two servers is discouraged for production, and why three is the smallest size that tolerates a failure.
+W: Quorum of two: with two peers a majority is both of them, so one survivor cannot commit writes. That is a cluster-sizing problem, not a seal or license problem.
+X: A=Automatic seal: a node does not seal because a peer died. A node stays unsealed until it is resealed, restarted or hits an unrecoverable storage error.
+B=Waiting for a lease: Raft leadership uses elections, and with Integrated Storage the HA lock goes to the Raft leader. No lease timer would unblock the survivor without quorum.
+D=Missing license: Vault Community runs Integrated Storage clusters of any size. Clustering does not require an Enterprise license.
+T: Two Raft peers need both online, so three is the smallest cluster that tolerates a failure.
+V: Vault
+
+@ VLT-VA003 D8 T8.1 applied definition
+S: A cluster of three Vault nodes shares one storage backend that supports high availability. Which statement about how the nodes behave is accurate?
+A: Every node serves reads and writes in parallel, and the load balancer should spread requests evenly
+B: One node holds the HA lock and is active, while the others are standbys that forward or redirect requests to it
+C: One node is active, and a standby only starts forwarding after an operator unseals it with the root key
+D: Writes go to all nodes at once, and each node signs its replies so that clients accept the first one
+K: B
+G: ## Active and standby nodes
+When the storage backend supports high availability, Vault enters HA mode automatically. One node acquires a lock in the data store and becomes active; the others are standbys. Standbys forward requests to the active node (request forwarding is on by default) or answer with a `307` redirect to its `api_addr`. If the active node is sealed, fails or loses connectivity, a standby takes the lock.
+## What HA does not do
+HA protects against outages. It does not increase scalability, because only the active node processes requests; Vault is bound by storage I/O.
+Standbys must already be unsealed to take over. Sealed nodes cannot act as standbys.
+W: Lock holder is active: one node owns the HA lock and handles requests, and standbys forward or redirect to it. This gives failover, not load sharing.
+X: A=Parallel active nodes: in Vault Community only the active node processes requests, so a load balancer does not turn standbys into extra capacity.
+C=Standby needs the root key: a standby is already unsealed with its own seal mechanism before it joins; forwarding does not depend on an operator providing the root key.
+D=Writes to all nodes: Vault does not broadcast writes to all nodes with signed replies; the active node writes to the storage backend.
+T: HA means one active node holding the lock and unsealed standbys that forward, for availability only.
+V: Vault
+
+@ VLT-VA003 D8 T8.1 applied troubleshooting
+S: A three-node HA cluster uses auto-unseal. Two standbys were restarted by an automated patch job and an operator ran `vault operator seal` on them for testing, so they are sealed. The active node then crashes. What happens?
+A: A sealed node takes the HA lock and unseals itself with the KMS, which restores service within seconds
+B: The cluster promotes the sealed nodes, which answer read requests from their local copy of the data
+C: The cluster stays unavailable because sealed servers cannot act as standbys or take over as active
+D: The third node continues alone because Raft quorum counts only nodes that run an unsealed process
+K: C
+G: ## Only unsealed nodes are standbys
+HA failover depends on standbys that are running and unsealed. When the active node fails, unsealed standbys compete for the HA lock; a sealed node cannot take part and cannot serve requests. A manual `vault operator seal` (the seal API) keeps a node sealed until restart or unseal, even when auto-unseal is configured.
+## Design consequence
+Monitor seal status of every node, and keep enough unsealed nodes to maintain quorum and a standby after patching.
+W: Sealed nodes cannot take over: with no unsealed standby left, no node can obtain the HA lock, and requests fail until a node is unsealed.
+X: A=Self-unsealing takeover: a node that was sealed through the API stays sealed until restarted or unsealed; it does not unseal itself in order to take the lock.
+B=Read-only local copy: sealed nodes cannot decrypt data and answer only unseal and status operations. Serving reads from a local copy is a feature of Enterprise performance standbys, which must be unsealed.
+D=Solo survivor: with Integrated Storage the sole remaining node cannot reach quorum in a three-node peer set. The statement also ignores that the third node must be unsealed.
+T: Standbys must be unsealed to take over, so sealed nodes provide no failover.
+V: Vault
+
+@ VLT-VA003 D8 T8.1 applied comparison
+S: In a Vault Enterprise HA cluster, administrators enable performance standby nodes. Which statement about their role is accurate?
+A: They serve requests that do not modify storage and forward requests that need a write to the active node
+B: They accept all writes locally and later replicate them to the active node through a replication token
+C: They are separate clusters in another region that hold a copy of the data and serve only disaster recovery
+D: They replace the HA lock, so any performance standby can answer writes without contacting the active node
+K: A
+G: ## Performance standbys (Enterprise)
+In a standard HA cluster, standbys only forward or redirect. With Vault Enterprise, performance standby nodes can service read-only requests, meaning requests that do not change storage, which scales operations such as KV reads and transit calls nearly linearly with the number of nodes. A request that needs a storage write is forwarded to the active node.
+Like ordinary standbys, a performance standby becomes active when the active node is sealed, fails or loses connectivity.
+## Do not confuse with replication
+Performance standbys live inside one cluster and share its storage. Performance and DR replication connect separate clusters.
+W: Read locally, forward writes: performance standbys scale read-only traffic within one cluster, and writes still pass through the active node that holds the HA lock.
+X: B=Local writes later replicated: write requests are forwarded to the active node, not applied locally. Replication tokens bootstrap replication between clusters, not standbys.
+C=Separate DR cluster: performance standbys are nodes of the same cluster. A cluster in another region with copied data is a replication secondary.
+D=Replaces the HA lock: the HA lock still determines which node is active. A performance standby cannot write on its own.
+T: Performance standbys are Enterprise nodes in one cluster that serve reads and forward writes.
+V: Vault
+
+@ VLT-VA003 D8 T8.1 applied use-case
+S: Which TWO statements about Autopilot in a self-managed Integrated Storage cluster are accurate? (Select TWO)
+A: A newly joined node becomes a non-voter until it has synced and reached the configured stability threshold
+B: Autopilot replaces the Shamir seal so that new nodes join without any unseal key or recovery key
+C: Dead server cleanup can remove unhealthy nodes from the Raft cluster without an operator doing it manually
+D: Autopilot converts a standby into an active node when the stability threshold is set to zero seconds
+E: Autopilot is available only if the cluster is configured with Consul as an external storage backend
+K: A,C
+G: ## What Autopilot does
+Autopilot is enabled by default for Integrated Storage. It decides whether a node is healthy enough to be a voter in the quorum list.
+- A joining node starts as a non-voter, syncs to the current Raft index and becomes a voter only after the stability threshold passes.
+- Dead server cleanup, when enabled through the Autopilot API, removes unhealthy nodes automatically.
+Without Autopilot, a joining node cannot vote while syncing yet is counted for quorum, so adding several nodes at once can lose quorum.
+W: A=Non-voter stage: new nodes catch up first and vote later, which protects quorum during scale-out.
+C=Dead server cleanup: Vault removes unhealthy peers from the Raft cluster automatically instead of waiting for an operator.
+X: B=Replaces the seal: Autopilot manages Raft membership and health. Joining nodes still need a seal mechanism; with Shamir they need unseal keys, and with auto-unseal the seal handles the join challenge.
+D=Promotes to active: leadership comes from Raft elections. A stability threshold concerns voter eligibility, and a threshold set too low risks instability.
+E=Consul only: Autopilot is a feature of Integrated Storage (Raft). Consul has its own, separate mechanisms.
+T: Autopilot admits joining nodes as non-voters until stable and can remove dead servers automatically.
+V: Vault
+
+@ VLT-VA003 D8 T8.2 applied comparison
+S: A company is designing a new self-managed Vault cluster and has no existing Consul infrastructure. Which choice matches HashiCorp's recommendation for the storage backend?
+A: Consul, because only a separate Consul cluster supports high availability with a lock in the data store
+B: A local file backend on each node, with a shared network drive so that every node reads the same files
+C: Integrated Storage, since it needs no extra software, keeps data on the Vault hosts and is HashiCorp supported
+D: Integrated Storage on the active node and an external database on the standbys for faster read access
+K: C
+G: ## Integrated Storage as the default
+HashiCorp recommends Integrated Storage for most use cases. It is built into Vault (version 1.4 or later), so it needs no additional software, adds no extra network hop, and Vault is the only system to monitor and troubleshoot. The encrypted data lives on the same hosts as the Vault servers. It also supports HA and Enterprise replication. Before Vault 1.4, Consul was the recommended storage.
+## External storage
+External backends such as Consul or DynamoDB can be used, with limited HashiCorp support and extra operational work, for example clustering the external system for HA.
+W: Built-in and supported: Integrated Storage is the recommended default; it adds no extra system to install, monitor or secure.
+X: A=Only Consul does HA: Integrated Storage supports HA, and the HA lock goes to the Raft leader. Several other backends support HA too.
+B=File backend on a shared drive: the file backend does not support high availability and is not meant for a clustered deployment.
+D=Mixed backends per role: a cluster has one storage backend (optionally a separate `ha_storage` for the lock), not a different backend per node role.
+T: Choose Integrated Storage by default; external storage costs extra operations and support.
+V: Vault
+
+@ VLT-VA003 D8 T8.2 applied comparison
+S: Which TWO statements correctly compare Consul as Vault's storage backend with Integrated Storage? (Select TWO)
+A: Consul keeps all Vault data in memory, so it needs more frequent snapshots than an on-disk store
+B: A Consul cluster that stores Vault data should also run service mesh so the data is shared with applications
+C: Consul has a larger maximum entry size than Integrated Storage, which is why it suits large secrets
+D: Integrated Storage needs only the Vault cluster, while Consul needs a Vault cluster plus a Consul cluster
+E: Consul removes the need to unseal Vault, because the Consul ACL token decrypts the stored data
+K: A,D
+G: ## Integrated Storage vs Consul
+- Deployment: Integrated Storage needs only the Vault cluster; Consul needs a Vault cluster plus a dedicated Consul cluster.
+- Data location: Integrated Storage keeps data on disk; Consul keeps all data in memory, so more frequent snapshots are needed.
+- Max message size: 1 MiB for Integrated Storage (configurable with `max_entry_size`) and 512 KiB for Consul (`kv_max_value_size`).
+- Use a dedicated Consul cluster for Vault storage, not shared for service discovery or service mesh.
+W: A=In-memory data: Consul stores Vault data in memory, so the organisation must snapshot it more often.
+D=Deployment footprint: Integrated Storage is part of Vault, while Consul adds a second cluster to build and operate.
+X: B=Shared with service mesh: the Consul cluster behind Vault should be dedicated and not used for service discovery or service mesh.
+C=Larger entries: Consul's limit is smaller (512 KiB) than Integrated Storage (1 MiB by default).
+E=No unseal needed: the storage backend is untrusted. Vault encrypts data before writing, so Consul access does not replace unsealing.
+T: Consul storage means a second, dedicated, in-memory cluster; Integrated Storage is built in and on disk.
+V: Vault
+
+@ VLT-VA003 D8 T8.2 applied use-case
+S: A config uses `storage "s3"` for data and `ha_storage "consul"` for the lock. What does the split provide?
+A: The S3 bucket holds Vault's encrypted data, while Consul holds the HA lock that picks the active node
+B: The S3 bucket holds the unseal keys, while Consul holds the encrypted data and replicates to standbys
+C: The S3 bucket acts as the leader, and Consul replicates the S3 data to a secondary cluster in another region
+D: The S3 bucket stores audit logs for compliance, while Consul stores the token and lease records only
+K: A
+G: ## Split data and HA storage
+Some storage backends can hold both Vault's data and the HA lock. Vault also supports a split mode: set `storage` to the backend that holds the data and `ha_storage` to a different backend that manages the lock. Example: Consul as `ha_storage` to manage the lock, with another backend for data. The node that obtains the lock becomes active; others stand by.
+The unseal keys are never stored in storage in plaintext, and audit logs are written to audit devices, not to the storage backend.
+W: Data in one, lock in other: `storage` holds the encrypted Vault data, and `ha_storage` provides the lock for HA election.
+X: B=Unseal keys in storage: the data backend holds only encrypted data; unseal keys are held by operators or by the auto-unseal service.
+C=S3 as leader with replication: a storage stanza does not create replication. Replication is an Enterprise feature that links separate clusters.
+D=Audit logs and tokens: audit logs go to audit devices, and tokens and leases are Vault data stored in the main storage backend.
+T: `ha_storage` can hold the HA lock while `storage` holds the data.
+V: Vault
+
+@ VLT-VA003 D8 T8.2 applied definition
+S: A Vault Enterprise customer wants to add replication between two clusters. Which storage requirement applies to the replicated clusters?
+A: Both clusters must use the same storage backend type and the same seal type
+B: Each cluster needs a storage backend that supports transactional updates, such as Integrated Storage or Consul
+C: Both clusters must use the file backend so that replication can copy files between hosts
+D: The primary needs Integrated Storage, while secondaries must use any backend that does not support HA
+K: B
+G: ## Storage and replication
+Replication is a Vault Enterprise feature (also in HCP Vault). It requires a storage backend that supports transactional updates, for example Integrated Storage or Consul.
+The two clusters need not match: there is no requirement that primary and secondary use the same storage engine, and none that they use the same seal type. Replication runs over the cluster port with Vault-generated certificates, not by copying files.
+W: Transactional storage: replication relies on transactional updates, which Integrated Storage and Consul provide. The backend types may differ between clusters.
+X: A=Same backend and seal: the docs state there is no requirement for the same storage engine or the same seal type.
+C=File backend: the file backend is not transactional in this sense, and replication does not copy files; it streams data over mutually authenticated TLS.
+D=Secondaries without HA: nothing requires secondaries to use a non-HA backend; each cluster is a normal Vault cluster that may use HA.
+T: Replication needs transactional storage on each cluster but not matching backends.
+V: Vault
+
+@ VLT-VA003 D8 T8.3 applied use-case
+S: An operator runs `vault operator init -key-shares=5 -key-threshold=3` on a new self-managed cluster with a Shamir seal. Two of the five key holders leave the company. Can the cluster still be unsealed?
+A: No, because every one of the five shares is needed to rebuild the unseal key
+B: No, because the threshold applies only to key holders who are in the original group
+C: Yes, but only after the two missing shares are regenerated with a command run on an unsealed node
+D: Yes, because any three of the remaining shares reconstruct the unseal key, and the shares can be entered in any order
+K: D
+G: ## Shamir's Secret Sharing
+With the default seal, Vault splits the unseal key into shares using Shamir's Secret Sharing. `-key-shares` sets how many shares are produced; `-key-threshold` sets how many are needed to rebuild the key (defaults 5 and 3, and the threshold must not exceed the shares).
+- Any threshold-sized subset works, in any order.
+- Fewer than the threshold reveal nothing about the key.
+- Holders can enter their shares from different machines, because the unseal process is stateful.
+## Operational lesson
+Losing shares is tolerable up to `shares - threshold` of them (here 2). Past that, the cluster cannot be unsealed; plan a rekey (`vault operator rekey`) when holders leave, while the threshold is still met.
+W: Threshold of three: three holders remain, which meets the threshold, and the order they enter shares in does not matter.
+X: A=All five required: that would make the threshold equal to the shares. The threshold of three is chosen exactly so that some shares can be lost.
+B=Original group only: the shares are numbers, not identities; any holder of three valid shares can contribute them.
+C=Regeneration needed first: no regeneration is needed here, and a sealed Vault cannot run such operations anyway. Rekeying is a separate, planned operation.
+T: Any threshold-sized subset of Shamir shares unseals, so up to shares minus threshold can be lost.
+V: Vault
+
+@ VLT-VA003 D8 T8.3 applied use-case
+S: Four administrators each hold one Shamir share of a cluster with three nodes and a threshold of three. The first node was unsealed. What must be done for the other two nodes?
+A: Nothing, since the unsealed node distributes its unsealed state to the other nodes of the cluster
+B: Unseal each remaining node by supplying the threshold number of shares to that node
+C: Copy the unseal key from the first node to the other nodes by using the HA standby link
+D: Unseal only the standby nodes, because the active node passes its root key to the standbys
+K: B
+G: ## Each node is unsealed on its own
+With a Shamir seal and multiple nodes, every node must be unsealed with the required threshold of shares. Vault does not distribute partially unsealed nodes across the cluster, and an unsealed node does not hand its root key to its peers. Unsealing is stateful on each node: shares can be entered from several clients, but they accumulate on the node that receives them.
+This is why Shamir unseal is hard to automate and why most teams use auto-unseal for clusters.
+W: Per-node unseal: each node needs its own threshold of shares. The shares are the same set, but each node must receive them.
+X: A=Automatic distribution: unsealed state is local to each node. Vault does not push a partially or fully unsealed state to peers.
+C=Copying the key: no mechanism copies the unseal key over the standby link; the key is rebuilt from shares at each node.
+D=Active passes the root key: the active node does not pass the root key to standbys, and a sealed standby cannot take over.
+T: With Shamir, every node needs its own threshold of shares before it unseals.
+V: Vault
+
+@ VLT-VA003 D8 T8.3 applied troubleshooting
+S: Two key holders leave a company that runs a Shamir-sealed cluster with five shares and a threshold of three. Which TWO statements about rekeying the unseal key with `vault operator rekey` are accurate? (Select TWO)
+A: The rekey is authorized by supplying the threshold number of current unseal key shares
+B: The cluster must be sealed first, because new shares cannot be created while data is readable
+C: Old shares keep working next to the new ones until the next restart of every node
+D: The operation can set a new share count and threshold, and new shares can go to different holders
+E: Rekeying re-encrypts every secret in the storage backend, so it takes as long as the data set is large
+K: A,D
+G: ## Rekeying Shamir unseal keys
+`vault operator rekey` (or the matching `sys/rekey` API) replaces the set of unseal key shares with a new one. It runs against an unsealed Vault and is authorized when the threshold of current unseal keys is provided. You can pick a new `-key-shares` and `-key-threshold` and, optionally, PGP keys to encrypt each new share.
+- Use it when key holders leave or when the split must change.
+- After it completes, the old shares are no longer valid.
+- Only the root key is re-encrypted with the new unseal key; the stored data is not rewritten.
+With auto-unseal the equivalent for the recovery key is `-target=recovery`.
+W: A=Threshold authorizes: the current threshold of shares proves quorum before new shares are issued.
+D=New split: the operator chooses a new number of shares and threshold, which allows handing shares to different holders.
+X: B=Must be sealed: rekey runs on an unsealed Vault; sealing is not needed to create new shares.
+C=Old shares overlap: once rekeyed, the old shares are replaced and are no longer valid.
+E=Rewrites all data: the new unseal key protects the root key; the stored secrets are not rewritten, so size does not matter.
+T: Rekeying issues a new set of unseal shares, authorized by the current threshold, when holders change.
+V: Vault
+
+@ VLT-VA003 D8 T8.3 applied definition
+S: Which TWO statements about a Shamir seal are accurate? (Select TWO)
+A: The shares are combined to reconstruct the unseal key, which is then used to decrypt the root key
+B: A single share is enough to decrypt data, provided the holder has a root token for the cluster
+C: Shares can be entered one at a time, in any order, from different client machines until the threshold is met
+D: A Shamir seal fits large dynamic clusters well, since nodes automatically unseal after every restart
+E: Shamir shares are stored in the storage backend so that standby nodes can rebuild the key themselves
+K: A,C
+G: ## How a Shamir seal works
+Shamir's Secret Sharing splits the unseal key into shares. Vault needs a threshold of them to reconstruct the unseal key, then uses it to decrypt the root key, which decrypts the keyring that protects the data.
+- Shares can be supplied one at a time, in any order, with `vault operator unseal` or the API.
+- The process is stateful and can span machines.
+- After a restart a node is sealed again, so Shamir unseal is manual and awkward to automate.
+W: A=Rebuilds the unseal key: the threshold of shares recreates the unseal key, which unlocks the root key.
+C=Any order, many machines: shares accumulate until the threshold is reached, and holders can use separate clients.
+X: B=One share and a root token: one share reveals nothing, and a token does not decrypt data at rest.
+D=Automatic after restart: a restarted node is sealed and needs operators; automatic unseal is what auto-unseal provides.
+E=Shares in storage: storing shares with the data would defeat the purpose; they are given to operators at initialization.
+T: Shamir shares rebuild the unseal key when the threshold is met, in any order and from any client.
+V: Vault
+
+@ VLT-VA003 D8 T8.4 applied comparison
+S: A platform team runs dozens of Vault clusters in autoscaling groups, and nodes are replaced several times per week. Why does the team move from a Shamir seal to auto-unseal?
+A: A trusted external service such as a cloud KMS decrypts the root key at start, so nodes unseal without human operators
+B: Auto-unseal removes the root key from the design, so there is no key to protect, only the policies
+C: Auto-unseal makes unseal keys unnecessary by storing them in the data store next to the encrypted secrets
+D: A node with auto-unseal no longer needs a storage backend, because the KMS holds the encrypted data
+K: A
+G: ## Why auto-unseal
+Auto-unseal delegates the protection of the unseal key to a trusted device or service, for example a cloud KMS, an HSM or another Vault's transit engine. At startup Vault connects to that service and has it decrypt the root key from storage. No operator has to type shares, which makes installs and node replacement easy to automate.
+## What stays the same
+The key chain still exists (the data is still encrypted by Vault's keyring and root key). Operations that need a quorum of humans, such as generating a root token, use recovery keys instead of unseal keys. Auto-unseal creates a lifecycle dependency on the external seal service.
+W: Delegated unseal: the external service decrypts the root key on startup, so replaced or restarted nodes unseal on their own.
+X: B=No root key: Vault still protects data with a keyring and root key; auto-unseal changes who decrypts the root key.
+C=Keys beside the data: storing a usable unseal key next to the encrypted data would defeat the barrier; the external service does the decrypting.
+D=No storage backend: data stays in the storage backend, and the KMS is used only for the root-key decryption.
+T: Auto-unseal lets a trusted service unseal nodes automatically, trading human shares for a dependency.
+V: Vault
+
+@ VLT-VA003 D8 T8.4 applied definition
+S: An operator initializes a cluster that uses a cloud KMS for auto-unseal. The output lists five recovery key shares. For which task are the recovery keys used?
+A: Unsealing a node when the KMS is unavailable, as a replacement for the unseal keys
+B: Decrypting the root key offline so a backup of the storage backend can be restored
+C: Authorizing quorum operations such as generating a root token, in place of Shamir unseal keys
+D: Signing the replication token that links a performance secondary to a primary cluster
+K: C
+G: ## Recovery keys
+With auto-unseal, initialization returns recovery keys instead of unseal keys. Vault builds them from an internal recovery key split with Shamir's Secret Sharing, with `-recovery-shares` and `-recovery-threshold` (and `-recovery-pgp-keys`) at init.
+- Operations that need a quorum of operators, such as `generate-root` or `vault operator rekey`, ask for recovery keys when auto-unseal is in use.
+- Recovery keys cannot decrypt the root key, so they cannot unseal Vault if the seal mechanism does not work.
+## Consequence
+Treat the KMS key as critical: if it is lost, recovery keys will not bring the cluster back.
+W: Quorum operations: recovery keys authorize operations such as root token generation that unseal keys authorize with a Shamir seal.
+X: A=Substitute unseal keys: recovery keys cannot decrypt the root key, so they cannot unseal a Vault whose KMS is unreachable.
+B=Offline root key decryption: only the seal mechanism can decrypt the root key, and recovery keys have no such ability.
+D=Signing replication tokens: replication tokens are created by the primary through the replication API and are unrelated to recovery keys.
+T: Recovery keys authorize quorum operations under auto-unseal but cannot unseal Vault.
+V: Vault
+
+@ VLT-VA003 D8 T8.4 applied troubleshooting
+S: A self-managed cluster uses a cloud KMS key for auto-unseal. During cleanup an administrator schedules that KMS key for permanent deletion, before any seal migration. The nodes are still running. What is the risk?
+A: Nothing changes, because the five recovery key shares can unseal the cluster if the KMS key disappears
+B: After the key is gone, restarted nodes cannot unseal and the cluster cannot be recovered, even from backups
+C: Vault re-encrypts the root key with the Shamir algorithm at once and prints new unseal keys to the audit log
+D: The cluster remains usable, but the stored secrets become readable only through the root token
+K: B
+G: ## Lifecycle dependency on the seal
+Auto-unseal creates a strict dependency on the seal mechanism. Recovery keys cannot decrypt the root key. If the KMS key becomes unavailable or is deleted before the seal is migrated, the cluster cannot be unsealed until the key is available again. If the key is permanently deleted, the cluster cannot be recovered, even from backups.
+## Mitigations
+- Control who can delete or disable the key (for example service control policies in the cloud).
+- Migrate seals deliberately with the old and new seal both available.
+- With Enterprise, a replication secondary can have its own seal configuration, which guards against some of the risk, although unreplicated items such as local mounts can still be lost.
+W: Unrecoverable cluster: without the key nothing can decrypt the root key, so a restart leaves nodes sealed permanently, backups included.
+X: A=Recovery keys unseal: recovery keys cannot decrypt the root key and are not sufficient to unseal Vault.
+C=Automatic Shamir conversion: Vault does not switch seals by itself; migration is an operator procedure with the old seal available.
+D=Root token reads data: a root token authorizes API calls on an unsealed Vault; it cannot decrypt data at rest.
+T: Deleting the auto-unseal key makes the cluster permanently unrecoverable; recovery keys cannot replace it.
+V: Vault
+
+@ VLT-VA003 D8 T8.4 applied use-case
+S: A cluster uses auto-unseal and the security team wants new key holders for the recovery key. Which command changes the recovery key share count and threshold?
+A: `vault operator rekey -target=recovery`
+B: `vault operator generate-root -target=recovery`
+C: `vault operator unseal -migrate -recovery`
+D: `vault operator rotate -target=recovery`
+K: A
+G: ## Rekeying the recovery key
+The recovery key can be rekeyed to change the number of shares, the threshold or the PGP keys used for distribution. With the CLI use `vault operator rekey -target=recovery`. The API equivalent is under `/sys/rekey-recovery-key` rather than `/sys/rekey`. The operation is authorized by providing a threshold of the current recovery keys.
+Other commands are different tools: `generate-root` creates a new root token, `unseal -migrate` is used during seal migration, and `rotate` rotates the data encryption key in the keyring.
+W: Rekey with target recovery: this begins a rekey of the recovery key, which sets new share and threshold values.
+X: B=generate-root: this issues a new root token. It does not change shares or thresholds of any key.
+C=unseal with migrate: the migrate flag moves keys between seal types during a seal migration; it is not a way to reissue recovery shares.
+D=operator rotate: this rotates the keyring's encryption key; the recovery key keeps the same shares.
+T: Use `vault operator rekey -target=recovery` to reshare the recovery key.
+V: Vault
+
+@ VLT-VA003 D8 T8.4 applied tradeoff
+S: Which TWO statements about migrating a cluster from a Shamir seal to an auto-unseal seal are accurate? (Select TWO)
+A: The migration needs no downtime, because every Vault version supports rolling seal changes
+B: Unseal commands run with the `-migrate` flag, and the Shamir unseal keys become the recovery keys
+C: A backup of the cluster should be taken first, and the old seal must still be available during migration
+D: Once migrated, the Shamir keys are discarded and any one recovery key unseals the cluster alone
+E: The migration is performed only by deleting the storage backend and re-initializing the cluster
+K: B,C
+G: ## Seal migration
+Switching seal types is rare, so HashiCorp accepts some downtime: the process cannot be performed without taking the whole cluster down briefly (online migration using Seal HA is an Enterprise option for auto seals and does not support Shamir).
+Core steps for Shamir to auto-unseal:
+- Take a backup first; both the old and new seals must be available during migration.
+- Add the new seal block to the configuration and unseal with `-migrate`, supplying the Shamir unseal keys.
+- The Shamir keys are migrated and become the recovery keys of the auto seal.
+With Integrated Storage, a quorum must come back for the leader to perform the migration.
+W: B=Unseal with migrate: the `-migrate` flag moves the old key shares and turns the Shamir unseal keys into recovery keys.
+C=Backup and both seals: a backup protects against failure, and migration needs the old seal (here Shamir keys) and the new seal.
+X: A=Rolling with no downtime: documentation states migration cannot be done without a brief cluster outage; only Enterprise Seal HA gives online migration between auto seals.
+D=One recovery key: recovery keys keep the migrated Shamir threshold, so a single key is not enough for quorum operations.
+E=Delete and re-init: re-initialization would destroy access to existing data. Migration keeps the data and re-protects the root key.
+T: Seal migration takes brief downtime, uses -migrate, and turns Shamir keys into recovery keys.
+V: Vault
+
+@ VLT-VA003 D8 T8.4 advanced use-case
+S: A Vault Enterprise customer wants the cluster to start and unseal even when one of two cloud KMS keys is unreachable. Which feature is intended for this?
+A: Seal HA, which configures two or three auto seals so Vault can unseal if at least one is available
+B: Shamir seal with a second set of shares, so that either set can unseal the cluster during an outage
+C: Disaster recovery replication, which keeps the secondary unsealed with the primary's KMS key
+D: Performance standbys, which cache the root key in memory after the first successful unseal
+K: A
+G: ## Seal high availability (Enterprise)
+Seal HA lets Vault Enterprise use more than one auto seal, at least two and no more than three. If a seal service is temporarily unavailable, Vault can still start and unseal when one configured seal is available (in a degraded mode), and values written while a seal is down are rewrapped later.
+- Choose seals unlikely to fail together, for example KMS keys in two regions or providers.
+- Shamir seals cannot be part of a seal HA setup.
+- Add or remove seals one at a time; configure a single seal at initialization.
+W: Seal HA: multiple auto seals protect against the loss of one seal service, which is what this requirement asks.
+X: B=Two share sets: Shamir seals do not support seal HA, and a cluster has one set of unseal keys.
+C=DR replication: a DR secondary can have its own seal configuration, but replication does not make the primary's KMS key redundant.
+D=Cached root key: performance standbys scale reads; they are not a way to unseal after a restart.
+T: Seal HA (Enterprise) combines two or three auto seals to survive the loss of one.
+V: Vault
+
+@ VLT-VA003 D8 T8.5 applied comparison
+S: A Vault Enterprise customer needs a warm standby cluster in another region. After a regional outage, applications should keep their existing tokens and leases with no new logins. Which replication type fits?
+A: Performance replication, since secondaries keep their own tokens and leases for local clients
+B: Performance replication, since secondaries mirror local mounts and tokens from the primary
+C: Disaster recovery replication, since the secondary shares the primary's token and lease data and is promoted on failure
+D: Disaster recovery replication, since the secondary serves client reads while the primary is healthy
+K: C
+G: ## DR vs performance replication (Enterprise)
+Both copy configuration from a primary, but they target different goals.
+- Disaster recovery (DR): a warm standby that mirrors the primary, including tokens, leases and local mounts. It does not serve client requests until it is promoted. Designed against the loss of a whole cluster.
+- Performance: secondaries serve client requests locally (scaling reads, cutting latency) and keep their own tokens and leases. Local mounts are not visible to the other side.
+## Failover consequence
+After a DR promotion, clients can continue with existing tokens and leases. With performance secondaries, applications must re-authenticate and obtain new leases when a secondary is promoted.
+W: DR replication: it mirrors tokens and leases and serves no clients until promotion, matching the warm-standby requirement.
+X: A=Performance with own tokens: performance secondaries do keep their own tokens and leases, which means clients need new logins after promotion, the opposite of the requirement.
+B=Performance mirrors tokens: performance replication does not mirror tokens, leases or local mounts from the primary.
+D=DR serves reads: DR secondaries do not forward or serve requests until elected primary, so they cannot give clients local reads.
+T: DR replication is a warm standby that keeps tokens and leases; performance replication serves local clients.
+V: Vault
+
+@ VLT-VA003 D8 T8.5 applied use-case
+S: A Vault Enterprise company in the United States wants application servers in Asia to read KV and use transit with low latency, while one primary cluster stays the system of record. Which setup fits?
+A: A disaster recovery secondary in Asia, so that local applications read from it while the primary is healthy
+B: A performance secondary in Asia, which serves local requests and forwards writes to shared state to the primary
+C: A second standalone cluster in Asia with its own KV data, synchronised by running the same CLI commands twice
+D: More standby nodes in the U.S. cluster, because standbys in the same cluster reduce intercontinental latency
+K: B
+G: ## Performance replication for latency and scale
+Performance secondaries share configuration, policies and supporting secrets (KV values, transit keys) with the primary but keep their own tokens and leases. Most high-volume work such as KV reads and transit encrypt/decrypt is served locally. A request that would change shared state is forwarded to the primary, transparently to the client.
+Placing a performance secondary near the users cuts latency and scales horizontally with the number of secondaries.
+## Why not the others
+DR secondaries serve nothing until promoted, and standbys in the original cluster do not help clients far away.
+W: Performance secondary: it serves local reads and transit operations, and forwards state-changing requests to the primary in the U.S.
+X: A=DR secondary: it does not handle client requests until it is promoted, so Asian applications could not read from it.
+C=Standalone clusters: manual duplication gives no replication, drifts easily and does not keep policies or secrets consistent.
+D=More U.S. standbys: standbys sit in the same region as the primary, so distance to Asian applications stays the same.
+T: Use performance replication to serve nearby clients and scale reads from one primary.
+V: Vault
+
+@ VLT-VA003 D8 T8.5 applied troubleshooting
+S: A Vault Enterprise team enabled a KV mount on a performance primary with the `-local` flag. Engineers in the secondary region cannot see this mount. Which statement explains it?
+A: Local mounts replicate only to disaster recovery secondaries, so a performance secondary never sees them
+B: Local mounts need a paths filter on the secondary before the data can be read there
+C: Local mounts are replicated to performance secondaries, but only after the next snapshot
+D: Local mounts are deleted on every secondary when the primary is promoted
+K: A
+G: ## Shared and local mounts
+Each mount is either shared (the default) or local (`-local`, for example `vault secrets enable -local -path=us_west_data kv-v2`).
+- Shared mounts replicate their data to performance secondaries.
+- Local mounts replicate only to disaster recovery secondaries. A local mount created on a performance primary is not visible to its performance secondaries; a local mount created on a performance secondary is not visible to the primary.
+Tokens and leases are local storage entries, and some paths on a shared mount (for example PKI certificates) can also be local.
+W: DR only: a local mount stays out of performance replication, so the secondary region cannot see it, by design.
+X: B=Needs a paths filter: the paths filter allows or denies shared mounts and namespaces; local is a mount property that already excludes it from performance replication.
+C=Replicated after a snapshot: replication is not snapshot-driven for this purpose; local mounts are excluded from performance replication.
+D=Deleted on promotion: promotion does not delete such mounts; they were never present on the performance secondary.
+T: Local mounts replicate to DR secondaries only, not to performance secondaries.
+V: Vault
+
+@ VLT-VA003 D8 T8.5 advanced use-case
+S: A primary Vault Enterprise cluster in the EU holds a namespace with regulated customer data. A performance secondary in another region must not receive it. Which feature controls this?
+A: A paths filter on the secondary that excludes the namespace or mount path from replication
+B: A DR secondary token, because DR clusters accept only data that is explicitly allowed
+C: The seal wrap setting, which hides the namespace from secondaries that lack the KMS key
+D: A longer lease TTL on the namespace, so secondaries cannot refresh the data
+K: A
+G: ## Paths filter
+When you enable performance replication the primary's mount configuration is replicated to secondaries. A paths filter lets you allow or deny replication of selected mount paths and namespaces per secondary. A path in the deny list stays only on the primary (and is not replicated to that secondary). It is for compliance cases such as data residency.
+To keep a secondary's own data from replicating upward, mark its mounts local instead.
+W: Paths filter: configured for the secondary, it removes selected mounts or namespaces from what that secondary receives.
+X: B=DR token: a DR secondary mirrors everything including local mounts; it is not a filtering tool.
+C=Seal wrap: seal wrap adds protection to selected values with the seal; it does not decide which data replicates.
+D=Longer lease TTL: leases govern dynamic secrets and tokens, not which paths get replicated.
+T: A paths filter keeps selected mounts and namespaces from replicating to a performance secondary.
+V: Vault
+
+@ VLT-VA003 D8 T8.5 applied troubleshooting
+S: The link between a performance secondary and its primary drops for ten minutes. A client of the secondary reads a KV secret and then tries to write a new KV secret. What happens?
+A: Both succeed; the write is queued and delivered to the primary when the link returns
+B: Both fail, because a disconnected secondary seals itself until it contacts the primary
+C: The read fails and the write succeeds, because writes are stored on the secondary first
+D: The read succeeds with possibly stale data, while the write fails as it cannot reach the primary
+K: D
+G: ## Disconnected performance secondaries
+If a performance secondary loses its connection to the primary, it keeps serving what it can complete from its own storage.
+- Reads of replicated data (KV, policies, mount configuration) succeed but may be stale.
+- Writes to replicated data fail, because the secondary cannot forward them.
+- Transit encrypt/decrypt keeps working with keys already replicated; reads and writes on a local mount of the secondary also work.
+When the link returns, the secondary reconciles with the primary. Check `connection_status` and `last_heartbeat` on the replication status endpoint.
+W: Read works, write fails: replicated data is readable from local storage, but a write to shared state needs the primary.
+X: A=Queued write: the docs describe failures, not queued writes; the secondary cannot forward the write.
+B=Self-seal: a disconnect does not seal the secondary; it continues to answer.
+C=Local-first writes: KV on a shared mount is replicated data, so writes must reach the primary.
+T: A disconnected performance secondary serves stale reads and fails writes to replicated data.
+V: Vault
+
+@ VLT-VA003 D8 T8.5 advanced use-case
+S: An engineer activates replication on a new secondary that uses a Shamir seal, where the primary also uses a Shamir seal. What happens to the secondary's seal configuration?
+A: It keeps its own unseal keys, and the primary's keys are added as extra recovery keys
+B: It is replaced with the primary's Shamir configuration and unseal keys
+C: It switches automatically to auto-unseal, using the primary's KMS configuration
+D: It is unchanged, since replication copies only data and never touches seals
+K: B
+G: ## Replication changes the secondary's seal keys
+Enabling replication modifies the secondary's seal. The primary and secondary need not use the same seal type, but the impact depends on the combination:
+- Shamir primary and Shamir secondary: the secondary's seal config and unseal keys are replaced by the primary's.
+- Auto-unseal secondary: its recovery configuration and keys are replaced by the primary's.
+Plan key custody before activating a secondary, because old shares on the secondary stop being valid.
+W: Replaced by the primary's: with two Shamir clusters the secondary adopts the primary's shares and threshold, and its old shares no longer work.
+X: A=Extra recovery keys: recovery keys exist only with auto-unseal, and Shamir clusters do not gain them.
+C=Automatic switch to auto-unseal: replication does not change the seal type; the seal type is configured in each cluster.
+D=Seals untouched: the docs state that enabling replication modifies the secondary seal configuration.
+T: Activating replication replaces the secondary's seal keys and configuration with the primary's.
+V: Vault
+
+@ VLT-VA003 D8 T8.5 applied comparison
+S: Which TWO statements correctly compare self-managed Vault Enterprise with an HCP Vault Dedicated cluster? (Select TWO)
+A: HCP Vault Dedicated uses auto-unseal with a unique KMS key per cluster, managed by HashiCorp
+B: Self-managed clusters are upgraded automatically, while HCP Vault Dedicated clusters wait for the customer
+C: A self-managed cluster is always on Integrated Storage, while HCP Vault Dedicated lets you pick Consul
+D: HCP Vault Dedicated is operated by HashiCorp, which handles backups, upgrades and platform recovery
+E: Customers of HCP Vault Dedicated manage the HSM used for auto-unseal in the same way as self-managed users
+K: A,D
+G: ## Self-managed vs HCP Vault Dedicated
+HCP Vault Dedicated is a hosted version of Vault Enterprise run by HashiCorp, using the same binary, CLI, API and UI.
+- Seal: self-managed clusters use Shamir by default and you choose; HCP Vault Dedicated is configured with auto-unseal and a unique KMS key per cluster.
+- Storage: self-managed clusters choose a backend; HCP Vault Dedicated uses Integrated Storage.
+- Upgrades and backups: HashiCorp handles minor and major version upgrades, backups, snapshots, cluster health, HA operations and platform recovery.
+- Customers still configure authentication, policies, secrets engines, identity and monitor usage, and manage tokens, leases and old secret versions.
+- HSM auto-unseal is not offered on HCP Vault Dedicated.
+W: A=Managed auto-unseal: each HCP cluster has its own KMS key that HashiCorp manages, so customers do not handle unseal keys.
+D=HashiCorp operates: backups, upgrades and recovery of the platform are HashiCorp's responsibility under the shared model.
+X: B=Reversed upgrades: HCP clusters are upgraded automatically; self-managed clusters are upgraded by the operator.
+C=Backend choice reversed: self-managed users choose their own storage; HCP Vault Dedicated uses Integrated Storage.
+E=Customer-managed HSM: HSM auto-unseal is listed as not available on HCP Vault Dedicated.
+T: HCP Vault Dedicated is HashiCorp-operated Enterprise with managed auto-unseal and Integrated Storage.
+V: Vault
+
+@ VLT-VA003 D8 T8.5 applied use-case
+S: A team moves from a self-managed cluster to HCP Vault Dedicated. At first login, how do administrators get a highly privileged token, and where do their namespaces start?
+A: They read the initial root token from the init output and create namespaces under the `root` namespace
+B: They use the shared root token stored in the HashiCorp support portal after submitting an unseal request
+C: They generate an admin token from the HCP Portal, and the top-level namespace is `admin`
+D: They run `vault operator init` on the cluster, and the top-level namespace is `root`
+K: C
+G: ## Super-user access on HCP Vault Dedicated
+On a self-managed cluster, initialization generates a `root` token, and regenerating one needs unseal keys or recovery keys. The top-level namespace is `root`.
+On HCP Vault Dedicated HashiCorp initializes and unseals the cluster for you, so there is no init output to keep. Administrators generate an `admin` token in the HCP Portal, valid for 6 hours, and the top-level namespace is `admin`.
+Teams therefore set up auth methods and policies promptly so that day-to-day access does not depend on the admin token.
+W: Admin token, admin namespace: the HCP Portal issues a time-limited admin token, and work happens under the `admin` namespace.
+X: A=Initial root token: the cluster is initialized by HashiCorp, and you do not receive init output; the top namespace is `admin`.
+B=Shared support-portal token: no shared root token exists; tokens are generated in the HCP Portal for each user.
+D=Run init yourself: customers do not initialize or unseal an HCP Vault Dedicated cluster; HashiCorp already did, and the top namespace is `admin`.
+T: HCP Vault Dedicated hands out a time-limited admin token from the portal and uses the admin namespace.
+V: Vault
