@@ -57,9 +57,9 @@ Amazon Web Services, Palantir Technologies, Microsoft, Google과 관련 없는 �
 | | Associate | AZ-104 Azure Administrator | 250 | 32 |
 | | | AI-103 Azure AI Apps and Agents Developer | 243 | 20 |
 | | Expert | AZ-305 Azure Solutions Architect | 251 | 22 |
-| Google Cloud | Foundational | GCP-CDL Cloud Digital Leader | 226 | 15 |
-| | | GCP-GAIL Generative AI Leader | 226 | 15 |
-| | Associate | GCP-ACE Associate Cloud Engineer | 250 | 22 |
+| Google Cloud | Foundational | GCP-CDL Cloud Digital Leader | 278 | 15 |
+| | | GCP-GAIL Generative AI Leader | 274 | 15 |
+| | Associate | GCP-ACE Associate Cloud Engineer | 275 | 22 |
 
 여러 시험에 공통으로 쓰이는 문항이 있어 시험별 합계는 전체 고유 문항 수보다 많습니다. Palantir는 섹션 비중을
 공개하지 않아 모든 섹션을 같은 비중으로 다루고, Azure는 비중을 범위로 공개해 모의고사는 그 중간값을 씁니다. Google Cloud는

@@ -2,8 +2,9 @@
 
 ## Now (warm start — keep this section current; update it with every merge)
 Updated 2026-10-30.
-- In progress: nothing. GCP-CDL study guide merged (15 days). Open gaps: Gemini app and Gems (GAIL T2.2, blocked hosts);
-  CDL golden signals / CapEx-OpEx / data-type definitions use generally accepted meanings (no reachable Google page).
+- In progress: **Google Cloud Professional Cloud Architect (GCP-PCA)** — not started; wait until the pools-topup PR is merged
+  (ingest and exam registration share data files). Then: read the exam guide, registration, GCP.md section, PLAN.md, ~250 q.
+  Open gaps: Gemini app and Gems (GAIL T2.2, blocked hosts); CDL golden signals / CapEx-OpEx / data types use generally accepted meanings.
 - Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; GCP-CDL bank and study guide; MLA-C02 study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). www.databricks.com is still
@@ -212,6 +213,10 @@ GCP-CDL study guide DONE 2026-10-30: 15 days (D1 3, D2 3, D3 2, D4 3, D5 2, D6 1
 (about 12 fixes: Cloud SQL engines, GPU/TPU wording, budgets do not stop resources by themselves, distractor lengths);
 glossary +8 `gcp-*` terms (zero trust, Iceberg, Spark, GDPR/CCPA, API styles, VPN, digital sovereignty, Mandiant), 11 existing tagged.
 New: `.claude/skills/md-summary` (markdown notes as compressed key summaries, referenced in CLAUDE.md).
+
+Google Cloud top-up 2026-10-30: GAIL +48 (b14-b15) = 274, CDL +52 (b12-b13) = 278, ACE +25 (b12) = 275, all reviewed
+(~13 fixes; ACE reviewer replaced 2 duplicates of published questions). AI-103 stays 243 (all domain targets met).
+Published GAIL questions still say "Customer Engagement Suite" (5); new ones use "Gemini Enterprise for Customer Experience".
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
