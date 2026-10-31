@@ -2,9 +2,9 @@
 
 ## Now (warm start — keep this section current; update it with every merge)
 Updated 2026-10-30.
-- In progress: nothing. GCP-PCA bank and study guide merged. Open gaps: Gemini app and Gems (GAIL T2.2, blocked hosts);
-  CDL golden signals / CapEx-OpEx / data types use generally accepted meanings; Gemini Cloud Assist capabilities are
-  private preview on the product page (noted in PCA G: and study days 2, 23; re-check status).
+- In progress: **HashiCorp Terraform Associate** next (developer.hashicorp.com is reachable); Databricks DBX-DEA merged with this PR.
+  Open gaps: Gemini app and Gems (GAIL T2.2); CDL golden signals / CapEx-OpEx / data types use generally accepted meanings;
+  Gemini Cloud Assist capabilities are private preview on the product page (noted in PCA); Spark API pages are blocked (403) for the DBX bank.
 - Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; GCP-CDL bank and study guide; MLA-C02 study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). www.databricks.com is still
@@ -230,14 +230,24 @@ PCA docs re-check DONE 2026-10-31: Workload Identity Federation, Apigee SpikeArr
 policy/IAP, Cloud Logging all match docs. Gemini Cloud Assist: product page says investigations/proactive operations are private preview, docs
 overview shows no label; kept (named in the exam guide) with an Availability note in G: (Q009002, Q009003, Q009038, e01) and study days 2, 23.
 
+## Databricks (started 2026-10-31)
+Rules and facts: `tools/qgen/DATABRICKS.md`. Vendor `databricks` (new tab); exam code `DBX-DEA` (no official code). Network: databricks.com and
+docs.databricks.com were opened in the environment's network settings on 2026-10-31 (Spark API docs still 403 via the proxy).
+DBX-DEA DONE 2026-10-31: Data Engineer Associate (guide updated 2026-08-06; 7 sections 6/21/22/16/10/10/15%, 33 tasks, 45 scored single-answer
+multiple choice + up to 10 unscored, 90 min, USD 200, pass mark unpublished, code SQL when possible else Python), 225 questions in b01-b09 (single
+answer only), each reviewed (about 55 fixes). Study guide 20 days (D1 1, D2 4, D3 4, D4 2, D5 2, D6 3, D7 3, final), 3 writers + 3 reviewers (about
+55 fixes); glossary +14 `dbx-*` terms, 22 tagged. Docs facts: SQL DENY is hive_metastore-only (not Unity Catalog) while ABAC DENY policies are Beta;
+Beta/Preview kept out of keys (multiple triggers per job, job completion trigger, run-duration thresholds, unique constraint, SQL Alert task, ABAC on
+views, metastore-level policies); JDBC via `dbtable` subquery (no documented `query` option); Trigger.Once deprecated (availableNow); "standard
+connectors" is not a docs term (the guide text is inferred). Checked only from standard Spark knowledge (re-check when Spark docs are reachable):
+unionByName(allowMissingColumns), DataFrame.summary quartiles, spark.default.parallelism RDD-only.
+
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
 network settings (only docs.aws.amazon.com, learn.microsoft.com and cloud.google.com/learn pages are reachable now).
 - Palantir Foundry Aware: the entry-level exam of the 2026 framework. Format, cost and proctoring not confirmed
   (community posts conflict); learn.palantir.com / certification.palantir.com are blocked here.
 - Google Cloud: other Professional exams (Cloud Architect, ACE, GAIL, CDL done, see the Google Cloud section).
-- Databricks Certified Data Engineer Associate (45 multiple choice, 90 min, revised 2026-05-04; pairs with
-  DEA-C01 / PLTR-DE). Needs databricks.com and docs.databricks.com.
 - HashiCorp Terraform Associate 004 (live 2026-01-08; multiple choice incl. multi-select). Needs
   developer.hashicorp.com.
 - Out of scope (hands-on, not multiple choice): Kubernetes CKA/CKAD, Palantir Specialist.
