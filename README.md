@@ -61,6 +61,7 @@ affiliated with Amazon Web Services, Palantir Technologies, Microsoft or Google,
 | Google Cloud | Foundational | GCP-CDL Cloud Digital Leader | 278 | 15 |
 | | | GCP-GAIL Generative AI Leader | 274 | 15 |
 | | Associate | GCP-ACE Associate Cloud Engineer | 275 | 22 |
+| | Professional | GCP-PCA Professional Cloud Architect | 274 | 26 |
 
 Some questions belong to more than one exam. Palantir publishes no section weights, so its sections count equally;
 Azure publishes weight ranges, and the mock exam uses their midpoints. Google Cloud publishes no pass mark (results are
