@@ -2,9 +2,9 @@
 
 ## Now (warm start — keep this section current; update it with every merge)
 Updated 2026-10-30.
-- In progress: **HashiCorp Terraform Associate** next (developer.hashicorp.com is reachable); Databricks DBX-DEA merged with this PR.
-  Open gaps: Gemini app and Gems (GAIL T2.2); CDL golden signals / CapEx-OpEx / data types use generally accepted meanings;
-  Gemini Cloud Assist capabilities are private preview on the product page (noted in PCA); Spark API pages are blocked (403) for the DBX bank.
+- In progress: nothing. Databricks DBX-DEA merged; HashiCorp TF-TA004 in the PR that updates this line. Next candidates: other Google Cloud
+  Professional exams, Terraform Infrastructure Engineer Professional, Vault Associate (developer.hashicorp.com reachable). Open gaps: Gemini app and Gems
+  (GAIL T2.2); Gemini Cloud Assist is private preview (noted in PCA); Spark API pages are blocked (403) for the DBX bank.
 - Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; GCP-CDL bank and study guide; MLA-C02 study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). www.databricks.com is still
@@ -242,14 +242,22 @@ views, metastore-level policies); JDBC via `dbtable` subquery (no documented `qu
 connectors" is not a docs term (the guide text is inferred). Checked only from standard Spark knowledge (re-check when Spark docs are reachable):
 unionByName(allowMissingColumns), DataFrame.summary quartiles, spark.default.parallelism RDD-only.
 
+## HashiCorp (started 2026-10-31)
+Rules and facts: `tools/qgen/TERRAFORM.md`. Vendor `hashicorp` (tab "HashiCorp", phone short name "HC"); exam code `TF-TA004` (Terraform Associate 004).
+TF-TA004 DONE 2026-10-31: content list read 2026-10-31 (8 objectives, 37 sub-objectives; 1 h, online proctored, Terraform 1.12, USD 70.50; question count,
+weights and pass mark NOT published, so mock uses 50 questions, equal weights, `weightsAssumed`), 266 questions in b01-b09 (one batch per section + a D4 top-up
+for the thin 004-new topics), each reviewed (about 50 fixes; reviewers replaced ~10 duplicates and fixed invalid one-line HCL blocks). Study guide 18 days,
+3 writers + 3 reviewers (about 45 fixes); glossary +13 `tf-*` terms, 14 tagged. Docs facts: `terraform refresh` and `taint` deprecated (teach `-refresh-only`,
+`-replace`); S3 DynamoDB locking deprecated (`use_lockfile`); write-only arguments need 1.11, ephemeral values 1.10, check blocks 1.5; `removed` block needs
+`from` + `lifecycle` and destroys by default; kept out of keys: generated configuration (experimental), `const` variables, Terraform policy, anything tier/edition-bound.
+Checked only from general knowledge (re-check): Vault provider dynamic credentials (Learn tutorial only), `terraform plan -detailed-exitcode` is verified.
+
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
 network settings (only docs.aws.amazon.com, learn.microsoft.com and cloud.google.com/learn pages are reachable now).
 - Palantir Foundry Aware: the entry-level exam of the 2026 framework. Format, cost and proctoring not confirmed
   (community posts conflict); learn.palantir.com / certification.palantir.com are blocked here.
 - Google Cloud: other Professional exams (Cloud Architect, ACE, GAIL, CDL done, see the Google Cloud section).
-- HashiCorp Terraform Associate 004 (live 2026-01-08; multiple choice incl. multi-select). Needs
-  developer.hashicorp.com.
 - Out of scope (hands-on, not multiple choice): Kubernetes CKA/CKAD, Palantir Specialist.
 
 ## Palantir (started 2026-10-14)
