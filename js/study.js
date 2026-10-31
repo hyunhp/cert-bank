@@ -31,7 +31,7 @@ const STUDY_EXAMS = [
   ["DBX-DEA", "Data Engineer Associate", "associate", "databricks"],
   ["TF-TA004", "Terraform Associate (004)", "associate", "hashicorp"],
 ].map(([code, name, level, vendor]) => [code, name, level, vendor || "aws"]);
-const VENDORS = [["aws", "AWS"], ["palantir", "Palantir"], ["azure", "Azure"], ["gcp", "Google Cloud", "GCP"], ["databricks", "Databricks", "DBX"], ["hashicorp", "HashiCorp", "HC"]];   // [id, name, short name on phones]
+const VENDORS = [["aws", "AWS"], ["palantir", "Palantir", "PLTR"], ["azure", "Azure"], ["gcp", "Google Cloud", "GCP"], ["databricks", "Databricks", "DBX"], ["hashicorp", "HashiCorp", "HC"]];   // [id, name, short name on phones]
 const vendorOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[3];
 const isNewVersion = name => / \(new\)$/.test(name);
 const shortName = name => name.replace(/ – (Associate|Professional|Expert|Specialty)( \(new\))?$/, "");
