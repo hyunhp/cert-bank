@@ -64,6 +64,7 @@ affiliated with Amazon Web Services, Palantir Technologies, Microsoft or Google,
 | | Professional | GCP-PCA Professional Cloud Architect | 274 | 26 |
 | Databricks | Associate | DBX-DEA Data Engineer Associate | 225 | 20 |
 | HashiCorp | Associate | TF-TA004 Terraform Associate (004) | 266 | 18 |
+| | | VLT-VA003 Vault Associate (003) | 253 | 15 |
 
 Some questions belong to more than one exam. Palantir publishes no section weights, so its sections count equally;
 Azure publishes weight ranges, and the mock exam uses their midpoints. Google Cloud publishes no pass mark (results are
