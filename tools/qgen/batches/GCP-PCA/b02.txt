@@ -1,0 +1,507 @@
+# GCP-PCA D1 T1.2 technical requirements (Well-Architected pillars, HA, fail-over, scalability, performance, Gemini Cloud Assist, backup and recovery); T1.4 migration planning
+# src: https://docs.cloud.google.com/architecture/framework
+# src: https://docs.cloud.google.com/architecture/framework/reliability
+# src: https://docs.cloud.google.com/architecture/framework/performance-optimization
+# src: https://docs.cloud.google.com/architecture/dr-scenarios-planning-guide
+# src: https://docs.cloud.google.com/architecture/dr-scenarios-for-applications
+# src: https://docs.cloud.google.com/sql/docs/mysql/high-availability
+# src: https://docs.cloud.google.com/sql/docs/mysql/backup-recovery/backups
+# src: https://docs.cloud.google.com/sql/docs/mysql/replication/cross-region-replicas
+# src: https://docs.cloud.google.com/backup-disaster-recovery/docs/concepts/backup-dr
+# src: https://docs.cloud.google.com/compute/docs/instance-groups
+# src: https://docs.cloud.google.com/compute/docs/instances/reservations-overview
+# src: https://docs.cloud.google.com/load-balancing/docs/https
+# src: https://docs.cloud.google.com/storage/docs/availability-durability
+# src: https://docs.cloud.google.com/cloud-assist/overview
+# src: https://docs.cloud.google.com/migration-center/docs/migration-center-overview
+# src: https://docs.cloud.google.com/architecture/migration-to-gcp-getting-started
+# src: https://docs.cloud.google.com/compute/docs/nodes/sole-tenant-nodes
+
+@ GCP-PCA D1 T1.2 applied tradeoff
+S: EHR Healthcare is moving a customer-facing records portal to Google Cloud. The stateless web tier must keep serving users if one zone of the region fails, and the MySQL database behind it must fail over without anyone restoring a backup. The company accepts a few minutes of database interruption during a zonal failure but wants to avoid the cost of running in several regions. Which design fits?
+A: A regional managed instance group behind a load balancer, plus Cloud SQL for MySQL in a high-availability configuration with a standby in a second zone
+B: A zonal managed instance group with a fast snapshot schedule, plus a Cloud SQL for MySQL instance with a single zone and a nightly export to a Cloud Storage bucket
+C: Two regional managed instance groups in different regions behind a load balancer, plus a Spanner multi-region instance for every table in the application database
+D: A single large Compute Engine VM in one zone that relies on live migration for host maintenance, plus a self-managed MySQL server on a persistent disk of that VM
+K: A
+G: ## Designing for zone failure within one region
+A region contains several zones, which are separate failure domains. The reliability pillar of the Well-Architected Framework says to "build highly available systems through resource redundancy": every tier must have capacity in more than one zone, and a failure must be handled automatically instead of by a person.
+- **Stateless tier**: a regional managed instance group (MIG) spreads identical VMs over multiple zones in one region. If a zone is lost, the instances in the remaining zones keep serving, and a load balancer stops sending traffic to unhealthy backends.
+- **Stateful tier**: Cloud SQL high availability (HA) creates a primary and a standby in two zones of the same region. Writes are replicated synchronously to the disks in both zones before they are committed, and if the instance or zone fails the standby becomes the new primary and users are rerouted (a failover) with a short interruption. The standby is not used for reads.
+## Matching the requirement to the cost
+The requirement is zone-level resilience with a tolerated interruption of minutes. Multi-region is a separate, more expensive step that buys protection against the loss of an entire region, which this company did not ask for.
+W: Regional MIG plus Cloud SQL HA: both tiers span two or more zones, so a zonal outage is absorbed automatically, with no restore step. The database failover is automatic and causes only a short interruption, which is within the stated tolerance, and everything stays in one region to keep cost down.
+X: B=Zonal MIG with snapshots and exports: a single zone is a single failure domain, so a zonal outage stops the web tier and the database until someone restores from a snapshot or an export, which is exactly the manual recovery the company wants to avoid.
+C=Two regions with Spanner multi-region: it would survive a regional loss, but the requirement only covers a zone, so this adds cost and rework to the application for protection that nobody requested.
+D=Single large VM with live migration: live migration only handles host maintenance events, not the loss of a zone, and one VM with a self-managed database remains a single point of failure.
+T: Spread each tier over multiple zones (regional MIG, Cloud SQL HA) to survive a zone failure automatically; go multi-region only when a regional outage must be survived.
+
+@ GCP-PCA D1 T1.2 applied comparison
+S: A logistics company has classified its order-management system as needing a recovery time objective of 4 hours and a recovery point objective of 15 minutes if the primary region is lost. The business will not fund a full second production environment. The database is MySQL. Which disaster recovery pattern fits best?
+A: Cold pattern, with nightly backups restored into an empty second region only after a disaster has been declared by the incident team
+B: Hot pattern, with two fully scaled production stacks serving live production traffic in two regions at all times
+C: Warm standby: a cross-region database replica plus a scaled-down copy of the stack, scaled up on failover
+D: No separate pattern: a single regional deployment, since zone redundancy covers a regional outage
+K: C
+G: ## Cold, warm and hot disaster recovery
+The disaster recovery (DR) planning guide ties the pattern to the recovery objectives:
+- **RTO** is the longest acceptable outage; **RPO** is the longest window of data that may be lost. Smaller values mean higher cost and complexity.
+- **Cold**: minimal resources in the DR location. Recovery means provisioning and restoring, so RTO is long and RPO equals the age of the last backup.
+- **Warm standby**: data is continuously replicated and a reduced-size environment is already running or ready. On failover you scale it up, so RTO is shorter without paying for full capacity.
+- **Hot**: both environments serve production traffic, which gives the smallest RTO and RPO and the highest cost.
+## Reading the numbers
+A 15-minute RPO is far smaller than any nightly backup interval, so data must be replicated continuously, for example with a cross-region read replica that is promoted on failover. A 4-hour RTO leaves time to scale out a prepared stack, so a full hot environment is unnecessary.
+W: Warm standby: a cross-region replica keeps data within minutes of the primary (meeting the 15-minute RPO), and the scaled-down stack can be expanded within the 4-hour RTO without funding a second full production environment.
+X: A=Cold pattern with nightly backups: a nightly backup means up to a day of data loss, which breaks the 15-minute RPO, and building an empty region from scratch is risky for a 4-hour RTO.
+B=Hot pattern: it would meet the objectives, but it duplicates the whole production cost, which the business explicitly refused to fund.
+D=Single region with zone redundancy: zones are inside one region, so losing the region takes every zone with it and the stated regional-loss scenario is not covered.
+T: Pick the cheapest DR pattern whose replication meets the RPO and whose recovery steps fit inside the RTO; continuous cross-region replication plus a scaled-down stack is warm standby.
+
+@ GCP-PCA D1 T1.2 advanced use-case
+S: A company runs a Cloud SQL for MySQL instance with high availability enabled and a cross-region read replica. A script run by an administrator drops a production table by mistake, and ransomware protection is also a board concern for the backup copies. The team learns that the standby and the replica both already show the table as gone. Which TWO measures protect against this kind of logical damage? (Select TWO)
+A: Enable automated backups with point-in-time recovery so the database can be restored to a moment just before the faulty statement
+B: Add a second cross-region read replica so that one more copy of the data exists in another location
+C: Use Backup and DR with a backup vault, whose write-once-read-many immutability keeps protected backups from being altered or deleted
+D: Switch the instance to a multi-region Cloud Storage bucket for its data files, so objects are stored in several locations
+E: Raise the instance to a larger machine type, so that a failover to the standby completes faster after such an error
+K: A,C
+G: ## Redundancy is not backup
+High availability and replicas protect against the loss of infrastructure (a zone, an instance, a region). They copy every change, including a wrong one: a dropped table, a bad UPDATE or an encrypting attacker is replicated to every copy within seconds. Protection against logical errors and malicious deletion needs **point-in-time history** and **protected backup copies**.
+## Tools
+- **Backups plus point-in-time recovery (PITR)** in Cloud SQL: restore to a chosen timestamp before the error, so little data is lost within the retained window.
+- **Backup and DR** with a **backup vault**: policy-based backups kept in a vault with write-once-read-many (WORM) immutability and indelibility, so a compromised account or ransomware cannot remove them.
+## Applying it
+Both the accidental drop and the ransomware worry are about data that is valid in form but wrong in content. The answers are the ones that keep older, protected states of the data.
+W: A=Backups with point-in-time recovery: it lets the team restore to the moment before the faulty statement, which is the only way to undo a replicated logical change.
+C=Backup and DR vault: immutable, indelible backups survive deletion attempts and ransomware, giving a clean copy that does not depend on the production instance.
+X: B=Another read replica: a replica applies the same writes as the primary, so it would also show the table as dropped; more copies do not mean older copies.
+D=Multi-region bucket for data files: Cloud SQL manages its own storage and does not run on a bucket you pick, and object replication would copy corrupted content anyway.
+E=Larger machine type: failover speed addresses infrastructure failure, and the standby already contains the same damaged data, so a faster failover restores nothing.
+T: HA and replicas keep up with mistakes as well as with data; only PITR and immutable backups give you an earlier, safe state to return to.
+
+@ GCP-PCA D1 T1.2 applied use-case
+S: Cymbal Retail expects holiday traffic several times higher than normal for a few days. Its web tier stores each shopper's cart in the memory of the VM that served the first request, so the load balancer is configured with session affinity and the team can only grow capacity by buying larger VMs. Which change best prepares the tier for the peak?
+A: Keep the design, order the largest available machine type, and let each VM hold more carts in its memory
+B: Move cart state to Memorystore for Redis, make the web VMs stateless, and run them in an autoscaled managed instance group
+C: Move to a spot-VM fleet of identical size, because the lower price per VM allows the team to over-provision all year
+D: Move the web tier into a single zone on high-CPU VMs, so all requests reach machines in one network location
+K: B
+G: ## Horizontal scalability needs stateless tiers
+The reliability and performance pillars both recommend scaling out (more instances) rather than only scaling up (bigger instances). Scaling up has a ceiling and a restart cost, and it leaves one machine as a single point of failure. Scaling out works only if any instance can serve any request.
+- **Externalize state**: store sessions and carts in a shared service such as Memorystore for Redis (Cymbal already uses Redis) or a database, so that no VM holds data that others need.
+- **Autoscale**: a managed instance group can add instances when load grows and remove them when it falls, which also reduces cost after the peak.
+## Result for the holiday peak
+With stateless VMs, the load balancer can send any request to any instance, a lost VM does not lose carts, and the group follows demand automatically.
+W: External cache with stateless autoscaled MIG: carts survive instance loss, session affinity is no longer needed, and capacity grows and shrinks with traffic instead of being sized for the worst case by hand.
+X: A=Largest machine type: scaling up has a hard upper limit, keeps carts tied to individual VMs and leaves each VM as a single point of failure during the peak.
+C=Spot fleet for all-year over-provisioning: spot VMs can be reclaimed at any time, which loses in-memory carts on exactly the busiest days, and over-provisioning all year wastes money.
+D=Single zone with high-CPU VMs: it concentrates the load in one failure domain and does nothing about carts living in VM memory.
+T: Scale out, not up: make tiers stateless by moving session data to a shared store, then let autoscaling follow demand.
+
+@ GCP-PCA D1 T1.2 applied use-case
+S: Altostrat Media serves podcasts and documentaries to viewers on several continents. Media files are in Cloud Storage and the origin application is in one region. Viewers far from the region see slow start times for popular episodes, while the origin is lightly loaded. Which change most directly reduces latency for these viewers?
+A: Move the origin application to a machine type with more vCPUs, to shorten the processing time of each request
+B: Create a second Cloud Storage bucket in the same region and split the objects between the two buckets
+C: Increase the replication of the media archive to a dual-region location and keep serving viewers from the same two regions
+D: Put a global external Application Load Balancer in front, with Cloud CDN enabled so popular objects are cached close to the viewers
+K: D
+G: ## Latency is mostly distance
+The performance pillar says to plan resource allocation around where users are. Round-trip time over long distances cannot be bought away with faster servers: the content must be closer to the user.
+- **Cloud CDN** caches cacheable responses at Google edge locations. A cache hit is served near the viewer without reaching the origin, which cuts start-up time and offloads the origin.
+- It works together with a global external Application Load Balancer, which gives one anycast front end for users everywhere.
+## Diagnosing the case
+The origin is lightly loaded, so compute is not the bottleneck. The distance between viewers and the one serving region is. Popular episodes are exactly the repeated, cacheable requests a CDN serves best.
+W: Global load balancer with Cloud CDN: popular episodes are cached at edge locations near viewers on every continent, so start-up delay falls while the origin load falls too.
+X: A=More vCPUs at the origin: the origin is already lightly loaded, so processing time is not the delay; the delay is network distance.
+B=Second bucket in the same region: splitting objects within a region neither moves data closer to viewers nor reduces distance-related delay.
+C=Dual-region bucket: it improves durability and availability for the archive, but viewers would still fetch from the same two regions, so far-away viewers see little change.
+T: When latency comes from distance and content is repeatedly requested, cache at the edge with Cloud CDN behind a global load balancer instead of scaling the origin.
+
+@ GCP-PCA D1 T1.2 applied use-case
+S: A retailer sees its monthly Google Cloud bill jump in the middle of the month. Finance wants to know which products, SKUs and resources caused the change, and the platform team would like the explanation to appear without someone starting an investigation each time. Which capability fits best?
+A: Gemini Cloud Assist cost anomaly analysis, which runs when an anomaly is detected and explains the change behind it
+B: Gemini Cloud Assist natural language design, which helps create a new and cheaper architecture for the application
+C: Gemini Cloud Assist IAM assistance, which proposes narrower roles for the users who created the extra resources
+D: Gemini Cloud Assist code troubleshooting, which traces a Cloud Run error down to its cause in the code
+K: A
+G: ## Gemini Cloud Assist across the lifecycle
+Gemini Cloud Assist is an AI collaborator in Google Cloud that supports several phases of the application lifecycle:
+- **Design and build**: natural-language architecture design in Application Design Center, Terraform and gcloud generation, IAM assistance.
+- **Support and troubleshoot**: investigations that analyze logs, metrics and configurations to find root causes, proactive alert investigations, database and application troubleshooting.
+- **Optimize**: cost questions in natural language, FinOps Hub analysis, **proactive cost anomaly analysis**, database optimization, network flow analysis, and storage insights.
+## Pillar link
+The question is about the cost optimization pillar: understanding spend, finding waste, and explaining changes. Choose the Gemini Cloud Assist capability from the matching lifecycle area. Output from any AI assistant is still reviewed by a person before it drives a decision.
+W: Cost anomaly analysis: when an anomaly is detected in a project, Gemini Cloud Assist analyzes products, SKUs and resources to identify the infrastructure changes behind the spike, which is the explanation finance wants without a manual investigation.
+X: B=Natural language design: this helps create and refine architectures, so it does not explain a cost increase that already happened in the current environment.
+C=IAM assistance: it helps choose and generate roles and policies, which has no link to the origin of a billing increase.
+D=Application code troubleshooting: it traces application errors to code and infrastructure, which are reliability symptoms, while the problem here is spend.
+T: Gemini Cloud Assist's optimize capabilities, such as cost anomaly analysis, explain spend changes; match the feature to the lifecycle phase and the pillar.
+
+@ GCP-PCA D1 T1.2 advanced use-case
+S: Cymbal Retail's product page calls a recommendation service to show "you may also like" items. When that service is slow or fails, the whole page fails and shoppers cannot buy the product they came for. The business says recommendations are nice to have, and the checkout is the revenue. Which design change best follows reliability guidance?
+A: Raise the availability target of the recommendation service to equal checkout, and keep the page dependent on it
+B: Remove recommendations from the site, because any optional dependency lowers the availability of the page
+C: Add a short timeout and a circuit breaker to the recommendation call, and show the page without it on failure
+D: Retry the recommendation call repeatedly until it succeeds, so the page always shows the complete content to every shopper
+K: C
+G: ## Design for graceful degradation
+The reliability pillar lists "design for graceful degradation" as a principle: when a non-essential dependency fails, the system should lose that feature, not the whole function. Technical tools are:
+- **Timeouts and circuit breakers**: stop waiting for a failing dependency and stop calling it for a while, so slow calls do not pile up and exhaust threads.
+- **Fallbacks**: serve cached, default or reduced content.
+- **Classify dependencies**: hard (checkout, payment) versus soft (recommendations, banners), and give hard dependencies the stricter targets.
+## Why the other directions fail
+Raising everything to the highest target is costly; endless retries amplify load on a struggling service and make the page slower. Removing features loses business value that can be kept safely with a fallback.
+W: Timeout, circuit breaker and fallback: the page degrades to a version without recommendations, so a failure of the soft dependency no longer blocks the revenue-critical purchase path.
+X: A=Equal availability target: it makes a non-essential service as expensive as checkout, and the page remains coupled, so any residual failure still breaks it.
+B=Remove recommendations: it gives up a business feature to avoid a risk that a fallback removes at a much smaller cost.
+D=Retry until success: unbounded retries add load on an already struggling service and make the page slower, which can turn a partial failure into a full outage.
+T: Classify dependencies as critical or optional and let optional ones fail softly with timeouts, circuit breakers and fallbacks.
+
+@ GCP-PCA D1 T1.2 applied comparison
+S: A hospital group runs a patient-scheduling application whose database is read-heavy: about 90% of queries are lookups and reports, and writes come from one region. At peak, the single Cloud SQL primary reaches its CPU limit, although the team does not want to rewrite the application or change database engines. Which approach scales the workload with the least change?
+A: Migrate the database to a globally distributed Spanner instance, and rewrite the schema and queries for the new engine
+B: Add Cloud SQL read replicas, and route read-only queries and reports to them while writes continue to go to the primary
+C: Disable high availability on the primary, because the standby consumes CPU that the primary needs for queries
+D: Move all report queries into the primary's maintenance window, so that they no longer compete with lookups during peak hours
+K: B
+G: ## Scaling relational reads
+Relational databases scale reads more easily than writes. Cloud SQL **read replicas** receive changes asynchronously from the primary and can serve read-only queries, so reads are spread across several instances while the primary keeps handling writes. The application needs only to send read traffic to a replica endpoint.
+- Fits when reads dominate and slightly stale data is acceptable.
+- Does not increase write throughput, which remains with the primary.
+- A cache in front of the database is another option for repeated lookups.
+## Alternatives
+Spanner scales writes horizontally and across regions, but it is another engine with schema and query work. Changing HA settings or moving queries around does not add capacity.
+W: Read replicas with read/write splitting: they take the lookups and reports off the primary, relieving its CPU with only a connection-routing change in the application.
+X: A=Spanner migration: it scales writes and regions, but the workload is read-heavy with writes in one region, and the team explicitly does not want a rewrite or a new engine.
+C=Disable high availability: the standby does not run queries and does not consume the primary's CPU, and removing it would drop zone resilience for no gain.
+D=Run reports in the maintenance window: maintenance windows are for updates, and reports are demand-driven, so postponing them does not add capacity for the peak.
+T: For read-heavy relational workloads, add read replicas (or a cache) and split read and write traffic before considering a new database engine.
+
+@ GCP-PCA D1 T1.2 advanced troubleshooting
+S: An application is deployed in two regions, each with a managed instance group behind its own regional load balancer. Users reach it through a DNS name that points to the primary region, and operators change the DNS record manually if that region fails. During a recent regional outage some users kept reaching the failed region for more than an hour because resolvers cached the old record. What design change gives the fastest automatic fail-over?
+A: Lower the DNS record's time-to-live to one second and keep the manual process for changing the record when needed
+B: Add a third regional load balancer in the primary region, giving users more entry points into the failed region
+C: Use a global external Application Load Balancer with health-checked backends in both regions
+D: Add more instances to the managed instance group in the primary region before the next outage occurs, to hold more load
+K: C
+G: ## Where fail-over decisions are made
+If the fail-over decision depends on DNS answers, clients and resolvers that cache records keep using the old address for as long as their cache lasts, and a person must also notice and act. A **global external Application Load Balancer** has a single anycast IP address and health-checks its backends in every region. When a region's backends are unhealthy, it routes requests to healthy backends in other regions automatically, with no client-side change.
+## Design points
+- Health checks decide when a backend is out; they must reflect the application's real readiness.
+- Remaining regions need capacity to absorb the traffic (see capacity planning for DR).
+- Data layers must also fail over; the load balancer solves only the entry point.
+W: Global load balancer with multi-region backends: one stable address, automatic health-based routing away from the failed region, no dependency on cached DNS answers or an operator.
+X: A=One-second TTL with manual changes: many resolvers ignore or floor very low TTLs, and a person must still detect the outage and edit the record, so recovery stays slow.
+B=Third load balancer in the primary region: more entry points inside the failed region fail together with it and do not change how clients are directed.
+D=More instances in the primary region: capacity does not help when the whole region is unavailable.
+T: Use a global load balancer with health-checked multi-region backends for automatic fail-over instead of relying on DNS changes.
+
+@ GCP-PCA D1 T1.2 applied troubleshooting
+S: A warm-standby disaster recovery design replicates data to a second region and keeps only a few VMs running there. During a rehearsal, scaling up the standby stack to production size failed in the recovery region because the required machine type was temporarily unavailable in the chosen zone, and the RTO was missed. What should the architect add to the design?
+A: Reservations for the required Compute Engine capacity in the recovery region, so resources are available when failover starts
+B: A shorter health check interval on the primary region, so that the failure is detected sooner than it is now
+C: A larger boot disk for the standby VM image, so that the machine starts faster after the failover begins
+D: A second storage bucket in the primary region for the VM images, so the images are available if the first bucket fails
+K: A
+G: ## Capacity is part of a DR plan
+The DR planning guide warns that a recovery environment must have its resources available at the time of the disaster. On-demand VMs depend on available capacity at that moment, and in a regional event many customers may try to start resources at once. If an RTO depends on starting large numbers of VMs, the design must secure that capacity.
+- **Reservations** let you reserve Compute Engine resources in a specific zone, so the capacity is guaranteed to be there when you create VMs that match the reservation.
+- You pay for reserved resources while they are reserved, so reserve what the RTO needs and keep the rest elastic.
+- Rehearsals find these gaps before a real incident does.
+## Reading the scenario
+Data replication worked and failure was detected. The failure was the inability to obtain compute in the recovery region.
+W: Reservations in the recovery region: they hold the machine capacity needed for the scale-up, so the failover can reach production size within the RTO.
+X: B=Faster detection on the primary: detection was not the problem; the delay came from not obtaining capacity after detection.
+C=Larger boot disk: disk size does not create unavailable machine types in the zone, so the scale-up would still fail.
+D=Second image bucket in the primary region: it sits in the region that is assumed to be lost and does nothing about compute capacity in the recovery region.
+T: A DR plan must secure compute capacity in the recovery region, for example with reservations, and be proven in rehearsals against the RTO.
+
+@ GCP-PCA D1 T1.2 applied definition
+S: A broadcaster stores newly produced footage in a Cloud Storage dual-region bucket for a production tool that must continue after a regional outage. The business sets a recovery point objective of 15 minutes for newly written objects across both regions, and default replication targets are too slow for that. What should the architect enable?
+A: Object Versioning on the bucket, keeping older versions of overwritten or deleted objects in the bucket
+B: The Archive storage class, which stores each object in colder storage that costs less for long-term retention
+C: A retention policy on the bucket, which prevents any object from being deleted or replaced before a set age
+D: Turbo replication on the dual-region bucket, designed to copy new objects to both regions within 15 minutes
+K: D
+G: ## Replication targets for dual-region buckets
+Cloud Storage writes an object to one region across zones and then replicates it asynchronously to the other region of a dual-region bucket.
+- **Default replication** targets 99.9% of newly written objects within one hour and 100% within 12 hours (most finish in minutes).
+- **Turbo replication** is an optional, premium feature of dual-region buckets, designed to replicate 100% of newly written objects between the two regions within a recovery point objective of 15 minutes.
+## Other features solve other problems
+Versioning and retention protect against deletion or overwrite, and storage classes affect cost and access pattern. None of them changes how fast data reaches the second region. Note that replication is not a full BCDR plan on its own.
+W: Turbo replication: it is designed for a 15-minute RPO across the two regions of a dual-region bucket, which is the stated requirement for newly written footage.
+X: A=Object Versioning: it protects older object generations against overwrites and deletes, and it does not speed up copying to the second region.
+B=Archive storage class: this class lowers storage cost for rarely read data and has no effect on replication time, and it would make a production tool's reads slower and costlier.
+C=Retention policy: it blocks deletion for a period, which supports compliance, not a replication time objective.
+T: To tighten the RPO of a dual-region Cloud Storage bucket, enable turbo replication; versioning, retention and classes address other needs.
+
+@ GCP-PCA D1 T1.2 applied use-case
+S: An e-commerce company has a user-facing Cloud Run service that runs a heavy framework. After periods without traffic, the first visitors wait several seconds for a response while a new instance starts, which violates the latency target for the first request. Costs for always running the service on VMs are not acceptable. Which change best fits the performance and cost goals?
+A: Set a minimum number of instances so a warm one is always ready, with autoscaling for bursts above it
+B: Rebuild the service on Compute Engine VMs with fixed capacity, because serverless platforms cannot meet a latency target
+C: Increase the request timeout of the service so the first visitor can wait for the instance to start
+D: Disable autoscaling and set the maximum number of instances to one, so no new instances are started during traffic bursts
+K: A
+G: ## Cold starts and warm capacity
+Serverless platforms such as Cloud Run scale to zero when idle. The next request must wait for a new instance to start, which is a **cold start**. For latency-sensitive services the performance pillar's answer is to keep a small amount of warm capacity.
+- **Minimum instances** keeps a set number of instances ready, trading a small continuous cost for fast first responses; scaling above the minimum still follows demand.
+- Startup time can also be reduced by lighter images and faster initialization, but that is a code change.
+## Trade-off
+You pay for the idle warm instance only, not for peak capacity all day, which is much cheaper than a fixed fleet sized for bursts.
+W: Minimum instances: one or more warm instances answer the first requests immediately, and autoscaling still adds instances for bursts, so cost stays far below a fixed VM fleet.
+X: B=Fixed VMs: Cloud Run can meet latency goals when warm capacity is configured; moving to VMs brings back the always-on cost and the management work the company wants to avoid.
+C=Longer timeout: the first visitor still waits the same startup time, and a longer timeout only allows the wait to continue without improving the latency target.
+D=Maximum of one instance: it caps throughput so that bursts queue or fail, and it does not remove the cold start after idle periods.
+T: For cold-start latency on serverless services, keep minimum instances warm; keep autoscaling for bursts.
+
+@ GCP-PCA D1 T1.4 applied use-case
+S: EHR Healthcare must leave its colocation facility because the lease ends in about ten months. It has a few hundred servers, documentation of its applications is thin, and several are tied to on-premises insurer integrations. What is the best first step in the migration plan?
+A: Start moving servers in alphabetical order so the project shows progress, and rewrite the documentation in parallel
+B: Use Migration Center discovery and assessment to inventory servers, map dependencies and decide which workloads must move together
+C: Re-architect every application into microservices before moving anything, so the whole estate is cloud-native on arrival at Google Cloud
+D: Renew the lease for three more years, since applications with unknown dependencies cannot be moved safely at all
+K: B
+G: ## Assess before you move
+A migration plan starts from facts: what exists, how it is used, and what depends on what. **Migration Center** supports this with:
+- **Discovery**: automatic or uploaded inventory of servers and databases.
+- **Assessment**: dependency mapping at the application and network level (which components must move together), technical fit assessment with suggested target products, and total cost of ownership reports based on your migration preferences.
+- **Planning**: best practices and prescriptive recommendations on what to migrate and how; the dependency results show which assets must be moved together, which is the basis for grouping them into waves.
+## Using it against a deadline
+A fixed lease end makes ordering decisive. Moving things without dependency information risks breaking integrations (the insurer links must keep working), while a full redesign of every application cannot fit in ten months. Most estates rehost first and modernize later.
+W: Discovery and assessment with Migration Center: it gives the inventory and dependency map that the thin documentation lacks, so the move can be planned in waves that keep tightly coupled systems and insurer integrations together before the lease ends.
+X: A=Alphabetical order: it ignores dependencies and risk, so systems could be split from the ones they call, causing outages and rework.
+C=Re-architect first: rewriting every application cannot be completed in ten months, and it would postpone the exit that the lease deadline requires.
+D=Renew the lease: it avoids the work instead of removing the cause, which is lack of information that discovery can supply, and it conflicts with the plan to leave colocation.
+T: Begin migration planning with discovery and dependency mapping, then plan waves that keep coupled workloads together and fit the deadline.
+
+@ GCP-PCA D1 T1.4 applied use-case
+S: A manufacturer has a spreadsheet with outdated server lists and no idea which servers talk to which. It wants an automated inventory, a view of application and network dependencies, a recommendation of target Google Cloud products and a cost comparison that follows its own preferences, such as target region and commitment term. Which choice meets this?
+A: Use Cloud Monitoring dashboards on the Google Cloud projects, because they show resource usage across the estate
+B: Hire a team to interview application owners, because only people know how systems relate to each other
+C: Use Migration Center discovery, then assessment with dependency analysis, fit assessment and TCO reports
+D: Create a Compute Engine VM for each listed server, so that actual usage can be measured after the VMs are running
+K: C
+G: ## What Migration Center provides
+Migration Center is the Google Cloud platform for the assessment and planning stages of a migration.
+- **Asset discovery**: scans an on-premises environment (servers, SQL Server, MySQL and PostgreSQL databases) or accepts uploaded data.
+- **Assessment**: identifies application and network dependencies, gives data-driven target suggestions based on a technical fit assessment, and generates TCO reports from the preferences you specify.
+- **Plan and migrate**: guidance and tooling for rehost, replatform and refactor.
+## Why it fits
+Every requirement in the question is an assessment output: inventory, dependencies, target fit and a preference-based cost view. Tools that only watch resources already in Google Cloud, or people-only methods, cover only a part of it.
+W: Migration Center discovery and assessment: it creates the inventory automatically, shows dependencies, suggests target products and builds TCO reports from the stated preferences.
+X: A=Cloud Monitoring dashboards: they report on resources that already run in Google Cloud and cannot see on-premises servers, dependencies or target recommendations.
+B=Interviews only: interviews add context, but they are slow and error-prone for dependencies between servers, and they do not produce a fit assessment or TCO figures.
+D=Create a VM per server first: this moves money and time to a trial-and-error approach, producing no dependency data and a bill before the plan exists.
+T: Migration Center covers discovery, dependency mapping, fit assessment and TCO reporting for the planning phase of a migration.
+
+@ GCP-PCA D1 T1.4 applied definition
+S: Which TWO situations point to a rehost (lift and shift) as the most suitable migration approach for a workload? (Select TWO)
+A: The workload is packaged vendor software whose code cannot be changed and which cannot be retired yet
+B: The business wants to remove technical debt and move a monolith to independent services that scale separately
+C: A hard exit date is close and the workload can run in the target environment as it is, with minimal changes
+D: The team wants to use fully managed services and horizontal scalability that the current design cannot use
+E: The current application is not supported on Google Cloud and the business wants to build a cloud-optimized replacement
+K: A,C
+G: ## Migration types
+The migration guide describes these approaches, ordered from least to most change:
+- **Rehost (lift and shift)**: move with minor or no modifications. It is quickest and uses existing skills, but the workload does not use cloud features such as horizontal scaling and managed services.
+- **Replatform (lift and optimize)**: move and adopt some cloud capabilities, for example containers or a managed database.
+- **Refactor / re-architect**: change the workload to use cloud capabilities (for example split a monolith).
+- **Rebuild**: decommission and rewrite as a cloud-optimized application.
+- **Repurchase**: replace with a SaaS equivalent.
+## Rehost signals
+Rehost is right when change is impossible (code not available, vendor restrictions) or when time pressure leaves no room for change, and optimization can follow later.
+W: A=Vendor software that cannot be changed: if the code cannot be changed and the workload cannot yet be retired, moving it as it is (rehost) is the practical option.
+C=Hard exit date with a workload that runs as is: rehost needs the least time and the least rework, so it fits a near deadline.
+X: B=Remove technical debt and split a monolith: this is a re-architect or refactor goal, which changes the code.
+D=Use managed services and horizontal scaling: these are benefits of replatforming or refactoring; rehosted workloads do not take full advantage of them.
+E=Replacement because it is unsupported: this describes a rebuild, which decommissions the application and writes a new one.
+T: Rehost fits workloads that cannot or need not change, or when time is short; the cloud-native benefits come from later replatform or refactor steps.
+
+@ GCP-PCA D1 T1.4 advanced tradeoff
+S: A company has finished planning a migration of about 120 applications. The migration team has little experience with the landing zone, the network connection and the cutover runbooks. Which application should the architect choose for the first migration wave?
+A: A low-criticality application with few dependencies and simple data, to validate the platform and runbooks
+B: The most business-critical application, since a success there proves the approach to the whole company immediately
+C: The application with the most dependencies, because it will reveal every integration problem in one single step
+D: The application on the oldest operating system, because it is the one with the highest security exposure
+K: A
+G: ## Pilot waves reduce risk
+Migration is done in waves. The first wave is a pilot: its purpose is to validate the foundation (resource hierarchy, IAM, network connectivity, logging), the migration tooling and the runbooks, and to let the team learn before critical systems follow.
+- Pick workloads that are **low in criticality, simple in dependencies, and representative** of later patterns.
+- Fix the findings (sizing, firewall rules, monitoring, rollback steps) before the larger waves.
+- Complex and critical systems move once the process is proven, and with dependency data in hand.
+## Why not start where it hurts most
+Learning happens at the cost of mistakes. Mistakes on a critical or highly coupled system have a large business impact, so the learning cost should be paid on a system where failure is cheap.
+W: Low-criticality, few-dependency application: a failure costs the business little, and the wave tests the landing zone, connectivity and cutover process that later waves reuse.
+X: B=Most critical application first: an inexperienced team would risk the highest-impact system while the platform and runbooks are still untested.
+C=Most dependent application: the large number of integrations multiplies the places where an untested process can fail, so it is a poor learning vehicle.
+D=Oldest operating system: security exposure may justify a priority later, but age alone does not make an application a safe or representative pilot.
+T: Start with a low-risk, representative pilot wave to prove the landing zone and runbooks before migrating critical or tightly coupled systems.
+
+@ GCP-PCA D1 T1.4 applied use-case
+S: A retailer plans to connect its data center, which uses 10.0.0.0/8 addresses in many sites, to a new Google Cloud environment with Cloud VPN and Interconnect. Network planning is still open. Before creating subnets, which action avoids a routing problem that is hard to fix later?
+A: Create the VPC subnets from 10.0.0.0/8, matching the on-premises ranges, so that workloads keep their addresses
+B: Define an IP plan giving Google Cloud subnets ranges that do not overlap with on-premises or other connected networks
+C: Postpone address planning until the connections are up, since routes can be advertised in either direction later on
+D: Use public IP addresses for all migrated VMs, so private range overlaps with the data center no longer matter
+K: B
+G: ## Address planning is a network prerequisite
+Hybrid connectivity exchanges routes between networks. If a Google Cloud subnet and an on-premises network use the same or overlapping ranges, routers cannot tell where a destination is, so traffic is dropped or misrouted, and Google Cloud rejects or ignores conflicting routes. Re-addressing live systems later is one of the most expensive migration fixes.
+## Planning checklist
+- Inventory on-premises and other cloud ranges (including those from acquisitions).
+- Allocate non-overlapping blocks for Google Cloud regions and environments, with growth room.
+- Include ranges for GKE Pods and Services, private service access and connectors, because they also consume address space.
+- Agree on it with the network team before the first subnet exists.
+W: Non-overlapping IP address plan: unique ranges make routing between the data center and Google Cloud unambiguous, and the plan reserves room for growth and for GKE and service ranges.
+X: A=Subnets inside 10.0.0.0/8: they overlap with the on-premises addresses, so routes conflict and connected systems cannot reach each other reliably.
+C=Postponing address planning: once workloads and connections exist, changing ranges means re-addressing running systems, so it should be settled before subnets are created.
+D=Public addresses for all VMs: this exposes the migrated systems to the internet and breaks the private-connectivity goal without removing the need to coordinate private ranges.
+T: Plan non-overlapping IP ranges with the on-premises network before building subnets or connectivity; overlaps are costly to fix later.
+
+@ GCP-PCA D1 T1.4 advanced troubleshooting
+S: KnightMotives moved the web front end of its build-to-order system to Google Cloud while the mainframe ERP stayed on premises. Each page now makes dozens of sequential calls to the ERP over the hybrid link, and dealers report very slow pages even though the link has plenty of bandwidth. What should the migration plan have used to prevent this?
+A: Dependency mapping, to move chatty components in one wave or add an API layer or cache that cuts cross-link calls
+B: A larger Interconnect capacity, because slow pages in hybrid designs are always caused by too little bandwidth
+C: A plan that moves each tier in its own wave, starting with whichever tier is the easiest for the team
+D: A switch of the front end to Spot VMs, so that its compute is less expensive while it waits for the ERP responses
+K: A
+G: ## Latency, not bandwidth, between dependent components
+Bandwidth is how much data can travel at once; latency is how long each round trip takes. An application that makes many sequential calls pays the round-trip time for every call. Latency across a hybrid link is far higher than inside a data center, so a chatty design that was fine on one network becomes slow when split across two.
+## What dependency analysis gives
+Network and application dependency mapping (as in Migration Center assessments) shows call patterns and which components must move together. Options to plan for:
+- Move tightly coupled components in the same wave, or keep them together on the same side.
+- Reduce chatter with an API layer that batches calls, asynchronous messaging, or caching of reference data.
+- Test latency-sensitive paths before cutover.
+## Applying it
+The link was not saturated; adding capacity would not shorten round trips.
+W: Dependency mapping and wave design: it exposes the chatty front end and ERP calls in advance, so the plan can move them together or add an API layer or cache that cuts the number of calls across the link.
+X: B=Larger Interconnect: the problem is round-trip latency from sequential calls, not capacity, and the link already has spare bandwidth.
+C=Separate waves by easiest tier: it ignores coupling and creates the split-tier situation that caused the problem.
+D=Spot VMs for the front end: they lower compute price but do not shorten round trips to the ERP, and they can be reclaimed at any time.
+T: Map dependencies to keep chatty components together or reduce cross-link calls; hybrid slowness often comes from latency and call patterns, not bandwidth.
+
+@ GCP-PCA D1 T1.4 applied use-case
+S: A company will move database servers running software that is licensed per physical core. It holds eligible licenses and wants to reuse them on Google Cloud, and the vendor requires that the licensed cores be tracked on dedicated physical hardware. Which approach should the architect plan?
+A: Run them on standard multi-tenant Compute Engine VMs and send the vendor the VM sizes, because core counts are the same
+B: Replace the database software with a SaaS product during the migration, because licenses cannot be reused on any public cloud
+C: Buy the largest available machine type, so that the vendor audit finds more cores than the licensing requires
+D: Run them on sole-tenant nodes, which dedicate physical hosts and show physical core usage for bring-your-own-license
+K: D
+G: ## Licensing as a migration input
+Software licenses change migration cost and design. Check each product for:
+- **Metric**: per core, per processor, per VM or per user, and whether Software Assurance or a license mobility program applies.
+- **Cloud terms**: whether bring-your-own-license (BYOL) is allowed, and what hardware rules apply.
+- **Alternative**: license-included images or managed services, which move license cost into the usage bill.
+## Sole-tenant nodes
+Sole-tenant nodes are Compute Engine hosts dedicated to your projects. They help meet dedicated-hardware requirements for BYOL scenarios that need per-core or per-processor licenses, and they give visibility into the underlying hardware so you can track core and processor usage. Identify these needs during planning, since they influence placement, cost and sizing.
+W: Sole-tenant nodes: they dedicate physical servers to the company and report hardware details, which supports per-core BYOL tracking that the vendor requires.
+X: A=Standard multi-tenant VMs: the vendor asks for physical-core tracking on dedicated hosts, and sharing hosts with other customers gives no such visibility.
+B=Mandatory switch to SaaS: BYOL is possible in some cases, and the vendor terms, not a blanket rule, decide, so replacing the product is not a given and adds migration work.
+C=Largest machine type: buying more cores than needed raises cost and does not satisfy a tracking requirement or the vendor's terms.
+T: Check license metrics and terms during planning; per-core BYOL that needs dedicated hardware points to sole-tenant nodes.
+
+@ GCP-PCA D1 T1.4 advanced tradeoff
+S: A finance team builds the business case for moving a data center workload to Google Cloud. The steady-state monthly cloud cost looks lower than the current run cost. Which TWO cost items should the plan add so the case is not overstated? (Select TWO)
+A: The period in which both the on-premises environment and the migrated environment run in parallel until cutover is complete
+B: The purchase price of on-premises hardware that was bought years ago and has already been paid for
+C: One-time migration effort such as assessment, tooling, data transfer, testing, retraining and any application changes
+D: The savings expected from a future rewrite of the application, counted as a benefit of the lift and shift
+E: The list price of every cloud service for the full term, before any usage or sizing information is applied to it
+K: A,C
+G: ## Migration business cases have one-time and transition costs
+A comparison of steady-state run cost leaves out the cost of getting there. Items a financial plan should include:
+- **Dual running**: until cutover and a stabilization period end, both environments cost money.
+- **One-time effort**: assessment, migration tooling and data transfer, testing, rehearsals, skills training and changes to applications.
+- **Licensing** changes, support contracts that cannot be canceled early, and decommissioning costs.
+## What does not belong
+**Sunk costs** (already paid) do not change the decision going forward; only future avoidable costs do. Benefits should come from the option being evaluated, not from separate later projects. Cost figures should rest on measured utilization from the assessment, not on maximum list sizes.
+W: A=Parallel running period: both environments are paid for until cutover and stabilization are complete, so ignoring it understates the cost of the move.
+C=One-time migration effort: assessment, transfer, testing and training are real costs of the project that the steady-state comparison does not include.
+X: B=Already-paid hardware: money spent in the past is sunk and does not differ between the options; only avoided future costs count.
+D=Savings from a future rewrite: they belong to a separate modernization project, and counting them for a lift and shift overstates its benefit.
+E=Unsized list prices for the full term: an estimate should rest on measured utilization and chosen sizing, and unadjusted list prices would misstate the cloud cost in the other direction.
+T: A migration business case must include transition costs (dual running and one-time effort), exclude sunk costs, and base cloud costs on measured sizing.
+
+@ GCP-PCA D1 T1.4 applied use-case
+S: The discovery data for a planned migration shows that many virtual machines have 16 vCPUs allocated but averaged under 10% CPU usage over the last three months. The team proposes to create each target VM with exactly the allocated size so that the migration is simple. What should the architect advise?
+A: Keep the allocated sizes, because reducing sizes is a risk that should wait until application owners approve it
+B: Choose the smallest possible machine for every VM, regardless of the measured peaks, to maximize savings from the first day
+C: Size targets from measured utilization plus peak headroom, and review them after migration
+D: Ignore sizing during migration, because Compute Engine bills only the CPU that is actually used by the guest operating system
+K: C
+G: ## Rightsize on evidence
+On-premises, servers are often sized for the worst case or for a hardware purchase cycle, so allocated capacity far exceeds use. Copying those sizes into the cloud, where VMs are billed for the configured resources, carries the waste into the monthly bill. Migration Center assessments use collected performance history to recommend targets and costs.
+- Use measured utilization (averages and peaks over a representative period) plus headroom.
+- Verify with owners and tests, then adjust after cutover using right-sizing recommendations.
+- Resizing a VM in the cloud is quick and cheap compared with a hardware swap, so the first sizing does not need to be perfect.
+## Avoiding both errors
+Over-sizing wastes money; under-sizing causes slowdowns at peaks. Evidence and a feedback loop balance them.
+W: Evidence-based sizing with headroom and later review: it removes obvious over-allocation without risking peak performance, and cheap resizing allows corrections after migration.
+X: A=Keep allocated sizes: this repeats the waste, and sizing can be reviewed with owners during planning instead of postponed indefinitely.
+B=Smallest machines everywhere: ignoring peaks risks slow or failing applications, and savings are not worth outages.
+D=Billing for used CPU only: VMs are billed for the configured vCPUs and memory, not for the guest's average usage, so oversized VMs cost money even when idle.
+T: Size migration targets from measured utilization plus headroom, then keep tuning; do not copy on-premises allocations blindly.
+
+@ GCP-PCA D1 T1.4 applied use-case
+S: A team has completed the cutover of a customer-facing database to Google Cloud over a weekend. To save money, a manager proposes powering off and wiping the old on-premises servers on Monday morning. Which TWO elements should the migration plan include instead? (Select TWO)
+A: Keep the source intact and in sync for a defined stabilization period, with rollback criteria, then decommission
+B: Wipe the servers immediately, because a rollback plan indicates a lack of confidence in the migration
+C: Keep the source environment running permanently, because decommissioning always carries too much risk to attempt
+D: Delete the source only after the cloud bill for the first month has been reviewed by the finance department
+E: Agree measurable rollback triggers before cutover, such as error rate or data mismatch, and name who decides
+K: A,E
+G: ## Cutover is not the end of the migration
+A migration plan includes the way back. After cutover there is a **stabilization period** in which the new system carries real traffic while the old one stays available.
+- **Rollback criteria**: agreed thresholds (error rates, data discrepancies, performance) that trigger a return to the source.
+- **Keep the source usable**: ideally in sync or at least a recent copy, so a rollback does not lose the changes made since cutover.
+- **Decommission on a schedule**: once the criteria are met for the agreed time, retire the source to realize the savings and avoid permanent dual running.
+## Balance
+Immediate wiping removes the safety net at the moment the risk is highest. Keeping the source forever turns a migration into permanent duplicate cost.
+W: A=Stabilization period: the old system remains a fallback while the new one proves itself, and it is then retired on a defined schedule to stop dual running.
+E=Agreed rollback triggers: measurable thresholds and a named decision maker turn a rollback into a quick, rehearsed decision instead of an argument during an incident.
+X: B=Wipe immediately: it removes the only fast fallback when problems are most likely to appear, so one defect could become unrecoverable.
+C=Keep the source forever: this makes the dual-running cost permanent and defeats the business case for migrating.
+D=Wait for the first cloud bill: a bill reflects cost, not whether the system is stable, so it is the wrong signal for the decommission decision.
+T: Keep the source as a fallback for a defined stabilization period with rollback criteria, then decommission it on schedule.
+
+@ GCP-PCA D1 T1.4 applied use-case
+S: Before the first migration wave, a company's cloud team has the migration tooling ready but no organization structure, network connectivity, identity setup or central logging in Google Cloud. The team lead wants to begin moving servers now and fix the foundation as problems appear. What should the architect recommend?
+A: Move the servers into a single project in the default network and add structure later, since projects can be reorganized at any time without any impact
+B: Pause server migration until all applications have been modernized, so that nothing needs a foundation designed for legacy servers
+C: Let each application team build its own organization structure, networks and logging, to avoid waiting for a central design
+D: Build the landing zone first: resource hierarchy, IAM, network and hybrid connectivity, logging and monitoring, then migrate into it
+K: D
+G: ## Landing zone before workloads
+Google's migration guidance has phases: assess, plan and build the foundation, deploy (migrate), and optimize. The **foundation** (landing zone) holds what every workload needs:
+- **Resource hierarchy** (organization, folders, projects) and policies.
+- **Identity and access** model, including how existing directory users reach Google Cloud.
+- **Network design**: address plan, VPC structure and hybrid connectivity.
+- **Logging, monitoring and security** controls.
+- **Billing structure** so that costs map to owners.
+## Why not retrofit
+Moving workloads into an unstructured environment means re-creating networks, permissions and projects later, usually with downtime and inconsistent controls. Building the foundation is a one-time effort that every wave then reuses.
+W: Landing zone first: the structure, identity, network and operations controls are in place and consistent before the first server lands, so later waves reuse them.
+X: A=Single project in the default network: it places workloads in a structure that has to be redone, and reorganizing live networks and permissions is disruptive and rarely free of impact.
+B=Pause until all modernization is done: that delays the migration for an unbounded time, and the foundation is needed whether or not applications are modernized.
+C=Each team builds its own: it creates inconsistent networks, logging and policies that conflict when hybrid connectivity and governance are added.
+T: Build the landing zone (hierarchy, IAM, network, logging, billing structure) before the first migration wave so every wave lands in a consistent foundation.
+
+@ GCP-PCA D1 T1.4 advanced use-case
+S: Discovery of a company's estate shows 400 virtual machines. About 60 of them have had near-zero CPU use for six months, receive no inbound connections according to the dependency data and have no named owner. How should the migration plan treat them?
+A: Migrate all of them in the first wave, since carrying unused servers is cheaper than asking owners questions
+B: Confirm with owners whether they are still needed, and retire those that are not instead of migrating them
+C: Shut them down permanently on the same day, because the data shows that nobody uses them at all
+D: Rehost them to the smallest machine type and leave them there indefinitely, to be reviewed in the next budget year
+K: B
+G: ## Retire before you migrate
+Assessment often finds servers that no longer serve a purpose. Moving them costs migration effort, then run cost, licenses and security exposure forever. Including a **retire** decision in each migration plan reduces scope and cost.
+- Use utilization and dependency data to identify **candidates**: near-zero use, no inbound connections, no owner.
+- Data alone is not proof: a quarterly or year-end job may be idle for months. Confirm with owners, or isolate (power off but keep) for a defined period to see if anyone objects, then archive and delete.
+- Record the decision so the savings are counted in the business case.
+## Why confirmation matters
+Deleting a server that runs a rare but important process can cause an outage that is more costly than the migration saving.
+W: Confirm and retire: data identifies candidates, owners confirm, and retired servers reduce migration scope, run cost and attack surface.
+X: A=Migrate all in the first wave: it moves useless capacity at full cost and puts unneeded systems into the new environment, which expands the pilot for nothing.
+C=Shut down the same day permanently: idle for six months does not rule out periodic jobs, and an irreversible action without owner confirmation is risky.
+D=Rehost small and forget: it keeps paying for, patching and securing systems with no known purpose for another year.
+T: Use discovery data to find retire candidates, confirm with owners (or isolate first), and drop them from scope instead of migrating them.

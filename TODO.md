@@ -2,9 +2,9 @@
 
 ## Now (warm start — keep this section current; update it with every merge)
 Updated 2026-10-30.
-- In progress: **Google Cloud Professional Cloud Architect (GCP-PCA)** — not started; wait until the pools-topup PR is merged
-  (ingest and exam registration share data files). Then: read the exam guide, registration, GCP.md section, PLAN.md, ~250 q.
-  Open gaps: Gemini app and Gems (GAIL T2.2, blocked hosts); CDL golden signals / CapEx-OpEx / data types use generally accepted meanings.
+- In progress: nothing. GCP-PCA bank and study guide merged. Open gaps: Gemini app and Gems (GAIL T2.2, blocked hosts);
+  CDL golden signals / CapEx-OpEx / data types use generally accepted meanings; Gemini Cloud Assist investigations are
+  private preview on the product page but taught by the PCA bank (re-check); PCA docs re-check list below.
 - Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; GCP-CDL bank and study guide; MLA-C02 study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). www.databricks.com is still
@@ -218,13 +218,23 @@ Google Cloud top-up 2026-10-30: GAIL +48 (b14-b15) = 274, CDL +52 (b12-b13) = 27
 (~13 fixes; ACE reviewer replaced 2 duplicates of published questions). AI-103 stays 243 (all domain targets met).
 Published GAIL questions still say "Customer Engagement Suite" (5); new ones use "Gemini Enterprise for Customer Experience".
 
+GCP-PCA DONE 2026-10-31: Professional Cloud Architect (guide read 2026-10-31; 6 sections 25/17.5/17.5/15/12.5/12.5%, 22 tasks,
+2 h, 50-60 q, 55 assumed, pass mark unpublished, 2 case studies = 20-30%), 274 questions in b01-b11 from PLAN.md (about 25% on the four
+case studies via `tools/qgen/GCP-PCA-cases.md`, own-words digest), each reviewed (about 60 fixes; reviewers replaced ~15 duplicates of
+published questions: ingest batches one by one and tell running reviewers). Study guide 26 days (D1 7, D2 6, D3 5, D4 3, D5 3, D6 1, final),
+4 writers + 4 reviewers (about 120 fixes, mostly case-digest drift); glossary +9 `gcp-*` terms, 22 tagged. Docs facts: Document AI built-in
+Human in the Loop deprecated 2024-01-16; Binary Authorization continuous validation Preview (not keyed); Migration Center rapid cost estimate
+Preview (not keyed); gsutil legacy, `gcloud storage` recommended; Service Catalog not keyed (Deployment Manager ended 2026-03-31);
+Cloud SQL Managed Connection Pooling needs Enterprise Plus; NotebookLM is now "Gemini Notebook Enterprise".
+PCA claims checked only from general knowledge (re-check against docs): Workload Identity Federation details, Apigee SpikeArrest/Quota in b09,
+CUD vs Spot trade-off in b09, Cloud Trace.
+
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's
 network settings (only docs.aws.amazon.com, learn.microsoft.com and cloud.google.com/learn pages are reachable now).
 - Palantir Foundry Aware: the entry-level exam of the 2026 framework. Format, cost and proctoring not confirmed
   (community posts conflict); learn.palantir.com / certification.palantir.com are blocked here.
-- Google Cloud: Generative AI Leader (50-60 multiple choice, 90 min; pairs with AIF/AIB), Professional Cloud
-  Architect (Associate Cloud Engineer done, see the Google Cloud section).
+- Google Cloud: other Professional exams (Cloud Architect, ACE, GAIL, CDL done, see the Google Cloud section).
 - Databricks Certified Data Engineer Associate (45 multiple choice, 90 min, revised 2026-05-04; pairs with
   DEA-C01 / PLTR-DE). Needs databricks.com and docs.databricks.com.
 - HashiCorp Terraform Associate 004 (live 2026-01-08; multiple choice incl. multi-select). Needs
