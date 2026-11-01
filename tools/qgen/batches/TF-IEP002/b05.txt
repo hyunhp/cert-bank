@@ -1,0 +1,579 @@
+# TF-IEP002 b05: D3 Infrastructure workflow and lifecycle (T3.6-T3.9)
+# src: https://developer.hashicorp.com/terraform/cli/workspaces
+# src: https://developer.hashicorp.com/terraform/language/values/variables
+# src: https://developer.hashicorp.com/terraform/language/expressions/references
+# src: https://developer.hashicorp.com/terraform/internals/debugging
+# src: https://developer.hashicorp.com/terraform/internals/graph
+# src: https://developer.hashicorp.com/terraform/cli/commands/graph
+# src: https://developer.hashicorp.com/terraform/cli/commands/force-unlock
+# src: https://developer.hashicorp.com/terraform/language/state/locking
+# src: https://developer.hashicorp.com/terraform/cli/commands/apply
+# src: https://developer.hashicorp.com/terraform/cli/commands/init
+# src: https://developer.hashicorp.com/terraform/cli/commands/validate
+# src: https://developer.hashicorp.com/terraform/cli/commands/output
+# src: https://developer.hashicorp.com/terraform/language/state/remote-state-data
+# src: https://developer.hashicorp.com/terraform/cloud-docs/workspaces/state
+# src: https://developer.hashicorp.com/terraform/language/expressions/version-constraints
+# src: https://developer.hashicorp.com/terraform/language/files/dependency-lock
+# src: https://developer.hashicorp.com/terraform/language/modules/develop/providers
+# src: https://developer.hashicorp.com/terraform/cli/commands/state/replace-provider
+
+@ TF-IEP002 D3 T3.6 applied use-case
+S: Three environment directories (dev, stage, prod) each call the shared module `app` from one Git repository. Prod must keep running the reviewed release while dev tests the next release. Which setup supports this?
+A: Pin the module source in each environment directory to its own Git tag with a `ref`, and move the prod tag forward only after dev and stage pass
+B: Point all three directories at one local path to the module folder and let prod apply less often than dev, so its resources change rarely
+C: Copy the module code into every environment directory so each team may edit its copy and promote changes by hand when it is ready
+D: Run `terraform init -upgrade` in dev only, because the upgrade flag keeps the other directories on whatever module source they installed first
+K: A
+G: ## Directory-per-environment with shared modules
+The CLI workspaces documentation names this pattern as the alternative to workspaces: reusable modules hold the common elements, and each environment is a separate configuration whose root module is only a backend configuration plus a few `module` blocks with environment-specific arguments. Every environment then has its own state, backend and credentials.
+## Promotion by version
+Because each root module chooses its own module version, a release moves through environments one at a time. For a Git source the version is a `ref` (tag or commit) in the `source` URL. For registry modules it is the `version` constraint. Dev points at the new tag first; stage and prod keep the old one until the change is reviewed.
+W: Separate roots with separately pinned Git tags let dev consume the new release while prod stays on the reviewed one, and promotion is a one-line change in the next environment's `source`.
+X: B=Shared local path: all directories read the same files, so the moment the folder changes every environment's next plan sees it. Applying prod less often only delays the surprise.
+C=Copied module code: copies drift apart, fixes must be re-applied by hand in each, and the review of one version no longer proves anything about the other copies.
+D=Upgrade flag in dev only: `-upgrade` refreshes modules and providers of the directory where it runs, but it does not pin anything for the other directories, so it is no release mechanism.
+T: One root per environment, each pinning its own module version, is the promotion path that workspaces cannot give.
+V: Terraform
+
+@ TF-IEP002 D3 T3.6 advanced troubleshooting
+S: A shared module names a bucket `"${terraform.workspace}-logs"`. A root module calls it twice, as `module.audit` and `module.access`, and the second apply fails because the bucket name already exists. What is the correct fix?
+A: Add a `name_prefix` input to the module and let the root module compute each value, using `terraform.workspace` only in the root
+B: Replace `terraform.workspace` with `path.module`, which is unique for every call and therefore yields two distinct bucket names
+C: Add a `depends_on` between the two module calls so that the second call waits and picks a different workspace name
+D: Select a second workspace before the second module call, because a workspace is selected per module rather than per directory
+K: A
+G: ## terraform.workspace inside a shared module
+`terraform.workspace` is the name of the currently selected workspace, and it is the same for every module call in one run. The references documentation says that, apart from `path.module`, such values should be used only in the root module. Using `terraform.workspace` as a name prefix inside a shared module can make it impossible to call the module more than once in the same configuration.
+## The recommended pattern
+The module declares an input variable (for example `name_prefix`). The calling module passes `"${terraform.workspace}-audit"` and `"${terraform.workspace}-access"`, or any other values. The module stays reusable, and the root decides how environment names appear.
+W: A prefix input makes the module's naming a caller decision, so both calls get distinct names while the root still derives them from the workspace.
+X: B=path.module: this is the filesystem path of the module source and is identical for both calls of the same module, so it would not separate the names. It is also not meant for resource naming.
+C=Added depends_on: ordering changes only when the calls run, not the string `terraform.workspace` evaluates to, so both calls still request the same bucket name.
+D=Second workspace: only one workspace can be selected for a working directory at a time, and the choice applies to the whole run, not to a single module call.
+T: Keep terraform.workspace in the root module and pass environment names into shared modules as inputs.
+V: Terraform
+
+@ TF-IEP002 D3 T3.6 applied troubleshooting
+S: `variable "size"` has `default = "tiny"`. The directory holds `terraform.tfvars` (small) and `prod.auto.tfvars` (large). The pipeline exports `TF_VAR_size=xlarge` and runs `terraform apply -var-file=ci.tfvars`, where that file sets medium. Which size is used?
+A: medium
+B: large
+C: xlarge
+D: small
+K: A
+G: ## Order of precedence for root module variables
+When a root module variable gets values from several sources, Terraform uses this order, highest first:
+- `-var` and `-var-file` options on the command line (in the order provided) and variables from HCP Terraform
+- `*.auto.tfvars` and `*.auto.tfvars.json` files, in lexical order
+- `terraform.tfvars.json`
+- `terraform.tfvars`
+- environment variables (`TF_VAR_name`)
+- the `default` in the variable block
+## Applying it
+Here every source sets a value: default (tiny), the environment variable (xlarge), `terraform.tfvars` (small), the auto-loaded file (large) and the explicit `-var-file` (medium). The command-line file sits at the top, so medium wins.
+W: A file passed with `-var-file` belongs to the highest-precedence group, above auto-loaded files, `terraform.tfvars`, environment variables and the default.
+X: B=Large: the auto-loaded `*.auto.tfvars` file beats `terraform.tfvars`, environment variables and the default, but not an explicit command-line variable file.
+C=Xlarge: environment variables are one of the lowest-precedence sources, beaten by every variable definition file and by the command line.
+D=Small: `terraform.tfvars` is loaded automatically, but both `*.auto.tfvars` files and `-var-file` override it.
+T: Command line and HCP Terraform beat auto.tfvars, which beats terraform.tfvars, then environment variables, then the default.
+V: Terraform
+
+@ TF-IEP002 D3 T3.6 applied definition
+S: A directory holds `10-base.auto.tfvars` and `2-team.auto.tfvars`, both defining `tier`, with `tier = "base"` and `tier = "team"` respectively. No other source sets it. What value does the root module use?
+A: team, because the files load in lexical order and the later file wins
+B: base, because the file whose name starts with the lower number is loaded last
+C: An error is raised, because two auto-loaded files may not set the same variable
+D: The value of the variable's default, because competing auto-loaded files cancel each other
+K: A
+G: ## Lexical order, not numeric order
+Terraform loads every `*.auto.tfvars` and `*.auto.tfvars.json` file in lexical order, and a later file overrides an earlier one for the same variable. Lexical means character by character, like a dictionary sort:
+- `10-base.auto.tfvars` compares `1` against `2` at the first character and sorts first.
+- `2-team.auto.tfvars` sorts after it.
+So `2-team` is applied last. Teams that layer files (`00-`, `10-`, `20-`) must zero-pad numbers, otherwise `100-` sorts before `20-`.
+## Duplicates
+The restriction is only that one variable cannot be assigned twice in the same file. Across files, later overrides earlier.
+W: Lexical sorting puts `10-base` before `2-team`, the last file loaded wins, so the variable resolves to team.
+X: B=Numeric reading: file names are compared as text, not as numbers, so the file starting with 10 is first, not last, and loses to the later one.
+C=Error on duplicates: Terraform reports a duplicate only when the same variable is assigned twice inside one file, not across different files.
+D=Default value: overrides are layered, never cancelled; any definition file beats the variable's default.
+T: Auto-loaded tfvars apply in lexical order and the last one wins, so zero-pad numeric prefixes.
+V: Terraform
+
+@ TF-IEP002 D3 T3.6 applied use-case
+S: A developer wants a throwaway copy of the main infrastructure to test a change before it reaches production, without adding a directory or a backend. Which use of CLI workspaces do the docs describe as a good fit?
+A: Create a workspace per feature branch, deploy a temporary copy of the main configuration with different inputs, and remove it after the test
+B: Create a workspace per customer and rely on workspace names to restrict who can read each customer's state in the shared backend
+C: Create a workspace per subsystem so that networking, data and application layers are managed as separate components in one directory
+D: Create a workspace for production so that its credentials differ from the credentials used for the other workspaces in the directory
+K: A
+G: ## What CLI workspaces are good at
+CLI workspaces are separate instances of state inside one working directory and backend. The docs describe a common use as creating a parallel, distinct copy of a set of infrastructure to test changes before touching production, often tied to a version control feature branch: the default workspace matches `main`, a developer creates a workspace for the branch, deploys a temporary copy and then destroys it.
+## What they are not for
+- **Isolation of access**: all workspaces of a directory use the same backend and credentials.
+- **System decomposition**: each subsystem should have its own configuration and backend.
+Inputs usually differ per workspace (for example a different region or size), supplied by variables.
+W: A branch-scoped workspace gives a temporary copy of the same configuration with its own state, the exact test-before-production use the docs name.
+X: B=Per-customer workspaces: workspace names are not an access-control boundary; anyone with backend access can select any of them.
+C=Per-subsystem workspaces: the docs say workspaces are not suitable for decomposing a system, because each subsystem should have its own configuration and backend.
+D=Production workspace for different credentials: all workspaces in a directory use the same backend credentials, so this does not separate them.
+T: Use CLI workspaces for temporary parallel copies of one configuration, not for separation of credentials or components.
+V: Terraform
+
+@ TF-IEP002 D3 T3.6 advanced troubleshooting
+S: A pipeline runs `terraform workspace select dev` and then `terraform plan -var-file=prod.tfvars` by mistake. The plan wants to resize dev resources to production sizes. What explains this?
+A: Selecting a workspace chooses only the state; nothing ties a variable file to a workspace, so the prod values were applied to dev state
+B: Terraform loads `prod.tfvars` automatically for every workspace and so it overrides whatever the dev workspace would otherwise use
+C: The `workspace select` command failed silently, so the run stayed in the default workspace, which holds production state
+D: Workspaces copy the variable values of the previous run, so the dev workspace inherited the sizes recorded by the last prod plan
+K: A
+G: ## Workspaces switch state, not inputs
+A CLI workspace is technically a renamed state file. Selecting it changes which state Terraform reads and writes. Input values come separately from variable files, environment variables and `-var` options, so a pipeline that selects one environment's workspace and passes another environment's variables will plan changes against the wrong state without any error.
+## Guardrails
+- Derive environment-specific values from `terraform.workspace` in the root module (for example with a map keyed by workspace name).
+- Or use a directory per environment so the variable file and the backend live together.
+- Fail the pipeline if the selected workspace and the variable file name disagree.
+W: The workspace controls state only, while `-var-file` is an independent input, so mixing a dev workspace with prod values is accepted and plans a resize.
+X: B=Auto-loading: only `terraform.tfvars`, `terraform.tfvars.json` and `*.auto.tfvars` files load automatically; a file named `prod.tfvars` is read only when passed with `-var-file`, which is what happened here.
+C=Silent failure: `terraform workspace select` returns an error when the workspace does not exist, and the plan describes dev resources, so dev was selected.
+D=Copied variables: Terraform does not store variable values per workspace in a CLI backend; values must be supplied on every run.
+T: A CLI workspace picks state, not variables; tie environment inputs to the workspace or use one directory per environment.
+V: Terraform
+
+@ TF-IEP002 D3 T3.6 advanced tradeoff
+S: Which TWO reasons favor one root module per environment, each with its own backend, over CLI workspaces in a single directory? (Select TWO)
+A: Each environment can use different credentials and access controls on its backend, which workspaces in one directory cannot provide
+B: Each environment can pin and promote shared module versions on its own schedule, keeping prod on a reviewed release
+C: Workspaces cannot take different input values, so environments with different sizes are impossible to build with them
+D: Separate root modules can share one state file safely, so a change in dev is instantly visible in prod
+E: Separate root modules remove the need for a lock because only one environment can ever run at once
+K: A,B
+G: ## Choosing the environment boundary
+Both approaches run the same code against different state. The docs recommend alternatives to workspaces "for complex deployments requiring separate credentials and access controls", because CLI workspaces of a directory share one backend and its credentials.
+## What separate roots add
+- **Access separation**: the backend of each environment can sit in a different account or bucket with its own permissions.
+- **Independent versions**: each root has its own `module` blocks, so versions advance per environment.
+- **Cost**: each directory installs its own plugin and module cache, and updates from version control must be applied to each directory.
+W: A=Separate backends: each root module has its own backend configuration, so credentials and access controls can differ per environment.
+B=Own module versions: every root has its own module blocks, so prod can stay on a reviewed release while dev tests newer ones.
+X: C=Different inputs: workspaces handle different sizes through variables or maps keyed by `terraform.workspace`; the docs say inputs are usually specified per workspace.
+D=Shared state file: separate roots have separate state; sharing one file is the opposite of isolation and is not what the pattern does.
+E=No lock needed: each state still has its own lock and two runs against the same environment still contend for it.
+T: Choose separate roots and backends when environments need different credentials or release schedules.
+V: Terraform
+
+@ TF-IEP002 D3 T3.7 applied troubleshooting
+S: A CI job was cancelled in the middle of `terraform apply`. The next run stops with "Error acquiring the state lock" and prints a lock ID and the earlier run's metadata. No other run is active. What is the correct action?
+A: Confirm the earlier run is really dead, then release the lock with `terraform force-unlock` and the printed lock ID
+B: Add `-lock=false` to every future command so that locks left by cancelled jobs no longer block the pipeline
+C: Delete the state object from the backend so that the lock disappears together with the file that it protects
+D: Run `terraform init -reconfigure`, which clears locks left behind by earlier runs when it reinitializes the backend
+K: A
+G: ## Why the lock stays
+Terraform locks state for every operation that can write it. When a process is killed, it cannot release the lock, so the next run fails to acquire it and prints a lock ID.
+## Safe recovery
+`terraform force-unlock LOCK_ID` removes the lock for the current configuration without modifying infrastructure. The ID acts as a nonce so that you unlock the right lock. The docs warn that unlocking a lock held by someone else can lead to multiple writers, so use it to release your own lock after automatic unlocking failed, once you have verified the holder is gone.
+## What not to do
+Disabling locking (`-lock=false`) is not recommended: concurrent writers can corrupt state. Removing state objects destroys the record of managed resources.
+W: Verifying that no run holds the lock and then using `force-unlock` with the reported ID releases only the orphaned lock and leaves state and infrastructure untouched.
+X: B=Disabling locks permanently: the docs do not recommend `-lock=false`; two concurrent applies could write the state at once and corrupt it.
+C=Deleting state: this loses the mapping between configuration and real resources, so the next plan would try to create everything again. The lock is a separate concern.
+D=Reconfigure: `-reconfigure` ignores earlier backend configuration settings; it does not release a lock held on the state.
+T: After a killed run, verify nobody holds the lock, then use terraform force-unlock with the lock ID.
+V: Terraform
+
+@ TF-IEP002 D3 T3.7 applied troubleshooting
+S: Two pipelines apply different changes to the same state. When both start together, the second fails at once with a lock error although the first finishes within minutes. Which change makes the second run wait instead of failing?
+A: Add `-lock-timeout=10m` to the plan and apply commands
+B: Add `-lock=false` to the second pipeline only
+C: Lower `-parallelism` to 1 on the first pipeline so it holds the lock for less time
+D: Run `terraform init -upgrade` in the second pipeline before applying
+K: A
+G: ## Lock acquisition
+By default Terraform tries to take the state lock once. The default for `-lock-timeout` is `0s`, which means it fails immediately if the lock is held. With `-lock-timeout=DURATION` (a number with a unit such as `30s` or `10m`) Terraform retries until the duration passes, and only then returns the error.
+## Choosing the timeout
+Set it a bit above the normal run length of competing pipelines. Serializing the runs in the CI system (a concurrency group) is better still, because it also avoids applying out of order.
+W: A lock timeout makes the second run retry for up to ten minutes, which covers the first run's few minutes, so no manual intervention is needed.
+X: B=Disabling the lock: the second run would write state at the same time as the first, which is the corruption that locking prevents.
+C=Lower parallelism: fewer concurrent operations make the first run slower, not shorter, and the second run would still fail at once.
+D=Upgrading in init: `-upgrade` refreshes providers and modules; it has no effect on how the state lock is taken.
+T: -lock-timeout makes Terraform wait for a held lock; the default of 0s fails immediately.
+V: Terraform
+
+@ TF-IEP002 D3 T3.7 applied definition
+S: Which TWO statements about Terraform's log settings are accurate? (Select TWO)
+A: `TF_LOG_CORE` and `TF_LOG_PROVIDER` enable logging separately for Terraform itself and for provider plugins
+B: Setting only `TF_LOG_PATH` produces no log output, because `TF_LOG` must also be set to enable logging
+C: `TF_LOG=JSON` writes a stable, documented format that downstream tools may rely on for every release
+D: `TF_LOG` output goes to standard output, so `terraform output -json` pipelines mix it with real results
+E: `TRACE` is the least verbose level and `ERROR` the most, so `TF_LOG=ERROR` is the best level for a crash
+K: A,B
+G: ## Terraform's log variables
+- `TF_LOG` turns logging on and sets the level: `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, in decreasing verbosity. Logs go to `stderr`.
+- `TF_LOG=JSON` writes TRACE-level logs in a parseable JSON encoding, which the docs say is not a stable interface and is meant for tools.
+- `TF_LOG_CORE` and `TF_LOG_PROVIDER` take the same levels but enable only the core or only the provider plugin logs.
+- `TF_LOG_PATH` appends the log to a file; logging still needs `TF_LOG` set.
+## Practical use
+For a failing provider call, `TF_LOG_PROVIDER=DEBUG` keeps the core noise out. For a bug report, collect a TRACE log.
+W: A=Separate core and provider logging: the two variables enable core and plugin logs independently, using the same levels as the main variable.
+B=Path needs TF_LOG: the docs state that even when `TF_LOG_PATH` is set, `TF_LOG` must be set before any logging happens.
+X: C=Stable JSON: the docs warn the JSON encoding is not a stable interface and may change at any time without warning.
+D=Standard output: logs go to `stderr`, so command output captured from `stdout`, such as `terraform output -json`, stays clean.
+E=Verbosity order: `TRACE` is the most verbose level and `ERROR` the least, so `ERROR` hides the detail needed to diagnose a crash.
+T: TF_LOG enables logs on stderr, TF_LOG_CORE and TF_LOG_PROVIDER split them, and TF_LOG_PATH only redirects to a file.
+V: Terraform
+
+@ TF-IEP002 D3 T3.7 advanced troubleshooting
+S: Plan fails with "Error: Cycle: aws_security_group.a, aws_security_group.b". Each group defines inline `ingress` blocks that use the other group's ID as the source. Which fix removes the cycle?
+A: Define the rules as separate rule resources, so each group exists first and the rules reference both groups
+B: Add `depends_on = [aws_security_group.b]` to the first group and the reverse to the second, so the order is explicit
+C: Run the apply with `-parallelism=1`, so that Terraform processes the groups one at a time
+D: Run the plan with `-refresh=false`, so that the cycle is not found while the existing state is read
+K: A
+G: ## What a cycle error is
+Terraform builds a dependency graph from references and `depends_on`. Inline rules make each group depend on the other's ID, so neither can be created first. The graph is validated for cycles before it is walked (`Validate the graph has no cycles`), and the plan stops.
+## Finding and breaking it
+- `terraform graph -type=plan -draw-cycles` highlights cycle edges in colour; `-draw-cycles` works with an explicit `-type`.
+- Break the loop by moving the part that creates the second edge into its own resource. Separate rule resources depend on both groups, while the groups depend on nothing in each other.
+W: Separate rule resources depend on both groups, while neither group depends on the other, so the graph becomes acyclic and groups are created before their rules.
+X: B=Mutual depends_on: it adds more edges between the same two nodes, which keeps (or creates) a cycle instead of removing one.
+C=Parallelism of one: it limits concurrent operations while walking a graph; a cyclic graph cannot be walked at all.
+D=No refresh: a cycle comes from the configuration's references, not from state refresh, so skipping refresh does not touch it.
+T: A cycle comes from mutual references; split the shared part into its own resource and inspect it with terraform graph -draw-cycles.
+V: Terraform
+
+@ TF-IEP002 D3 T3.7 applied definition
+S: Which TWO statements about the `-parallelism` setting are accurate? (Select TWO)
+A: By default Terraform processes up to 10 graph nodes at once, and the flag applies to plan, apply and destroy
+B: Providers such as AWS back off and retry on API rate limits in their clients, so Terraform does not use parallelism for that
+C: Raising the value lets Terraform process dependent resources at the same time because they no longer wait
+D: The flag only applies to apply, not to plan or destroy, because only apply changes infrastructure
+E: A value of 0 disables the limit and is the documented fix for provider throttling errors
+K: A,B
+G: ## How the graph walk is limited
+Terraform walks the dependency graph in parallel: a node runs as soon as everything it depends on is done. A semaphore limits how many nodes run at once so that the machine and the APIs are not overwhelmed. The default is 10, set with `-parallelism=n` on `plan`, `apply` and `destroy`.
+## Rate limiting
+The docs call the setting an advanced operation, helpful in special cases or to debug issues. They also note that some providers, AWS for example, handle rate limits with graceful backoff and retry in their API clients, so Terraform does not use parallelism to address API rate limits directly.
+W: A=Default and scope: ten nodes run concurrently unless changed, and the option exists on plan, apply and destroy.
+B=Provider-level backoff: rate-limit handling sits in the provider client with retries, not in Terraform's graph walk.
+X: C=Dependent resources: raising the number never breaks dependency edges; a node still waits until all of the nodes it depends on are complete.
+D=Apply only: the docs list plan, apply and destroy as accepting the flag, since all three walk the graph.
+E=Zero as a fix: the docs describe no unlimited value and no rate-limit remedy; unlimited concurrency would make throttling worse.
+T: -parallelism caps concurrent graph nodes (default 10) on plan, apply and destroy; rate limits are mostly handled by provider retries.
+V: Terraform
+
+@ TF-IEP002 D3 T3.7 applied troubleshooting
+S: A pipeline runs `terraform plan -input=false` and fails with "No value for required variable". The variable has no default, and `prod.tfvars` exists in the repository. Which TWO changes supply the value without a prompt? (Select TWO)
+A: Pass the file explicitly with `-var-file=prod.tfvars` in the plan command
+B: Export `TF_VAR_<name>` in the pipeline environment before running the command
+C: Rename the variable block in the configuration to `required_variable` so Terraform stops asking
+D: Add `-lock=false`, which makes the plan treat missing variables as null instead
+E: Keep `prod.tfvars` as it is, because Terraform loads every file ending in `.tfvars` from the directory
+K: A,B
+G: ## How missing variables behave
+A variable without a default needs a value from some source. In an interactive terminal Terraform prompts. With `-input=false` it errors out instead, which is what automation wants.
+## Sources that load without prompting
+- `-var` and `-var-file` options on the command line.
+- Files named `terraform.tfvars`, `terraform.tfvars.json`, or ending in `.auto.tfvars` / `.auto.tfvars.json`, loaded automatically.
+- Environment variables named `TF_VAR_<name>`.
+- Values set in HCP Terraform.
+A plain `prod.tfvars` is not loaded automatically.
+W: A=Explicit file: `-var-file` reads the named file, so the value in `prod.tfvars` reaches the variable.
+B=Environment variable: `TF_VAR_` followed by the variable name is read by Terraform without any prompt.
+X: C=Renaming the variable: names are part of the interface; renaming changes the variable and the same requirement remains for the new name.
+D=Lock flag: `-lock=false` concerns the state lock and has nothing to do with missing variables.
+E=Every tfvars file: only `terraform.tfvars`, `terraform.tfvars.json` and `*.auto.tfvars` (or `.json`) files load automatically; other names need `-var-file`.
+T: With -input=false a missing variable is an error; supply it via -var-file, -var, TF_VAR_ or an auto-loaded file.
+V: Terraform
+
+@ TF-IEP002 D3 T3.7 applied comparison
+S: A pipeline's `terraform validate` stage passes, but the next `terraform plan` stage fails with a provider authentication error. A reviewer asks why validate did not catch it. What is the accurate answer?
+A: Validate checks syntax and internal consistency only; it does not contact providers or remote services, while plan does
+B: Validate was run without initialization, which makes it skip provider checks and report success without testing anything
+C: Validate checks only files changed since the last commit, so the changed credentials were outside its scope
+D: Validate caches the result of the last successful plan and reports that result when the files are unchanged
+K: A
+G: ## What validate does
+`terraform validate` checks whether configuration files are syntactically valid and internally consistent (attribute names, value types), regardless of variables or state. The docs state it does not validate remote services such as remote state or provider APIs. It needs an initialized directory with plugins and modules installed; `terraform init -backend=false` prepares one without touching the backend.
+## What plan adds
+`terraform plan` runs in the context of a workspace, variable values and real provider credentials, includes an implied validation, and talks to the APIs while refreshing and reading data. Credentials problems surface there.
+W: Validate is an offline consistency check, so a bad or missing credential cannot fail it; the provider is first contacted during plan.
+X: B=Skipping checks: validate requires an initialized directory and fails without it; it does not report success without checking.
+C=Changed files only: validate reads the configuration in the whole directory, not a diff from version control.
+D=Cached plan result: validate keeps no plan result; it evaluates the configuration each time.
+T: validate proves the code is consistent; only plan proves that credentials, state and APIs work.
+V: Terraform
+
+@ TF-IEP002 D3 T3.8 applied comparison
+S: In HCP Terraform, workspace `vpc-prod` has not been shared with anyone (default). A consumer workspace needs its `subnet_id` output. Which statement is accurate?
+A: `tfe_outputs` reads the outputs without full state access and is not subject to remote state sharing, but the tfe provider token needs permission
+B: `terraform_remote_state` works for every workspace in the organization, because new workspaces share state with all of them by default
+C: `tfe_outputs` first requires the producer to share state with the consumer, exactly as `terraform_remote_state` does
+D: `tfe_outputs` returns the complete state file of the producer, so the consumer must be trusted with every resource attribute
+K: A
+G: ## Two ways to read outputs in HCP Terraform
+- `terraform_remote_state` reads the whole state snapshot of another workspace. It is governed by **remote state sharing** settings: by default new workspaces do not allow other workspaces to read their state, and the docs advise enabling access only between workspaces that need each other (least privilege).
+- `tfe_outputs` (tfe provider) returns only the output values. The docs recommend it because it does not require full access to workspace state, and note that remote state access controls do not apply to it. The provider still needs a valid token with permissions on the producing workspace.
+## Example
+`data "tfe_outputs" "vpc" { config = { organization = "example_corp" workspaces = { name = "vpc-prod" } } }` and then `data.tfe_outputs.vpc.outputs.subnet_id`.
+W: tfe_outputs bypasses state sharing and exposes only outputs, so the consumer works as long as its tfe provider token is authorized for the producing workspace.
+X: B=Default sharing: new workspaces do not allow other workspaces to access their state by default, so a plain remote state read would be denied.
+C=Sharing prerequisite: the docs say remote state access controls do not apply to tfe_outputs; the token's permissions govern it instead.
+D=Complete state: the data source returns output values only, which is why it is considered more secure than full state access.
+T: In HCP Terraform prefer tfe_outputs: outputs only, no state-sharing requirement, but the token must be authorized.
+V: Terraform
+
+@ TF-IEP002 D3 T3.8 applied troubleshooting
+S: An app configuration reads `data.terraform_remote_state.net.outputs.subnet_ids` and fails with an unsupported-attribute error. The network configuration defines `subnet_ids` as an output of `module.vpc`, and no root `output` exists. What is the fix?
+A: Add a root `output "subnet_ids"` in the network configuration that returns `module.vpc.subnet_ids`, then apply it
+B: Change the consumer to `outputs.vpc.subnet_ids`, because remote state also exposes child module outputs under the module name
+C: Add `depends_on = [module.vpc]` to the data source in the consumer so that the output becomes visible
+D: Mark the child module's output as `sensitive = true`, which makes it appear among the root outputs of the state
+K: A
+G: ## Only root outputs are shared
+`terraform_remote_state` exposes the **root module output values** of the other configuration. An output declared inside a child module is internal to the module call; it reaches the state's `outputs` only when the root module re-exports it with its own `output` block.
+## The fix in two steps
+1. In the producer, add `output "subnet_ids" { value = module.vpc.subnet_ids }` and apply, so the new output is written to state.
+2. The consumer then reads `data.terraform_remote_state.net.outputs.subnet_ids`.
+Until the producer is applied the output is missing, even though the code now declares it.
+W: A root output re-exporting the child module's value, applied to update the state, makes the attribute available to the consumer.
+X: B=Module names in outputs: the data source's `outputs` object holds root output names only; module call names are not part of it.
+C=Data source depends_on: ordering in the consumer cannot add a value that the producer's state does not contain.
+D=Sensitive flag: sensitivity only controls display; it does not promote a child output to the root.
+T: terraform_remote_state sees only root outputs that have already been applied; re-export child module values at the root.
+V: Terraform
+
+@ TF-IEP002 D3 T3.8 applied definition
+S: A consumer must plan before the producer configuration has ever been applied, so its state has no outputs yet. Which `terraform_remote_state` argument supplies fallback output values in that case?
+A: defaults
+B: config
+C: workspace
+D: backend
+K: A
+G: ## Arguments of terraform_remote_state
+- `backend` (required): the backend type, such as `s3` or `remote`.
+- `config` (object): settings for that backend, such as bucket and key.
+- `workspace`: the Terraform workspace to read, if the backend supports workspaces.
+- `defaults` (object): default values for outputs, used if the state file is empty or lacks a required output.
+## When defaults helps
+It supports first-time bootstrap or ordered rollouts where the consumer might be planned before the producer has written an output. Use it deliberately: placeholder values can mask a missing apply of the producer.
+W: `defaults` is described as the values to use when the state file is empty or lacks a required output.
+X: B=Config: this tells the data source how to reach the backend (bucket, key, region); it does not provide fallback outputs.
+C=Workspace: this chooses which workspace's state to read; an empty state in that workspace is still empty.
+D=Backend: this selects the backend type to read from and has no role in missing-output handling.
+T: terraform_remote_state `defaults` covers an empty state or a missing output.
+V: Terraform
+
+@ TF-IEP002 D3 T3.8 advanced troubleshooting
+S: An app configuration runs in workspace `prod` and reads network outputs through `terraform_remote_state` on the S3 backend, setting only `backend` and `config`. It receives the dev network's subnet IDs. Why?
+A: Without the `workspace` argument the data source reads the default workspace's state, which here holds the dev network
+B: The data source always reads the workspace that was created first in that backend, regardless of the arguments it is given
+C: The `config` block must repeat the app configuration's own workspace name, or Terraform falls back to an earlier state
+D: Remote state cannot be read per workspace, so it merges outputs from all workspaces and returns the newest value
+K: A
+G: ## Workspaces and terraform_remote_state
+The workspace of the running configuration does not carry over to the data source. The data source takes its own `workspace` argument for the backend it reads, and when it is omitted it reads the `default` workspace of the producer.
+## Matching environments
+If producer and consumer use the same workspace names per environment, set `workspace = terraform.workspace` in the data source. That keeps prod reading prod. With directory-per-environment layouts, point `config` at each environment's own backend key or bucket.
+W: The omitted `workspace` argument leaves the data source on the default workspace of the producer, so prod receives the values of whichever environment lives there.
+X: B=Oldest workspace: there is no creation-order rule; the argument chooses the workspace and the default is used when it is missing.
+C=Repeating workspace in config: `config` holds backend settings; the consumer's selected workspace is not copied into it and no earlier state is used as a fallback.
+D=Merging outputs: each workspace has its own separate state, and the data source reads one snapshot; it never merges them.
+T: Set workspace = terraform.workspace on terraform_remote_state, or the default workspace is read.
+V: Terraform
+
+@ TF-IEP002 D3 T3.8 applied troubleshooting
+S: A pipeline script runs `terraform output -raw subnet_ids` to pass a `list(string)` output to a deployment tool and fails. Which command fits the script?
+A: `terraform output -json subnet_ids` and parse the result with a JSON tool such as `jq`
+B: `terraform output subnet_ids -raw -flatten`, which joins the list into a single string with commas
+C: `terraform output -no-color subnet_ids`, because colorless output is meant for machine consumption
+D: `terraform output -state=terraform.tfstate subnet_ids`, which converts complex values to plain strings
+K: A
+G: ## Output formats
+- Default: human-readable HCL-like display; sensitive values show `<sensitive>`.
+- `-json`: a JSON object, with one key per output, or only the named output, suitable for `jq`.
+- `-raw`: prints one value as a plain string without any formatting; it supports only string, number and boolean values, so lists and maps fail.
+## Practice
+Use `-raw` for single scalars in shell scripts (an ID or a URL) and `-json` for lists and objects. Both `-json` and `-raw` print sensitive values in plain text, so treat the script log as sensitive. `-no-color` and `-state` do not change the data shape; `-state` is a legacy option for the local backend only.
+W: JSON output keeps lists and objects intact and works with `jq`, whereas `-raw` accepts only string, number and boolean values.
+X: B=Flatten flag: no such option exists in `terraform output`, and `-raw` still rejects lists.
+C=No-color: this removes colour codes only; the list would still be in HCL-style display, not a script-friendly structure.
+D=State path: `-state` is a legacy option for local state that picks a file to read; it does not convert types.
+T: Use terraform output -raw for scalars and -json for lists and maps.
+V: Terraform
+
+@ TF-IEP002 D3 T3.8 applied comparison
+S: Which TWO approaches let one configuration publish data for another without giving the reader access to the whole state? (Select TWO)
+A: Publish values to a shared key/value store with a resource and read them with the matching data source
+B: Create a DNS record with a predictable name and have consumers resolve it with a DNS data source
+C: Give the consumer read access to the state bucket and use `terraform_remote_state` on the root outputs
+D: Mount the producer's state file into the consumer's working directory and pass it with `-state`
+E: Copy the output values by hand into the consumer's `default` values after each producer apply
+K: A,B
+G: ## Paired resources and data sources
+The docs offer alternatives to remote state for sharing data between configurations that represent system components:
+- A shared Consul cluster: `consul_key_prefix` publishes, `consul_keys` reads.
+- Tags: assign a tagging convention to resources, then query by tags with the provider's data source (for example `aws_vpc`).
+- DNS: create a record with a predictable name and use that name or the DNS provider to read addresses.
+- `terraform_remote_state`: tighter coupling, no extra publishing step, but the reader needs access to the full state snapshot.
+## Why it matters
+Anyone who can read the outputs from a backend can read the entire state, which often holds secrets. A published, narrow channel limits exposure.
+W: A=Key/value store: the producer writes only chosen values, and readers need access to that store, not to state.
+B=DNS record: only the address data published in DNS is visible, and consumers use ordinary lookups.
+X: C=Remote state read: this is the approach that needs access to the whole state snapshot, the exposure the question wants to avoid.
+D=Mounted state with `-state`: this hands over the entire file, which is more exposure, and `-state` is a legacy local-backend option.
+E=Manual copy: values drift from the producer without any link, and the defaults would hide the mismatch; it is not a supported sharing mechanism.
+T: Share data through a narrow published channel (key/value store, DNS, tags) when readers must not see the state.
+V: Terraform
+
+@ TF-IEP002 D3 T3.8 applied troubleshooting
+S: HCP Terraform workspace variable `instance_count` is set to 5. The repository's `prod.auto.tfvars` sets it to 2, and the variable has a default of 1. A VCS-triggered run starts. Which value does the root module use?
+A: 5
+B: 2
+C: 1
+D: The run stops with an error for the competing definitions
+K: A
+G: ## Where HCP Terraform variables sit
+The precedence list puts variables defined in HCP Terraform (workspace variables and variable sets) together with `-var` and `-var-file` at the top. They beat `*.auto.tfvars` files, `terraform.tfvars`, `TF_VAR_` environment variables and the default.
+## Consequence for teams
+A value kept in the repository is not authoritative when the workspace also defines it. Teams should keep each variable in one place, or reviews of the file will not match what the run actually uses.
+W: HCP Terraform variables have the highest precedence, so the workspace value of 5 overrides the auto-loaded file and the default.
+X: B=Auto file: `*.auto.tfvars` ranks below command-line options and HCP Terraform variables.
+C=Default: the default is the lowest-precedence source and is used only if nothing else sets the variable.
+D=Error: layered sources are expected; Terraform resolves them by precedence and only complains when one file assigns the same name twice.
+T: HCP Terraform variables outrank auto.tfvars and terraform.tfvars; keep each variable in one place.
+V: Terraform
+
+@ TF-IEP002 D3 T3.9 advanced troubleshooting
+S: `terraform init` fails with no available provider release for `hashicorp/aws`. The root module requires `>= 5.0, < 5.10`, while a child module from the registry requires `>= 5.20`. What is the cause?
+A: Terraform must satisfy every constraint from the root and all child modules together, and no release fits both ranges
+B: Child module constraints are ignored, so the root module's range alone made no release available in the registry
+C: The root module's range wins over child modules, but `5.10` and above are hidden from the registry cache
+D: Terraform installs one provider copy per module, and the child module copy simply failed to download
+K: A
+G: ## Constraints combine
+The root module and every child module can constrain the provider version. Terraform treats these as equal and proceeds only if all are met. A single provider version is installed and shared by the whole configuration.
+- Root `>= 5.0, < 5.10` allows 5.0 to 5.9.
+- Child `>= 5.20` allows 5.20 and up.
+The intersection is empty, so `init` reports that no available release matches the given constraints and lists which modules asked for what.
+## Fixing
+Raise the root upper bound (and test the upgrade), pick an older version of the child module with a lower minimum, or relax one of the two. Shared modules should state only the minimum they need.
+W: Constraints from all modules are intersected; with 5.0-5.9 and 5.20 or higher no version qualifies, so init fails.
+X: B=Ignored constraints: Terraform considers module constraints equal with the root's, which is exactly what produces the conflict.
+C=Root wins: neither side takes priority, and no hidden registry cache is involved.
+D=One copy per module: a configuration uses one installed version per provider, which is why the constraints must agree.
+T: Root and module provider constraints are intersected; if the ranges do not overlap, init fails.
+V: Terraform
+
+@ TF-IEP002 D3 T3.9 applied troubleshooting
+S: CI plans against `source = "terraform-aws-modules/vpc/aws"` with `version = "~> 5.0"`. A laptop with an unchanged lock file shows no changes, but CI proposes changes after a new 5.x release. Why do they differ?
+A: The lock file records providers only; module versions are not remembered, so each fresh init takes the newest release in range
+B: The lock file pins modules too, but CI regenerates it on every run, which replaces the laptop's recorded version
+C: Registry modules ignore `version` constraints in CI, where the newest release is always installed whatever the constraint
+D: The laptop caches providers and CI caches modules, so the two differ in which of the two is allowed to update itself
+K: A
+G: ## What the lock file covers
+`.terraform.lock.hcl` currently tracks only provider dependencies. For remote modules Terraform does not remember selections: it selects the newest available version that meets the constraint whenever it installs the module. A machine that already installed the module keeps its copy until `terraform init -upgrade`; a fresh CI workspace installs whatever is newest in range.
+## Making modules reproducible
+Use an exact version (`version = "5.8.1"`) when you need identical module code everywhere, and move the pin in a reviewed change. The docs say to require specific versions for third-party modules so that updates happen when convenient, and to use ranges only when the publisher follows semantic versioning.
+W: Modules are absent from the lock file, so a fresh checkout resolves `~> 5.0` to the newest 5.x, while the laptop keeps the version it installed earlier.
+X: B=Lock for modules: the lock file has no module entries; the docs say it tracks only provider dependencies.
+C=Ignored constraints: `~> 5.0` is honored; the newest release inside 5.x is chosen, which is the difference seen here.
+D=Different caches: both machines apply the same constraint rules; the divergence comes from when each one last resolved the module.
+T: Providers are locked, modules are not; pin modules to an exact version to get identical code everywhere.
+V: Terraform
+
+@ TF-IEP002 D3 T3.9 applied definition
+S: A team runs `terraform init -upgrade` to move a provider forward within its constraint. What else does the flag change?
+A: It ignores selections recorded in the lock file and also updates installed child modules to the latest source code
+B: It rewrites the version constraints in the configuration files to the newest provider release
+C: It upgrades the Terraform CLI itself to the newest release that `required_version` permits
+D: It migrates the state to the newest state format so the providers it selected can write to it
+K: A
+G: ## Normal init versus -upgrade
+Plain `terraform init` reuses lock file selections for providers and leaves installed modules as they are, installing only newly added ones. `terraform init -upgrade` changes both:
+- Providers: the newest version matching the constraints is selected, ignoring the lock file, and the lock file is updated.
+- Modules: installed modules are updated to the latest source code that matches their version constraints or refs.
+## What it never does
+It does not edit your `.tf` files, change the CLI version, or migrate state. Review the lock file diff and the plan after upgrading, in a lower environment first.
+W: The flag reconsiders lock file selections for providers and refreshes installed modules, so both can change in one command.
+X: B=Edits to constraints: init writes only the lock file and the `.terraform` directory; constraints remain whatever the team wrote.
+C=Upgrading the CLI: `-upgrade` concerns providers and modules; the CLI version is installed separately and checked by `required_version`.
+D=State migration: the flag has no effect on the state format; backend migration uses `-migrate-state`.
+T: init -upgrade re-resolves providers (ignoring the lock file) and updates modules within their constraints.
+V: Terraform
+
+@ TF-IEP002 D3 T3.9 advanced use-case
+S: A security team wants CI to fail if `terraform init` would change the committed lock file, while still verifying installed providers against the recorded checksums. Which command fits?
+A: `terraform init -lockfile=readonly`
+B: `terraform init -upgrade -lockfile=readonly`
+C: `terraform init -get=false`
+D: `terraform init -backend=false`
+K: A
+G: ## Lock file modes
+`-lockfile=readonly` tells init to suppress changes to the lock file while still verifying the installed packages against the checksums already recorded. If the selection or checksums would need to change, init reports an error instead of rewriting the file.
+- It conflicts with `-upgrade`, which exists to change the selections.
+- It suits CI jobs: dependency changes must come through a reviewed commit of the lock file, not through a pipeline run.
+## Not the same
+`-get=false` skips child module installation; `-backend=false` skips backend configuration. Neither affects the lock file rules.
+W: Read-only mode keeps the lock file unchanged and verifies checksums, so a pipeline fails rather than silently changing provider selections.
+X: B=Upgrade plus read-only: the two options conflict, since upgrading must write new selections.
+C=Skipping modules: `-get=false` only skips child module installation; providers can still be added to the lock file.
+D=Skipping the backend: `-backend=false` skips backend initialization and leaves the lock file behaviour unchanged.
+T: -lockfile=readonly makes init verify the lock file without rewriting it, and it conflicts with -upgrade.
+V: Terraform
+
+@ TF-IEP002 D3 T3.9 applied definition
+S: A team wants a provider's beta build, version `2.1.0-beta`. Which constraint lets Terraform select it?
+A: `= 2.1.0-beta`, an exact version
+B: `>= 2.0.0` as an open lower bound
+C: `~> 2.1` as a pessimistic range
+D: `>= 2.1.0-beta, < 3.0.0` as a bounded range
+K: A
+G: ## Pre-release versions
+A version with a dash suffix such as `1.2.0-beta` is a pre-release. The version constraints documentation says that to select one you must set the exact version using `=` (or no operator). Terraform does not match pre-release versions on `>`, `>=`, `<`, `<=` or `~>`.
+## Why
+It keeps range constraints from silently moving a configuration onto unstable builds. Unstable builds still need an explicit, exact opt-in, and that choice then lands in the lock file for review.
+W: Only an exact version match (with or without the equals sign) selects a pre-release.
+X: B=Open lower bound: range operators skip pre-release versions, so this takes the newest stable release.
+C=Pessimistic constraint: `~>` does not match pre-release versions either, so it resolves to a stable 2.x.
+D=Bounded range with the beta as its lower bound: a range operator still does not match pre-releases, and the constraint cannot be combined with an exact version either.
+T: Pre-release versions are selected only by an exact version constraint, never by range operators.
+V: Terraform
+
+@ TF-IEP002 D3 T3.9 advanced troubleshooting
+S: A team moves from `hashicorp/aws` to an in-house build at `registry.acme.corp/acme/aws`. After editing `required_providers`, plan fails because existing resources in state still reference the old provider. Which step fixes the state?
+A: `terraform state replace-provider registry.terraform.io/hashicorp/aws registry.acme.corp/acme/aws`, then re-run init
+B: `terraform init -upgrade`, which rewrites provider addresses in state when a new source appears in the configuration
+C: `terraform apply -refresh-only`, because a refresh stores the new provider address in each resource entry
+D: Remove all the resources from state with `terraform state rm` and import them again under the new provider
+K: A
+G: ## Provider addresses in state
+Each resource in state records the fully qualified source address of its provider (for example `registry.terraform.io/hashicorp/aws`). When the source in `required_providers` changes, existing entries still name the old address, and Terraform cannot match them to the new provider.
+## Replace-provider
+`terraform state replace-provider FROM_PROVIDER_FQN TO_PROVIDER_FQN` updates all resources that use the "from" provider so they use the "to" provider. It always writes a backup of state first, since the change is destructive, and asks for confirmation unless `-auto-approve` is given. Then `terraform init` installs the new provider and records it in the lock file.
+W: The command rewrites the provider address of every matching resource in state without touching real infrastructure, after which init installs the new source.
+X: B=Upgrade flag: `-upgrade` picks new versions of providers and modules; it does not edit addresses in the state.
+C=Refresh-only apply: refreshing reads real objects through a provider that Terraform can match; it does not rename the provider recorded for a resource.
+D=Remove and import: this works only with a lot of manual effort and risk; the dedicated command keeps all attributes and bindings with a backup.
+T: After changing a provider's source address, run terraform state replace-provider to retarget the resources in state.
+V: Terraform
+
+@ TF-IEP002 D3 T3.9 applied tradeoff
+S: A platform team publishes a shared module used by dozens of root modules. Which provider version requirement inside the module is recommended?
+A: A minimum version with `>=`, set to the first release that has the features the module uses
+B: An exact version such as `= 5.42.0`, so every consumer gets the version that the module author tested
+C: A pessimistic range such as `~> 5.42.0`, which prevents consumers from moving to a newer minor release
+D: No `required_providers` block at all, because the root module declares the providers for every child module
+K: A
+G: ## Constraints in shared modules
+Each module must declare its own provider requirements, because Terraform needs to find one version compatible with all modules in the configuration and needs the source address. The docs' recommendation for shared modules: constrain only the minimum required provider version with `>=`, the minimum containing the features the module relies on. That lets the consumer choose a newer version.
+## Why not tighter
+All constraints are intersected. A module that demands `= 5.42.0` or `~> 5.42.0` blocks every root module that needs another version, and two modules with narrow, different pins cannot be used together.
+## Where pins belong
+Root modules decide the final version through their constraints and the lock file.
+W: A minimum with `>=` states what the module needs and leaves the final choice to the root module, avoiding conflicts with other modules.
+X: B=Exact pin: any consumer with a different constraint, or another module needing another version, hits an unsatisfiable combination.
+C=Narrow range: it caps the allowed version, so consumers cannot upgrade the provider until the module is changed.
+D=No requirements block: only provider configuration is inherited by child modules, while source and version requirements are not; each module must declare its own.
+T: Shared modules declare only a minimum provider version with >=; roots pin and lock.
+V: Terraform

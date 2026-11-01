@@ -1,0 +1,591 @@
+# TF-IEP002 b07: D5 Security, secrets and compliance (T5.1-T5.5)
+# src: https://developer.hashicorp.com/terraform/language/manage-sensitive-data
+# src: https://developer.hashicorp.com/terraform/language/manage-sensitive-data/write-only
+# src: https://developer.hashicorp.com/terraform/language/block/ephemeral
+# src: https://developer.hashicorp.com/terraform/language/block/variable
+# src: https://developer.hashicorp.com/terraform/language/block/output
+# src: https://developer.hashicorp.com/terraform/language/resources/ephemeral
+# src: https://developer.hashicorp.com/terraform/cli/commands/plan
+# src: https://developer.hashicorp.com/terraform/cloud-docs/variables/managing-variables
+# src: https://developer.hashicorp.com/terraform/cloud-docs/workspaces/dynamic-provider-credentials/workload-identity-tokens
+# src: https://developer.hashicorp.com/terraform/cloud-docs/workspaces/dynamic-provider-credentials/aws-configuration
+# src: https://developer.hashicorp.com/terraform/cloud-docs/dynamic-provider-credentials/vault-backed
+# src: https://developer.hashicorp.com/terraform/cloud-docs/users-teams-organizations/permissions
+# src: https://developer.hashicorp.com/terraform/cloud-docs/users-teams-organizations/permissions/organization
+# src: https://developer.hashicorp.com/terraform/cloud-docs/policy-enforcement/manage-policy-sets
+# src: https://developer.hashicorp.com/terraform/cloud-docs/policy-enforcement/opa
+# src: https://developer.hashicorp.com/terraform/cloud-docs/policy-enforcement/sentinel
+# src: https://developer.hashicorp.com/terraform/language/meta-arguments/lifecycle
+# src: https://developer.hashicorp.com/terraform/language/checks
+# src: https://developer.hashicorp.com/terraform/internals/json-format
+
+@ TF-IEP002 D5 T5.1 applied troubleshooting
+S: A module declares `variable "db_password" { type = string, sensitive = true }` and passes it to `aws_db_instance`. Plan output shows `(sensitive value)`, yet an auditor who downloaded the state file reads the password in cleartext. What explains this?
+A: The sensitive flag only redacts the value in CLI and UI output; Terraform still writes the value to state and plan files
+B: The sensitive flag was ignored because the variable is consumed by a managed resource instead of by an output block
+C: The remote backend decrypts the state when it is downloaded, which makes every sensitive marker disappear from the file
+D: The sensitive flag only applies to variables that have no default; set the default to null so redaction covers the state
+K: A
+G: ## What `sensitive` does and does not do
+Marking a variable or output `sensitive = true` changes how Terraform **displays** values. Terraform redacts them in CLI output and the HCP Terraform UI, and any expression that references a sensitive value is treated as sensitive too.
+It does not change what Terraform **stores**. State and plan files still contain the real value, so anyone who can read those files can read the secret. `terraform output -raw` and `-json` also print sensitive outputs in plain text.
+## Keeping the value out of state
+Only ephemeral values (the `ephemeral` argument on variables, the `ephemeral` block, write-only arguments) are omitted from state and plan files. Otherwise, secure the state: remote storage, encryption at rest, access control and audit logs.
+W: The sensitive argument is a display control. The password still lands in state because the resource argument is a normal, persisted attribute, so protecting state access or switching to an ephemeral value plus a write-only argument is the real fix.
+X: B=Resource consumption: sensitivity propagates to every expression that references the variable, which is why the plan shows a redacted value. The redaction is the same for outputs and resources, and neither stores less.
+C=Decryption on download: encryption at rest protects the stored object, but the file content itself is not changed by sensitive markers. Even a perfectly encrypted state holds the secret once someone with access reads it.
+D=Default value: the sensitive argument has no relation to defaults, and setting a default of null would only make the variable required or empty. It would not change what Terraform writes to state.
+T: sensitive hides values on screen only; state and plan files still hold them, so use ephemeral values and write-only arguments or lock down state access.
+V: Terraform
+
+@ TF-IEP002 D5 T5.1 applied use-case
+S: A config uses `resource "random_password" "db"` and passes `random_password.db.result` to the `password` argument of `aws_db_instance`. Security wants the password in neither resource's state entry. Which change achieves this?
+A: Mark the `result` reference with `sensitive()` and enable server-side encryption on the state bucket that holds both entries
+B: Use an `ephemeral "random_password"` block and pass its result to the instance's `password_wo` argument, with `password_wo_version` set
+C: Move `random_password` into a child module and expose the value through an output block that has `sensitive = true`
+D: Add `lifecycle { ignore_changes = [password] }` on the instance so Terraform stops tracking the password attribute in state
+K: B
+G: ## Two pieces work together
+- An **ephemeral resource** (`ephemeral "random_password" "db" {}`) exists only during the current operation. Terraform never writes it to state or plan files.
+- A **write-only argument** (such as `password_wo` on `aws_db_instance`) accepts a value for the provider to use and then Terraform discards it, so the managed resource's state entry has no password.
+## Version argument
+Because Terraform cannot store the write-only value, providers add a version argument such as `password_wo_version`. Terraform stores that number in state, so changing it is the way to tell the provider to send a new value.
+## Reading it later
+The generated value is not kept anywhere by Terraform. If it must be recoverable, write it to a secrets store in the same configuration (for example with a write-only secret argument) and read it back with another ephemeral resource.
+W: The ephemeral block never persists, and the write-only argument hands it to the provider without storing it. Neither the random_password nor the database entry holds the secret, which a regular resource and argument pair cannot guarantee.
+X: A=sensitive() plus encryption: sensitive only hides the value on screen and encryption protects the file at rest. The secret is still written to state, so anyone who can read the state reads the password.
+C=Sensitive output via a child module: the random_password resource still saves its result in state, and a sensitive output is also stored in state. Moving the resource into a module changes only where the address lives.
+D=ignore_changes: this setting stops Terraform from proposing updates to the attribute. It does not remove the attribute from state, and the value written on creation remains there.
+T: To keep a secret out of state, generate it with an ephemeral block and consume it through a write-only argument and its version argument.
+V: Terraform
+
+@ TF-IEP002 D5 T5.1 applied troubleshooting
+S: A CI job runs `terraform plan -out=tfplan`, then uploads `tfplan` as a build artifact so another job can apply it after approval. A reviewer worries about secrets. Which statement is accurate?
+A: The saved plan encrypts every sensitive value with a key that only the approving job's runner can use
+B: Terraform strips sensitive and ephemeral values from the file, so the artifact only holds non-secret planned changes
+C: The saved plan holds the configuration, planned values and input variables, and sensitive data is stored in cleartext
+D: The saved plan stores only a hash of each variable, so the apply job must receive all the secret values again
+K: C
+G: ## What a saved plan contains
+`terraform plan -out` writes an opaque file with the full configuration, all values associated with planned changes, and the plan options including **input variables**. The documentation states that sensitive data, even if obscured in terminal output, is saved in **cleartext** in the plan file.
+## Consequences for pipelines
+- Treat the plan artifact exactly like state: restrict who can download it, set a short retention and keep it in an access-controlled artifact store.
+- Do not publish it to a place broader than the people allowed to see the secrets it might hold.
+- Ephemeral values are the exception: Terraform omits them from state **and** plan files, which is another reason to prefer them for credentials.
+W: The saved plan is not encrypted and is not redacted. Sensitive values appear in cleartext, so the artifact must be protected as a secret store with tight access and short retention.
+X: A=Runner-bound encryption: Terraform does not encrypt plan files with any key tied to a runner. Anyone who can read the file can extract the values.
+B=Stripped values: only ephemeral values are left out of plan files. Sensitive values and the input variables still appear, and the apply needs them.
+D=Hashed variables: the file keeps the values, not hashes of them, and a saved plan is applied as is. Hashing would make the plan impossible to apply without recalculating.
+T: A saved plan file holds sensitive values in cleartext, so guard the artifact like state.
+V: Terraform
+
+@ TF-IEP002 D5 T5.1 applied troubleshooting
+S: Reviewers find a `prod.auto.tfvars` containing `db_password = "..."` committed to the main branch two weeks ago. Which remediation is most complete?
+A: Delete the file in a new commit and add it to `.gitignore`, because the latest commit no longer exposes the password
+B: Rotate the exposed password, remove the file and ignore it, then supply the new value through a secrets source or sensitive variable
+C: Mark `db_password` as `sensitive = true` in the variable block, which redacts the committed value in the repository
+D: Encrypt the committed file with base64 and decode it in the pipeline, so the stored copy is no longer readable at a glance
+K: B
+G: ## Secrets in version control
+Terraform variable files are plain text, and Git keeps history. Once a secret is committed, deleting the file does not remove it from earlier commits, clones or forks, so the secret must be treated as compromised.
+## A complete fix has three parts
+- **Rotate** the credential so the leaked value is useless.
+- **Remove and ignore** the file (and rewrite history only as an extra clean-up, not as a substitute for rotation).
+- **Re-supply** the value from outside the repository: environment variables, an HCP Terraform sensitive variable, or an ephemeral read from a secrets manager.
+The variables documentation also says to ignore variable definition files with sensitive values in your VCS.
+W: Rotation is mandatory because history still holds the old value. Removing and ignoring the file stops a repeat, and moving the new value to a secrets source keeps it out of the repository.
+X: A=Delete and ignore only: older commits still contain the password, so anyone with a clone or fork can read it. Without rotation the secret stays valid.
+C=Sensitive flag: sensitive changes how Terraform displays values and does not touch a file already in Git. The committed text stays readable.
+D=Base64: base64 is an encoding, not encryption; anyone can decode it in one command. It also leaves the secret in history.
+T: A committed secret is a leaked secret: rotate it, remove and ignore the file, and inject the new value from outside the repository.
+V: Terraform
+
+@ TF-IEP002 D5 T5.1 applied use-case
+S: A root module must read a short-lived token created by a child module and use it to configure a provider, without the token reaching state. Which child module declaration allows this?
+A: `output "token" { value = ephemeral.auth.main.token, ephemeral = true }` in the child module
+B: `output "token" { value = ephemeral.auth.main.token, sensitive = true }` in the child module
+C: `output "token" { value = ephemeral.auth.main.token, ephemeral = true }` in the root module, read by the child
+D: `variable "token" { default = ephemeral.auth.main.token }` in the child module, set from the root
+K: A
+G: ## Ephemeral outputs
+The `ephemeral` argument on an `output` block omits that output from state. Terraform only allows it on **child module** outputs: root module outputs cannot be ephemeral. This is how a module passes a credential to its caller during one run.
+## Where the caller may use it
+An ephemeral value can only be referenced in ephemeral contexts: another ephemeral output or variable, locals, an `ephemeral` block, a write-only argument, a `provider` block and provisioner or connection blocks. A provider configuration is therefore a valid consumer of the token.
+## Sensitive is a different control
+`sensitive = true` hides the value on screen. A sensitive child output still reaches state.
+W: An ephemeral child module output omits the token from state and plan, and the root can consume it in a provider block, which is an allowed ephemeral context.
+X: B=Sensitive output: this redacts the display but the value is still persisted, so the token would reach state. It also is not accepted in a provider block unless the value is ephemeral.
+C=Ephemeral root output: the ephemeral argument cannot be used on root module outputs, and the token comes from the child module in this design anyway.
+D=Variable default: defaults must be constants, so a reference to an ephemeral resource there is invalid. Ephemeral values flow in through ephemeral variables or outputs.
+T: Pass transient credentials between modules with ephemeral = true on a child module output; root outputs cannot be ephemeral.
+V: Terraform
+
+@ TF-IEP002 D5 T5.1 applied definition
+S: A team reads a secret with `ephemeral "aws_ssm_parameter" "api"` and wants to use `.value`. Which TWO usages of `ephemeral.aws_ssm_parameter.api.value` are valid? (Select TWO)
+A: As the value of a write-only argument such as `secret_string_wo` on a managed resource
+B: As an argument of a regular, non-write-only attribute such as `tags` on a managed resource
+C: As the value of a root module `output` block that has `sensitive = true`
+D: As an argument inside a `provider` block that configures a provider
+E: As an argument of a `data` block that reads another object from the cloud API
+K: A,D
+G: ## Where ephemeral values may appear
+Terraform restricts ephemeral references to places where the value cannot be persisted. Valid contexts are: `locals`; `variable` blocks with `ephemeral`; child module `output` blocks with `ephemeral`; managed resource **write-only** arguments; other `ephemeral` blocks; `provider` blocks; and provisioner and connection blocks.
+Anywhere else, such as an ordinary resource argument, a data source or a root output, Terraform returns an error when it plans, because the value would be written to state or plan files.
+W: A=Write-only argument: the provider receives the value and Terraform discards it, so it is an allowed ephemeral context.
+D=Provider block: provider configuration is evaluated at run time and never stored in state, which is why ephemeral credentials may configure providers.
+X: B=Regular attribute: tags is stored in state, so Terraform rejects an ephemeral value there to avoid persisting it.
+C=Root output: sensitive does not make it ephemeral, and root module outputs cannot be ephemeral. The value would be written to state.
+E=Data block argument: data sources store their configuration and results in state, and the block is not on the list of ephemeral contexts, so the reference is rejected.
+T: Ephemeral values may flow only into write-only arguments, provider blocks, locals, ephemeral blocks, and ephemeral variables or child outputs.
+V: Terraform
+
+@ TF-IEP002 D5 T5.2 applied troubleshooting
+S: A database uses `password_wo = var.new_password` and `password_wo_version = 1`. Security rotated the secret and the pipeline passes the new value, but `terraform plan` reports no changes and the database keeps the old password. Why?
+A: Terraform stores the write-only value in state, and it only compares the stored hash on a later apply
+B: Terraform cannot diff a write-only value it never stored; only a changed version argument produces a planned update
+C: Terraform treats write-only arguments as immutable, so a password change requires destroying and recreating the instance
+D: The plan only shows password changes when `sensitive = true` is set on the variable that feeds the write-only argument
+K: B
+G: ## Why a rotation can be invisible
+Terraform sends write-only arguments to the provider on every operation, but it does not keep them in state or in plan files. With no stored prior value, Terraform has nothing to compare against, so a new value alone creates no plan diff.
+## The version argument
+Providers add a sibling such as `password_wo_version`. Terraform **does** store that number. Increment it in the same change that supplies the new value and the plan shows an update, so the provider applies the new write-only value.
+## Practice
+Tie the version to the secret's own version metadata (for example a version output of the secrets manager) so rotation in the store drives the update.
+W: The version argument is the only trackable signal. Raising it makes the plan include an in-place update, and the provider then uses the current write-only value.
+X: A=Stored hash: Terraform keeps no copy or hash of write-only values. That is the reason a version argument exists.
+C=Immutable: write-only arguments are updated in place by the provider when the version changes; a replacement is not required for a password change.
+D=Sensitive on the variable: sensitivity only changes display. It has nothing to do with whether a change appears in the plan.
+T: A write-only argument is invisible to plan diffs, so bump its _version argument to apply a rotated secret.
+V: Terraform
+
+@ TF-IEP002 D5 T5.2 applied use-case
+S: A configuration reads a Vault secret with an `ephemeral` block that obtains a dynamic credential lease. The security team asks what happens to that lease once the run is over. Which behavior matches the documented lifecycle?
+A: Terraform stores the lease ID in state so the next run can renew the same credential
+B: Terraform leaves the lease untouched, and Vault revokes the credential when its TTL expires
+C: Terraform opens the resource, renews it if needed, and closes it, ending the lease so Vault revokes the credentials
+D: Terraform opens the resource at the start of every run and closes it only when `terraform destroy` runs
+K: C
+G: ## Ephemeral resource lifecycle
+An `ephemeral` block has three steps in each run phase:
+- **Open**: when Terraform needs the result. For a Vault secret, the Vault provider obtains a lease and returns the secret.
+- **Renew**: if the operation outlasts the remote expiration time, Terraform asks the provider to renew, for example by calling Vault's lease renewal API.
+- **Close**: after the dependent providers have finished their work in that phase, Terraform closes the resource. For Vault that explicitly ends the lease, so Vault revokes the credentials immediately.
+## Why it helps
+Credentials are alive only as long as the run needs them and never appear in state, so a leaked state or plan contains no usable secret.
+W: Terraform manages the full open, renew and close cycle, and closing the Vault resource ends the lease, which makes the credentials stop working right after the phase completes.
+X: A=Lease ID in state: ephemeral resources are never recorded in state or plan files, so nothing carries over to the next run. Each run opens its own new lease.
+B=Wait for TTL: Terraform closes the resource and ends the lease explicitly. It does not leave short-lived credentials alive until they time out.
+D=Close only at destroy: the resource is closed after the dependent providers finish their work for the current run phase, not at the end of the infrastructure's lifetime.
+T: Ephemeral resources are opened, renewed and closed within the run; for Vault, closing ends the lease and revokes the credentials.
+V: Terraform
+
+@ TF-IEP002 D5 T5.2 applied troubleshooting
+S: One config creates `aws_secretsmanager_secret_version.db` and, in the same run, reads it through `ephemeral "aws_secretsmanager_secret_version"` to feed `password_wo`. On a first plan, the ephemeral block shows no result yet. What does Terraform do?
+A: It fails the plan, because ephemeral resources must read objects that already exist before planning starts
+B: It reads the secret during plan using the previous run's state, then verifies the value during apply
+C: It skips the ephemeral block and sets `password_wo` to null so the database is created without a password
+D: It defers opening the ephemeral resource to the apply stage, once the secret version's `secret_id` is known
+K: D
+G: ## Unknown inputs and ephemeral resources
+If an input argument of an ephemeral resource references something Terraform cannot know until apply (such as the ID of an object created in the same run), Terraform **defers** executing the ephemeral resource until the apply stage. The dependency graph still orders it after the secret version is created.
+## Why a data source is the wrong tool
+A normal `data` block that reads the secret would store `secret_string` in state. The ephemeral read gives the same data without persisting it, and the dependent write-only argument receives it at apply time.
+## Pattern from the docs
+Generate with an ephemeral `random_password`, store with `secret_string_wo` and `secret_string_wo_version`, read back with an ephemeral secret version, and pass the result to `password_wo` with the version taken from the secret.
+W: Deferral lets the first apply create the secret and then read it in the same run, so the database password comes from the secrets manager without ever being stored in state.
+X: A=Plan failure: unknown input values do not cause an error; Terraform postpones the work until apply.
+B=Previous state: an ephemeral resource is not in state, so there is no previous result to read. It is opened in the run itself.
+C=Null password: Terraform does not substitute null for a missing ephemeral result. The write-only argument receives the real value at apply.
+T: An ephemeral resource with unknown inputs is deferred to apply, which allows create-then-read of a secret in one run.
+V: Terraform
+
+@ TF-IEP002 D5 T5.2 applied definition
+S: Which TWO statements about write-only arguments are accurate? (Select TWO)
+A: Terraform sends the write-only argument to the provider on every operation, because it has no stored value to compare
+B: Terraform stores the write-only value in state in encrypted form and shows the difference in each plan
+C: A write-only argument accepts both ephemeral values and ordinary non-ephemeral values such as a literal string
+D: A write-only argument is only valid inside `ephemeral` blocks and cannot be set on a managed resource
+E: A write-only argument must have the same value on every run, or Terraform marks the resource as tainted
+K: A,C
+G: ## What a write-only argument is
+A write-only argument is a managed-resource argument (usually named `*_wo`) that the provider uses when it creates or updates the object and that Terraform then discards. It needs Terraform 1.11 or later and provider support.
+## Properties to remember
+- Not stored in state or plan files, so the plan cannot show a diff for it. The `*_wo_version` argument is the tracked signal.
+- It is sent to the provider on every operation.
+- It accepts ephemeral **and** non-ephemeral values. HashiCorp recommends feeding it from an ephemeral resource, since a literal string would still sit in your configuration.
+W: A=Sent every operation: with no stored value, Terraform cannot know if it changed, so it passes the value on each run and the version argument controls updates.
+C=Both kinds of values: a literal or variable works as the value, although an ephemeral source is the recommended way to avoid exposing the secret elsewhere.
+X: B=Encrypted in state: write-only values are not stored at all, not even encrypted, which is why plans cannot show a diff.
+D=Only in ephemeral blocks: write-only arguments are defined on managed resources, and that is the place where ephemeral values are consumed.
+E=Same value each run: changing the value does not taint anything. It simply has no effect unless the version argument also changes.
+T: Write-only arguments are never stored, are sent every run, accept ephemeral or plain values, and need the version argument to trigger updates.
+V: Terraform
+
+@ TF-IEP002 D5 T5.2 applied tradeoff
+S: A workspace stores an AWS access key as a Terraform variable marked Sensitive, and the config assigns it to the provider's `access_key`. A reviewer asks for the key to be passed as an environment variable instead. What is the strongest reason?
+A: Only environment variables can be marked sensitive in HCP Terraform, so Terraform variables are always stored in readable form
+B: Environment variables can be read back through the API by workspace admins, which simplifies key rotation
+C: Terraform variables cannot hold strings longer than the maximum length for environment variable values
+D: Terraform variables reach the configuration and may leak to logs or state; environment variables stay outside it
+K: D
+G: ## Where a secret can leak
+An HCP Terraform sensitive variable is write-only in the UI and API: nobody can read it back. But a Terraform variable is part of the configuration's inputs. The documentation warns that Terraform runs receive the full text of all Terraform variable values, including sensitive ones, and may print them in logs or state if the configuration sends the value to an output or a resource parameter.
+## Environment variables
+Provider credentials supplied as environment variables are read by the provider process and are not referenced from the configuration, so there is no path to an output or resource argument. Both categories can be marked sensitive.
+## Better still
+Use dynamic provider credentials so no long-lived key is stored at all.
+W: Keeping credentials out of the configuration's variables removes the chance that a reference carries them into logs, outputs or state, which is why the documentation prefers environment variables when possible.
+X: A=Environment variables encrypted: both categories can be marked sensitive and are handled the same way once sensitive. Encryption is not the difference.
+B=Readable through the API: sensitive values cannot be read back by anyone, including admins. Only new values can be written.
+C=Length limit: no such limit makes Terraform variables unsuitable for credentials. The concern is exposure, not size.
+T: Prefer environment variables for provider credentials: Terraform variables travel through the configuration and can reach logs or state.
+V: Terraform
+
+@ TF-IEP002 D5 T5.2 applied use-case
+S: A company self-hosts Terraform Enterprise with no public OIDC metadata endpoint. Cloud providers cannot reach it to verify workload identity tokens, yet runs need short-lived AWS credentials. Which approach fits?
+A: Vault-backed dynamic credentials, where Vault authenticates the run's token and issues short-lived AWS credentials
+B: Long-lived IAM user keys stored as sensitive environment variables and rotated each quarter by an administrator
+C: A shared variable set that holds the AWS root account keys, applied to every workspace in the organization
+D: Embedding the AWS access key in the provider block, with the configuration repository set to private
+K: A
+G: ## Two forms of dynamic credentials
+- **Dynamic provider credentials**: the cloud trusts HCP Terraform or Terraform Enterprise's OIDC identity and verifies tokens through the platform's public metadata endpoints.
+- **Vault-backed dynamic credentials**: the run's token authenticates to **Vault**, whose secrets engines (AWS, GCP, Azure) generate short-lived credentials.
+## Why Vault-backed here
+The documentation positions Vault-backed credentials for teams that want a central place to manage cloud credentials and want to avoid exposing the platform's OIDC metadata endpoints publicly. Vault itself must reach `/.well-known/openid-configuration` and `/.well-known/jwks`, but those can stay on a private network.
+W: Vault verifies the run's token over the private network and uses its AWS secrets engine to mint short-lived credentials, so no public OIDC endpoint and no long-lived key is needed.
+X: B=Static IAM user keys: long-lived keys defeat the goal of short-lived credentials, and stored keys can leak through logs or state.
+C=Root keys in a variable set: this gives every workspace full account power, which is the opposite of least privilege, and the keys never expire.
+D=Key in the provider block: a private repository is still a repository; the key sits in cleartext in configuration and state. Access control on the repo is not a secrets mechanism.
+T: No public OIDC endpoint but need short-lived cloud credentials: use Vault-backed dynamic credentials.
+V: Terraform
+
+@ TF-IEP002 D5 T5.3 advanced troubleshooting
+S: An AWS role trusts HCP Terraform with the condition `StringLike` on `sub` of `organization:acme:project:*:workspace:*:run_phase:*`. The role grants admin access to a production account. What is the risk?
+A: Only the plan phase can assume the role, so applies fail with an authentication error
+B: Any workspace in any project of the acme organization can assume the production role
+C: The token audience is no longer checked, so a Vault token could assume the AWS role
+D: The wildcard makes the role usable by any organization on HCP Terraform, not only acme
+K: B
+G: ## The subject claim identifies the caller
+A workload identity token's `sub` claim reads `organization:ORG:project:PROJECT:workspace:WS:run_phase:PHASE`. The cloud trust policy compares it with a pattern. The narrower the pattern, the fewer workspaces can assume the role.
+## What the wildcards allow
+With `*` for both project and workspace, every workspace in the `acme` organization, including a sandbox workspace any developer can run, can assume the production role. Use the exact project and workspace, and wildcard only the run phase when plan and apply need the same access.
+## Where wildcards hurt more
+The documentation notes that unless you match at least the organization name, any organization on HCP Terraform could reach your cloud resources. Here the organization is pinned, so the exposure is every workspace in it.
+W: The organization is fixed, but project and workspace are wildcards, so any workspace in acme is trusted by the admin role. A sandbox workspace could act in production.
+X: A=Plan-only: the run_phase wildcard matches both plan and apply, so both phases can assume the role.
+C=Audience: the audience is a separate condition (aud). A pattern on sub does not remove it, and changing sub does not affect the aud check.
+D=Any organization: the pattern starts with organization:acme, so tokens from other organizations do not match. That risk appears only when the organization is not matched.
+T: Pin the trust policy to the exact organization, project and workspace; wildcards on those parts let every workspace assume the role.
+V: Terraform
+
+@ TF-IEP002 D5 T5.3 applied use-case
+S: Plans in a workspace should only read AWS resources, while applies need write access. The workspace uses dynamic credentials. Which configuration implements least privilege?
+A: One role with write access, and a policy set that blocks destructive changes during the plan phase
+B: One role with read access for both phases, and the pipeline grants write access to a person on approval
+C: Two roles with trust policies matching run_phase plan and apply, set through plan and apply role ARN variables
+D: One role whose trust policy uses a `run_phase:*` wildcard, restricted by a longer session duration
+K: C
+G: ## Separate identity per run phase
+The `sub` claim ends in `run_phase:plan` or `run_phase:apply`, so a trust policy can tell the phases apart. When different permissions are wanted, create **two roles**, each trusting one phase, and set the environment variables `TFC_AWS_PLAN_ROLE_ARN` and `TFC_AWS_APPLY_ROLE_ARN`. The plan role can be read-only. If the plan variable is absent, `TFC_AWS_RUN_ROLE_ARN` is used.
+## Why a wildcard is not enough
+`run_phase:*` grants the same access to both phases, which is for workspaces that do not need separation.
+W: Distinct trust policies for plan and apply give each phase its own role, so plan runs can only read while applies hold the write permissions.
+X: A=Write role plus policy: a policy set evaluates the plan output after the plan has run with write credentials. It does not limit what the plan phase itself can call.
+B=Read role and human grant: dynamic credentials do not hand out permissions to a person. The apply phase still needs a role that can write.
+D=Wildcard and session length: a wildcard gives both phases the same role, and duration only changes how long the credentials last. Neither separates the privilege.
+T: Use separate plan and apply roles, each trusted by its own run_phase, so plans stay read-only.
+V: Terraform
+
+@ TF-IEP002 D5 T5.3 applied definition
+S: When writing a trust policy for HCP Terraform workload identity tokens, which TWO claims should be validated at minimum? (Select TWO)
+A: `aud`, so a token meant for one platform cannot be replayed against another
+B: `terraform_run_id`, so only one specific run can ever assume the role
+C: `sub`, including at least the organization name, so other tenants cannot assume the role
+D: `exp`, to ensure the token has a very long validity before it is accepted
+E: `iat`, so tokens issued before the policy was written are accepted
+K: A,C
+G: ## What the cloud checks
+The cloud platform verifies the JWT signature with the platform's public key, then looks at claims to decide whether to grant a role. HashiCorp's guidance is to match at least:
+- `aud`, the intended audience (such as `aws.workload.identity`). It prevents a token issued for one system from being used on another, for example against Vault.
+- `sub`, which carries organization, project, workspace and run phase. If you do not match at least the organization name, any workspace on HCP Terraform could reach your cloud resources.
+## Other claims
+Custom claims such as project name or workspace ID may be added for more precision. `terraform_run_id` is different on every run, so it is meant for traceability and logging, not for trust rules.
+W: A=aud: restricts the token to its intended consumer, so a token minted for another service cannot be replayed on this one.
+C=sub: includes the organization and workspace, so pinning it makes sure only the intended workspaces assume the role.
+X: B=Run ID: a new value on every run, so a trust rule on it would reject all future runs. It is for audit trails.
+D=exp: token expiry is verified by the platform when it checks the token; a long validity is not a trust check and would make theft worse.
+E=iat: the time of issue is not an authorization condition, and accepting old tokens would weaken the policy.
+T: Always match aud and sub (with the organization at least); run IDs and timestamps are not trust conditions.
+V: Terraform
+
+@ TF-IEP002 D5 T5.3 applied tradeoff
+S: Runs of a workspace use an IAM user key saved as a sensitive environment variable, rotated by hand. The security team wants no long-lived credential in the pipeline. Which change addresses this directly?
+A: Move the key into a variable set so the same key is shared by more workspaces and rotated in one place
+B: Configure dynamic provider credentials so each run presents a signed token for an IAM role and gets temporary credentials
+C: Replace the environment variable with a Terraform variable, so the key is passed as a normal input variable
+D: Raise the rotation frequency to weekly, and put the key into the repository's encrypted secrets store
+K: B
+G: ## Static keys versus workload identity
+A stored key is valid until someone rotates it, can be copied from logs or backups and works from anywhere. With **dynamic provider credentials**, HCP Terraform generates a workload identity token (JWT) for each plan or apply, signed by its private key and expiring at the end of the plan or apply timeout. The cloud verifies it with the platform's public key and returns temporary credentials for the role named in the workspace variables.
+## Result
+Nothing long-lived is stored in the workspace, and the token's `sub` claim ties the permission to a specific organization, project, workspace and phase.
+W: A per-run signed token exchanged for temporary credentials removes the stored key entirely, so there is nothing to leak or forget to rotate.
+X: A=Shared variable set: this widens the number of workspaces holding the same long-lived key, so a leak affects more environments.
+C=Terraform variable: the documentation prefers environment variables for credentials, since Terraform variables flow through the configuration. It also leaves the key long-lived.
+D=Weekly rotation: more frequent rotation shortens exposure but the credential is still stored and still long-lived. The request is to have none.
+T: To remove long-lived pipeline credentials, use dynamic provider credentials with workload identity tokens.
+V: Terraform
+
+@ TF-IEP002 D5 T5.3 advanced troubleshooting
+S: A production workspace is VCS-driven with auto-apply on. Developers have only Read access to the workspace but can merge to the main branch of its repository. A reviewer calls this a privilege path. What is it?
+A: A merge to main queues a run that applies using the workspace's credentials, whatever the developer's own role
+B: Read access lets developers edit workspace variables, including the credentials that the run uses to reach the cloud
+C: Auto-apply gives every member of the organization the right to approve any pending run in every workspace
+D: The VCS connection copies the developer's personal API token into the workspace to authenticate the run
+K: A
+G: ## Permissions of connected systems count
+HCP Terraform's permissions describe what happens inside HCP Terraform. Integrated systems have their own models. The documentation gives this example: with a VCS-connected workspace, anyone who can merge to the main branch can queue plans, even without permission to queue plans and even if they are not a member of the organization. With **auto-apply** on, merging also starts the apply.
+## What to do
+- Treat repository merge rights as workspace write rights: protect the branch, require reviews and limit who can merge.
+- Disable auto-apply on sensitive workspaces so a human or policy gate confirms the plan.
+W: The merge becomes the effective deployment trigger, and the run uses the workspace's credentials. Branch protection and review of the repository are part of the workspace's access control.
+X: B=Read editing variables: Read cannot change variables; changing them needs variable write permissions.
+C=Org-wide approval: auto-apply applies a successful plan without waiting for approval. It does not give approver rights to anyone.
+D=Personal token copy: VCS-driven runs use the workspace's VCS connection and workload credentials, not a developer's token.
+T: Repository merge rights are effectively workspace apply rights on VCS-driven, auto-apply workspaces.
+V: Terraform
+
+@ TF-IEP002 D5 T5.3 applied troubleshooting
+S: An audit shows a team has the Read role on workspace prod-net, yet its members can queue and confirm applies there. The team also holds the organization permission "Manage all workspaces". What explains the access?
+A: The workspace role overrides the organization permission only when it is more restrictive, so the Read role should have limited them
+B: Effective access is the sum of permissions from every scope, so the organization permission grants more than the Read role
+C: Organization permissions apply only to new workspaces, and prod-net was cloned from a template that granted write
+D: The Read role includes apply on workspaces that have auto-apply enabled, so the team can confirm runs
+K: B
+G: ## Additive permissions
+HCP Terraform permissions are **additive** across organization, project and workspace scopes. A team's effective permission is the highest level it holds from any scope: **Manage all workspaces** at the organization level gives that level on every workspace, even where the team has Read.
+## The reverse is not true
+A lower-level organization permission (such as View all workspaces) does not override a higher workspace role (such as Write).
+## Least-privilege practice
+Give the team only workspace or project roles, or reduce the organization permission, so the highest grant is what you intend. Audit all scopes together.
+W: Because the sum of grants is used, the organization-level manage permission raises the team to full control. Removing it leaves the intended Read role.
+X: A=Restrictive override: a narrower role never reduces a broader grant, because permissions add up rather than override.
+C=Only new workspaces: organization permissions apply to every workspace in the organization, old or new.
+D=Read with auto-apply: Read does not carry run confirmation rights. Auto-apply removes the need to confirm but does not give Read users that ability.
+T: HCP Terraform permissions add up across scopes, so audit organization, project and workspace grants together.
+V: Terraform
+
+@ TF-IEP002 D5 T5.4 applied use-case
+S: A platform team needs a tagging policy on every workspace in the organization, except those in the Sandbox project, now and for workspaces created later. Which setup meets this?
+A: A policy set applied globally with the Sandbox project excluded
+B: A policy set attached manually to each current workspace, repeated by an admin on creation
+C: A copy of the policy in each workspace's repository, run by the pipeline before the plan
+D: A policy set at advisory level scoped to the Sandbox project, with the rest left unscoped
+K: A
+G: ## Policy set scope
+A policy set is a collection of policies. Apply it **globally**, to specific **projects** or **workspaces**, or to workspaces with specific **tags**. You can also **exclude** a project, workspace or tag from the set, so the rule is a statement of intent ("everything except Sandbox").
+## Why scope beats per-workspace attachment
+Global scope automatically covers workspaces created later. Manual attachment has gaps whenever someone forgets, which is how non-compliant workspaces appear.
+## Policy as code
+Store the policy set in VCS and connect it, so changes are reviewed and versioned.
+W: Global scope covers every existing and future workspace, and the exclusion removes the Sandbox project from enforcement without touching any other workspace.
+X: B=Manual attachment: new workspaces remain uncovered until someone attaches the set, so the control depends on memory.
+C=Per-repo copy: a pipeline script can be edited or skipped by the team being governed, and it is not enforced by HCP Terraform.
+D=Sandbox-scoped advisory set: this scopes the policy to the one project that should be exempt, which is the reverse of the requirement.
+T: Use a global policy set with exclusions for baseline rules, and scoped sets for stricter project rules.
+V: Terraform
+
+@ TF-IEP002 D5 T5.4 applied tradeoff
+S: A Sentinel policy forbids public ingress. It must stop runs by default, yet only the security on-call team may let an exception proceed. Which setup fits?
+A: Advisory level, because the on-call team then sees the failure and decides afterwards
+B: Hard mandatory level, because no one can proceed until the configuration is fixed, whatever the permissions
+C: Soft mandatory level, with the policy override permission granted only to the on-call team
+D: An OPA advisory policy, because OPA policies can stop runs as soon as one advisory rule fails
+K: C
+G: ## Sentinel enforcement levels
+- **Advisory**: a failure never interrupts the run; it is only reported.
+- **Soft mandatory**: a failure stops the run, but users who are allowed to override can continue it.
+- **Hard mandatory**: a failure stops the run until the configuration is fixed. If the policy set has the override option enabled, users with permission can override even hard mandatory failures, and this setting takes precedence over the individual level.
+## Who can override
+Team permissions control overrides: *No policy overrides*, *Delegate policy overrides* (project and workspace managers can enable them for what they manage), or *Manage policy overrides* (override in all workspaces). Grant the last to the on-call team only.
+W: Soft mandatory blocks by default and the policy override permission limits the exception path to the security on-call team, so other teams must fix their configuration.
+X: A=Advisory: failures never stop a run, so insecure ingress could be applied without any exception being granted.
+B=Hard mandatory: with the default setting, nobody can continue past a failure, so the exception path the on-call team needs is missing. Enabling the set-level override option would change that for broader users.
+D=OPA advisory: advisory policies never interrupt a run in any framework. OPA's blocking level is mandatory.
+T: To block by default with a narrow exception path, use soft mandatory plus override permission for a named team.
+V: Terraform
+
+@ TF-IEP002 D5 T5.4 applied troubleshooting
+S: An OPA policy is registered with query `data.terraform.allow`, where the Rego rule is `allow = true { ... }`. HCP Terraform cannot interpret the result. What change fixes it?
+A: Replace the rule with a `deny[msg]` rule that collects violations and query it; the policy passes when the array is empty
+B: Lower the enforcement level to advisory, which accepts rules returning a boolean instead of an array
+C: Move the rule into a Sentinel `main` rule, since OPA queries can only return a numeric score
+D: Return the string `pass` when compliant, since HCP Terraform matches that literal value
+K: A
+G: ## How HCP Terraform evaluates OPA
+You register each OPA policy with a **query** that names a rule, typically package plus rule, such as `data.terraform.policies.public_ingress.deny`. The result must be an **array**. If the array is empty, the policy passes; messages in it describe violations.
+## Input data
+HCP Terraform combines the plan and the run into one JSON document. Use `input.plan` for plan data (for example `resource_changes`) and `input.run` for run data such as workspace and organization.
+## Pattern
+A `deny[msg]` rule loops over `input.plan.resource_changes` and builds a message with the resource address for each violation.
+W: A deny-style rule returns an array of messages, which is what the query must produce, and an empty array reports a pass. A boolean cannot be interpreted.
+X: B=Advisory level: the enforcement level decides what happens after a failure. It does not change the required result format.
+C=Sentinel rule: a Sentinel main rule belongs to the other framework, and OPA queries are not scored numerically.
+D=Literal string: no magic string is matched; the pass signal is an empty array.
+T: OPA policies for HCP Terraform must return an array of violations; empty means the plan complies.
+V: Terraform
+
+@ TF-IEP002 D5 T5.4 applied definition
+S: Which TWO statements about HCP Terraform policy sets are accurate? (Select TWO)
+A: A policy set can only contain policies written in one framework, such as Sentinel or OPA
+B: A policy set can mix Sentinel and OPA policies as long as the enforcement levels match
+C: A workspace can have several policy sets from different frameworks applied at the same time
+D: A workspace must choose exactly one framework, because Sentinel and OPA results cannot be combined
+E: A policy set can only be applied to the whole organization, since scoping is done inside each policy
+K: A,C
+G: ## Framework per set
+Each policy has a framework (Sentinel or OPA) chosen at creation and unchangeable afterwards. A **policy set** can only be built from policies of the same framework.
+## Several sets per workspace
+HCP Terraform checks the plan against every set that applies to a run. You can apply multiple sets that use different frameworks to the same workspace, which lets a team keep Sentinel rules and add new OPA rules gradually.
+## Scope lives on the set
+Scope (global, projects, workspaces, tags and exclusions) is a property of the policy set, not of an individual policy.
+W: A=One framework per set: policies are tied to a framework when created, so one set holds only Sentinel or only OPA policies.
+C=Mixed sets on a workspace: each applicable set is evaluated, and a workspace can have Sentinel and OPA sets together.
+X: B=Mixed policies: sets cannot mix frameworks, whatever the enforcement levels are.
+D=One framework per workspace: workspaces can use sets from several frameworks, and each gives its own results.
+E=Only organization-wide: policy sets can be global, or scoped to projects, workspaces or tags, with exclusions.
+T: A policy set uses a single framework, but a workspace can have several sets from different frameworks.
+V: Terraform
+
+@ TF-IEP002 D5 T5.4 applied definition
+S: The security team will write and edit Sentinel policies and set their enforcement, but must not manage workspaces or apply runs. They are given the organization permission "Manage policies". What else does that permission imply?
+A: Read access to runs on all workspaces, which setting enforcement of policy sets requires
+B: Permission to override every failed policy on every workspace in the organization
+C: Write access to all workspace variables, so policies can read configuration values
+D: Permission to approve and apply runs on workspaces that a policy set covers
+K: A
+G: ## Policies versus overrides versus runs
+HCP Terraform separates these duties:
+- **Manage policies**: create, edit, read, list and delete the organization's Sentinel policies. It implicitly gives permission to **read runs on all workspaces**, which is necessary to set enforcement of policy sets.
+- **Policy overrides**: a separate setting (no overrides, delegate, or manage policy overrides) controlling who can override failed soft mandatory evaluations.
+- **Workspace and project roles**: control variables, plans and applies.
+## Least privilege
+Give the policy authors Manage policies alone. They can see runs, but cannot change the infrastructure or bypass their own policies unless you add other grants.
+W: Authoring needs visibility into runs to set enforcement, so Manage policies includes read access to runs in every workspace and nothing that changes infrastructure.
+X: B=Override rights: overriding failures is the separate policy overrides setting.
+C=Variable write access: variable management is a different permission and policies do not need to change variables.
+D=Apply rights: applying requires workspace or project run permissions; policy authors do not receive them.
+T: Manage policies lets a team author policies and read runs; overriding and applying are separate grants.
+V: Terraform
+
+@ TF-IEP002 D5 T5.5 advanced use-case
+S: A pipeline gate parses `terraform show -json tfplan` and must block any plan that replaces a resource tagged as stateful, including create-before-destroy replacements. Which condition identifies a replacement in `resource_changes`?
+A: `change.actions` equals `["delete"]`, since a replacement removes the old object first
+B: `change.actions` contains both `"delete"` and `"create"`, in either order
+C: `change.actions` equals `["update"]` with a `replace_paths` list that is empty
+D: `action_reason` is absent from the entry, since replacements never carry a reason
+K: B
+G: ## Reading a JSON plan
+`terraform show -json tfplan` has a `resource_changes` array. Each entry has `change.actions`: `["no-op"]`, `["create"]`, `["read"]`, `["update"]`, `["delete"]`, or the two-element forms for **replacement**: `["delete","create"]` (destroy then create) and `["create","delete"]` (create-before-destroy).
+## Why match both orders
+A gate looking only for `["delete"]` misses replacements; looking only for `["delete","create"]` misses resources with `create_before_destroy`. Test whether the list contains both actions.
+## Extra context
+`action_reason` is optional and explains why, for instance `replace_because_cannot_update` or `replace_because_tainted`. Treat it as supporting detail, not as the detector.
+W: Checking for both delete and create catches every replacement, whichever order the lifecycle uses, so a stateful resource cannot be replaced by a reviewed-looking plan.
+X: A=Delete only: a pure delete is a different change, and a replacement has two actions, so the test would miss it.
+C=Update with replace_paths: an update is an in-place change and does not replace the object; it has no relation to a replacement.
+D=Absent reason: the reason is optional. Many replacements have one, others do not, so its absence tells nothing.
+T: Detect replacements by testing change.actions for both delete and create, in either order.
+V: Terraform
+
+@ TF-IEP002 D5 T5.5 advanced troubleshooting
+S: A developer deletes a `module "db"` call from the root. A review gate must flag deletions caused by removed configuration, but let routine replacements pass. Which `action_reason` values mark such deletions in the plan JSON?
+A: `delete_because_no_resource_config` and `delete_because_no_module`
+B: `replace_because_cannot_update` and `replace_because_tainted`
+C: `read_because_dependency_pending` and `delete_because_no_module`
+D: `replace_because_tainted` and `delete_because_no_resource_config`
+K: A
+G: ## Why the reason matters
+A `delete` can come from a deliberate removal or from an accident such as deleting a module call. The plan JSON adds `action_reason` to explain it:
+- `delete_because_no_resource_config`: the instance has no corresponding resource configuration anymore.
+- `delete_because_no_module`: the instance belongs to a module that is no longer declared.
+- `replace_because_cannot_update`: the provider cannot change an argument in place, so a replacement was planned.
+- `replace_because_tainted`: the object was tainted in state.
+## Gate design
+Fail or require extra approval when `actions` contains delete **and** the reason is one of the two removal values. Replacement reasons are routine and handled by a separate rule.
+W: Both values say the configuration for the object disappeared, which is exactly the accidental removal pattern the gate needs to catch.
+X: B=Replacement reasons: these describe replaced objects, which the gate lets through.
+C=Dependency pending: that reason is for data sources that cannot be read yet, not deletions. Pairing it with the module value would add false matches.
+D=Tainted plus no config: a tainted replacement is routine rework. Only the removal reason belongs in the gate.
+T: In plan JSON, delete_because_no_resource_config and delete_because_no_module signal deletion from removed configuration.
+V: Terraform
+
+@ TF-IEP002 D5 T5.5 applied comparison
+S: After each apply, a team wants a health probe of the new endpoint that warns on failure but never blocks a run, and that HCP Terraform keeps re-evaluating after deployment. Which construct fits?
+A: A `postcondition` on the load balancer resource that calls the health endpoint through a provisioner
+B: A `precondition` on the output that publishes the URL, which stops plans with an unreachable endpoint
+C: A `validation` block in the endpoint variable, which tests reachability whenever the variable is set
+D: A `check` block with a scoped data source and an assertion, whose failure is only a warning
+K: D
+G: ## Choosing a validation
+- **Variable validation**: checks inputs when the plan is created; failure stops the operation.
+- **Precondition**: evaluated at plan time on resources, data sources and outputs; failure stops the run.
+- **Postcondition**: verifies what Terraform produced; failure stops the run.
+- **Check block**: runs as the **last step** of plan or apply, after Terraform has planned or provisioned infrastructure. A failed assertion produces a **warning** and the operation continues.
+## Continuous validation
+When health checks are enabled on a workspace, HCP Terraform re-evaluates check blocks, preconditions and postconditions on a schedule, so the probe also catches problems after deployment.
+## Scoped data source
+A check can hold its own `data` block (for example `http`) that is used only by that check. If it fails to read, it also produces a warning, not an error.
+W: A check block is non-blocking by design, runs after plan or apply, and is included in HCP Terraform's regular health assessments, which satisfies both parts of the requirement.
+X: A=Postcondition: a failing postcondition stops the operation, and calling the endpoint through a provisioner is not how conditions are tested.
+B=Precondition: it blocks the plan, and it runs before the endpoint exists, so it could not test the new endpoint.
+C=Validation block: it validates inputs when the plan is created, and a failure is an error that blocks the run.
+T: Use check blocks for non-blocking assertions such as health probes; conditions and validations block the run.
+V: Terraform
+
+@ TF-IEP002 D5 T5.5 advanced troubleshooting
+S: A production database has `lifecycle { prevent_destroy = true }`. A reviewed change modifies `engine`, an argument the provider cannot change in place. The plan errors instead of showing a replacement. What is happening, and what is the safe path?
+A: Terraform rejects any plan that would destroy the object, which includes replacement; migrate deliberately, as removing the rule opens a window for data loss
+B: The provider is incompatible with `prevent_destroy`; set `create_before_destroy = true` and Terraform will build a replacement first and keep the old database
+C: Terraform ignores the engine change when the rule is set; apply it later with `-target` so the replacement happens outside the lifecycle protection
+D: The rule only fails when `terraform destroy` runs, so the plan error must be a stale state problem that `terraform refresh` clears
+K: A
+G: ## What prevent_destroy does
+When `prevent_destroy = true`, Terraform **rejects any plan that would destroy** the associated object and returns an error. A forced replacement includes a destroy, so it triggers the error. The setting also makes `terraform destroy` fail on the resource once it exists, and the argument must be present in the configuration.
+## Limits to know
+- It does not stop destruction when the resource block itself is removed from the configuration, because lifecycle rules (except `create_before_destroy`) are not recorded in state.
+- It is a guardrail against accidents, not an access control.
+## Safe path
+Plan the change as a migration: snapshot and build a new database, move traffic and data, then retire the old one with a reviewed change that deliberately removes the protection. Do not simply delete the rule for convenience.
+W: The error is the rule doing its job, since replacement needs a destroy. The safe approach is a deliberate, reviewed migration rather than a quiet removal of the guard.
+X: B=create_before_destroy: it changes the order of a replacement; the old object is still destroyed afterwards, so prevent_destroy still rejects the plan.
+C=Ignoring the change: Terraform does not skip planned replacements. -target does not bypass lifecycle protection and is meant for exceptional cases.
+D=Stale state: the rule applies to every plan that would destroy the object, not only to the destroy command. Refreshing state changes nothing.
+T: prevent_destroy blocks any plan that destroys the object, including forced replacements; migrate deliberately.
+V: Terraform
+
+@ TF-IEP002 D5 T5.5 advanced tradeoff
+S: Which TWO controls help stop accidental destruction of a production database? (Select TWO)
+A: `lifecycle { prevent_destroy = true }` on the database resource, so plans that would destroy it fail with an error
+B: `lifecycle { create_before_destroy = true }` on the database resource, so the old instance is never removed
+C: `lifecycle { ignore_changes = all }` on the database resource, so Terraform cannot propose any destructive change
+D: A mandatory policy that inspects the plan's `resource_changes` for delete actions on database types and fails the run
+E: Marking the database identifier variable `sensitive`, so reviewers cannot approve a plan that names it
+K: A,D
+G: ## Layers of protection
+- **In configuration**: `prevent_destroy` makes Terraform reject plans that destroy the object, whether it is a destroy, a replacement, or a plan for `terraform destroy`. It does not cover removal of the whole resource block.
+- **In the platform**: a mandatory-level Sentinel or OPA policy reads the plan (`tfplan.resource_changes` or `input.plan.resource_changes`) and fails when a protected type has a delete action. It also covers the block-removal case that `prevent_destroy` misses.
+## What does not help
+- `create_before_destroy` only changes the order of a replacement.
+- `ignore_changes = all` stops update proposals; the docs state Terraform can still create and destroy the object.
+- `sensitive` hides values, and has no approval role.
+W: A=prevent_destroy: rejects plans that would destroy the object, giving an immediate guardrail close to the code.
+D=Mandatory policy: inspects the plan for delete actions and blocks the run in the platform, so the control remains if someone removes the block or the lifecycle rule.
+X: B=create_before_destroy: the old object is still destroyed after the new one exists; only the order changes.
+C=ignore_changes all: Terraform will never propose updates, but can still delete the object, so it does not stop deletion.
+E=Sensitive identifier: hiding a value does not prevent any action, and it reduces the information reviewers have.
+T: Combine prevent_destroy in code with a mandatory plan-inspecting policy; ordering and ignore settings do not prevent deletion.
+V: Terraform
