@@ -1,0 +1,641 @@
+# TF-IEP002 b08: D6 Modules and the registry (T6.1-T6.4): when to refactor into a module, module contract, registry use, terraform test
+# src: https://developer.hashicorp.com/terraform/language/modules
+# src: https://developer.hashicorp.com/terraform/language/modules/develop/composition
+# src: https://developer.hashicorp.com/terraform/language/modules/develop/refactoring
+# src: https://developer.hashicorp.com/terraform/language/modules/develop/providers
+# src: https://developer.hashicorp.com/terraform/language/modules/develop/structure
+# src: https://developer.hashicorp.com/terraform/language/modules/configuration
+# src: https://developer.hashicorp.com/terraform/language/block/module
+# src: https://developer.hashicorp.com/terraform/language/block/output
+# src: https://developer.hashicorp.com/terraform/language/expressions/version-constraints
+# src: https://developer.hashicorp.com/terraform/cli/commands/init
+# src: https://developer.hashicorp.com/terraform/registry/modules/publish
+# src: https://developer.hashicorp.com/terraform/registry/modules/use
+# src: https://developer.hashicorp.com/terraform/cloud-docs/registry/publish-modules
+# src: https://developer.hashicorp.com/terraform/cloud-docs/registry/test
+# src: https://developer.hashicorp.com/terraform/language/tests
+# src: https://developer.hashicorp.com/terraform/language/tests/mocking
+# src: https://developer.hashicorp.com/terraform/cli/commands/test
+
+@ TF-IEP002 D6 T6.1 applied use-case
+S: Which TWO observations are sound reasons to extract a set of resources into a reusable module? (Select TWO)
+A: Four separate stacks each carry a copy of the same bucket, key and policy wiring, and the copies have started to drift apart
+B: The root configuration has 40 resources and the team wants each apply to touch only a subset of them
+C: The security team wants encryption and mandatory tags built in, with callers allowed to set only a small, approved set of inputs
+D: A single stack is hard to read because main.tf has grown to 900 lines and the team wants shorter files
+E: The team wants the database resources to live in their own state so a failed apply cannot affect the network
+K: A,C
+G: ## What a module is for
+A module is a set of resources that Terraform manages together behind an interface of input variables and outputs. The root module calls child modules, and the child's resources become part of the same workspace and the same state.
+- A module is a unit of reuse and standardization: write the pattern once, parameterize what differs, and let callers use it repeatedly.
+- A module is not a unit of isolation. Resources in a child module share the caller's plan, apply and state file; a failed apply in one module affects the whole run.
+- Splitting files inside a directory (`network.tf`, `database.tf`) organizes code without any module at all.
+## Signals that a module pays off
+- The same resource group is copied into several configurations, so a fix has to be repeated everywhere and the copies diverge.
+- The organization wants guardrails: defaults such as encryption, naming and tags are baked in, and only approved inputs are exposed.
+Wanting smaller state, smaller blast radius or independent applies calls for separate configurations (workspaces or directories) connected through outputs or data sources, not for modules.
+W: A=Repeated, drifting copies: when four stacks hold the same wiring, a module gives one definition to fix and version, and each stack passes only what differs.
+C=Built-in guardrails: a module can hard-code encryption and tags and expose only approved variables, so callers get compliant infrastructure by construction.
+X: B=Touch only a subset per apply: modules do not split the plan or the apply. Every resource in every module is still planned in the same run; `-target` or separate configurations are the tools for that.
+D=Shorter files: splitting `main.tf` into several `.tf` files in the same directory achieves readability without adding an interface, versioning and documentation burden.
+E=Separate state for the database: child modules share the root module's state, so a failed apply still affects the same state. A separate workspace or root configuration is what isolates it.
+T: Extract a module to reuse and standardize a pattern; use separate configurations, not modules, when you need isolation of state or blast radius.
+
+@ TF-IEP002 D6 T6.1 applied tradeoff
+S: A platform team proposes a module `s3_bucket` that declares 25 variables, each passed one-to-one to a single `aws_s3_bucket` resource with no defaults or extra logic, and outputs the same attributes. Which assessment is accurate?
+A: It adds little: callers can already use the resource directly, and every provider change must now be mirrored in the wrapper
+B: It is required, because only resources wrapped in a module can be versioned and published to the private registry
+C: It is useful as is, because the module gives each caller its own state file and therefore a smaller blast radius
+D: It is useful as is, because a module call is the only way to apply the same resource arguments in more than one workspace
+K: A
+G: ## Abstraction has to earn its keep
+A module creates an interface: callers see variables and outputs instead of the resource schema. That is valuable when the module encodes decisions (defaults, naming, composition of several resources, validation) so callers have less to know.
+A pass-through wrapper encodes nothing. It has the same arguments as the resource, so callers must learn the module and the resource, and the module author must update the wrapper whenever the provider adds, renames or deprecates an argument.
+## What would justify it
+- Defaults for encryption, versioning, public access blocks and tags.
+- Several related resources created together (bucket, policy, lifecycle rules).
+- Validation of inputs against company rules.
+Without any of these, use the resource directly.
+W: Thin wrapper: with no defaults, validation or composition the module only renames the resource's own interface. It doubles the maintenance (every new provider argument must be added) while giving callers nothing they could not do with the resource.
+X: B=Required for publishing: any module can be published, but nothing requires that a single resource be wrapped to be versioned. A configuration that uses the resource directly is versioned through its own repository and the provider's lock file.
+C=Own state per caller: child modules run in the caller's workspace and write into the caller's state. A module never creates a separate state file or a smaller blast radius.
+D=Only way to reuse in several workspaces: any configuration directory can be applied in many workspaces with different variable values; a module is not needed for that.
+T: A module should add decisions, defaults or composition; a one-to-one wrapper around a single resource only adds maintenance.
+
+@ TF-IEP002 D6 T6.1 advanced use-case
+S: An `app` module must run in production, where a VPC is managed by a network stack, and in development, where one shared VPC already exists. Which design follows the module-composition guidance?
+A: Add a `create_vpc` boolean with `count` on the VPC resource and a tag-based `data "aws_vpc"` lookup used when it is false
+B: Nest a `network` child module inside `app` and let it decide, by calling a data source first, whether it must create anything
+C: Declare input variables such as `vpc_id` and `subnet_ids`, and let each caller pass them from a resource or a data source
+D: Keep two copies of the module, `app-prod` and `app-dev`, and copy changes between them whenever the app logic changes
+K: C
+G: ## Dependency inversion
+A module that creates its own network and also needs to coexist with a network somebody else owns ends up full of conditionals. The Terraform composition guidance recommends the opposite: the module declares what it needs as inputs, and the caller decides where those objects come from.
+```
+module "app" {
+  source     = "./modules/app"
+  vpc_id     = data.aws_vpc.shared.id        # dev: existing
+  subnet_ids = module.network.subnet_ids     # prod: managed here
+}
+```
+- The module stays small and does not need to know whether the object is created in the same configuration or looked up.
+- The same module works unchanged when the network later moves into its own configuration, because only the caller's expressions change.
+- For richer objects, declare an `object({...})` variable with only the attributes the module reads; any resource or data source with at least those attributes satisfies it.
+W: Inputs for the dependencies: the module receives `vpc_id` and `subnet_ids` and no longer cares whether they come from a managed resource or an existing data source. This is the recommended dependency-inversion pattern for conditional creation across environments.
+X: A=`create_vpc` flag: this works but it is exactly what the guidance advises against. It pushes environment awareness and conditional resources into the module, and every `count` index must then be handled in outputs.
+B=Nested network module deciding at run time: Terraform cannot create or skip resources based on a lookup made during the same run in this way, and a hidden child module makes the network hard to swap or share.
+D=Two forked copies: duplicated code drifts apart and every fix must be applied twice; environment differences belong in inputs, not in forks.
+T: Make modules receive their dependencies as inputs; the caller supplies them from resources or data sources instead of the module creating or detecting them.
+
+@ TF-IEP002 D6 T6.1 applied troubleshooting
+S: A team moves `resource "aws_instance" "web"` from the root module into a new `module "web"` that contains the same resource. The plan now shows `aws_instance.web` to be destroyed and `module.web.aws_instance.web` to be created. Which change gives a plan with no destroy?
+A: Add `lifecycle { ignore_changes = all }` to the resource inside the new module so the old and new objects are treated as equal
+B: Add a `moved` block in the root module with `from = aws_instance.web` and `to = module.web.aws_instance.web`
+C: Run `terraform apply -target=module.web` first so the new module is created before the old instance is touched
+D: Add `prevent_destroy = true` to the instance so Terraform keeps the existing object and adopts it at the new address
+K: B
+G: ## Addresses identify objects
+Terraform tracks each object in state by its address. `aws_instance.web` and `module.web.aws_instance.web` are different addresses, so after the code moves Terraform sees one object with no configuration (destroy) and one new object with no state (create).
+A `moved` block tells Terraform that a state entry should be treated as if it had always been at a different address.
+```
+moved {
+  from = aws_instance.web
+  to   = module.web.aws_instance.web
+}
+```
+Before planning, Terraform looks in state for the `from` address, renames the entry to `to`, and then plans normally. The result is as if the instance had been created inside the module. The block lives in the configuration, so it is reviewed in the pull request and applied by every workspace that uses the code. `moved` needs Terraform 1.1 or later.
+W: `moved` block: it records the address change in code, so the next plan renames the state entry and shows no destroy or create for the instance.
+X: A=`ignore_changes = all`: this ignores differences in arguments of an existing object; it does not link two different addresses, so the old instance is still destroyed and a new one created.
+C=`-target=module.web`: targeting only creates the new instance first, leaving two instances, and the old one is still planned for destruction afterward. It does not rename anything in state.
+D=`prevent_destroy`: it makes the plan fail with an error when a destroy is required. It never adopts an object at a new address.
+T: A `moved` block maps an old address to a new one in state, so refactoring resources into or out of modules does not destroy them.
+
+@ TF-IEP002 D6 T6.1 advanced use-case
+S: A grown module is split into modules `x` (resources `a` and `b`) and `y` (resource `c`). The original module stays as a backward-compatible shim that calls both. Which TWO statements about handling existing callers are accurate? (Select TWO)
+A: The shim should contain `moved` blocks such as `from = aws_instance.a` and `to = module.x.aws_instance.a`, so callers who upgrade do not replace objects
+B: The `moved` blocks in the shim can be deleted as soon as the first caller has applied, because they are only read once and then forgotten
+C: The shim can add a `moved` block that targets a resource inside a sibling module `module.other`, as long as both are in the same repository
+D: Removing the `moved` blocks from the shim later is a breaking change for any caller that has not yet applied a version that contains them
+E: Every caller must also run `terraform state mv` for each resource, because `moved` blocks are only honored in the root module
+K: A,D
+G: ## Splitting a module without replacing objects
+Resources inside a module have addresses such as `module.original.aws_instance.a`. When resources move into new child modules, their addresses change to `module.original.module.x.aws_instance.a`. The shim approach keeps the old module name, replaces its resource blocks with calls to the new modules, and adds `moved` blocks that map each old address to the new one.
+- Terraform resolves module references in `moved` blocks relative to the module instance that contains them, so the shim writes `module.x.aws_instance.a`.
+- A module may only make `moved` statements about its own objects and objects of its child modules. Reaching into a sibling is not allowed.
+- Each caller records the move the first time it applies the new version. A caller that skips straight over the version containing the blocks to a later one that has removed them will see destroy and create.
+- Removing `moved` blocks is therefore a breaking change: keep them until you are sure all callers have upgraded past them, or release them in a major version.
+W: A=Shim `moved` blocks: they map each old address to the child module's address, relative to the shim, so upgrading callers keep their objects.
+D=Removing `moved` blocks: a caller that has not yet applied a version that contains them would no longer see the mapping, so removal breaks it.
+X: B=Delete after first apply: the mapping must be present in the configuration of every workspace that still has the old addresses in state. One caller applying does not update the others.
+C=Sibling module target: a module can only write `moved` statements about its own objects and its child modules' objects, so a path into `module.other` is out of scope for the shim.
+E=`state mv` per resource and root-only: `moved` blocks work in child modules as well as the root module, and they remove the need for manual `state mv` commands.
+T: When splitting a module, keep a shim with `moved` blocks that point into the new child modules, and keep them until every caller has upgraded.
+
+@ TF-IEP002 D6 T6.1 applied use-case
+S: A configuration has `module "a"` with a single instance. A team changes it to `count = 3` and adds `moved { from = module.a  to = module.a[2] }`. What does the plan propose?
+A: Destroy the existing objects and create three new instances of the module, because the instance key changed
+B: Treat the existing objects as `module.a[0]` and create `module.a[1]` and `module.a[2]` as new
+C: Fail with an error, because `moved` cannot reference a module call that uses `count`
+D: Treat the existing objects as `module.a[2]` and create new objects only for `module.a[0]` and `module.a[1]`
+K: D
+G: ## Moving into an instance key
+When at least one of the two addresses in a `moved` block has an instance key, Terraform reads both as referring to specific instances. `module.a` becomes `module.a[2]`: all objects that were created under `module.a` are treated as having been created in instance 2 of the counted module call.
+- Terraform then plans only the instances that have no state: `module.a[0]` and `module.a[1]`.
+- Without any `moved` block that mentions the module, adding `count` makes Terraform propose moving the original object to index `0` on its own. Writing the block explicitly is recommended so the intent is visible to future readers.
+- The same works for `for_each`: `from = module.a`, `to = module.a["small"]`.
+W: Move into `[2]`: the explicit block overrides the default of index 0, so the existing objects become instance 2 and only instances 0 and 1 are created.
+X: A=Destroy and recreate: that is what would happen if Terraform had no mapping at all; the `moved` block exists precisely to prevent it.
+B=Existing objects become index 0: that is the automatic behavior when `count` is added and no `moved` block mentions the module. The explicit block changes it to index 2.
+C=Error for counted modules: `moved` supports module calls and instance keys on them, including switching between no key, `count` and `for_each`.
+T: A `moved` block with an instance key assigns existing objects to that key; Terraform creates only the other instances.
+
+@ TF-IEP002 D6 T6.1 advanced troubleshooting
+S: A platform module `platform` calls `network`, which calls `subnets`, which calls `routing`. A team needs a custom routing policy but the top module exposes no input for it. What is the recommended direction?
+A: Add an input to every module on the chain and forward the new variable down through each level of calls
+B: Use an `override.tf` file in the root to replace the routing resource that sits four levels down
+C: Flatten the tree into sibling modules composed in the root, with outputs of one passed as inputs to the next
+D: Run `terraform state mv` to pull the routing resources into the root module and stop using the module
+K: C
+G: ## Keep the module tree flat
+Deeply nested modules turn the top module into a closed box whose behavior can be changed only through variables that every level must forward. Terraform's composition guidance recommends one level of child modules and using expressions in the root to connect them.
+```
+module "network" { source = "./modules/network" }
+module "routing" {
+  source     = "./modules/routing"
+  subnet_ids = module.network.subnet_ids
+}
+```
+- Each module is small and replaceable; a caller with a special need swaps one building block for its own.
+- The root module shows how the pieces connect, so the wiring is visible in one place.
+- Child modules should compose through the caller, not call each other directly in a chain.
+W: Flat composition: the root wires the modules together, so the team can substitute or configure the routing module without touching the others.
+X: A=Forward a variable through every level: this works once but each change repeats it at every level, and the top module's interface keeps growing with every request from a caller.
+B=`override.tf` four levels down: override files merge by block name within a single directory and cannot reach into a resource inside a nested child module.
+D=Pull resources into the root with `state mv`: this abandons the module and its reuse, and a manual state edit does not scale across the workspaces that call the module.
+T: Prefer a flat module tree where the root composes small building blocks, instead of deep chains of modules calling modules.
+
+@ TF-IEP002 D6 T6.2 applied troubleshooting
+S: After a shared module adds `provider "aws" { region = "us-east-1" }`, a caller that sets `count = 2` on the module call gets "Module does not support count". What is the correct fix?
+A: Remove the `provider` block from the module, declare the provider in `required_providers`, and pass configurations in with the caller's `providers` argument
+B: Replace `count = 2` with `for_each = toset(["a", "b"])`, since only `count` is blocked for modules that contain provider blocks
+C: Add `depends_on = [provider.aws]` to the module call so the nested provider is configured before the instances are expanded
+D: Keep the provider block and add `configuration_aliases` to it so Terraform treats each counted instance as a separate provider
+K: A
+G: ## Where provider configurations belong
+Provider configurations are global to a configuration and can be defined only in the root module. A module intended to be called by others must not contain `provider` blocks. It declares which providers it needs (and, if it needs several configurations, their aliases) in `required_providers`, and the caller supplies the configurations.
+- A module containing its own provider blocks cannot be used with `count`, `for_each` or `depends_on`. Terraform reports an error such as "Module does not support count".
+- The legacy pattern also forces the provider configuration to disappear together with the resources when the module is removed, which prevents Terraform from destroying those resources.
+- Child modules inherit default (unaliased) provider configurations from the parent automatically; aliased ones must be passed explicitly in a `providers` map.
+W: Remove the block and pass providers: the module becomes compatible with `count`, `for_each` and `depends_on`, and the caller controls region and credentials.
+X: B=Switch to `for_each`: `for_each` and `depends_on` are blocked in the same way as `count` for a module that has its own provider block.
+C=`depends_on` on the module: this is also not allowed on a module with a nested provider configuration, and there is no `provider.aws` object to reference in `depends_on`.
+D=`configuration_aliases` on a provider block: `configuration_aliases` belongs in `required_providers` to declare names the caller must pass; it does not make a nested provider block compatible with expansion.
+T: Reusable modules contain no provider blocks; they declare requirements and receive configurations from the caller.
+
+@ TF-IEP002 D6 T6.2 applied troubleshooting
+S: A root module declares `required_providers { datadog = { source = "DataDog/datadog" } }` and configures `provider "datadog"`. A child module creates `datadog_monitor` resources but has no `required_providers` block. What happens at `terraform init`?
+A: Terraform inherits the root's source and version requirements for the child, so init installs DataDog/datadog and succeeds
+B: The child shares the root's provider configuration, but without its own requirement Terraform looks for `hashicorp/datadog` and init fails
+C: Terraform reads the provider's source address from the lock file and applies it to every module that uses the local name
+D: Init succeeds, but the child module's resources are created with the provider's default settings instead of the root's configuration
+K: B
+G: ## Configurations are inherited, requirements are not
+Two separate things connect a module to a provider:
+- The provider configuration (region, credentials, endpoints) is global and may be inherited by child modules implicitly, or passed explicitly with `providers`.
+- The provider requirement (source address and version constraints) must be declared by each module in its own `required_providers` block. Terraform combines the requirements of all modules to find a single compatible version.
+Source and version requirements are not inherited. For a provider outside the `hashicorp` namespace, a module without a requirement makes Terraform assume the default namespace for the local name `datadog`, which is `hashicorp/datadog`; that provider does not exist, and init fails.
+```
+terraform {
+  required_providers {
+    datadog = { source = "DataDog/datadog", version = ">= 3.0" }
+  }
+}
+```
+W: Requirements are per module: the child inherits the configuration, but not the source, so without its own `required_providers` it resolves to `hashicorp/datadog` and init cannot install it.
+X: A=Inherited requirements: only provider configurations are inherited; the documentation states explicitly that provider source and version requirements are not.
+C=Lock file as source of truth: the dependency lock file records the selected versions and checksums for providers already resolved; it is not consulted to map a local name to a source for modules.
+D=Success with default settings: init cannot succeed without a resolvable source, and when a configuration is inherited the root's settings (not defaults) apply.
+T: Provider configurations flow down to child modules, but every module must declare its own provider source and version requirements.
+
+@ TF-IEP002 D6 T6.2 advanced tradeoff
+S: One `module "bucket"` call uses `for_each` over three AWS regions, and each instance must create its bucket in the matching region through the aliases `aws.eu`, `aws.us` and `aws.ap`. Which approach works?
+A: Pass `providers = { aws = aws[each.key] }` in the module call so that each instance receives the alias named by its key
+B: Add `configuration_aliases = [aws.eu, aws.us, aws.ap]` to the module and let each instance pick one from its own `region` input
+C: Use three separate `module` blocks, each with its own `providers = { aws = aws.eu }` style map, sharing the same source
+D: Set `provider = aws[each.key]` as a meta-argument next to `for_each`, which is read before the instances are expanded
+K: C
+G: ## Provider association is static
+Terraform decides which provider configuration each resource uses before it expands `count` and `for_each`. The `providers` map in a module call therefore cannot contain expressions that vary by instance, and provider names cannot be built from `each.key`.
+- Every instance of one module call receives the same provider configurations.
+- If different instances need different provider configurations (different regions or accounts), write one `module` block for each distinct set of configurations.
+```
+module "bucket_eu" {
+  source    = "./modules/bucket"
+  providers = { aws = aws.eu }
+}
+module "bucket_us" {
+  source    = "./modules/bucket"
+  providers = { aws = aws.us }
+}
+```
+The same source address can be used in several module blocks, as long as the labels are unique. A shared helper local or a generated file can keep the blocks consistent.
+W: One block per configuration: provider association is static, so each region gets its own module call with a fixed `providers` map.
+X: A=Dynamic alias with `each.key`: provider references are static identifiers and not expressions; Terraform cannot index into aliases by a key.
+B=`configuration_aliases` with an input: the argument declares names the caller may pass in; it does not let a module pick a configuration at run time from an input value.
+D=`provider = ...` next to `for_each`: `provider` is a resource meta-argument and not a module argument; modules use `providers`, and its values cannot vary per instance.
+T: Different instances of a module call cannot use different provider configurations; use a separate module block for each.
+
+@ TF-IEP002 D6 T6.2 applied use-case
+S: A module author outputs `value = aws_db_instance.this` so callers can read whatever they need. What is the main design drawback?
+A: Callers can no longer use `module.db.<output>` in expressions, because outputs may not hold whole resource objects
+B: Terraform stores a whole-object output in the state of the child module only, so callers cannot read it from the root
+C: The output couples every caller to the resource's attribute names, so a provider schema change becomes a breaking module change
+D: The output is evaluated before the resource is created, so callers always see unknown values during apply
+K: C
+G: ## Outputs are the module's public interface
+Outputs and input variables form the contract between a module and its callers. Anything exposed can be depended on.
+- Exposing a whole resource object makes the full provider schema part of the contract. If a provider version renames or removes an attribute, or the author switches the resource type, callers that used that attribute break even though the module's own code did not change.
+- Expose only the values callers need under stable names, such as `endpoint`, `arn` and `port`. Each has a description.
+- Outputs that carry secrets should be marked `sensitive = true`; whole-object outputs also carry attributes the caller never asked for.
+Whole-object outputs are legal and callers can read them with `module.db.<name>.<attribute>`, but the interface is wider than it should be.
+W: Coupled to the schema: a whole object exposes every attribute under the provider's own names, so any provider-driven change is a breaking change for callers.
+X: A=Not usable in expressions: an output can hold any value, including an object, and callers can reference attributes of it.
+B=State confined to the child module: outputs of child modules are available to the calling module; module outputs are how values flow upward.
+D=Unknown during apply: output values depend on the resource and are evaluated once it exists; the output is not evaluated before the resource is created.
+T: Expose a small set of stable named outputs; a whole resource object makes the provider schema part of the module's contract.
+
+@ TF-IEP002 D6 T6.2 advanced troubleshooting
+S: A child module `auth` has `output "token" { value = ephemeral.vault_kv_secret_v2.t.data["token"] ephemeral = true }`. The root adds `output "token" { value = module.auth.token ephemeral = true }` and `terraform validate` fails. What is the cause and fix?
+A: Ephemeral outputs are valid only in child modules; remove the root output and use the value only in ephemeral contexts such as a provider block
+B: The child output must also be marked `sensitive = true` before the root can mark it ephemeral, and then both flags work
+C: Ephemeral outputs require the value to be stored in state first; run an apply with the output as a normal value, then add the flag
+D: Root module outputs may be ephemeral only when a `precondition` proves that the value is not persisted to the plan file
+K: A
+G: ## Ephemeral outputs
+Terraform 1.10 and later can mark values as ephemeral, meaning they exist only during the run and are never written to state or plan files. A child module can declare an `output` with `ephemeral = true` to pass such a value, for example a short-lived token, to its caller.
+- The output's value must come from an ephemeral context (an ephemeral resource, an ephemeral variable).
+- The root module cannot declare ephemeral outputs, because a root output is persisted so that other configurations and `terraform output` can read it.
+- A value that is ephemeral may be used only in ephemeral contexts: another ephemeral variable or output in a child module, a provider configuration, an ephemeral resource, a provisioner or connection block, or a write-only argument.
+```
+provider "vault" { token = module.auth.token }   # allowed: provider config is ephemeral context
+```
+W: Child-only ephemeral outputs: the root output is the problem. Remove it and consume `module.auth.token` in ephemeral contexts, such as provider configuration.
+X: B=Sensitive first: `sensitive` only redacts display and does not stop persistence. It is not a prerequisite for ephemeral, and it does not allow a root ephemeral output.
+C=Store in state first: this defeats the purpose; ephemeral values are never stored in state or plan files, and no first apply is required.
+D=Root output with a precondition: a precondition validates a value but does not change where an output is persisted. The rule is a hard limit on root module outputs.
+T: `ephemeral = true` outputs exist only in child modules; the root consumes them in ephemeral contexts and never exports them.
+
+@ TF-IEP002 D6 T6.2 advanced use-case
+S: A module author changes `aws_subnet.private` from `count = 2` to `for_each` keyed by `a` and `b`, where index 0 was zone `a` and index 1 was zone `b`. How should callers be protected from replacement?
+A: Add `moved` blocks inside the module from `aws_subnet.private[0]` to `aws_subnet.private["a"]` and from `[1]` to `["b"]`
+B: Add `lifecycle { create_before_destroy = true }` so the new keyed subnets are built before the old indexed ones are removed
+C: Add one `moved` block from `aws_subnet.private` to `aws_subnet.private` so Terraform recomputes all of the instance keys by itself
+D: Add `lifecycle { ignore_changes = [availability_zone] }` so that zone changes between instances never cause replacement
+K: A
+G: ## Instance keys are part of the address
+`aws_subnet.private[0]` and `aws_subnet.private["a"]` are different addresses. Switching between `count` and `for_each` without a mapping makes Terraform plan to destroy the indexed instances and create the keyed ones.
+A `moved` block with instance keys maps each old instance to its new key. The docs show this exact case, `count` to `for_each`:
+```
+moved {
+  from = aws_subnet.private[0]
+  to   = aws_subnet.private["a"]
+}
+moved {
+  from = aws_subnet.private[1]
+  to   = aws_subnet.private["b"]
+}
+```
+Because the blocks sit in the module, every caller that upgrades picks up the mapping automatically in its next plan; new callers ignore them since they have no state at the old addresses.
+W: Keyed `moved` blocks: each old index is mapped to its new key, so no subnet is replaced when callers adopt the new version.
+X: B=`create_before_destroy`: it changes the order of a replacement; the subnets are still replaced and need new CIDRs or may conflict, so it does not prevent replacement.
+C=A single block without keys: a mapping that does not name instance keys describes whole-resource renames and cannot guess which index belongs to which key.
+D=`ignore_changes` on the zone: it hides changes to an argument of an existing object; the address change still means the old object has no configuration and a new object must be created.
+T: Changing `count` to `for_each` changes instance addresses; ship `moved` blocks mapping each index to its key in the module.
+
+@ TF-IEP002 D6 T6.2 applied tradeoff
+S: Version 2.3.0 of a registry module renames the output `vpc_id` to `network_id`. Callers using `version = "~> 2.0"` now fail with "Unsupported attribute" at plan. What should the maintainer have done?
+A: Publish the rename as a patch release, because the module's resources did not change and state is untouched
+B: Delete the 2.3.0 tag and re-push it with a corrected README, so consumers resync and see the rename documented
+C: Keep `vpc_id` as well, add `network_id` in a minor release, and remove the old output only in a new major version
+D: Pin every caller to an exact version by hand, because the registry cannot enforce compatibility for outputs
+K: C
+G: ## Semantic versioning is the module's contract
+Registry modules must use semantic versions, and callers rely on that when they write constraints such as `~> 2.0` (any 2.x from 2.0 up). Within a major version, callers expect no breaking changes to the interface.
+- Renaming or removing an input or output is a breaking change and belongs in a major release.
+- Adding an optional input or a new output is backward compatible and belongs in a minor release.
+- To retire a name gracefully: add the new name, keep the old one in the same minor release (possibly with a description that says it is deprecated), and remove it in the next major version.
+Constraints give callers control (`version = "2.3.1"` pins exactly), but they only work if authors follow the rules.
+W: Additive minor release: both outputs exist during 2.x, so `~> 2.0` callers keep working and can migrate at their pace before the next major release.
+X: A=Patch release: a patch is for compatible bug fixes; renaming an output breaks `~> 2.0` and also `~> 2.3.0` callers.
+B=Re-push the tag: moving a tag does not undo the rename for callers who already installed 2.3.0; registries expect published versions to be immutable, and removal is discouraged unless the release is critically flawed.
+D=Exact pins only: consumers can pin, but that only shifts the problem to every consumer and defeats ranges; the maintainer is responsible for compatible releases within a major version.
+T: Renaming or removing an input or output breaks the contract and needs a major version; add the new name and keep the old one during the minor releases.
+
+@ TF-IEP002 D6 T6.3 applied use-case
+S: A module call has `version = "~> 2.1"`. A laptop was initialized when 2.4.0 was the newest release. 2.5.0 is published, and a CI job then starts from a fresh checkout. Without any extra flags, what do `terraform init` on the laptop and `terraform init` in CI select?
+A: Laptop keeps 2.4.0 because it already satisfies the constraint, while CI downloads 2.5.0 as the newest version that matches
+B: Both select 2.4.0, because the dependency lock file records the module version chosen first
+C: Laptop upgrades to 2.5.0 on every init, while CI selects 2.4.0 from the cached registry index of the last run
+D: Both select 2.5.0, because init always installs the newest module version that satisfies the constraint
+K: A
+G: ## Module versions are not locked
+The dependency lock file (`.terraform.lock.hcl`) records provider selections and checksums. It does not record module versions.
+- Terraform uses the newest installed module version that meets the constraint. If an acceptable version is already installed, a plain `terraform init` leaves it as it is.
+- When no acceptable version is installed (a fresh checkout or CI runner), Terraform downloads the newest version that meets the constraint.
+- `terraform init -upgrade` updates already installed modules to the latest version allowed by the constraint.
+So two machines can plan with different module versions even when the configuration is identical. Where reproducibility matters, pin an exact `version = "2.4.0"` and raise it through a reviewed change.
+W: Different results: the laptop already has a satisfying version and keeps it, but the fresh CI workspace has none and downloads the newest match; module versions are not in the lock file.
+X: B=Lock file records module versions: it covers providers only, so nothing forces CI to reuse the laptop's 2.4.0.
+C=Laptop upgrades on every init: installed modules stay unchanged unless `-upgrade` is passed; there is also no cached index that CI would reuse.
+D=Both 2.5.0: this would be true only with `-upgrade` on the laptop; a plain init does not change an installed module that still satisfies the constraint.
+T: Provider versions are locked, module versions are not; plain init keeps an installed module, a fresh init takes the newest match, `-upgrade` updates, an exact pin removes the drift.
+
+@ TF-IEP002 D6 T6.3 applied troubleshooting
+S: A team's GitHub repository `aws-vpc-module` has release tags such as `release-2024.03`, and the module does not show up as a version in the public Terraform Registry. Which TWO changes are needed? (Select TWO)
+A: Rename the repository to `terraform-aws-vpc` so it follows the `terraform-<PROVIDER>-<NAME>` pattern
+B: Create a `registry.json` manifest at the repository root that lists the module versions to publish
+C: Move the root module files into a `modules/vpc` directory so the registry can find nested modules
+D: Name the default branch `release` so the registry treats pushes to it as new module versions
+E: Create tags in semantic-version form, such as `v1.0.0` or `1.0.0`, because tags that look otherwise are ignored
+K: A,E
+G: ## What the public registry needs
+The public Terraform Registry publishes modules straight from a public GitHub repository. The requirements are:
+- Repository name `terraform-<PROVIDER>-<NAME>`, such as `terraform-aws-ec2-instance`. `<NAME>` may contain hyphens.
+- A short description on the repository.
+- The standard module structure, with the root module's `.tf` files at the repository root.
+- Release tags that are semantic versions, optionally prefixed with `v` (`v1.0.4`, `0.9.2`). At least one tag is needed to publish; tags that do not look like versions are ignored.
+New versions appear when a correctly formed tag is pushed; the registry is notified through a webhook and the version shows up in about a minute.
+W: A=Repository name: only repositories matching `terraform-<PROVIDER>-<NAME>` are listed for publishing, so `aws-vpc-module` is not eligible until renamed.
+E=Semantic-version tags: `release-2024.03` does not look like a version and is ignored, so the registry sees no releases.
+X: B=A manifest file: no such file exists; the registry reads the module from the repository structure and versions from tags.
+C=Move files into `modules/vpc`: the root module must be at the repository root; nested modules in `modules/` are optional extras.
+D=Branch named `release`: versions come from tags and not from branch names or pushes to a branch (public registry publishing has no branch mode).
+T: Public registry: repository `terraform-<PROVIDER>-<NAME>`, root module at top level, and semantic-version tags such as `v1.2.3`.
+
+@ TF-IEP002 D6 T6.3 applied definition
+S: A module named `vpc` for provider `aws` is published in the private registry of the HCP Terraform organization `acme`. Which `module` block selects version 1.4 or later within 1.x from it?
+A: `source = "app.terraform.io/vpc/aws/acme"` with `version = "~> 1.4"`
+B: `source = "acme/vpc/aws"` with `version = "~> 1.4"`
+C: `source = "app.terraform.io/acme/aws/vpc"` with `version = "~> 1.4"`
+D: `source = "app.terraform.io/acme/vpc/aws"` with `version = "~> 1.4"`
+K: D
+G: ## Registry module addresses
+A registry module source has the form `<NAMESPACE>/<NAME>/<PROVIDER>`. With no hostname, Terraform uses the public registry, for example `hashicorp/consul/aws`.
+A private registry adds the hostname in front: `<HOSTNAME>/<NAMESPACE>/<NAME>/<PROVIDER>`. For HCP Terraform the hostname is `app.terraform.io` and the namespace is the organization name, so the module is `app.terraform.io/acme/vpc/aws`.
+- `version` is allowed only for modules that come from a registry. `~> 1.4` allows 1.4 and any later 1.x, but not 2.0.
+- Callers need credentials for the private registry (for example from `terraform login`), but not access to the module's source repository: the registry downloads the code and serves it.
+- Inside HCP Terraform runs, `localterraform.com` can be used as the hostname so the same configuration works against Terraform Enterprise.
+W: Hostname, organization, name, provider: that order matches `<HOSTNAME>/<NAMESPACE>/<NAME>/<PROVIDER>`, and `~> 1.4` keeps the module within major version 1.
+X: A=Organization last: the namespace must precede the name; here the organization is read as the provider segment.
+B=No hostname: `acme/vpc/aws` resolves against the public registry, where an `acme` namespace is a different publisher.
+C=Name and provider swapped: the third segment is the module name and the fourth the provider, so `aws/vpc` would look for a module `aws` for provider `vpc`.
+T: Private registry sources are `<HOSTNAME>/<ORG>/<NAME>/<PROVIDER>`; without a hostname Terraform uses the public registry.
+
+@ TF-IEP002 D6 T6.3 applied troubleshooting
+S: One repository holds the modules `app` and `db` under `modules/app` and `modules/db`, published to the HCP Terraform private registry with tag-based publishing. Each new tag such as `v1.3.0` creates a version of both modules. What fixes this?
+A: Set a different Source Directory for each module; the registry then publishes only the module whose directory changed in the tagged commit
+B: Switch both modules to branch-based publishing, since tag-based publishing always releases every module in a repository
+C: Turn on the setting to publish modules from a single repository, which makes the registry pick one module for each tag
+D: Give each module its own Module Tag Prefix, such as `app-` and `db-`, and tag releases as `app-v1.3.0` and `db-v2.0.1`
+K: D
+G: ## Several modules in one repository
+In tag-based publishing the registry reads semantic-version tags. Without a prefix, every module published from the repository receives a new version for any valid tag, so releasing `app` also releases `db`.
+- Module Tag Prefix filters tags. With prefix `app-`, the tag `app-v1.0.0` publishes version `v1.0.0` of the `app` module, and the `db` module ignores it.
+- Source Directory tells the registry where each module's files are; it does not decide which tags apply.
+- The organization setting to publish modules from a single repository, when disabled, expects one module per repository; with it enabled and no prefixes, new tags can publish new versions of all modules.
+Separate repositories per module avoid the problem entirely and keep module testing available.
+W: Tag prefixes: each module only reacts to its own prefix, so a tag for one module no longer releases the other.
+X: A=Source Directory only: the directory tells the registry where to find a module's code. Without a prefix, a valid tag still produces a version for every module.
+B=Branch-based publishing: it works, but it is not required and it needs an explicit version for each release; the statement that tag-based publishing always releases all modules is wrong, prefixes address it.
+C=Single-repository setting: it is the setting that allows multiple modules per repository; it has no logic to pick one module per tag, and it also turns off module testing.
+T: For several modules in one repository, filter tags with a Module Tag Prefix per module and tag releases as `prefix-vX.Y.Z`.
+
+@ TF-IEP002 D6 T6.3 applied troubleshooting
+S: A caller writes `source = "git::https://git.example.com/net.git"` together with `version = "1.2.0"` and `terraform init` fails. What is the correct way to pin the module to its 1.2.0 release?
+A: Append `?ref=v1.2.0` to the source address and remove the `version` argument
+B: Append `//v1.2.0` to the source address and keep the `version` argument
+C: Change the source to `net/git/https` so the version argument is looked up through the public registry
+D: Keep the arguments and run `terraform init -upgrade` so Terraform resolves the tag from the version string
+K: A
+G: ## `version` is for registries only
+The `version` argument takes a version constraint and applies only to modules installed from a registry (the public Terraform Registry or an HCP Terraform private registry). Registries index semantic versions, so Terraform can resolve a range.
+- For Git sources, select a revision with the `ref` query parameter: a tag, branch or commit SHA.
+```
+module "net" {
+  source = "git::https://git.example.com/net.git?ref=v1.2.0"
+}
+```
+- Without `ref`, Terraform clones the default branch at `HEAD`, which changes over time.
+- Modules from a local path share the caller's repository and version, so `version` is not supported for them either.
+- A subdirectory inside a package uses `//` before the path (`...net.git//modules/vpc?ref=v1.2.0`); it is not a version selector.
+W: `?ref=`: for a Git source the revision is part of the address, and `version` must be dropped because it is valid only for registry modules.
+X: B=`//` suffix: a double slash marks a subdirectory inside the package, so `v1.2.0` would be read as a directory name, and `version` is still invalid.
+C=Fake registry address: `net/git/https` is parsed as namespace, name and provider on the public registry and does not reach the Git repository.
+D=`init -upgrade`: it updates installed modules within their constraints; it does not make `version` valid for a Git source.
+T: Registry modules use `version`; Git modules are pinned with `?ref=<tag|branch|sha>` in `source`.
+
+@ TF-IEP002 D6 T6.3 advanced use-case
+S: A team prepares a repository for publishing a module to the public registry. Which TWO layout choices follow the standard module structure? (Select TWO)
+A: Nested modules go under `modules/`, and one with its own `README.md` is considered usable by external callers
+B: Example configurations go under `examples/`, and their `module` blocks use a relative path to the repository root such as `../..`
+C: The root module's `.tf` files sit at the repository root, and nested module calls use relative paths such as `./modules/cluster`
+D: The root module lives in a `src/` directory so that tests, docs and examples can sit next to it in the repository root
+E: Nested modules without a README are blocked by Terraform and cannot be called from outside the repository
+K: A,C
+G: ## Standard module structure
+The registry and Terraform tooling understand a conventional layout for modules distributed from their own repository.
+- The root module (required) has its `.tf` files at the top of the repository; commonly `main.tf`, `variables.tf` and `outputs.tf`, plus `README.md` and a `LICENSE`.
+- `modules/` holds nested modules. A nested module with a `README.md` is intended for external use; without one it is for internal use only. This is advisory; Terraform does not enforce it.
+- Calls to nested modules from the root should use relative paths like `./modules/consul-cluster`, so Terraform treats them as part of the same package.
+- `examples/` holds example configurations. Because users copy them, their `module` blocks should use the source address an external caller would use, not a relative path.
+W: A=Nested modules and README: `modules/<name>` with a README signals a module meant for external callers.
+C=Root at top, relative nested calls: the registry expects the root module at the repository root, and relative `./modules/...` paths keep nested modules in the same package.
+X: B=Relative paths in examples: examples are meant to be copied, so they should use the published address a caller would type, not `../..`.
+D=Root module in `src/`: the root module must be in the repository root for the registry to read it.
+E=Terraform blocks no-README modules: the README distinction is advisory only; Terraform does not refuse to call such nested modules.
+T: Root module at the repo root, optional `modules/` (README marks external use) and `examples/` with external source addresses.
+
+@ TF-IEP002 D6 T6.4 applied troubleshooting
+S: A unit-test file uses `mock_provider "aws" {}` and a run block with `command = plan` that asserts `aws_s3_bucket.logs.arn != ""`. The test fails because the value is not known. What is the right fix?
+A: Change the assertion to compare `aws_s3_bucket.logs.id` instead, since only `arn` is computed by a provider
+B: Set `override_during = plan` in the `mock_provider` block so the mocked computed values are generated during the plan
+C: Add `expect_failures = [aws_s3_bucket.logs]` to the run block so the unknown value is accepted as an expected failure
+D: Add `-refresh=false` in `plan_options` to stop Terraform from reading the mocked bucket back from the provider
+K: B
+G: ## When mocks generate data
+A mocked provider returns the same schema as the real provider and fills computed attributes with fake data. By default Terraform generates that data during `apply`; in a `command = plan` run, computed attributes are `(known after apply)`, as with a real provider, and an assertion on them cannot be evaluated.
+```
+mock_provider "aws" {
+  override_during = plan
+}
+```
+- `override_during` accepts `plan` or `apply`. With `plan`, the data is generated at plan time and reused for apply.
+- The attribute can also be set in `mock_resource`, `mock_data` and override blocks, where it overrides the provider-level setting.
+- Generated values: numbers are `0`, booleans `false`, strings random 8-character alphanumerics, collections empty. Use `defaults` to supply realistic values.
+W: `override_during = plan`: the mock generates the computed `arn` at plan time, so a plan-only unit test can assert on it without running an apply.
+X: A=Assert on `id`: `id` is also computed, so it is equally unknown at plan with the default behavior.
+C=`expect_failures`: it accepts failures of user-defined custom conditions only; an unknown value in an assertion is not a custom condition on the resource.
+D=`refresh = false`: refresh reads existing objects; the bucket has no prior state, so refresh is irrelevant and the computed value stays unknown at plan.
+T: In plan-mode tests with mocks, computed values are unknown unless `override_during = plan` makes the mock generate them at plan time.
+
+@ TF-IEP002 D6 T6.4 applied troubleshooting
+S: A module has a precondition requiring `startswith(aws_iam_role.r.arn, "arn:aws:iam::")` for a role it creates. A test using `mock_provider "aws" {}` and the default `command = apply` fails on that condition. What is the best fix?
+A: Add a `mock_resource "aws_iam_role"` block with `defaults = { arn = "arn:aws:iam::123456789012:role/test" }` to the mock provider
+B: Remove the precondition from the module, because a condition that fails under mocks is not a valid module rule
+C: Switch the test to a real `provider "aws"` block with fixed test credentials, because mocks cannot generate ARN-shaped values
+D: Mark the run block with `expect_failures = [aws_iam_role.r]` so the failing precondition counts as the expected result
+K: A
+G: ## Mock data does not know real formats
+A mock provider generates data only for computed attributes, and by type: strings are random 8-character alphanumeric values. The mock has no knowledge of what an ARN, an ID or a URL should look like, so a module that parses or validates such values will fail under the generic mock.
+Provide realistic values for the attributes your module depends on:
+```
+mock_provider "aws" {
+  mock_resource "aws_iam_role" {
+    defaults = { arn = "arn:aws:iam::123456789012:role/test" }
+  }
+}
+```
+- `mock_resource` and `mock_data` apply to every resource or data source of that type; they can also live in `.tfmock.hcl` files shared with `source`.
+- `override_resource` and `override_data` target one specific resource address and set its `values`.
+- Required arguments must still be set in configuration; the mock only fills computed attributes.
+W: `defaults` in `mock_resource`: the computed `arn` receives an ARN-shaped value, so the module's own rule passes and the test still runs without credentials.
+X: B=Delete the precondition: the rule protects real runs; weakening production code to satisfy a test double is the wrong direction.
+C=Real provider: that gives up the point of the unit test (no credentials, no infrastructure). Mocks can return fixed values for any computed attribute through `defaults`.
+D=`expect_failures`: this would turn the test into one that expects the error, and it would make the run fail anyway under `command = apply` because the plan cannot succeed.
+T: Mocks fill computed attributes with random values; use `mock_resource` defaults (or an override) when the module checks their format.
+
+@ TF-IEP002 D6 T6.4 advanced troubleshooting
+S: Which TWO statements about `expect_failures` in a `terraform test` run block are accurate? (Select TWO)
+A: With `command = apply`, a failure of the expected condition during planning still makes the run fail, because the apply cannot proceed
+B: A variable of type `number` that receives `"abc"` counts as an expected failure when the variable is listed in `expect_failures`
+C: It can list any number of resources and variables safely, because Terraform keeps evaluating the others after the first failure
+D: It applies only to user-defined custom conditions (validation, preconditions, postconditions and `check` assertions), not to type errors
+E: Provider API errors raised during apply are treated as expected when the failing resource is listed in `expect_failures`
+K: A,D
+G: ## Testing failure paths
+`expect_failures` lists checkable objects (resources, data sources, `check` blocks, input variables, outputs) whose custom conditions are expected to fail. The test passes if they fail and fails if they do not.
+```
+run "rejects_odd" {
+  command = plan
+  variables { n = 7 }
+  expect_failures = [var.n]
+}
+```
+- Only conditions written by the module author count: `validation`, `precondition`, `postcondition` and `check` blocks. A type mismatch is enforced by Terraform itself, and the run still fails.
+- All validation features except `check` blocks stop execution when they fail. You can therefore rely on only one checkable object in the list (several are meaningful only for `check` blocks), and assertions must only use values that exist before that failure.
+- Prefer `command = plan`. With `command = apply`, a failure during planning means the run could not apply, so the run fails overall, even though the failure was expected.
+W: A=Apply-mode caveat: the expected failure occurs during the plan, so the apply never runs and the run fails; use `command = plan` for such tests.
+D=Custom conditions only: validations, pre/postconditions and checks are testable; type constraints and other errors are not.
+X: B=Type mismatch: a `number` receiving `"abc"` fails the surrounding test even if the variable is listed, because only custom conditions can be expected.
+C=Many objects at once: because most custom conditions halt execution, the others would not be evaluated; only `check` blocks continue.
+E=Provider errors: these are not custom conditions, so listing the resource does not make a provider error expected.
+T: `expect_failures` is for custom conditions only, ideally one per run block and with `command = plan`.
+
+@ TF-IEP002 D6 T6.4 advanced troubleshooting
+S: A test file sets `test { parallel = true }` and has four independent run blocks against the same module directory, with no `state_key` or `module` blocks. The file still takes the same time as before. What is the reason and the fix?
+A: The `-parallelism` flag caps the file at one operation; raise it to the number of run blocks and the four runs will overlap
+B: Runs that execute the same configuration share one in-memory state, so they stay sequential; give independent runs different `state_key` values
+C: Parallel execution works only for `command = plan` run blocks, so the four runs should be converted from apply to plan
+D: Parallel execution works only when each run block sets `providers` to a distinct aliased provider, so the runs need aliases
+K: B
+G: ## When run blocks can run in parallel
+By default a test file runs its `run` blocks one after another. With `parallel = true` on the `test` block or on a `run` block, Terraform can execute eligible blocks at the same time. Two run blocks run in parallel only if:
+- They do not reference each other's outputs.
+- They do not share the same state file.
+- Both have `parallel = true` (set on the `test` block, a run block can override it with `false`).
+The state file is chosen by `state_key`, or, when it is not set, by the module source: all runs against the main configuration share one state. Independent runs therefore need distinct keys.
+```
+run "site_one" { state_key = "one"  ... }
+run "site_two" { state_key = "two"  ... }
+```
+A run with `parallel = false` acts as a barrier: earlier runs finish first and later runs start after it.
+`-run-parallelism=<n>` (default 10) caps how many runs execute at once in a file, and `-parallelism=<n>` caps operations inside one run; neither makes ineligible runs parallel.
+W: Shared state: with no `state_key`, all four runs use the main configuration's state and must wait for each other; unique keys make them eligible.
+X: A=`-parallelism`: that flag limits operations within a single plan or apply (default 10) and is not a cap that serializes the file; raising it does not make runs that share a state parallel.
+C=Plan only: parallel runs can use either command; what matters is that they do not share state or outputs.
+D=Distinct providers: providers are not part of the eligibility rules; state file and output references are.
+T: Parallel run blocks need `parallel = true`, no output references between them, and different state files (`state_key` or `module`).
+
+@ TF-IEP002 D6 T6.4 advanced use-case
+S: A test file has three run blocks in order: `setup` (module `./testing/setup`, creates a bucket), `init` (main configuration, writes objects) and `read` (module `./testing/loader`, reads the objects). In which order does Terraform destroy the three sets of resources when the file finishes?
+A: The setup module first, then the main configuration, then the loader module, in the order they were created
+B: The main configuration first, because its state file is the primary one, and then the setup and loader modules
+C: Loader module, then main configuration, then setup module, so the bucket is removed only after its objects
+D: All three at the same time, because Terraform keeps a separate state for each and destroys them in parallel
+K: C
+G: ## Cleanup order in terraform test
+Each test file keeps its state in memory. There is one state for the main configuration and one for each alternate module loaded with a `module` block in a run block. At the end of the file Terraform destroys everything it created, in reverse run block order, using the last run block that referenced each state.
+- `read` ran last and used the loader module's state, so that goes first.
+- `init` used the main state, so it follows.
+- `setup` ran first, so its resources are destroyed last.
+That order matters: the bucket created by `setup` cannot be deleted while it still holds the objects written later. If a setup resource must outlive another set, order or share state on purpose with `state_key`. If cleanup fails, Terraform lists the resources it could not destroy and you must remove them manually.
+W: Reverse order of last use: loader, then main, then setup, so the bucket is emptied before it is removed.
+X: A=Creation order: destroy follows reverse run order, not creation order, otherwise the bucket would be deleted while still holding objects.
+B=Main first: there is no priority for the main state; the order follows the last run block that referenced each state.
+D=In parallel: cleanup is sequential in reverse run block order because later resources can depend on earlier ones.
+T: terraform test destroys in reverse run block order; setup modules run first and are destroyed last.
+
+@ TF-IEP002 D6 T6.4 applied use-case
+S: The root module of a repository calls `module "credentials"`, which reads an object from S3, and passes the decoded result to `local_file`. A team wants root-level assertions without AWS credentials or any S3 call. Which block does that?
+A: `override_module` with `target = module.credentials` and an `outputs` attribute holding the value the module would return
+B: `override_resource` with `target = module.credentials` and a `values` attribute holding the decoded JSON
+C: `mock_provider "aws" {}` alone, because mock providers return the object content that a real S3 read would give
+D: A second `provider "aws"` block with `alias = "fake"` pointing at a local endpoint and `providers` on the run block
+K: A
+G: ## Overrides for modules, resources and data sources
+Besides `mock_provider`, test files have override blocks that replace values without calling the provider:
+- `override_resource` (attribute `values`) and `override_data` replace the computed values of a specific resource or data source.
+- `override_module` (attribute `outputs`) replaces a whole module's outputs; Terraform creates none of that module's resources.
+All three take a `target`, can sit at file level or in a run block (run level wins), and work with real or mocked providers.
+```
+override_module {
+  target  = module.credentials
+  outputs = { data = { username = "u", password = "p" } }
+}
+```
+`outputs` takes an HCL value, so supply it in the shape the caller consumes (here the module's real output is a string that the root passes to `jsondecode`, so the override must match what the root expects).
+A mock provider alone would return a random 8-character string for the S3 object body, which `jsondecode` cannot parse.
+W: `override_module`: it replaces the module's outputs, so no S3 call is made and the root-level `local_file` uses the supplied value.
+X: B=`override_resource` on a module: its target is a resource address; a module address is not valid, and the module attribute for supplying values is `outputs`.
+C=`mock_provider` alone: the mock fills the S3 object body with a random string, so `jsondecode` fails; you would still have to supply the content.
+D=Local fake endpoint provider: this reconfigures a real provider rather than removing the call, and it needs infrastructure for the endpoint.
+T: To stub a whole module in `terraform test`, use `override_module` with `outputs`; use `override_resource` or `override_data` for single objects.
+
+@ TF-IEP002 D6 T6.4 applied use-case
+S: A platform team publishes private modules by tag. They want HCP Terraform to run each module's tests on every commit to a branch, and engineers to run `terraform test -cloud-run=...` against HCP-stored credentials. What is required?
+A: Keep tag-based publishing with a Module Tag Prefix, because tags are the only trigger that runs registry tests
+B: Enable the option to publish modules from a single repository, which switches on tests for all modules in it
+C: Publish with the Branch type and enable testing for the module; its source must contain test files
+D: Add the `-junit-xml` flag to the CI command, because it sends the run to HCP Terraform instead of local execution
+K: C
+G: ## Testing private registry modules
+HCP Terraform can run a module's `terraform test` files automatically for modules in the private registry.
+- Testing can be enabled only for modules published with the branch-based workflow (a branch name and a module version, no tag required). It runs on every commit to the designated branch.
+- Testing is disabled when the organization option to publish from a single repository is on.
+- Test-specific environment variables and provider credentials are configured on the module's test settings; dynamic credentials (OIDC) are recommended over static keys.
+- After testing is enabled, engineers run `terraform test -cloud-run=app.terraform.io/<ORG>/<MODULE>/<PROVIDER>` from the CLI after `terraform login`. The tests run remotely with the credentials in HCP Terraform, without committing the local changes. The module must come from a private registry.
+Locally, `-junit-xml=<path>` writes a JUnit report; it does not change where tests run.
+W: Branch-based publishing with testing enabled: this is the workflow that supports automatic tests and the `-cloud-run` option.
+X: A=Tag-based with prefix: testing can be enabled only on branch-based modules; tags remain valid for publishing but cannot enable module tests.
+B=Single-repository option: the documentation says module testing is disabled when that option is enabled.
+D=`-junit-xml`: it only writes a report file locally; remote execution comes from `-cloud-run=<module address>`.
+T: Registry module tests need branch-based publishing with testing enabled; `-cloud-run` then runs them remotely in HCP Terraform.
+
+@ TF-IEP002 D6 T6.4 applied use-case
+S: A module's tests live in `tests/net.tftest.hcl`, which sets `variables { region = "us-east-1" }` at file level. A pipeline runs `terraform test -var region=eu-west-1`, and the run block does not set `region`. Which region does the run use?
+A: `eu-west-1`, because command-line values always override every other source of a variable
+B: `eu-west-1`, because a variable passed on the command line is applied after the test file is read
+C: Neither; Terraform reports a conflict and asks which source to trust before the run
+D: `us-east-1`, because variables set in a test file take the highest precedence
+K: D
+G: ## Variables in test files
+A test file can define `variables` at file level and inside a `run` block. File-level values apply to all run blocks in that file; a value in a run block overrides the file-level one for that run.
+- Variable precedence is the usual one, except that values from the test file are highest. They override environment variables, variable files and `-var` options.
+- Automatic variable files (`terraform.tfvars`, `*.auto.tfvars`) inside the test directory override those in the main directory, but they apply only to tests in that directory.
+- Values passed on the command line or in variable files apply to all tests in a run, and are the right place for sensitive values that should not appear in test files.
+So a pipeline that wants to change a value for a test must either remove it from the test file or let the run block read it from somewhere other than the file-level `variables`.
+W: Test file wins: the file-level `variables` block outranks the command-line `-var`, so the run uses `us-east-1`.
+X: A=Command line always wins: in normal plans it ranks near the top, but test-file variables outrank even command-line values.
+B=Applied after the test file: precedence is not decided by read order; test-file values are ranked highest.
+C=Conflict prompt: Terraform never asks; precedence rules resolve it silently, so a pipeline value can be ignored without warning.
+T: In terraform test, values in the test file override `-var`, var files and environment variables.

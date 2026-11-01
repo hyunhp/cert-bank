@@ -254,7 +254,7 @@ A plan expresses a final state. If one argument change forces replacement of eve
 - Delegate rolling to a platform that does it (an autoscaling group's instance refresh or a managed service) and let Terraform change the launch template only.
 - Avoid `-target` for routine releases; the docs reserve it for exceptional situations.
 W: Per-group keys give the pipeline independent diffs. Each apply replaces only the group whose version changed, so capacity remains in the other groups.
-X: B=-parallelism=1: it only limits concurrency; all twelve are still replaced in the same run, with no checks and no guarantee that capacity remains.
+X: B=-parallelism=1: it only limits concurrency; the walk order across the twelve instances is not controlled, so all of them can be destroyed before any is created, and there are no health checks between steps.
 C=replace_triggered_by: it makes one resource's replacement cascade to another, which tends to widen the replacement, not stagger it across applies.
 D=-target on the block: the block address covers every instance, and -target is for exceptional use, not release control.
 T: Batch a rollout by keying groups in for_each and applying one group at a time; parallelism and -target do not do that.
@@ -300,25 +300,25 @@ D=Speculative sources: triggers fire on successful applies of the source, not on
 T: Run-triggered runs wait for confirmation unless Auto-apply run triggers is on, giving a built-in promotion gate.
 V: HCP Terraform
 
-@ TF-IEP002 D4 T4.2 advanced troubleshooting
-S: A release applied 12 of 30 planned changes before a provider error stopped the run, and the team debates how to roll back. Which TWO statements are accurate? (Select TWO)
-A: Terraform has no automatic rollback; the twelve completed changes stay in state, and the fix is a corrected apply or a revert
-B: Reverting the commit and applying moves forward to the earlier configuration, which can recreate any resource that was destroyed, without its data
-C: Running terraform plan -refresh-only restores the earlier configuration of the twelve resources by writing the old values back to the cloud
-D: Terraform keeps a transaction log, so the completed changes are undone automatically when the run is cancelled
-E: Deleting the state file returns every resource to its pre-release condition, because Terraform then recreates them
-K: A,B
-G: ## What failure means in Terraform
-An apply is a sequence of operations on remote systems. Terraform records each successful operation in state as it goes, then stops when one fails. There is no transaction and no undo.
-- **State matches reality** for the twelve completed resources, and the remaining eighteen are untouched, so the next plan shows the rest of the work.
-- **Rollback is roll-forward**: fix the cause and re-apply, or revert the configuration commit and apply. Terraform computes the diff from where things are now to where the old code says they should be.
-- **Data caveat**: a revert that destroys and recreates a stateful resource (database, volume) brings back an empty one. Plan the release so that risky changes use `prevent_destroy`, snapshots or blue/green.
-W: A=No automatic rollback: completed changes remain applied and recorded, so recovery is a new apply after fixing or reverting the code.
-B=Revert and apply: it is a forward change toward older configuration, and anything replaced on the way back is a new object without the old contents.
-X: C=Refresh-only: it updates state to match the real world and never changes remote objects, so it cannot restore earlier values.
-D=Transaction log: Terraform has no transactional apply and no undo of completed operations.
-E=Deleting state: this makes Terraform forget the objects; the next plan would try to create duplicates and fail on names or leave orphans.
-T: Terraform rolls forward only; a failed apply leaves the completed changes in place and a revert is just another apply.
+@ TF-IEP002 D4 T4.2 advanced use-case
+S: A team wants a short-lived preview environment for every pull request, built from the same configuration, and each one must be destroyable without affecting staging or the other previews. Which design fits?
+A: Give each pull request its own state (a distinct backend key or workspace) and variable values, and run terraform destroy against that state when the pull request closes
+B: Keep one shared state, add a map entry per pull request in a tfvars file, and remove the entry when the pull request closes so that the next apply cleans up
+C: Reuse the staging state and use -target on the new resources at apply, then target the same addresses with a destroy when the review ends
+D: Apply each preview into the staging state, and on close run terraform state rm for its resources so that Terraform stops tracking them
+K: A
+G: ## Ephemeral environments
+A preview environment is the same configuration instantiated with different inputs and, above all, its own state. State is the unit that Terraform creates, updates and destroys, so isolating it makes cleanup a single, predictable operation.
+- Parameterize names and sizes with variables (for example `-var="env=pr-142"`), so that globally unique names do not collide.
+- Point the backend at a per-environment location, for example with `terraform init -backend-config="key=previews/pr-142.tfstate"`, or select a workspace named after the pull request.
+- On close, the pipeline runs `terraform destroy` with the same state location and variables. Nothing else is in that state, so nothing else can be removed.
+- Add a scheduled cleanup for previews whose pull request was closed without the hook firing.
+This is a pipeline design choice, not a Terraform feature: Terraform only supplies state isolation and `destroy`.
+W: A separate state per pull request limits both create and destroy to that environment, so closing the pull request removes exactly its resources and staging is never in the plan.
+X: B=Shared state with map entries: removal does work in principle, but every preview change plans against one shared state and lock, and a bad apply or a lock held by one pull request blocks and endangers all the others.
+C=Staging state with -target: -target is for exceptional use, leaves the plan partial, and mixes preview resources with staging so a mistaken destroy can reach staging.
+D=terraform state rm: it makes Terraform forget the objects without deleting them, so the preview resources keep running and costing money, orphaned.
+T: Preview environments get their own state and inputs per pull request, and a destroy on close removes only that environment.
 V: Terraform
 
 @ TF-IEP002 D4 T4.3 advanced definition
@@ -451,7 +451,7 @@ D: Increase the token lifetime so that the old IAM user session expires before t
 K: A
 G: ## Provider configuration for dynamic credentials
 HCP Terraform makes the temporary credentials available to the provider in the run environment (for AWS through its supported environment or shared configuration mechanisms). Explicit credentials in the provider block or competing environment variables are earlier in the provider's own lookup order, so they win.
-The docs advise to pass a region (argument or `AWS_REGION`) and to not use the other arguments or methods from the provider's authentication section, since they may interfere. That includes keys held in workspace variables or variable sets.
+The docs advise to pass a region (argument or `AWS_REGION`) and to not use the other arguments or methods from the provider's authentication section, since they may interfere. Static keys in the provider block or in environment variables are such methods.
 ## Result
 After removing static keys, every run authenticates with a role chosen by trust policy and permissions follow the role, not the old IAM user. Also delete the stale user's keys.
 W: Static arguments and credential variables take precedence in the provider, so the old identity keeps being used; removing them lets the dynamic credentials apply and ends reliance on long-lived keys.
@@ -505,13 +505,12 @@ T: Order: command line and HCP Terraform, then auto.tfvars, terraform.tfvars.jso
 V: Terraform
 
 @ TF-IEP002 D4 T4.4 applied troubleshooting
-S: A team keeps one file per environment and loads them by naming. Which TWO files does Terraform load automatically when run with no flags in that directory? (Select TWO)
-A: terraform.tfvars.json
-B: team.auto.tfvars
-C: prod.tfvars
-D: terraform.prod.tfvars
-E: variables.tfvars.json
-K: A,B
+S: A team keeps one variable file per environment in the root directory, and a pipeline step runs terraform plan with no flags. Which of these files does Terraform load without being told to?
+A: team.auto.tfvars
+B: prod.tfvars
+C: terraform.prod.tfvars
+D: variables.tfvars.json
+K: A
 G: ## Which variable files load automatically
 Terraform loads variable definition files without flags only when the name matches a fixed pattern:
 - `terraform.tfvars`
@@ -519,11 +518,10 @@ Terraform loads variable definition files without flags only when the name match
 - any file ending in `.auto.tfvars` or `.auto.tfvars.json`
 All other `.tfvars` files, whatever their content, are ignored unless passed with `-var-file="prod.tfvars"`. This is why a file named for an environment is usually either given the `.auto.tfvars` suffix (always on) or kept without it and selected explicitly in a pipeline step per environment.
 A file ending in `.json` is parsed as a JSON object with variable names as keys.
-W: A=terraform.tfvars.json: it is one of the two special names that Terraform loads automatically and parses as JSON.
-B=team.auto.tfvars: the .auto.tfvars suffix marks files that are loaded automatically, in lexical order.
-X: C=prod.tfvars: the name matches no automatic pattern; it must be passed with -var-file.
-D=terraform.prod.tfvars: only the exact name terraform.tfvars qualifies, not a prefix.
-E=variables.tfvars.json: a .tfvars.json file is auto-loaded only when named terraform.tfvars.json or ending in .auto.tfvars.json.
+W: team.auto.tfvars: the .auto.tfvars suffix marks files that are loaded automatically, in lexical order.
+X: B=prod.tfvars: the name matches no automatic pattern; it must be passed with -var-file.
+C=terraform.prod.tfvars: only the exact name terraform.tfvars qualifies, not a prefix.
+D=variables.tfvars.json: a .tfvars.json file is auto-loaded only when named terraform.tfvars.json or ending in .auto.tfvars.json.
 T: Automatic: terraform.tfvars, terraform.tfvars.json and *.auto.tfvars(.json); everything else needs -var-file.
 V: Terraform
 
