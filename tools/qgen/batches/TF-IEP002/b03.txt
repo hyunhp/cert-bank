@@ -1,0 +1,573 @@
+# TF-IEP002 b03: D2 State management and upgrades (T2.1-T2.5)
+# src: https://developer.hashicorp.com/terraform/language/backend/s3
+# src: https://developer.hashicorp.com/terraform/language/backend/index
+# src: https://developer.hashicorp.com/terraform/cli/commands/init
+# src: https://developer.hashicorp.com/terraform/cli/cloud/settings
+# src: https://developer.hashicorp.com/terraform/cli/commands/plan
+# src: https://developer.hashicorp.com/terraform/language/block/moved
+# src: https://developer.hashicorp.com/terraform/language/block/removed
+# src: https://developer.hashicorp.com/terraform/cli/commands/state/mv
+# src: https://developer.hashicorp.com/terraform/cli/commands/state/rm
+# src: https://developer.hashicorp.com/terraform/cli/commands/output
+# src: https://developer.hashicorp.com/terraform/cli/commands/graph
+# src: https://developer.hashicorp.com/terraform/language/block/terraform
+# src: https://developer.hashicorp.com/terraform/language/v1-compatibility-promises
+# src: https://developer.hashicorp.com/terraform/language/meta-arguments/depends_on
+# src: https://developer.hashicorp.com/terraform/language/state/remote-state-data
+
+@ TF-IEP002 D2 T2.1 applied use-case
+S: A team on Terraform 1.12 stores state in S3 and locks it with a DynamoDB table. They want to retire the table and keep locking. Which change to the `s3` backend block achieves this?
+A: Set `use_lockfile = true` and allow the pipeline role to read, write and delete the lock object stored beside the state key
+B: Enable versioning on the bucket and remove `dynamodb_table`, since versioned writes make concurrent applies fail safely
+C: Set `encrypt = true` with a customer managed KMS key, because encrypted state objects can only be written by one caller
+D: Point `dynamodb_table` at the bucket name and add a `LockID` tag to the state object so S3 handles lock rows itself
+K: A
+G: ## How the S3 backend locks state
+Locking stops two runs from writing the same state at once. The `s3` backend supports locking only if you opt in, and it offers two mechanisms.
+- **S3 native locking**: `use_lockfile = true` makes Terraform create a lock object named like the state key plus `.tflock`, using S3 conditional writes. The lock exists while a run holds it and is deleted afterwards.
+- **DynamoDB locking**: `dynamodb_table` names a table whose partition key is `LockID` (string). The docs mark this method deprecated and due for removal in a future minor version. Both can be set together during migration.
+## Permissions follow the mechanism
+The role needs `s3:GetObject`, `s3:PutObject` and `s3:DeleteObject` on the `.tflock` key, in addition to access to the state key. Missing delete rights leave the lock behind and the next run reports a held lock.
+W: Native S3 locking: `use_lockfile = true` replaces the DynamoDB table, and the role needs get, put and delete on the lock object next to the state key.
+X: B=Versioning only: versioning keeps old object versions for recovery, but it does not stop two runs from overwriting each other, so concurrent applies would still corrupt state.
+C=Encryption: `encrypt` protects the object at rest; it has nothing to do with serializing writers, and KMS does not limit writes to one caller.
+D=Table named after the bucket: a DynamoDB table is a separate service, and the backend never stores lock rows in S3 objects or tags.
+T: To drop DynamoDB for S3 backend locking, set `use_lockfile = true` and grant object delete on the `.tflock` key.
+V: Terraform, Amazon S3
+
+@ TF-IEP002 D2 T2.1 applied troubleshooting
+S: An engineer changes the `bucket` value in the `s3` backend block to a new bucket. `terraform init` stops with "Backend configuration changed". The state must move to the new bucket. Which command does that?
+A: `terraform init -reconfigure`, which re-reads the block and copies the old state to the new location
+B: `terraform init -migrate-state`, which copies the existing state to the newly configured backend
+C: `terraform init -upgrade`, which refreshes the backend definition along with provider selections
+D: `terraform state push` run before init, which writes the local file into the bucket named in the block
+K: B
+G: ## Changing a backend is a state decision
+Terraform remembers the initialized backend in `.terraform/`. When the block no longer matches, `init` refuses until you say what should happen to the state: `-reconfigure` or `-migrate-state` must be supplied.
+- **`-migrate-state`** copies existing state to the new backend, and may prompt to confirm each workspace. `-force-copy` answers yes to the prompts and implies `-migrate-state`.
+- **`-reconfigure`** ignores the previous configuration and does not migrate anything. The new location starts empty, so the next plan proposes creating every resource again.
+Back up the state first. The docs strongly recommend copying `terraform.tfstate` aside before migrating.
+W: `-migrate-state`: it is the option that copies the existing state into the new backend, so the next plan shows no changes.
+X: A=`-reconfigure`: it discards the old backend settings without copying, so the bucket would be empty and plan would want to recreate resources that already exist.
+C=`-upgrade`: this only re-selects provider and module versions within constraints; it does not handle a changed backend.
+D=`state push` first: push writes to the backend that is already initialized, which is the old one here, and it is not how a backend change is processed.
+T: Changed backend settings need `init -migrate-state` to carry state over; `-reconfigure` starts with nothing.
+V: Terraform, Amazon S3
+
+@ TF-IEP002 D2 T2.1 advanced use-case
+S: Four environments share one `s3` backend block in Git. Bucket and key differ per environment, and the repository must not hold them. Which TWO statements about a partial configuration are accurate? (Select TWO)
+A: The block keeps `backend "s3" {}` and each pipeline run passes `terraform init -backend-config=prod.s3.tfbackend`
+B: Backend arguments cannot use input variables, so a partial configuration is the way to vary them per run
+C: Values from `-backend-config` stay in memory and are never written to the working directory
+D: Terraform needs no backend block at all if every argument arrives through `-backend-config` options
+E: Credentials passed by `-backend-config` are safer than environment variables because they are never saved in plan files
+K: A,B
+G: ## Why partial configuration exists
+The `backend` block is read before variables are evaluated, so it cannot reference `var.` values. To keep environment-specific or sensitive arguments out of version control, you leave them out and supply them at `init`.
+- A **file**: `-backend-config=PATH`, a file of `key = "value"` lines that fills the empty arguments.
+- **Key/value pairs**: `-backend-config="key=value"` (shell history keeps these).
+- Interactive prompts for missing values.
+Terraform requires at least an empty `backend "s3" {}` in a root file to name the backend type. The merged result is written in plain text under `.terraform/`, and also into plan files, which is why HashiCorp recommends environment variables for credentials.
+W: A=Partial configuration with a file: the empty block names the type and the per-environment file supplies bucket and key at init.
+B=No variables in backends: backend settings are needed before variable evaluation, so per-run values must come through init options.
+X: C=Memory only: the merged configuration is stored on disk in `.terraform/` in plain text, so that directory must stay out of version control.
+D=No block needed: at least an empty backend block is required to select the backend type.
+E=Safer than environment variables: the docs warn the opposite, because `-backend-config` values land in `.terraform/` and in plan files.
+T: A partial backend block names only the type; init options fill in the rest, and the merged result sits in plain text under `.terraform/`.
+V: Terraform
+
+@ TF-IEP002 D2 T2.1 applied comparison
+S: A root module declares `cloud { organization = "acme" workspaces { tags = ["app:web"] } }`. Three HCP Terraform workspaces carry that tag. An engineer runs `terraform init` then `terraform plan`. What is the expected behavior?
+A: Terraform plans all three workspaces in one run and merges their results into a single plan
+B: Plan fails because tags may only be used with a workspace `name`, so one workspace must be chosen
+C: Terraform works in one workspace at a time, chosen with `terraform workspace select` or `TF_WORKSPACE`
+D: Terraform creates a new workspace per tag value on every plan and runs there, leaving the existing ones untouched
+K: C
+G: ## Name versus tags in the cloud block
+The `cloud` block links a working directory to HCP Terraform workspaces.
+- `workspaces { name = "..." }` ties the directory to one workspace.
+- `workspaces { tags = [...] }` ties it to every workspace in the organization with those tags (optionally limited with `project`). The CLI then maps its own workspace commands onto them: `terraform workspace list` shows the matches and `terraform workspace select` picks one. If no workspace has the tags, init offers to create one.
+`name` and `tags` cannot be combined. Each run still targets exactly one workspace, with its own state and variables.
+W: One workspace at a time: with tags, the CLI picks among matching workspaces via `workspace select` or `TF_WORKSPACE`, and each run uses that workspace's own state.
+X: A=Merged plan: a run belongs to a single workspace and a single state, so there is no cross-workspace plan.
+B=Tags need a name: the two settings are alternatives, and combining them is what is rejected.
+D=Workspace per tag value: init may offer to create a workspace when none match, but plan never creates workspaces on its own.
+T: A tags-based `cloud` block exposes many workspaces to the CLI; you work in one selected workspace per run.
+V: HCP Terraform
+
+@ TF-IEP002 D2 T2.1 advanced use-case
+S: A project keeps state in an `s3` backend and now moves it to an HCP Terraform workspace. The team edits the configuration. Which approach moves the state with the fewest manual steps?
+A: Keep the `backend "s3"` block and add a `cloud` block, so both receive every state write
+B: Replace the `backend` block with a `cloud` block and run `terraform init`, accepting the prompt to copy existing state
+C: Replace the block, run `terraform init -reconfigure`, then re-import each resource into the new workspace
+D: Run `terraform state pull`, upload the JSON to the workspace's variables page and then remove the old backend
+K: B
+G: ## Moving state into HCP Terraform
+A configuration can have one state storage setting: either a `backend` block or a `cloud` block, not both. Switching is a backend change, so `terraform init` detects the previous backend and offers to copy the existing state into the HCP Terraform workspace, matching the `-migrate-state` flow.
+- Back up the state first.
+- If the `cloud` block uses tags, init asks which workspace name to create or use for each existing workspace.
+- Afterwards runs can execute remotely with state, locks and history handled by the service.
+`-reconfigure` would skip the copy, leaving an empty workspace.
+W: Replace and init: init sees the backend changed and offers to copy the state into the workspace, so no resources need to be re-imported.
+X: A=Both blocks: a configuration can use only one of `backend` or `cloud`, and Terraform reports an error rather than dual-writing.
+C=Reconfigure and re-import: `-reconfigure` discards the old state link, which forces needless imports of resources that are already tracked.
+D=Upload as a variable: workspace variables are inputs to runs, not a state store, and state would not become a state version.
+T: Switch to HCP Terraform by swapping `backend` for `cloud` and answering the migration prompt in `init`.
+V: HCP Terraform, Terraform
+
+@ TF-IEP002 D2 T2.1 applied tradeoff
+S: A shared state bucket for production is updated by a pipeline. Last week a mistaken `terraform state push` replaced the production state with an older snapshot. Which bucket setting lets the team restore the previous snapshot?
+A: `use_lockfile = true`, because a lock object keeps the last written state in a sibling key
+B: `encrypt = true`, because server-side encryption retains the prior ciphertext of each overwritten object
+C: Bucket versioning, which keeps earlier versions of the state object so a known-good version can be restored
+D: A `-backup` path on `terraform apply`, because the backup option copies remote state before each write
+K: C
+G: ## Locking is not backup
+Three different protections get confused.
+- **Locking** (`use_lockfile`) serializes writers. It holds no copy of state.
+- **Encryption** (`encrypt`) protects data at rest. Overwriting still replaces the object.
+- **Versioning** keeps earlier versions of the same S3 key. The S3 backend docs highly recommend enabling bucket versioning so state can be recovered after accidental deletion or human error.
+After a bad overwrite you restore the earlier object version, then run `terraform plan` to see what differs from the real infrastructure. The `-backup` option is a legacy option for local state files, not remote backends.
+W: Versioning: each overwrite creates a new object version, so the correct earlier state can be copied back as the current one.
+X: A=Lock file: it exists only while a run holds the lock and holds no state content.
+B=Encryption: it does not retain previous contents; an overwrite replaces the object.
+D=`-backup`: the legacy backup options work with local state, so they do not snapshot an S3 backend before writes.
+T: Recover from overwritten or deleted remote state with bucket versioning; locking only prevents concurrent writes.
+V: Amazon S3, Terraform
+
+@ TF-IEP002 D2 T2.2 applied use-case
+S: During an incident an operator changed a tag on a load balancer in the console, and the team accepts that value. The configuration still holds the old tag. They run `terraform apply -refresh-only` and approve. What is the result?
+A: State and outputs match the real tag, infrastructure is untouched, and the next normal plan shows the tag reverting
+B: The configuration file is rewritten with the accepted tag value, so the next normal plan reports no changes at all
+C: The load balancer is changed back to the old tag during that same apply because apply always enforces configuration
+D: Terraform destroys and recreates the load balancer to reconcile the difference with the recorded state
+K: A
+G: ## What refresh-only mode does
+In **refresh-only mode** Terraform reads the real objects and proposes only to update state, and root module output values, to match what it finds. It does not create, update or destroy infrastructure. It is for cases like an emergency edit you now want to record. (Available from v0.15.4.)
+## What it does not do
+- It never edits `.tf` files. If you want the new tag to persist, update the configuration yourself.
+- After the state refresh the configuration remains the desired state, so a following normal `plan` shows an in-place update that sets the tag back.
+Because it replaces the old implicit `terraform refresh` command, it shows you the proposed state changes before saving.
+W: Refresh-only: state is brought in line with reality without changing infrastructure, and the unchanged configuration then drives a plan to revert the tag.
+X: B=Rewrites configuration: Terraform never writes `.tf` files; reconciling the code is a manual edit.
+C=Immediate revert: refresh-only mode cannot modify remote objects; reverting happens in a later normal apply.
+D=Recreate: a tag is updatable in place, and refresh-only never plans resource changes anyway.
+T: `-refresh-only` syncs state to reality; to keep the outside change, update the code as well.
+V: Terraform
+
+@ TF-IEP002 D2 T2.2 applied troubleshooting
+S: A web instance has a corrupted disk but is still running, and `terraform plan` shows no changes. The team wants Terraform to rebuild only that instance in the next apply. Which command does so?
+A: `terraform apply -refresh-only -target=aws_instance.web`, which rebuilds by refreshing the object first
+B: `terraform taint aws_instance.web`, the recommended current way to mark a resource for recreation
+C: `terraform state rm aws_instance.web`, since removing it from state makes the next apply rebuild it in place
+D: `terraform apply -replace="aws_instance.web"`, which plans that one instance as destroy and create
+K: D
+G: ## Forcing a rebuild of a healthy-looking resource
+Terraform only plans changes when state, configuration and reality differ. When an object is damaged in a way the provider cannot see, you must tell Terraform to replace it.
+- **`-replace=ADDRESS`** on `plan` or `apply` marks that instance for replacement in this run. The plan shows it as "must be replaced" so reviewers see the impact, and saved plans carry the decision.
+- `terraform taint` still works but is deprecated in favor of `-replace`, because it writes to state before any plan is reviewed.
+- Dependents of the instance may also change if they use attributes that become unknown.
+W: `-replace`: it marks exactly one address for destroy and create in a reviewable plan.
+X: A=Refresh-only with a target: refresh-only never changes infrastructure, so nothing would be rebuilt.
+B=`taint`: it is deprecated for this purpose and mutates state before review, whereas `-replace` is the recommended form.
+C=`state rm`: removing it from state makes Terraform forget it, so the next apply creates a second instance and leaves the damaged one running.
+T: Use `-replace=ADDRESS` to rebuild one resource in a reviewable plan; taint is the older, deprecated route.
+V: Terraform
+
+@ TF-IEP002 D2 T2.2 advanced comparison
+S: A module is used by 30 workspaces. A maintainer renames `aws_s3_bucket.logs` to `aws_s3_bucket.audit` in the module. How should the rename ship so every workspace keeps its bucket?
+A: Add a `moved` block from the old address to the new one in the module, so each workspace's next plan updates its state address
+B: Run `terraform state mv` manually in only one workspace, because other workspaces learn the address through the registry
+C: Rename the resource and rely on the provider to detect the same bucket name and update the state automatically
+D: Add a `removed` block for the old address and an `import` for the new one in each of the 30 workspaces
+K: A
+G: ## Refactoring addresses safely
+Terraform tracks objects in state by address. If you rename a resource block, the old address has no configuration and the new address has no state, so a plan proposes destroy and create.
+- A **`moved` block** (`from = aws_s3_bucket.logs`, `to = aws_s3_bucket.audit`) records the rename in code. On the next plan, each workspace that has state at the old address shows the object as moved and retargets its state, with no infrastructure change.
+- **`terraform state mv`** does the same by hand, once per state. With 30 workspaces that is 30 manual, unreviewed, error-prone operations.
+Because the block ships with the module, consumers get the move as they upgrade. Keep it long enough for all consumers to apply once.
+W: `moved` block: it travels with the module and each consumer applies the address change on its next run, with the change visible in the plan.
+X: B=One manual `state mv`: each workspace has its own state, and nothing teaches the others the new address.
+C=Provider detection: providers know nothing about Terraform addresses; the plan would destroy the old bucket and create a new one.
+D=`removed` plus `import`: removed with destroy false and a new import would work per workspace but multiplies manual effort and is not a rename mechanism.
+T: Ship a rename with a `moved` block so every state retargets itself on its next plan.
+V: Terraform
+
+@ TF-IEP002 D2 T2.2 applied troubleshooting
+S: A team deletes the `aws_db_instance.legacy` block from the configuration. They want Terraform to forget the database while the database keeps running. The plan currently shows a destroy. What fixes it?
+A: Add `lifecycle { prevent_destroy = true }` to the block and keep applying, since the destroy then only warns
+B: Run `terraform plan -refresh=false`, so the missing block cannot cause the database to be destroyed
+C: Add `removed { from = aws_db_instance.legacy }` with `lifecycle { destroy = false }` in place of the block
+D: Add `moved { from = aws_db_instance.legacy to = null }` so the address is dropped from state quietly
+K: C
+G: ## Removing from management without destroying
+A resource in state but not in configuration is planned for destroy. To stop managing it, state the intent in code with a **`removed` block**.
+- `removed { from = aws_db_instance.legacy  lifecycle { destroy = false } }` tells Terraform to drop the object from state and leave the real database alone.
+- `destroy = true` (the default) would destroy it, which is the same as deleting the block.
+- The block is reviewed in the plan and travels with the code, unlike a one-off `terraform state rm`.
+W: `removed` block with `destroy = false`: Terraform removes the address from state at apply time and does not call the delete API.
+X: A=`prevent_destroy`: this makes the plan fail with an error, and it needs the resource block that was deleted.
+B=`-refresh=false`: skipping refresh only avoids reading remote objects; the plan still compares state with configuration and proposes the destroy.
+D=`moved` to null: `to` must be a valid resource address, so the block is invalid and cannot discard state.
+T: Use a `removed` block with `destroy = false` to stop managing a resource without deleting it.
+V: Terraform
+
+@ TF-IEP002 D2 T2.2 advanced use-case
+S: The security team wants to catch out-of-band changes to production early, without applying anything. Which TWO approaches serve that goal? (Select TWO)
+A: A scheduled `terraform plan -refresh-only -detailed-exitcode` job that raises an alert when it exits with code 2
+B: A scheduled `terraform validate` job that fails when a resource attribute differs from the cloud API
+C: Drift detection through HCP Terraform health assessments that periodically compare the workspace with real infrastructure
+D: A nightly `terraform fmt -check` job that reports resources edited outside the pipeline
+E: A pipeline step that runs `terraform state list` and compares the address count with the previous day
+K: A,C
+G: ## Detecting drift
+Drift is real infrastructure differing from what state records. Only a command that reads the remote objects can see it.
+- `terraform plan -refresh-only` compares state against real objects and proposes only state changes. With `-detailed-exitcode`, the exit code is 0 for no changes and 2 when changes exist (1 is an error), which suits a scheduled job.
+- HCP Terraform **health assessments** run on a schedule against a workspace and report drift without needing you to build the job.
+## What does not detect drift
+`validate` checks syntax and internal consistency offline. `fmt` checks style. `state list` only prints addresses already in state.
+W: A=Scheduled refresh-only plan: exit code 2 signals that remote objects differ from state, with no apply involved.
+C=Health assessments: HCP Terraform checks the workspace on a schedule and reports drift automatically.
+X: B=`validate`: it never contacts the cloud API, so it cannot compare attributes with reality.
+D=`fmt -check`: it inspects file formatting only and knows nothing about resources.
+E=`state list` counts: addresses in state do not change when someone edits an attribute in the console.
+T: Detect drift with refresh-only plans (exit code 2) or HCP Terraform health assessments; validate, fmt and state list cannot see it.
+V: Terraform, HCP Terraform
+
+@ TF-IEP002 D2 T2.2 applied troubleshooting
+S: An engineer runs `terraform state rm aws_instance.app` for a tracked instance, then runs `terraform plan`. The configuration still contains the `aws_instance.app` block. What does the plan show?
+A: A plan to destroy the instance, because it is running but no longer recorded in state
+B: A plan to create a new `aws_instance.app`, while the original instance keeps running outside management
+C: No changes, because the plan reads the real instance by its configuration arguments
+D: An error that the address was removed from state, which must be restored with `terraform state push`
+K: B
+G: ## What `state rm` does
+`terraform state rm` deletes the binding between an address and its real object in state. It never calls the provider to delete anything: the object keeps running.
+- Config still declares `aws_instance.app`, state has nothing for it, so Terraform plans a **create**.
+- Applying that plan builds a second instance, and the first becomes unmanaged and may cost money or hold an IP or name.
+- If the goal is to stop managing the object, remove the resource block too, or use a `removed` block. If the goal is to adopt it again, use `import`.
+W: Create: with no state entry, Terraform sees a missing resource and proposes a new one, leaving the original untouched.
+X: A=Destroy: destroy needs a state entry for an object to delete, so an object absent from state cannot be destroyed by Terraform.
+C=No changes: Terraform matches configuration to state by address, not by searching the cloud for a lookalike.
+D=Error: removal is valid; the plan runs normally and just differs from before.
+T: After `state rm` with the block still in code, the next plan creates a duplicate.
+V: Terraform
+
+@ TF-IEP002 D2 T2.3 applied use-case
+S: Before changing a shared networking module, an engineer wants a picture of which resources depend on which, including the order Terraform will use. Which command gives this?
+A: `terraform graph`, which emits the dependency graph of resources and data sources in DOT format
+B: `terraform providers lock`, which prints the ordering of resources in each provider's schema
+C: `terraform validate -json`, which lists every dependency edge found while checking references
+D: `terraform state list`, which prints addresses in the order they will be created
+K: A
+G: ## Dependency graph
+Terraform builds a directed graph of resources and data sources, and walks it so independent nodes run in parallel and dependent ones wait. An edge comes from a reference to another object's attribute (implicit) or from `depends_on` (explicit).
+- `terraform graph` prints the simplified graph in Graphviz DOT format, for example `terraform graph | dot -Tsvg > graph.svg`.
+- `-type=plan` or other types give more detail, exposing internal implementation.
+Reading the graph before a refactor shows what changes ripple into.
+W: `terraform graph`: it renders the ordering constraints between configured objects.
+X: B=`providers lock`: that command writes checksums into the dependency lock file for providers, nothing to do with resource order.
+C=`validate -json`: it reports diagnostics, not a list of dependency edges.
+D=`state list`: output is the addresses in state in sorted order, not a creation order.
+T: Use `terraform graph` to visualize ordering before changing shared code.
+V: Terraform
+
+@ TF-IEP002 D2 T2.3 advanced use-case
+S: Which TWO things create a dependency edge, so Terraform orders operations accordingly? (Select TWO)
+A: A resource argument that references an attribute of another resource, such as `subnet_id = aws_subnet.a.id`
+B: A `depends_on = [aws_iam_role_policy.p]` meta-argument listing another resource
+C: The order in which resource blocks appear within a `.tf` file
+D: The alphabetical order of the file names in the working directory
+E: A shared `tags` value that both resources read from the same local
+K: A,B
+G: ## Implicit and explicit dependencies
+- **Implicit**: referencing `aws_subnet.a.id` tells Terraform the instance needs the subnet first, so it creates the subnet first and destroys it last.
+- **Explicit**: `depends_on` is for hidden dependencies, where one resource needs another to exist but no attribute is referenced, such as an instance whose boot script needs an IAM policy to be attached.
+Position in files does not matter: Terraform loads all `.tf` files in a directory as one module. A shared local value creates a reference to the local, not an ordering between the two resources.
+W: A=Attribute reference: it creates an implicit edge from the referencing resource to the one it uses.
+B=`depends_on`: it creates an explicit edge for dependencies Terraform cannot see in the arguments.
+X: C=Block order in a file: configuration is declarative, so layout in the file has no effect on ordering.
+D=File names: all files in the directory are merged into one module, and name order is not an ordering signal.
+E=Shared local: both resources depend on the local value, but that does not make one wait for the other.
+T: Edges come from references and `depends_on`; file order and naming do not matter.
+V: Terraform
+
+@ TF-IEP002 D2 T2.3 applied troubleshooting
+S: A root module and its child modules are about to move to a new major version of the AWS provider. The team needs to see which modules require which provider constraints. Which command shows it?
+A: `terraform providers`, which prints a tree of provider requirements by module and what state records
+B: `terraform version -json`, which lists the providers loaded and their constraints in each module
+C: `terraform graph -type=providers`, which prints each module's version constraints as text
+D: `terraform output -json`, which lists the provider versions that child modules export
+K: A
+G: ## Finding provider requirements
+Each module can declare `required_providers` with its own version constraint, and Terraform must find one version that satisfies all of them. Before an upgrade you need to know who constrains what.
+- `terraform providers` prints a tree: requirements of the root module, then each child module, then the providers state tracks. It points out which module blocks a newer provider version.
+- `terraform version` shows installed versions of the CLI and providers that are selected in the working directory, but not per-module constraints.
+- After changing constraints, `terraform init -upgrade` selects new versions and rewrites `.terraform.lock.hcl`.
+W: `terraform providers`: the tree is organized by module, so a module with a restrictive constraint is easy to spot.
+X: B=`version -json`: it prints selected versions only, not the per-module constraints.
+C=`graph -type=providers`: no such graph type is meant for constraint text, and the graph output is DOT, not constraint lines.
+D=`output -json`: outputs are values declared by the configuration; they do not include provider metadata.
+T: `terraform providers` shows which module needs which provider constraint, ahead of an upgrade.
+V: Terraform
+
+@ TF-IEP002 D2 T2.3 advanced troubleshooting
+S: A platform team plans to rename the output `vpc_id` to `network_id` in the root module of a network workspace. Twelve application workspaces read it with `data "terraform_remote_state"`. What should they do first?
+A: Rename the output; remote state data sources re-read the output schema and map the old name automatically
+B: Add `network_id` and keep `vpc_id` until the consumers have switched, then remove the old output
+C: Run `terraform state mv` on the output so the consumer states update their references
+D: Rename it and have consumers run `terraform init -upgrade` to pick up the new output name
+K: B
+G: ## Cross-state dependencies
+`terraform_remote_state` reads the root module outputs from another configuration's latest state. Those outputs are a contract: consumers refer to them by name (`data.terraform_remote_state.net.outputs.vpc_id`).
+- Removing or renaming an output breaks every consumer on its next plan, because the attribute no longer exists.
+- Safe sequence: publish the new output alongside the old, update consumers, apply them, then remove the old one.
+- These links are not visible in the producer's graph. Search the other repositories and workspaces for `terraform_remote_state` that point at this state before changing outputs.
+W: Add the new output and keep the old one: consumers keep working while they migrate, and the old output is dropped once nothing reads it.
+X: A=Automatic mapping: nothing maps names; a consumer referencing a missing output fails its plan.
+C=`state mv` on an output: outputs are not resources, and consumer states do not store the producer's output name.
+D=`init -upgrade`: it selects provider and module versions and does not rewrite references in code.
+T: Treat root outputs read via `terraform_remote_state` as an API: add, migrate consumers, then remove.
+V: Terraform
+
+@ TF-IEP002 D2 T2.3 applied use-case
+S: An instance is declared with `depends_on = [aws_iam_role_policy.boot]`, and nothing else links them. During `terraform destroy`, in what order does Terraform act on these two objects?
+A: It destroys the policy first, then the instance, because the policy was created first
+B: It destroys both in parallel, because `depends_on` only influences creation order
+C: It destroys the instance first, then the policy, which reverses the creation order
+D: It asks which to remove first, since explicit dependencies are not ordered on destroy
+K: C
+G: ## Destroy reverses the graph
+Dependencies describe "A needs B". Creation walks edges from B to A. Destruction walks them in the opposite direction, so something that needs B is removed before B.
+- With `depends_on = [aws_iam_role_policy.boot]`, the instance depends on the policy.
+- Create: policy then instance. Destroy: instance then policy.
+- Independent objects have no edge and may be processed in parallel (default parallelism is 10 operations).
+This is why a hidden dependency declared with `depends_on` protects destroy order too, not only creation.
+W: Reverse order: the instance depends on the policy, so the instance is destroyed first and the policy last.
+X: A=Policy first: that is creation order; destroying it first could remove permissions the instance still relies on.
+B=Parallel: `depends_on` creates an edge that applies to every operation, including destroy.
+D=Prompt: Terraform computes the order automatically from the graph.
+T: Destroy runs the dependency graph in reverse, so dependents go before what they depend on.
+V: Terraform
+
+@ TF-IEP002 D2 T2.4 applied comparison
+S: A repository sets `required_version` in its `terraform` block. Which value allows 1.14 and 1.15 but rejects any 2.x release?
+A: `required_version = "~> 1.12.0"`
+B: `required_version = ">= 1.12"`
+C: `required_version = "= 1.14.0"`
+D: `required_version = "~> 1.12"`
+K: D
+G: ## How the version constraint works
+`required_version` in the `terraform` block states which CLI versions can use the configuration. Terraform stops with an "Unsupported Terraform Core version" error if the running CLI does not match.
+- `~> 1.12` is the pessimistic operator on the second-to-last segment: it means `>= 1.12.0` and `< 2.0.0`, so any later 1.x.
+- `~> 1.12.0` only allows patch releases of 1.12 (`>= 1.12.0, < 1.13.0`).
+- `>= 1.12` has no upper bound and accepts 2.x.
+- `= 1.14.0` allows exactly that one version.
+The block accepts constant values only; it cannot use variables or functions.
+W: `~> 1.12`: it permits 1.12 and every later 1.x, including 1.14 and 1.15, and stops at 2.0.
+X: A=`~> 1.12.0`: this is locked to the 1.12 patch series, so 1.14 would be rejected.
+B=`>= 1.12`: no upper bound, so a future 2.x would be accepted.
+C=`= 1.14.0`: only one version passes, so 1.15 would be rejected.
+T: `~> 1.12` means at least 1.12 and below 2.0; adding a patch digit narrows it to that minor line.
+V: Terraform
+
+@ TF-IEP002 D2 T2.4 applied troubleshooting
+S: A developer in a dev environment applies with a newer CLI. A teammate on an older CLI then runs a plan against the same state and gets an error that the state was written by a newer Terraform version. What is the correct way forward?
+A: Use `-lock=false` so the older CLI skips the version stored in the state
+B: Run `terraform init -upgrade` to downgrade the state format to the older release
+C: Edit `terraform_version` in the pulled state JSON and push it back with `terraform state push`
+D: Upgrade the teammate's CLI to at least the version that wrote the state, and align `required_version`
+K: D
+G: ## State is forward-only
+Terraform records the CLI version that last wrote state. Within v1.x, the compatibility promise lets you upgrade from any v1.x to any later v1.x, but downgrading is not guaranteed: later releases may introduce new storage formats for state snapshots that earlier versions cannot read.
+- An older CLI refuses to use state written by a newer one, which prevents it from corrupting data it does not understand.
+- Fix by moving everyone to the newer CLI, and put the minimum in `required_version` so mismatches fail early and clearly.
+- Do not hand-edit version fields in state; that bypasses the protection.
+W: Upgrade the older CLI: state is meant to move forward, and a pinned `required_version` makes the team converge.
+X: A=`-lock=false`: locking is about concurrent writers, and the version check is separate.
+B=`init -upgrade`: this changes provider and module selection, and cannot downgrade state.
+C=Edit and push: forging the version field defeats the safety check and can corrupt state the older CLI cannot parse.
+T: State formats only move forward; upgrade lagging CLIs and set `required_version` to match.
+V: Terraform
+
+@ TF-IEP002 D2 T2.4 applied tradeoff
+S: A company runs dev, staging and prod from the same configuration and wants to move from Terraform 1.12 to 1.15. Which TWO practices reduce the risk? (Select TWO)
+A: Upgrade the CLI in dev first, run a plan expecting no changes, then promote through staging to prod
+B: Read the upgrade notes for each release between, and raise `required_version` in the same reviewed change
+C: Upgrade prod first because its state is the most important to have in the newest format
+D: Run `terraform init -upgrade` in each environment, because that command installs the new Terraform CLI
+E: Step through every minor release one at a time, since skipping a version loses state data
+K: A,B
+G: ## Rolling a CLI upgrade through environments
+Within v1.x you can upgrade from any v1.x release to any later one, so skipping minors is supported, and you do not need to apply every release in turn.
+- **Lowest-risk environment first.** Run `terraform plan` with the new CLI against dev. A healthy upgrade shows no unexpected changes. Then move to staging and prod.
+- **Read the release notes** (and upgrade guides) for deprecations and behavior changes, and set `required_version` so older CLIs stop early.
+- Remember that state written by the new CLI may not be readable by the old one, so rolling back after an apply is not guaranteed.
+`terraform init -upgrade` updates providers and modules within constraints; it never installs the Terraform CLI.
+W: A=Dev first: an uneventful plan on the new CLI proves compatibility before production is touched.
+B=Notes plus `required_version`: you learn about deprecations ahead of time and the constraint keeps stragglers from writing with an old CLI.
+X: C=Prod first: the most valuable state should take the new format last, after the lower environments proved it.
+D=`init -upgrade`: it selects provider and module versions, not the CLI version.
+E=One minor at a time: skipping within v1.x is supported by the compatibility promises, and no state data is lost.
+T: Upgrade the CLI in non-production first, verify with an empty plan, read the notes, and pin `required_version`.
+V: Terraform
+
+@ TF-IEP002 D2 T2.4 advanced use-case
+S: A team upgrades the CLI from 1.12 to 1.15 and wants no provider changes in the same rollout. After the upgrade, `terraform init` runs in CI. What keeps provider versions the same?
+A: The CLI version is stored in each provider's `version` argument, so providers follow the CLI
+B: `.terraform.lock.hcl` committed to version control, which pins each provider to its recorded version and checksums
+C: `required_version`, which also acts as a constraint on provider plugin releases
+D: The `.terraform` directory, which CI restores from cache and which stores the provider selection permanently
+K: B
+G: ## CLI and providers upgrade independently
+Terraform core and providers are separate programs with separate versions.
+- Upgrading the CLI does not change which provider releases are selected.
+- The **dependency lock file** `.terraform.lock.hcl` records each selected provider version and its checksums. `terraform init` reuses those versions as long as they still satisfy the `required_providers` constraints. Only `terraform init -upgrade` moves to newer ones.
+- Commit the lock file so every environment and CI job installs identical providers.
+Doing the CLI upgrade and the provider upgrade as two separate changes makes a surprising plan easier to attribute.
+W: The committed lock file: init honors it, so the CLI upgrade installs the exact provider releases already chosen.
+X: A=CLI version in provider arguments: provider constraints are declared in `required_providers`, and are independent of the CLI release.
+C=`required_version`: it constrains the CLI only; provider constraints live in `required_providers`.
+D=Cache of `.terraform`: it is a local working directory that may be absent on a fresh runner, and the lock file, not the cache, is the source of truth.
+T: Commit `.terraform.lock.hcl`; a CLI upgrade then leaves provider versions alone until `init -upgrade`.
+V: Terraform
+
+@ TF-IEP002 D2 T2.4 applied use-case
+S: A state file shows resources under the provider address `registry.terraform.io/-/aws` from a very old Terraform release, and the upgrade to a current CLI cannot find the provider. Which command rewrites these entries to the correct source address?
+A: `terraform providers lock -platform=linux_amd64`, which reassigns recorded provider addresses
+B: `terraform init -migrate-state`, which updates provider source addresses stored inside state
+C: `terraform state replace-provider registry.terraform.io/-/aws registry.terraform.io/hashicorp/aws`
+D: `terraform state mv registry.terraform.io/-/aws registry.terraform.io/hashicorp/aws`
+K: C
+G: ## Provider source addresses in state
+Since Terraform 0.13 providers have a full source address, `registry.terraform.io/hashicorp/aws`. State written by older releases may still carry a legacy placeholder namespace such as `registry.terraform.io/-/aws`.
+- `terraform state replace-provider FROM TO` rewrites the provider recorded for every resource in the state. It asks for confirmation, and with a remote backend writes under the lock.
+- `providers lock` only writes `.terraform.lock.hcl` hashes.
+- `init -migrate-state` handles backend changes, not provider addresses.
+- `state mv` moves resource addresses, not providers.
+W: `state replace-provider`: it is the command designed to change the provider source recorded against resources in state.
+X: A=`providers lock`: it records checksums for the lock file and does not touch state.
+B=`init -migrate-state`: it copies state to a new backend; it does not rewrite provider addresses.
+D=`state mv`: its arguments are resource or module addresses, so provider source strings are not valid.
+T: Use `terraform state replace-provider` to fix provider source addresses recorded in state.
+V: Terraform
+
+@ TF-IEP002 D2 T2.5 applied use-case
+S: A resource is declared as `resource "aws_instance" "web" { for_each = toset(["a", "b"]) }`. In a Linux shell, which command prints the attributes recorded for the instance with key `a`?
+A: `terraform state show aws_instance.web.a`
+B: `terraform state show aws_instance.web[a]`
+C: `terraform state show aws_instance.web["a"]`
+D: `terraform state show 'aws_instance.web["a"]'`
+K: D
+G: ## Addressing for_each instances on the command line
+State addresses for keyed instances include the key in brackets with quotes: `aws_instance.web["a"]`. The quotes are part of the address.
+- An unquoted `["a"]` is processed by the shell, which strips the double quotes and passes `aws_instance.web[a]`, an invalid address; wrapping the whole address in single quotes keeps the inner double quotes.
+- `terraform state list` shows exact addresses to copy. `terraform state show ADDRESS` prints the attributes of one resource instance. For `count`, the form is `aws_instance.web[0]`.
+- Dot notation (`.web.a`) is for attributes and module paths, not instance keys.
+W: Single-quoted whole address: the shell passes it unchanged, so Terraform receives the exact key string.
+X: A=Dot form: a key is not a nested name, so `.a` would be read as another address segment.
+B=Bracket without quotes: that form would mean a reference to the local value `a`, and is not a key string address.
+C=Double quotes unquoted: the shell removes the double quotes, so Terraform receives the same invalid text as the previous form.
+T: Quote the whole address in single quotes so the key's double quotes survive the shell.
+V: Terraform
+
+@ TF-IEP002 D2 T2.5 applied comparison
+S: A root module has `output "db_password" { value = random_password.db.result sensitive = true }`. A script runs `terraform output -raw db_password`. What does it print, compared with plain `terraform output db_password`?
+A: Both print `<sensitive>`, since the flag affects every command that reads outputs
+B: The raw command fails because sensitive outputs may only be read through `-json`
+C: Both print the real value, since the output command ignores `sensitive` entirely
+D: The raw command prints the unquoted value, while the plain command prints `<sensitive>`
+K: D
+G: ## Sensitive outputs on the command line
+`sensitive = true` on an output stops Terraform from showing the value in plan, apply and the plain `terraform output` listing.
+- `terraform output NAME` prints `<sensitive>` for that output.
+- `terraform output -raw NAME` prints a string, number or boolean with no quotes or formatting, handy in scripts.
+- `terraform output -json` prints values as JSON.
+- The docs state that `-json` and `-raw` display sensitive values in plain text, so treat the shell, CI logs and state access with care. The value is also in state in plain text.
+W: `-raw` prints the plain value for scripting; the default view still hides it as `<sensitive>`.
+X: A=Both hidden: `-raw` and `-json` are the explicit ways to read the value.
+B=Only JSON: `-raw` also works for strings, numbers and booleans, but not for complex values.
+C=Output ignores sensitivity: the plain listing honors the flag and masks the value.
+T: `terraform output -raw NAME` reveals a sensitive output as plain text; the default view masks it.
+V: Terraform
+
+@ TF-IEP002 D2 T2.5 applied troubleshooting
+S: Auditors ask how state is protected. Which TWO statements about `terraform state pull` and sensitive data are accurate? (Select TWO)
+A: `terraform state pull` prints the current state of the configured backend as JSON to standard output
+B: Values marked `sensitive` in the configuration are redacted in the state document that `state pull` prints
+C: State can contain secrets such as generated passwords in plain text, so access to the backend must be restricted
+D: `terraform state pull` locks the state until the engineer runs `terraform state push` with the edited copy
+E: Pulled state is encrypted with the backend's key and cannot be read without running Terraform
+K: A,C
+G: ## What state holds
+State maps addresses to real objects and stores each object's attributes, including ones a provider returns that are secret: initial passwords, generated keys, connection strings.
+- `sensitive = true` hides values from Terraform's CLI output. It does not encrypt or redact the state document.
+- `terraform state pull` downloads the latest state from the backend and prints raw JSON, useful with `jq` for inspection.
+- Protect the backend: restrict bucket or workspace access, enable encryption at rest, and log reads.
+`state pull` is a read operation. `state push` is a separate, risky overwrite that most teams restrict.
+W: A=State pull: it outputs the backend's current state as JSON for inspection.
+C=Secrets in state: attributes are stored unmasked, so backend access control is part of secret handling.
+X: B=Redaction: sensitivity only affects display in Terraform output, and the state JSON holds the value.
+D=Lock until push: pull is a plain read that does not hold a lock waiting for a later push.
+E=Encrypted for Terraform only: encryption at rest is a backend feature, and the output of `pull` is readable text.
+T: `state pull` shows raw JSON, and state holds secrets in plain text, so lock down backend access.
+V: Terraform
+
+@ TF-IEP002 D2 T2.5 applied use-case
+S: A compliance script needs every resource attribute in the current state as machine-readable JSON, to filter with `jq`. Which command fits best?
+A: `terraform state list -json`, which returns each address together with its attributes
+B: `terraform graph -json`, which returns each resource with its stored values
+C: `terraform show -json`, which prints the current state in a documented JSON format
+D: `terraform validate -json`, which prints the values recorded in state
+K: C
+G: ## Choosing the inspection command
+- `terraform state list` prints addresses only, optionally filtered by an address prefix or `-id`.
+- `terraform state show ADDRESS` prints one instance's attributes as readable text.
+- `terraform show` prints the whole state (or a saved plan file) in human form; `terraform show -json` gives a stable, documented JSON representation meant for tools. It includes values of attributes, so treat output as sensitive.
+- `terraform state pull` prints the raw state file, whose format is internal and may change between versions.
+For tooling, prefer the documented `show -json` format.
+W: `terraform show -json`: it is the machine-readable representation of state for tools, with attributes included.
+X: A=`state list -json`: `state list` only prints addresses and has no attribute output.
+B=`graph -json`: graph outputs DOT text describing ordering, not attribute values.
+D=`validate -json`: it reports diagnostics about configuration validity and reads no state.
+T: Use `terraform show -json` for tooling; `state list` gives addresses and `state show` one resource's text.
+V: Terraform
+
+@ TF-IEP002 D2 T2.5 applied troubleshooting
+S: A new engineer clones a repository and runs `terraform plan`. It proposes creating every resource, though production exists. `terraform state list` prints nothing and the backend block is unchanged. What is the most likely cause?
+A: The selected CLI workspace is `default`, whose state is empty, while production state sits in another workspace
+B: The `.terraform.lock.hcl` file is out of date, which makes Terraform skip reading any state during the refresh
+C: The local provider cache is empty, and providers must be downloaded before any state can be read
+D: The plan used `-refresh=true`, which clears addresses that cannot be found in the cloud
+K: A
+G: ## Same code, different state
+With backends that support multiple CLI workspaces, each workspace has its own state, stored under a separate key. A fresh clone starts in the `default` workspace. If production state lives in a workspace such as `prod`, `default` holds nothing and Terraform plans to create all resources.
+- Diagnose with `terraform workspace show` and `terraform workspace list`, then `terraform workspace select prod`.
+- If the workspace is right, check the backend arguments (bucket, key, prefix) and credentials for the correct account.
+- This is a state selection problem, not a drift one: do not apply the plan, because it would create duplicates.
+W: Wrong workspace: an empty state under the selected workspace explains both the empty `state list` and the plan to create everything.
+X: B=Stale lock file: the lock file pins provider versions and checksums and plays no part in finding state.
+C=Empty provider cache: a missing plugin makes `init` or plan fail with an error rather than hiding state.
+D=`-refresh=true`: refresh updates attributes of tracked objects, and does not remove addresses from state; that is also the default.
+T: A plan that wants to recreate everything with an empty `state list` points to the wrong workspace or backend location; check before applying.
+V: Terraform
+
+@ TF-IEP002 D2 T2.5 applied use-case
+S: A team wants to see which of the 400 addresses in a large state belong to the child module `module.network`, with no attribute detail. Which command does that?
+A: `terraform state show module.network`, which prints every instance below the module in one listing
+B: `terraform state list module.network`, which prints only addresses that start with that module path
+C: `terraform output module.network`, which lists the resources the module created
+D: `terraform graph module.network`, which prints the module's resource addresses as plain lines
+K: B
+G: ## Listing and filtering state
+`terraform state list [options] [address...]` prints the address of every resource instance in state, one per line. Given an address argument it filters, so `module.network` returns only entries within that module (and `module.network.aws_subnet.a` returns just that resource).
+- It prints addresses only, which makes it quick on large states. `-id=ID` filters by a real object's ID.
+- `terraform state show ADDRESS` takes a single resource instance and prints its attributes; it does not accept a whole module.
+- `terraform output` reads root outputs. `terraform graph` has no address filter and prints DOT.
+W: `state list` with an address: filtering by module path returns exactly the addresses in that module.
+X: A=`state show` on a module: it is for a single resource instance and prints attributes, not a listing.
+C=`output` with a module name: outputs are values the root module exports, not a resource inventory.
+D=`graph` with a module: graph writes DOT and does not take an address to filter by.
+T: `terraform state list <module address>` lists the instances within that module.
+V: Terraform
+

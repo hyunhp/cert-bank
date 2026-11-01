@@ -1,0 +1,557 @@
+# TF-IEP002 b01: D1 Terraform configuration (T1.1-T1.4)
+# src: https://developer.hashicorp.com/terraform/language/meta-arguments/for_each
+# src: https://developer.hashicorp.com/terraform/language/meta-arguments/count
+# src: https://developer.hashicorp.com/terraform/language/values/variables
+# src: https://developer.hashicorp.com/terraform/language/block/variable
+# src: https://developer.hashicorp.com/terraform/language/values/outputs
+# src: https://developer.hashicorp.com/terraform/language/block/locals
+# src: https://developer.hashicorp.com/terraform/language/expressions/version-constraints
+# src: https://developer.hashicorp.com/terraform/language/block/terraform
+
+@ TF-IEP002 D1 T1.1 applied use-case
+S: A security standard says every resource must carry owner, cost-center and environment tags, and the cost-center value must be changeable in exactly one place. Which design in the root module meets this?
+A: One locals block holds the shared tag map built from variables, and each resource sets its tags with merge(local.common_tags, { Name = "..." })
+B: Each resource block carries its own literal tags map, and a reviewer checks all of them by hand whenever the cost center changes
+C: A tags argument inside the terraform block applies the three keys to every resource declared anywhere in the configuration
+D: A variable with the three tags as its default is declared in each resource block so that the resources can override it individually
+K: A
+G: ## Turning a standard into one source of truth
+A requirement such as "change it in one place" is a request to remove duplication. In the Terraform language the tool for that is a local value: a named expression that other expressions reuse.
+- `locals { common_tags = { Owner = var.owner, CostCenter = var.cost_center, Environment = var.environment } }` defines the map once.
+- A resource adds its own keys with `merge(local.common_tags, { Name = "web" })`, so shared and resource-specific tags stay separate.
+- Changing `var.cost_center` (or the local) changes every consumer in the next plan.
+Locals can reference variables and other locals; variables cannot be declared inside a resource block, and the `terraform` block takes only constants.
+W: Locals plus merge: the shared map is defined once, derived from input variables, and every taggable resource consumes it, so the one-place requirement is met and per-resource additions such as Name still work.
+X: B=Literal tags per resource: copying the map into each block means a cost-center change touches every block, and a hand review is exactly the manual control the requirement tries to avoid.
+C=Tags in the terraform block: the terraform block configures CLI behavior such as required_version and backends; it has no tags argument and does not inject arguments into resources.
+D=Variable per resource block: variable blocks are top-level (or module-level) declarations, not nested inside resources, and repeating them would again create many places to change.
+T: Repeated values across resources belong in a local (or a variable feeding a local), consumed with merge for resource-specific additions.
+V: Terraform
+
+@ TF-IEP002 D1 T1.1 applied advanced
+S: A monitoring requirement says a CPU alarm exists only in prod. The resource is `aws_cloudwatch_metric_alarm.cpu` with `count = var.environment == "prod" ? 1 : 0`. Which output expression yields the alarm ARN in prod and `null` elsewhere without failing the plan?
+A: aws_cloudwatch_metric_alarm.cpu[0].arn, because index zero is always present when count is a conditional
+B: aws_cloudwatch_metric_alarm.cpu.arn, because Terraform unwraps a single-instance count automatically
+C: one(aws_cloudwatch_metric_alarm.cpu[*].arn), which returns the sole element or null when the list is empty
+D: join("", aws_cloudwatch_metric_alarm.cpu[*].arn), which returns an empty string instead of null when nothing exists
+K: C
+G: ## Optional resources and how to consume them
+Setting `count` to 0 or 1 is the standard way to make a resource optional. The resource is then a list of instances, so references need an index or a splat.
+- With `count = 0` the list is empty. `cpu[0]` fails with "Invalid index" because there is no element zero.
+- Without any index at all, Terraform reports "Missing resource instance key" because the block has `count` set.
+- The splat `cpu[*].arn` always produces a list (empty or one element), and `one()` converts a list of zero or one elements to `null` or that element. It errors if the list has two or more elements.
+W: one() with a splat: the splat yields an empty list in non-prod and a one-element list in prod, and one() turns those into null and the ARN, matching the requirement exactly.
+X: A=Index zero: with count = 0 there are no instances, so cpu[0] fails with an invalid index error in every non-prod environment.
+B=Unindexed reference: a resource with count must be referenced by instance or splat; Terraform never auto-unwraps a single instance and reports a missing instance key.
+D=join with empty string: it does not fail, but it yields "" rather than null, which downstream code testing for null or using the value as an ARN would treat as a real value.
+T: Optional resource via count 0/1: read it with a splat, and use one() to get "the element or null".
+V: Terraform
+
+@ TF-IEP002 D1 T1.1 applied use-case
+S: A company requires resource names of the form <org>-<env>-<app> and only the environments dev, stage and prod. Which TWO configuration choices best encode this requirement? (Select TWO)
+A: A local value builds the name once from var.org, var.environment and var.app, and every resource references that local
+B: A comment above each resource documents the naming pattern so that reviewers can reject names that do not match
+C: A validation block on the environment variable uses contains() to reject any value outside dev, stage and prod
+D: The environment variable gets a default of "dev" so that an unexpected value cannot be supplied by a caller
+E: The name argument of each resource is set to a random_id value so that names can never collide between environments
+K: A,C
+G: ## Encoding policy in the configuration
+A requirement becomes reliable when the configuration enforces it instead of describing it.
+- **Construction**: build the string once in `locals { name_prefix = "${var.org}-${var.environment}-${var.app}" }` and reference it everywhere. The convention cannot drift between resources.
+- **Constraint**: a `validation` block on a variable runs during plan and rejects bad input with your `error_message`, e.g. `condition = contains(["dev", "stage", "prod"], var.environment)`.
+A default only supplies a value when none is given; callers can still pass anything. Comments are not checked by Terraform.
+W: A=Shared local name: the pattern is built from the inputs in one place and reused, so every resource name follows the convention.
+C=Validation with contains(): the environment input is limited to the three allowed values and a violation fails at plan time with a clear message.
+X: B=Comment documentation: Terraform ignores comments, so nothing enforces the pattern and compliance depends on reviewers noticing each deviation.
+D=Default of dev: a default is used only when the caller passes nothing, so it does not stop someone from setting environment to an unlisted value.
+E=random_id names: random names break the required <org>-<env>-<app> structure, and uniqueness was not the stated requirement.
+T: Build conventions once in locals and enforce allowed values with variable validation.
+V: Terraform
+
+@ TF-IEP002 D1 T1.1 applied use-case
+S: Security publishes a golden AMI by tagging it approved=true. The application team wants every new plan to use the newest approved image and to fail early if none exists. Which approach implements this?
+A: A variable named ami_id with no default, and a runbook step that tells engineers to look up the newest tagged image by hand
+B: A hard-coded AMI ID in the resource, updated through a pull request each time security releases a new image
+C: A data "aws_ami" source with most_recent = true and a tag filter, plus a precondition that checks the result before it is used
+D: A resource "aws_ami" block that registers the golden image so that Terraform owns the image the application launches
+K: C
+G: ## Reading existing facts with a data source
+A data source queries something Terraform does not manage and exposes its attributes. `data "aws_ami" "golden"` with `most_recent = true` and a `filter` on tag `approved` resolves the newest matching image at each plan.
+- The lookup removes the human step and the stale hard-coded ID.
+- A `precondition` in a `lifecycle` block (on the consuming resource) or a postcondition on the data block states the assumption, for example that the image architecture is as expected, and fails the run with your message instead of an obscure provider error.
+Because the ID is resolved at plan time, a new golden image shows up as a proposed change to the instance, which reviewers see in the plan.
+W: Data source with filter and condition: the newest approved image is found automatically on every plan, and a failed assumption stops the run early with a readable message.
+X: A=Manual variable: it keeps a human lookup in the loop, so values go stale or get mistyped, and nothing in the code states the approval requirement.
+B=Hard-coded ID: it is predictable but needs a pull request for every release, and the code cannot show that the image is approved.
+D=aws_ami resource: that registers a new image from a snapshot; the team only wants to read an image that security already owns.
+T: Facts that live outside your state (the newest approved image) are read with data sources and protected with conditions.
+V: Terraform, EC2
+
+@ TF-IEP002 D1 T1.1 applied tradeoff
+S: A platform team owns the shared network, and many application teams deploy into it. The platform team must be able to change the network without touching application state. What is the best composition?
+A: Keep the network and every application in one root module so that a single plan shows the combined effect of every change
+B: Give the network its own root module and state, and have each application root read the subnet and VPC it needs through data sources or published outputs
+C: Copy the network resources into each application root module so that each team can adjust its own network when needed
+D: Pass the network as a variable file stored in each application repository, with the IDs edited by hand after each network change
+K: B
+G: ## Composition and blast radius
+How you divide configuration into root modules decides who can change what and how big a mistake can be. Every root module has its own state and its own plan.
+- Split along ownership and change rate: a slow-moving shared network is separate from fast-changing applications.
+- Consumers need the network's identifiers. They can read published outputs (for example through a remote state data source) or look objects up with data sources filtered by tag or name.
+- Each application plan then only touches that application, and the network team plans without any application resources in scope.
+A monolith has one plan and one lock for everyone, so unrelated teams block each other and a single mistake can reach the network.
+W: Separate roots with data/output lookups: ownership matches state boundaries, applications read network facts instead of managing them, and neither side can destroy the other's resources by accident.
+X: A=Single root: one state and one lock is shared by all teams, so changes queue up and every plan includes resources a team does not own.
+C=Copied network resources: duplicating the resources would make each root try to manage its own network, creating several competing definitions rather than one shared network.
+D=Hand-edited variable files: IDs go stale whenever the network is rebuilt and nothing links them to the real objects; lookups remove the manual step.
+T: Split roots by owner and change rate, and connect them with outputs or data-source lookups, not copies.
+V: Terraform
+
+@ TF-IEP002 D1 T1.1 applied use-case
+S: Teams request message queues by adding an entry to a map in a tfvars file, for example `queues = { billing = { retention = 4 } }`. Adding or removing an entry must never affect the other queues. How should the queue resource be created?
+A: With count = length(var.queues), indexing a list built from the map so that each queue gets a numeric position
+B: With one separate resource block per team, edited by the platform team whenever a request arrives
+C: With a module call that receives the whole map and loops internally with a null_resource for each entry
+D: With for_each = var.queues, so each entry becomes an instance keyed by its team name
+K: D
+G: ## Keys, not positions
+Terraform identifies instances by their address. With `count` the address is a number (`aws_sqs_queue.q[0]`), so adding or removing a middle entry shifts everything after it. With `for_each` over a map the address is the key (`aws_sqs_queue.q["billing"]`), so each entry keeps its identity as the map changes.
+- Request-driven lists of similar objects are the standard `for_each` case.
+- `each.key` is the team name and `each.value.retention` carries the settings: `message_retention_seconds = each.value.retention * 86400`.
+Adding a key creates one instance; deleting a key destroys only that one.
+W: for_each over the map: instance addresses are the team names, so adding or removing one entry plans exactly one create or destroy and leaves the others untouched.
+X: A=count with positions: addresses are numbers, so removing an entry shifts the later ones and Terraform proposes updates or replacements for queues nobody touched.
+B=Resource per team: it works but turns every request into a code change by the platform team, which the self-service tfvars workflow is meant to avoid.
+C=null_resource loop: null_resource creates no queues; looping over entries still requires for_each or count, so this misses the point.
+T: Self-service lists of like objects: for_each over a map keyed by a stable name, never a positional count.
+V: Terraform, SQS
+
+@ TF-IEP002 D1 T1.1 applied use-case
+S: Policy says production instances may only be m5.large, m5.xlarge or m5.2xlarge, and the failure must be reported before any resource is created. Where should this rule be coded?
+A: In a validation block on the instance_type variable, using contains() on the allowed list with a clear error_message
+B: In the description argument of the instance_type variable, which Terraform reads to reject values that do not match
+C: In an ignore_changes entry on the instance so that a non-compliant size is never applied to the real resource
+D: In an output block that prints the chosen size so that the operator can see it before approving the apply
+K: A
+G: ## Fail at the input, not at the cloud
+A `validation` block on a variable evaluates its `condition` while Terraform builds the plan. If it is false, the run stops and shows `error_message`. No provider call has happened yet, so nothing is created.
+- Typical forms: `contains([...], var.instance_type)`, `can(regex(...))`, numeric ranges.
+- The same checking style protects modules: a caller gets the message at the variable that was wrong.
+A description is documentation only. `ignore_changes` makes Terraform ignore drift in an attribute, which is the opposite of enforcing it. An output is evaluated after the fact and enforces nothing.
+W: Variable validation: the allowed-size list is checked during plan, so a wrong size is rejected before any resource is created, with a message naming the allowed values.
+X: B=Description text: descriptions appear in docs and prompts but Terraform never evaluates them as rules.
+C=ignore_changes: it tells Terraform to disregard changes to an attribute, so a non-compliant value could slip through unnoticed rather than being blocked.
+D=Output block: an output only displays a value; it cannot reject input and runs too late to prevent an apply.
+T: Rules about allowed input values belong in variable validation so they fail at plan time.
+V: Terraform
+
+@ TF-IEP002 D1 T1.2 applied troubleshooting
+S: A configuration declares `required_version = "~> 1.12.0"`. An engineer with Terraform 1.14.2 runs init. What happens?
+A: Terraform runs normally, because ~> allows any later minor version as long as the major version stays the same
+B: Terraform runs normally but warns that a newer provider version is available for the configuration
+C: Terraform downloads Terraform 1.12.x automatically and delegates the run to that version
+D: Terraform stops with an unsupported Terraform Core version error, since ~> 1.12.0 allows only 1.12.x patch releases
+K: D
+G: ## How ~> bounds a version
+The pessimistic operator `~>` lets only the right-most specified component increase.
+- `~> 1.12.0` allows `1.12.1`, `1.12.9` but not `1.13.0`.
+- `~> 1.12` allows `1.13` and `1.20` but not `2.0`.
+`required_version` constrains the Terraform CLI itself, not provider plugins. If the running CLI does not satisfy the constraint (including any constraints inside called modules), Terraform refuses to proceed with an "Unsupported Terraform Core version" error. It never fetches or switches CLI versions on its own.
+Pinning the CLI range makes runs predictable across laptops and CI, while a deliberate change to the constraint documents an upgrade.
+W: Constraint not met: 1.14.2 is outside 1.12.x, so Terraform stops with an unsupported-version error until the CLI or the constraint changes.
+X: A=Any later minor: that is the behavior of ~> 1.12 with two components; with three components only the patch number may grow.
+B=Provider warning: required_version never concerns providers, and the run does not proceed at all.
+C=Automatic CLI switch: Terraform CLI does not download or re-exec other CLI versions; the operator or the pipeline selects the binary.
+T: The number of components in ~> decides what may grow: ~> 1.12.0 patches only, ~> 1.12 minors too.
+V: Terraform
+
+@ TF-IEP002 D1 T1.2 applied use-case
+S: A root module must pick the same provider builds on every engineer's laptop and in CI, while still allowing intended upgrades. Which TWO practices achieve this? (Select TWO)
+A: Declare a bounded constraint such as ~> 5.40 for each provider in required_providers
+B: Commit the .terraform.lock.hcl file so every machine selects the recorded provider versions
+C: Run terraform init -upgrade at the start of every pipeline run so the newest build is always chosen
+D: Set required_version to the exact CLI version, which also fixes every provider version
+E: Leave constraints off and add .terraform.lock.hcl to .gitignore so each machine resolves versions independently
+K: A,B
+G: ## Two layers of provider pinning
+- **Constraints** in `required_providers` say which versions are acceptable. The docs recommend root modules use `~>` to set both a lower and an upper bound.
+- **The dependency lock file** `.terraform.lock.hcl` records the exact version (and checksums) that `terraform init` selected. Later inits reuse it until you run `terraform init -upgrade`.
+Committing the lock file turns "acceptable range" into "the same version everywhere"; changing it becomes a reviewable diff. `required_version` only limits the Terraform CLI.
+W: A=Bounded constraint: a ~> range gives an upper bound, so an unexpected major release is never selected.
+B=Committed lock file: it pins the exact version and checksums, so laptops and CI install the same provider build.
+X: C=Upgrade on every run: -upgrade ignores the recorded selections and pulls the newest allowed version, so runs can differ from one day to the next.
+D=Exact required_version: this constrains only the CLI binary; providers are selected by their own constraints and the lock file.
+E=No constraints, ignored lock file: every machine would resolve the newest version independently, which is the unpredictability being avoided.
+T: Constraint sets the allowed range, the committed lock file fixes the exact build; upgrade deliberately with init -upgrade.
+V: Terraform
+
+@ TF-IEP002 D1 T1.2 applied advanced
+S: A module is sourced with `source = "git::https://git.example.com/net.git"` and no ref. A release on the default branch changes an input name, and tomorrow's pipeline plan fails. What would have prevented this?
+A: Pinning the source to a tag with ?ref=v2.3.1, and moving to a newer tag deliberately in a reviewed change
+B: Adding a version = "~> 2.3" argument beside the Git source, which restricts which commits are fetched
+C: Committing the .terraform.lock.hcl file, which also records the Git commit used for each module
+D: Setting required_version in the module call so that the module's code cannot change between runs
+K: A
+G: ## Module versions come from the source address
+Terraform has two ways to pin a module.
+- **Registry modules** use the `version` argument with the same constraint syntax as providers.
+- **Git (and similar) sources** carry the revision in the source address: `?ref=v2.3.1` selects a tag, branch or commit. Without `ref`, Terraform uses the default branch, so any merged change flows into your next `terraform init`.
+The `version` argument is only valid for registry sources, and the lock file covers providers (not modules). Pinning to an immutable tag or commit makes upgrades an explicit edit that shows up in a pull request.
+W: Tag-pinned source: the module code is fixed until the team edits the ref, so a release on the default branch cannot change inputs under a running pipeline.
+X: B=version with Git source: version works only with registry modules; Terraform rejects it alongside a Git address.
+C=Lock file for modules: the lock file tracks provider selections, not module sources, so unpinned Git modules are not protected by it.
+D=required_version on the call: required_version belongs in the terraform block and constrains the CLI; it has no effect on which module code is fetched.
+T: Pin Git modules with ?ref=<tag or commit>; pin registry modules with version; the lock file is for providers.
+V: Terraform
+
+@ TF-IEP002 D1 T1.2 applied use-case
+S: A module has variables `min_size` and `max_size`. The author wants a plan to fail whenever max_size is smaller than min_size, on Terraform 1.15. Which implementation works?
+A: A validation block on max_size with condition = var.max_size >= var.min_size and a descriptive error_message
+B: A validation block is not allowed to read another variable, so a precondition on the resource is the only supported place
+C: A locals value named size_ok, which stops the plan automatically when it evaluates to false
+D: A default on max_size set to the same number as min_size so that the two can never differ
+K: A
+G: ## Validation can look at other values
+Early Terraform versions let a variable's validation reference only that variable. Since Terraform 1.9 a `validation` condition may refer to other input variables, locals and data sources, so cross-field rules can live next to the variable that is wrong.
+- `condition = var.max_size >= var.min_size` on `max_size` rejects the bad pair during plan.
+- A `precondition` on a resource also works, but it reports the problem where the value is consumed instead of where it was supplied.
+A local is just a named value; it never fails a plan. A default only applies when the caller omits the variable.
+W: Cross-variable validation: on the tested version a validation block may read min_size, so the check sits next to the input and fails the plan with a clear message.
+X: B=Restriction claim: this was true before 1.9, but on current versions validation can reference other variables, so it is not the only supported place.
+C=Local as a guard: a local that evaluates to false has no effect on plan; only validation, preconditions, postconditions or check assertions raise errors or warnings.
+D=Same default: a default does not stop callers from passing different values and removes the flexibility the module needs.
+T: From Terraform 1.9, variable validation can reference other variables, locals and data sources.
+V: Terraform
+
+@ TF-IEP002 D1 T1.2 applied troubleshooting
+S: `variable "db_password" { sensitive = true }` feeds `output "conn" { value = "postgres://app:${var.db_password}@db" }`, and plan fails with "Output refers to sensitive values". Which TWO changes let the plan succeed? (Select TWO)
+A: Mark the output with sensitive = true so that the output stays redacted in CLI output
+B: Remove sensitive = true from the variable so that the password becomes an ordinary string
+C: Wrap the expression in nonsensitive() only if the exposed value is genuinely safe to reveal
+D: Move the output into a locals block, which is exempt from the sensitivity check
+E: Add depends_on to the output so that Terraform treats the dependency as explicit
+K: A,C
+G: ## How sensitivity propagates
+A value marked sensitive stays marked through expressions. An output that derives from it must acknowledge that by being `sensitive = true`; otherwise Terraform stops with "Output refers to sensitive values" so a secret is not printed by accident.
+- Mark the output sensitive and CLI output shows `<sensitive>`.
+- `nonsensitive(value)` removes the mark and is for values that are not secret despite the label.
+Sensitive only redacts display. Terraform still stores sensitive values in state, and `terraform output -json` or `-raw` shows them in plain text.
+W: A=Sensitive output: the output now declares its sensitivity, so the check passes and the value is redacted in normal output.
+C=nonsensitive(): it deliberately drops the mark, valid only when the resulting string is safe to reveal; Terraform then lets the output print.
+X: B=Removing sensitive from the variable: it would silence the error but expose the password in plans and logs, defeating the reason for the mark.
+D=Moving to locals: locals also carry the sensitive mark; sensitivity follows the value, not the block type.
+E=depends_on: ordering has no influence on sensitivity checks.
+T: Sensitivity follows values through expressions; acknowledge it with sensitive = true on the output, and treat it as display redaction only.
+V: Terraform
+
+@ TF-IEP002 D1 T1.2 applied tradeoff
+S: A subnet module must only be used with private subnets. Reviewers want a violation to block the apply, not just warn. Which construct fits?
+A: A check block with an assert, because failing assertions halt the plan before any change
+B: A precondition in the resource's lifecycle block that verifies the subnet is not public, which fails the run with its error_message
+C: An output marked sensitive that contains the subnet type and is read by the pipeline after apply
+D: A comment next to the module call, since Terraform reports any violated comment as a failed plan
+K: B
+G: ## Which assertion can block
+Terraform has several ways to assert something about infrastructure.
+- `precondition` and `postcondition` (in `lifecycle` blocks of resources, data sources, and in outputs) stop the run when false. A precondition is evaluated before the object is acted on; a postcondition after.
+- A `check` block with `assert` is for ongoing validation of whole-infrastructure assumptions. Failed assertions only produce warnings and never block plan or apply.
+- Variable `validation` blocks check inputs only.
+Because the stated goal is to block the apply, a precondition (or validation on the input) is the right tool.
+W: Precondition: a false condition raises the error message and halts the operation, so a public subnet cannot be created.
+X: A=check block: its assertions surface as warnings, so the run continues; it is for monitoring, not for gating.
+C=Sensitive output read afterwards: this inspects the result only after infrastructure already exists and enforces nothing.
+D=Comment: comments are ignored by Terraform and cannot fail a plan.
+T: Block with preconditions/postconditions/validation; check blocks only warn.
+V: Terraform
+
+@ TF-IEP002 D1 T1.2 applied use-case
+S: A reviewer reads an IAM policy in a module: one statement allows `s3:*` on `"*"` for an application that only reads objects under `reports/` in one bucket. Which revision follows least privilege?
+A: Allow only s3:GetObject on "${aws_s3_bucket.data.arn}/reports/*" in an aws_iam_policy_document data source
+B: Allow s3:Get* and s3:List* on "*" so that the application can also discover other buckets it might need later
+C: Keep s3:* but add a variable named read_only, whose true value is documented in the module README
+D: Allow s3:* on the bucket ARN only, since limiting the resource is enough to make the policy least-privilege
+K: A
+G: ## Least privilege in code
+Least privilege means granting only the actions an identity needs, on only the resources it needs. In Terraform the policy is just data, so reviewers can check both parts in the diff.
+- Actions: list the specific API calls (`s3:GetObject`), not wildcards.
+- Resources: reference the real ARN (`aws_s3_bucket.data.arn`) with the needed path, so a rename or recreate keeps the policy aligned.
+Building the policy from references also records the dependency in the graph. Narrowing only one of the two dimensions still leaves excess permissions.
+W: Specific action and scoped ARN: only reads are allowed, and only under the reports/ prefix of this one bucket, which is what the application does.
+X: B=Broad read on all resources: it removes writes but still grants listing and reading everywhere, including data the application has no need for.
+C=Documented variable: a README note does not change the policy; the permissive statement is still applied.
+D=s3:* on one bucket: the resource is narrowed but the application could still delete or overwrite objects there, which exceeds its needs.
+T: Least privilege narrows both actions and resources; build ARNs from resource references.
+V: Terraform, IAM, S3
+
+@ TF-IEP002 D1 T1.3 applied troubleshooting
+S: A module declares `variable "name" { type = string, default = "svc", nullable = false }`. The caller sets `name = null`. What does the module use for var.name?
+A: null, because an explicit null always overrides the default and is passed through to the resources
+B: The string "svc", because nullable = false makes Terraform substitute the default when null is passed
+C: An error is raised for every caller that passes null, regardless of whether a default exists
+D: The empty string, because a string variable converts null to the empty value for its type
+K: B
+G: ## null and defaults
+Assigning `null` to a variable normally means "unset" in the sense that arguments see `null`. By default variables are `nullable = true`, so the null passes through and the default is not used.
+- With `nullable = false` and a default, passing `null` makes Terraform use the default instead.
+- With `nullable = false` and no default, passing null is an error.
+This matters when tracing a wrong value: a caller that forwards `var.x` from its own variable may be sending null deliberately, and the module's nullable setting decides whether the default saves it.
+W: nullable = false with a default: the null is replaced by the default, so the module sees "svc".
+X: A=Pass-through null: that happens when nullable is true (the default behavior); here the setting prevents it.
+C=Always an error: an error would occur only if no default existed; with a default the substitution happens.
+D=Empty string: Terraform never invents an empty value for null; it either passes null or applies the default.
+T: nullable = false turns a null input into the default (or an error when there is no default).
+V: Terraform
+
+@ TF-IEP002 D1 T1.3 applied troubleshooting
+S: A local is defined as `name = var.name != null ? var.name : "${var.app}-svc"`. The pipeline's tfvars file contains `name = ""`, and resources are created with an empty name. What is the cause?
+A: An empty string is not null, so the conditional keeps var.name, and the fix is to test for null or empty, for example with coalesce or length
+B: Terraform treats empty strings as null in conditionals, so the default branch should have run and the provider must be at fault
+C: Locals are evaluated before variables, so var.name was still unset at the time of the comparison
+D: A conditional can return only a literal, so var.name was ignored and the empty string came from the provider
+K: A
+G: ## null versus empty
+`null` means "no value"; `""` is a real string value. A conditional `var.name != null` is true for `""`, so the first branch wins and the empty string flows into the local and then into every consumer.
+- To treat both as missing, use a check such as `var.name != null && var.name != ""`, or `length(coalesce(var.name, "")) > 0`.
+- `coalesce()` skips both null and empty strings for strings, which makes `coalesce(var.name, "${var.app}-svc")` a short fix.
+Tracing a value means following it: tfvars gives the variable, the variable feeds the local, the local feeds the resource, and you can verify each hop with `terraform console` or plan output.
+W: Empty string is not null: the comparison treats "" as a provided value, so the default branch never runs; the condition has to cover the empty case.
+X: B=Empty string as null: Terraform makes no such conversion; the conditional is behaving exactly as written.
+C=Evaluation order: Terraform builds a dependency graph; a local that references a variable is evaluated after the variable has its value.
+D=Literals only: conditionals return either expression, including references; var.name was used as written.
+T: null and "" are different; test for both when an empty tfvars value should mean "use the fallback".
+V: Terraform
+
+@ TF-IEP002 D1 T1.3 applied troubleshooting
+S: Plan fails with "Cycle: local.a, local.b" for `locals { a = "x-${local.b}", b = "y-${local.a}" }`. What is the correct diagnosis and fix?
+A: The locals block may be declared only once per module, so merge the two locals into separate blocks
+B: Each local refers to the other, so neither can be computed first; derive both from a third input instead of from each other
+C: Locals cannot contain interpolation, so use the format() function in a variable default instead
+D: The provider rejects the values, so add depends_on to each local to enforce a safe order
+K: B
+G: ## Dependency cycles between values
+Terraform builds a graph in which every reference is an edge: `local.a` needs `local.b`, and `local.b` needs `local.a`. A graph that loops back on itself cannot be ordered, so the plan stops with a cycle error that lists the members.
+- Fix by breaking the loop: both values should come from a variable, a resource attribute, or one local that the other uses.
+- Cycles can also run through resources and modules; the error names the members of the loop so you can find the reference that closes it.
+`depends_on` is not available on locals, and it would add edges, not remove them.
+W: Mutual references: each local needs the other's value, so there is no valid evaluation order; removing one of the references resolves it.
+X: A=Multiple locals blocks: a module may declare several locals blocks; the error comes from the references, not the number of blocks.
+C=No interpolation in locals: locals accept any expression including templates; interpolation is not the problem.
+D=depends_on: locals cannot take depends_on, and ordering constraints would make a cycle worse rather than solve it.
+T: A cycle error means references loop; remove an edge by deriving values from a common source.
+V: Terraform
+
+@ TF-IEP002 D1 T1.3 applied troubleshooting
+S: A root module's output `value = module.network.aws_subnet.private.id` fails with "Unsupported attribute". The network module defines `aws_subnet.private` internally. What is the correct fix?
+A: Declare an output in the network module that exposes the subnet ID, then reference module.network.private_subnet_id from the root
+B: Add depends_on = [module.network] to the root output, which makes the child's resources visible to it
+C: Change the root output to use aws_subnet.private.id, since resources in child modules are global to the configuration
+D: Mark the root output as sensitive so that Terraform is allowed to read the child module's internals
+K: A
+G: ## Modules are closed boxes
+A module's resources are private. The only data that leaves a child module is what it declares in `output` blocks, and a caller reads it as `module.<name>.<output_name>`. An expression like `module.network.aws_subnet.private.id` asks for a resource attribute that the module object does not have, hence "This object does not have an attribute named...".
+- Add `output "private_subnet_id" { value = aws_subnet.private.id }` inside the module.
+- Reference it in the root with `module.network.private_subnet_id`.
+This is the contract that lets module authors refactor their internals safely.
+W: Child output: the module exposes the ID deliberately, and the root can then read it through the module object.
+X: B=depends_on: it orders operations but does not expose internals; the attribute still does not exist on the module object.
+C=Global resources: resource addresses are scoped to the module where they are declared, so the root cannot see child resources by plain name.
+D=Sensitive flag: sensitivity affects display only and does not grant access.
+T: A caller sees only a module's declared outputs: expose what you need with an output block.
+V: Terraform
+
+@ TF-IEP002 D1 T1.3 applied troubleshooting
+S: `resource "aws_instance" "web" { count = 2 ... }` is followed by `output "ids" { value = aws_instance.web.id }`. Plan fails with "Missing resource instance key". Which fix returns both IDs?
+A: Add a depends_on to the output so that Terraform waits for the instances before reading the ID
+B: Change the output to aws_instance.web.*.id only if the instances were created with for_each, not count
+C: Change the output to aws_instance.web[*].id, which returns a list with the ID of every instance
+D: Replace count with a variable so that Terraform no longer treats the resource as a list
+K: C
+G: ## Count makes a resource a list
+When `count` is set, `aws_instance.web` is no longer one object but a list of instances addressed `aws_instance.web[0]`, `[1]`. Referencing it without an index is an error naming the missing key.
+- `aws_instance.web[0].id` selects one instance.
+- `aws_instance.web[*].id` (the splat expression) collects the attribute from every instance into a list.
+With `for_each` the resource is a map keyed by instance key, so you use `aws_instance.web["a"].id` or a `for` expression over the map.
+W: Splat expression: it returns the list of IDs for both counted instances, which is what the output wanted.
+X: A=depends_on: ordering does not supply the missing index; the reference is still ambiguous.
+B=Legacy splat with for_each: the issue is a counted resource; the splat form works for the list that count produces, not for a for_each map.
+D=Replacing count with a variable: a variable inside count only changes the number of instances; the resource is still a list whenever count is present.
+T: Count gives a list: index it or use [*]; for_each gives a map: use keys or a for expression.
+V: Terraform
+
+@ TF-IEP002 D1 T1.3 applied troubleshooting
+S: A team writes a backend and provider block using variables. Which TWO lines make `terraform init` fail because variables are not allowed there? (Select TWO)
+A: provider "aws" { region = var.region }
+B: terraform { backend "s3" { bucket = var.state_bucket } }
+C: terraform { required_version = var.tf_version }
+D: resource "aws_s3_bucket" "b" { bucket = local.bucket_name }
+E: output "region" { value = var.region }
+K: B,C
+G: ## Where variables can appear
+Input variables, locals and resource references can be used in most arguments of resources, data sources, providers, outputs and module call inputs. Two places must be known before variables are evaluated:
+- The **backend** configuration is needed during `terraform init` to find the state, so it cannot use variables or locals. Use partial configuration with `-backend-config` for values that differ.
+- The **terraform block** arguments, such as `required_version` and `required_providers`, accept constants only; the docs state they cannot refer to named objects like variables, and cannot call functions.
+A provider `region = var.region` is normal, as are resource arguments with locals and outputs with variables.
+W: B=Backend bucket from a variable: backend settings are read at init time, before variables exist, so Terraform rejects the reference.
+C=required_version from a variable: the terraform block accepts constants only, so the reference fails.
+X: A=Provider region from a variable: providers may use variables, which is the standard way to parameterize a region.
+D=Resource argument from a local: locals are ordinary expressions available to resource arguments.
+E=Output from a variable: outputs may reference variables; nothing blocks it.
+T: Backend and terraform-block settings are constants; everything else can use variables and locals.
+V: Terraform
+
+@ TF-IEP002 D1 T1.3 applied troubleshooting
+S: The root module sets `instance_type = "m5.xlarge"` in tfvars and declares `variable "instance_type"`, but the deployed instances stay `t3.micro`. The call is `module "app" { source = "./app" }`, and the module's own variable defaults to t3.micro. What explains it?
+A: The tfvars file is read by the module, but the module ignores it because defaults take priority in child modules
+B: The root variable is never passed into the module call, so the module keeps its default value
+C: Terraform copies variables with the same name into child modules but only for variables without a default
+D: The instance type is cached in state, so changing a variable has no effect until the state is deleted
+K: B
+G: ## Variables do not cross module boundaries automatically
+Every module, root or child, has its own input variables. A value set in tfvars or the CLI feeds the root module's variable only. The root must pass it explicitly: `instance_type = var.instance_type` inside the `module` block. Without that argument the child uses its default (or prompts if it has none).
+- When a value does not show up, trace the chain: tfvars → root variable → module argument → child variable → resource argument.
+- Running `terraform plan` and reading the module's resource arguments shows where the chain stops.
+Nothing is shared by name; this is what lets module inputs stay a clear contract.
+W: Missing module argument: the root variable has the right value, but it is never handed to the child, so the child default t3.micro applies.
+X: A=Defaults beat tfvars: tfvars feed only the root module; a child default applies simply because nothing was supplied.
+C=Same-name copying: Terraform has no implicit passing of variables between modules.
+D=State cache: state stores what exists; a configuration change that reaches the resource produces a plan diff, and deleting state is never needed.
+T: Inputs are passed explicitly at each module call; trace tfvars to variable to module argument.
+V: Terraform
+
+@ TF-IEP002 D1 T1.4 applied troubleshooting
+S: Instances are created with `count = length(var.names)` and the name list is [a, b, c]. The team removes b. What does the plan show compared with `for_each = toset(var.names)`?
+A: Both versions destroy only the instance for b and leave the other two untouched
+B: The count version changes instance [1] to match c and destroys [2], while the for_each version destroys only the instance keyed b
+C: The count version keeps all three instances, and the for_each version recreates all of them
+D: Both versions replace every instance because the list changed, and only the key naming differs
+K: B
+G: ## Positions versus identities
+Instances are tracked by address. With `count`, the address is a position: `[0]`, `[1]`, `[2]`. Removing b from [a, b, c] makes the list [a, c], so position 1 now means c and position 2 no longer exists.
+- Instance `[1]` (previously b) is updated or, if the changed attribute forces it, replaced to become c.
+- Instance `[2]` (previously c) is destroyed.
+With `for_each` over a set, addresses are keys: `["a"]`, `["b"]`, `["c"]`. Removing b removes only `["b"]`; the other keys keep their addresses and their objects.
+W: Positional shift versus keyed identity: count moves later entries into earlier slots, causing collateral changes; for_each affects only the removed key.
+X: A=Same result: count and for_each would give the same plan only if the removed item were last in the list.
+C=Reversed outcomes: it is the count version that disturbs surviving items; for_each addresses are stable.
+D=Everything replaced: neither version replaces all instances; the plan shows only the shifted and removed ones.
+T: Use for_each when items can be removed from the middle; count addresses shift.
+V: Terraform
+
+@ TF-IEP002 D1 T1.4 applied troubleshooting
+S: `for_each = var.subnet_names` fails where the variable is `list(string)`. The error says the argument must be a map, or set of strings. Which fix is correct?
+A: Change the variable's type to number so that Terraform generates the keys itself
+B: Add a count argument next to for_each so that Terraform can index the list
+C: Wrap the list in tolist(), which makes it a valid sequence for for_each
+D: Use for_each = toset(var.subnet_names), which converts the list to a set and removes duplicates
+K: D
+G: ## What for_each accepts
+`for_each` takes a map or a set of strings. Lists and tuples are not converted implicitly, so passing one raises an error that names the type you gave. To use a sequence, explicitly return a set (`toset()`) or build a map with a `for` expression.
+- `toset(var.names)` makes `each.key` and `each.value` the same string.
+- Duplicate strings collapse into one element, so two equal names produce one instance.
+- Use a map when each instance needs its own settings.
+`count` and `for_each` cannot be used in the same block.
+W: toset(): it explicitly produces the set for_each requires, and the keys become the string values.
+X: A=Number type: a number cannot produce keys for for_each; only maps and sets of strings are accepted.
+B=count beside for_each: the two meta-arguments are mutually exclusive in one block.
+C=tolist(): that keeps the value a list, which is exactly what for_each rejects.
+T: for_each needs a map or set of strings: convert lists with toset() or build a map with a for expression.
+V: Terraform
+
+@ TF-IEP002 D1 T1.4 applied troubleshooting
+S: `for_each = toset(aws_subnet.private[*].id)` on a new environment fails with "The for_each set includes values derived from resource attributes that cannot be determined until apply". Which TWO changes resolve this cleanly? (Select TWO)
+A: Iterate over a static map such as var.subnets keyed by zone name, and use the subnet ID as an attribute, not as the key
+B: Apply with -target for the subnets first, accepting that every later change needs the same two-step process
+C: Wrap the set in nonsensitive() so that Terraform treats the IDs as known during the plan
+D: Iterate over the same collection that created the subnets (for example for_each = aws_subnet.private), keyed by the original static keys
+E: Use timestamp() in the key so that each run produces a fresh known value
+K: A,D
+G: ## Keys must be known at plan time
+Terraform must know every instance address before it contacts providers. Resource IDs are generated by the API during apply, so they are unknown during a first plan and cannot serve as `for_each` keys or set members.
+- Take keys from values you control: a variable, a local or a literal map.
+- If you need to create something per existing resource, `for_each = aws_subnet.private` works because the keys of that for_each resource are the original static keys, even though the attribute values are unknown.
+`-target` can bypass the error once, but it leaves the configuration permanently dependent on a manual two-step apply.
+W: A=Static keys: the iteration set is known at plan time and the generated ID is only used as a value.
+D=Chained for_each: iterating over a for_each resource uses its known keys, so the unknown IDs are not needed to build instances.
+X: B=-target workaround: it hides the design flaw and every fresh environment needs the manual sequence again.
+C=nonsensitive(): sensitivity is unrelated to unknown values.
+E=timestamp(): impure functions cannot be used in keys, because their value is not known until apply.
+T: Build for_each keys from static data; chain through another for_each resource when you need one instance per object.
+V: Terraform
+
+@ TF-IEP002 D1 T1.4 applied use-case
+S: Instances are keyed `aws_instance.web["web-a"]`. The team renames the key to "web-1" in the map and wants the existing instance kept. What should be added to prevent destroy and create?
+A: A moved block with from = aws_instance.web["web-a"] and to = aws_instance.web["web-1"]
+B: A lifecycle ignore_changes = [tags] entry, so that Terraform ignores the key change
+C: A depends_on from the new key to the old key, so that Terraform reuses the old object
+D: A removed block for the old key only, so that Terraform keeps the real instance outside of state
+K: A
+G: ## Keys are part of the address
+Changing a map key changes the instance address. Terraform sees `["web-a"]` as gone (destroy) and `["web-1"]` as new (create), even if the arguments are identical.
+- A `moved` block records the rename in configuration: `moved { from = aws_instance.web["web-a"] to = aws_instance.web["web-1"] }`. Terraform updates the state address during the next plan and apply, with no change to the real object.
+- `terraform state mv` does the same by hand, but moved blocks are reviewable and travel with the code.
+`removed` stops managing an object (without destroying it when so configured) and would not link the new key to it.
+W: moved block: the instance previously at the old key is associated with the new key in state, so the plan shows a rename rather than a replacement.
+X: B=ignore_changes: it tells Terraform to ignore attribute drift, not address changes.
+C=depends_on: dependencies order operations and do not map one address to another.
+D=removed block: it would leave the old instance unmanaged and the new key would still create an additional one.
+T: Renaming a for_each key renames the address; record it with a moved block.
+V: Terraform
+
+@ TF-IEP002 D1 T1.4 applied use-case
+S: `aws_instance.web` is created with `for_each = { a = ..., b = ... }`. Which TWO expressions produce a list of instance IDs? (Select TWO)
+A: values(aws_instance.web)[*].id
+B: aws_instance.web.*.id
+C: [for k, v in aws_instance.web : v.id]
+D: aws_instance.web.id
+E: aws_instance.web[0].id
+K: A,C
+G: ## A for_each resource is a map of objects
+With `for_each`, `aws_instance.web` evaluates to a map from each key to the instance object: `{ a = {...}, b = {...} }`. Use keys to pick one (`aws_instance.web["a"].id`), or turn the map into a list.
+- `values(aws_instance.web)` returns the list of instance objects, and `[*].id` collects their IDs.
+- A `for` expression over the map, `[for k, v in aws_instance.web : v.id]`, builds the list directly; `{for k, v in ... : k => v.id}` builds a map and keeps the keys.
+Numeric indexes and legacy splats are for `count` lists.
+W: A=values() with splat: values() produces a list of instances and the splat extracts every ID.
+C=for expression: iterating the map and returning the id builds the list.
+X: B=Legacy splat on a map: this form does not work with for_each instances in the way it does for count.
+D=No key: the resource is a map, so an attribute cannot be read without choosing an instance.
+E=Index zero: instances are keyed by name, so there is no numeric element at index 0.
+T: For for_each resources use keys, values() or a for expression; numeric indexing belongs to count.
+V: Terraform
+
+@ TF-IEP002 D1 T1.4 applied troubleshooting
+S: A map for for_each is built with `{ for s in var.subnets : s.name => s }`. Two list entries both have name "app". What happens?
+A: The second entry silently replaces the first, so only one subnet is created
+B: Terraform merges both entries into a list under the key "app" without being asked to
+C: Terraform raises a duplicate object key error unless the key expression ends with the grouping operator ...
+D: Terraform appends a numeric suffix to the second key so that both subnets are created
+K: C
+G: ## Keys in for expressions must be unique
+In an object-producing `for` expression each result key must be unique. If two elements produce the same key, Terraform reports "Duplicate object key" and states that the ellipsis (`...`) may be used if duplicates are expected.
+- Adding `...` after the value (`s.name => s...`) groups all values for the same key into a list. That changes the value type, so resources need to handle the list.
+- Usually the better fix is to make the key unique (for example `"${s.vpc}-${s.name}"`) so every subnet gets its own stable address.
+Silent overwrite or automatic renaming would hide a configuration bug.
+W: Duplicate key error: the two entries produce the same key, so Terraform stops and suggests grouping or fixing the keys.
+X: A=Silent override: Terraform fails instead; hiding a lost subnet would be a dangerous behavior.
+B=Automatic merging: grouping happens only with the explicit ... operator.
+D=Numeric suffix: Terraform never edits keys; the key you compute is the instance address.
+T: Keys in for expressions must be unique: fix them or group deliberately with ....
+V: Terraform
+
+@ TF-IEP002 D1 T1.4 applied troubleshooting
+S: `for_each = var.users` fails because `variable "users"` is `sensitive = true`, a map whose values contain tokens. Which change works while keeping the tokens secret?
+A: Set for_each = nonsensitive(var.users) so Terraform can build the instance addresses
+B: Use for_each = toset([for k, v in var.users : k]) so the keys are used, and look up tokens by key
+C: Remove sensitive = true from the variable so that for_each accepts the map directly
+D: Wrap the map in jsonencode() so that for_each receives a plain string key
+K: B
+G: ## Sensitive values cannot be instance keys
+Terraform shows instance addresses in plans and state output, so for_each rejects sensitive values: the value would always be disclosed. Transforming the value does not remove the mark in most cases.
+- Keys that are not secret can be extracted: `toset([for k, v in var.users : k])` yields the names, and tokens stay in the sensitive map.
+- Inside the resource, read the secret through `var.users[each.key]`.
+- `nonsensitive()` would reveal the tokens, and removing the flag exposes them everywhere.
+W: Extract keys: the for expression produces only the names for the instance addresses, while the tokens remain protected in the variable.
+X: A=nonsensitive() on the whole map: that uncovers the tokens in plans and logs.
+C=Removing sensitive: the secrets would be printed everywhere the variable appears.
+D=jsonencode: a string is not a valid map or set for for_each, and the result would still carry the mark.
+T: For sensitive maps iterate over non-secret keys and look secrets up by each.key.
+V: Terraform
