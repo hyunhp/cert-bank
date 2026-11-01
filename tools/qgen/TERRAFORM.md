@@ -31,3 +31,19 @@ Writing rules:
 - Hot spots: state fundamentals (why state exists, what it holds) belong to D2; backends, locking, drift, moved/removed/refresh-only belong to D6;
   sensitive/ephemeral/write-only/Vault belong to D4; `import` and `terraform state` subcommands and TF_LOG belong to D7; provider requirements and the lock file
   belong to D2, `terraform init` command behavior to D3.
+
+## TF-IEP002 HashiCorp Certified: Terraform Infrastructure Engineer Professional (002) (added 2026-11-01)
+Source: https://developer.hashicorp.com/certifications/terraform-infrastructure-engineer-professional (read 2026-11-01).
+
+| Item | Value |
+|---|---|
+| Format | Multiple choice, online proctored, English, 90 minutes, credential valid 2 years; exam launches at IBM TechXchange 2026 (price "coming soon") |
+| Version tested | Terraform 1.15 (page). Key only features the docs on developer.hashicorp.com show as released; anything the docs mark newer/preview stays out of keys |
+| Questions / pass mark / weights | Not published: mock uses `questions: 60` (assumed), `passMarkUnpublished`, `weightsAssumed` (equal) |
+| Objectives | 7 sections, 43 objectives (1a-1h, 2a-2e, 3a-3i, 4a-4d, 5a-5e, 6a-6d, 7a-7e) = tasks T1.1-T7.5 in `data/exam-tasks.json` (a=1, b=2 ...) |
+| Domain names | Not published: our own labels (Terraform configuration; State management and upgrades; Infrastructure workflow and lifecycle; CI/CD and deployment; Security, secrets and compliance; Modules and the registry; HCP Terraform operations) |
+| Audience | Mid-career engineer running Terraform in production: shared modules, remote state, CI/CD, troubleshooting, governance/policy |
+
+Writing rules: those of TF-TA004 above, one level up. Scenario-based stems ("a team ...", "a plan shows ..."), predicting plan output or expression values,
+choosing between approaches, diagnosing a failing run. No questions that only test Associate fundamentals. Item 1h (Terraform MCP server) and 5d/7e (policy as code:
+Sentinel/OPA) come from the docs only; no editions/tiers/prices as keys.
