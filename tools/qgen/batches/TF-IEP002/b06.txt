@@ -1,0 +1,587 @@
+# TF-IEP002 b06: D4 CI/CD and deployment (T4.1-T4.4)
+# src: https://developer.hashicorp.com/terraform/cli/commands/fmt
+# src: https://developer.hashicorp.com/terraform/cli/commands/validate
+# src: https://developer.hashicorp.com/terraform/cli/commands/plan
+# src: https://developer.hashicorp.com/terraform/cli/commands/apply
+# src: https://developer.hashicorp.com/terraform/language/values/variables
+# src: https://developer.hashicorp.com/terraform/cloud-docs/run/modes-and-options
+# src: https://developer.hashicorp.com/terraform/cloud-docs/run/ui
+# src: https://developer.hashicorp.com/terraform/cloud-docs/run/states
+# src: https://developer.hashicorp.com/terraform/cloud-docs/workspaces/settings/run-triggers
+# src: https://developer.hashicorp.com/terraform/cloud-docs/variables
+# src: https://developer.hashicorp.com/terraform/cloud-docs/dynamic-provider-credentials
+# src: https://developer.hashicorp.com/terraform/cloud-docs/dynamic-provider-credentials/aws-configuration
+# src: https://developer.hashicorp.com/terraform/cloud-docs/dynamic-provider-credentials/azure-configuration
+# src: https://developer.hashicorp.com/terraform/cloud-docs/dynamic-provider-credentials/specifying-multiple-configurations
+# src: https://developer.hashicorp.com/terraform/cloud-docs/dynamic-provider-credentials/vault-backed
+
+@ TF-IEP002 D4 T4.1 applied use-case
+S: A pull-request pipeline runs on shared runners that hold no cloud credentials. Which TWO Terraform steps can still run there and give useful feedback? (Select TWO)
+A: terraform fmt -check -recursive, to fail the build when any file is not in canonical style
+B: terraform plan with the default refresh, to show reviewers the changes against the live resources
+C: terraform init -backend=false followed by terraform validate, to catch syntax and type errors
+D: terraform plan -refresh-only, to confirm that no one changed the live resources outside Terraform
+E: terraform apply on a plan file produced earlier, to prove that the plan can be executed
+K: A,C
+G: ## What needs credentials
+A CI pipeline is a sequence of gates, and a good design puts the cheap, credential-free gates first so that most mistakes fail in seconds.
+- **Style**: `terraform fmt -check` reads only local files. Its exit status is 0 when the input is properly formatted and non-zero otherwise.
+- **Static checks**: `terraform validate` checks syntax and internal consistency, regardless of variables or state. It needs an initialized directory with providers and modules installed, and `terraform init -backend=false` prepares that without touching the backend.
+- **Anything that reads real objects**: a normal plan, a refresh-only plan and an apply must call the backend and the provider APIs, so they need credentials.
+Ordering the stages as format, validate, plan, approval, apply keeps expensive and privileged work at the end.
+W: A=terraform fmt -check -recursive: it only parses local files, needs no network or credentials, and returns a non-zero status for unformatted files so the build fails.
+C=init -backend=false plus validate: initialization without the backend still installs providers and modules, and validate then checks the configuration without calling provider APIs or remote state.
+X: B=Default plan: planning refreshes every resource through provider APIs and reads state from the backend, so it fails without credentials.
+D=Refresh-only plan: this mode exists to read live objects and compare them with state, which requires credentials for both the backend and the provider.
+E=Applying a saved plan: apply changes real infrastructure, needs backend and provider access, and is the last stage of a pipeline, not a credential-free check.
+T: Put fmt -check and init -backend=false plus validate first; anything that touches state or providers needs credentials.
+V: Terraform
+
+@ TF-IEP002 D4 T4.1 applied definition
+S: A pipeline step runs terraform fmt -check in the repository root. It passes, yet a module in modules/network/ is badly formatted and reaches main. What change makes the step catch it?
+A: Add -recursive, because by default fmt processes only the current directory unless told to descend into subdirectories
+B: Add -diff, because the exit status becomes non-zero whenever a diff would be produced for any nested file
+C: Run terraform validate first, because validation also enforces canonical formatting of every file in all modules
+D: Add -write=false, because without it the command silently reformats the files and then reports success
+K: A
+G: ## fmt scope and exit status
+`terraform fmt` has one job: rewrite configuration to the canonical style. In automation it is used in check mode.
+- By default it scans only the current directory; `-recursive` also processes subdirectories.
+- `-check` reports whether input is formatted: exit 0 when properly formatted, non-zero with a list of file names otherwise. `-check` implies no writing.
+- `-diff` only displays the changes; `-write=false` only stops overwriting.
+A pipeline that should fail on any unformatted file in the tree therefore uses `terraform fmt -check -recursive`.
+W: Without -recursive the command never looks into modules/network, so the badly formatted file is invisible to the check. Adding -recursive extends the scan, and -check turns findings into a failing status.
+X: B=-diff: it prints differences but is not the switch that controls the exit status; scope is still limited to the current directory.
+C=validate: it verifies syntax, attribute names and types, not style, and a badly indented but valid file passes.
+D=-write=false: -check already implies no overwrite, and the missing piece is directory scope, not file writing.
+T: In CI use terraform fmt -check -recursive; check controls the exit status and recursive controls the scope.
+V: Terraform
+
+@ TF-IEP002 D4 T4.1 advanced troubleshooting
+S: A pipeline's validate stage passes for a change that sets instance_type to a value no provider API accepts, and the plan stage fails later. What explains the gap?
+A: validate checks syntax and internal consistency only, not remote services, so accepted values of provider APIs are not tested
+B: validate runs against the backend state and aborts only when the state holds a resource with a conflicting attribute
+C: validate was run without -var-file, so every variable was null and the invalid instance type was never evaluated
+D: validate is limited to the root module and skips child modules, which is where the instance type was set
+K: A
+G: ## What validate does and does not do
+`terraform validate` verifies that configuration is syntactically valid and internally consistent: correct attribute names, value types, references. It does so regardless of provided variables or existing state, and it does not validate remote services such as remote state or provider APIs.
+## Consequence for pipelines
+- A string such as an unknown instance size has the right type, so validate passes. Only the provider API rejects it, usually at plan or apply time.
+- To move such errors earlier, add `validation` blocks on variables, enumerations of allowed values, or preconditions, which run during plan.
+- A plan stage remains necessary: validate is a cheap first gate, not a replacement.
+W: validate evaluates structure and types, not whether a remote API will accept a value. The string is well-typed, so it passes, and the rejection happens when the plan or apply calls the provider.
+X: B=State-based check: validate does not read state or the backend at all; it works with the configuration alone.
+C=Missing var-file: validate is designed to work regardless of the variables supplied and does not need values to be set.
+D=Root only: validate checks the configuration in the directory including the module calls it contains; the gap is the remote API, not module depth.
+T: validate catches structural errors only; provider-side acceptance shows up at plan, so use validation blocks to shift checks left.
+V: Terraform
+
+@ TF-IEP002 D4 T4.1 advanced use-case
+S: Two CI jobs run on separate runners: a plan job writes tfplan and uploads it, and an apply job downloads it later. Which TWO statements about handling that artifact are accurate? (Select TWO)
+A: The file holds the full configuration and variable values, so sensitive values sit in cleartext and it needs protected storage
+B: The apply job must run terraform init with the same lock file and Terraform version, since the plan file does not carry providers
+C: The file is a standard JSON document, so reviewers can safely grep it for secrets and then share it on a public bucket for audit
+D: The apply job can add -var="size=large" to adjust a value after review without invalidating the approval
+E: The apply job needs -auto-approve, because a saved plan otherwise waits for an interactive confirmation prompt
+K: A,B
+G: ## What a saved plan is
+`terraform plan -out=tfplan` writes the plan in an opaque, non-standard file format. The docs state that it contains your full configuration, all values associated with planned changes and all plan options including input variables. Sensitive data, even if obscured on screen, is saved in cleartext. Treat the file as a sensitive artifact.
+## Applying it elsewhere
+- `terraform apply tfplan` performs the saved operations without prompting; passing the plan file is the approval, and `-auto-approve` is ignored.
+- You cannot add planning modes or options to a saved-plan apply, because the plan already holds the final decisions.
+- The plan file is not a replacement for initialization: the working directory must be initialized with the same provider versions (lock file) and a compatible Terraform version.
+- `terraform show tfplan` renders the plan for review.
+W: A=Sensitive artifact: the plan stores configuration and variables in cleartext, so artifact storage needs access control and short retention.
+B=Initialized directory: the apply job needs a working directory prepared by init with the same lock file and a compatible Terraform version, because providers are installed by init and not embedded in the plan file.
+X: C=Standard JSON: the format is opaque and not meant for other software; use terraform show -json for review and treat the file as secret either way.
+D=Adding -var: a saved plan cannot be combined with extra planning options; the values were fixed at plan time, and the apply would be rejected.
+E=Needs -auto-approve: passing a saved plan counts as approval, and the flag is ignored in that mode.
+T: A saved plan is a secret-bearing, opaque artifact applied in an initialized directory; no new options and no extra approval flag.
+V: Terraform
+
+@ TF-IEP002 D4 T4.1 advanced tradeoff
+S: A pipeline plans on merge, a reviewer approves, and a later job runs terraform apply -auto-approve with a fresh plan. Last week the apply deleted a database that the reviewed plan did not mention. Which change best closes the gap?
+A: Apply the exact plan file that the reviewer saw, using terraform apply tfplan after the approval gate
+B: Require two reviewers on the pull request, so that a second person also reads the plan output once
+C: Run the plan twice before approval and compare the outputs, then continue with the second one
+D: Add -refresh=false to the apply, so the apply cannot notice new differences in live resources
+K: A
+G: ## Approval gates and what is approved
+A gate is only meaningful if the thing that was reviewed is the thing that runs. In a pipeline with a separate `plan` and `apply`, the approval is attached to a human-readable plan, but a second `terraform apply` without a plan file creates a **new** plan at apply time. Anything that changed between the two moments (a merge, a console edit, another pipeline) can appear in the second plan without anyone having approved it.
+## The fix
+Save the plan with `-out`, review it (for example with `terraform show`), put the manual approval after it, and apply that same file. If the state changed in between, Terraform refuses the stale plan instead of silently doing something else. Treat the file as sensitive and keep it as the artifact bound to the approval.
+W: Applying the saved plan binds the approval to the exact change set. Differences discovered at apply time cause a failure, not an unreviewed deletion.
+X: B=Two reviewers: more reading of an output that no longer matches the later apply does not stop the second, unreviewed plan from running.
+C=Plan twice: both plans are throwaway, and the apply still creates a third plan, so nothing ties approval to execution.
+D=-refresh=false: skipping refresh hides drift and uses possibly outdated state, which makes surprises more likely rather than less.
+T: Approve a saved plan and apply that file; a fresh plan at apply time makes the approval meaningless.
+V: Terraform
+
+@ TF-IEP002 D4 T4.1 applied troubleshooting
+S: A contributor opens a pull request from a fork of the company repository, and the HCP Terraform workspace connected to the repository shows no speculative plan. Pull requests from internal branches do get one. What is the most likely reason?
+A: HCP Terraform does not run speculative plans for pull requests that come from forks, to avoid running untrusted code
+B: Speculative plans start only after the pull request has been merged, since HCP Terraform needs the final destination contents
+C: Speculative plans require the contributor to hold the apply permission in the workspace before HCP Terraform will start a run
+D: The fork has its own copy of the workspace variables, so the plan is queued in a different organization
+K: A
+G: ## Speculative plans in VCS-driven workflows
+When a workspace is connected to a repository, HCP Terraform automatically starts a **speculative plan** when a pull request opens against the selected branch. It shows possible changes (and is checked against policies) but can never be applied, and a link appears in the pull request. If the pull request is updated, the plan reruns.
+## Conditions
+- Only pull requests that originate from within the same repository trigger speculative plans.
+- Forks are excluded to avoid running malicious code or exposing sensitive variables. (Terraform Enterprise administrators can allow forks.)
+- Automatic speculative plans can be disabled per workspace, and directory filters can skip plans for unrelated paths.
+W: Fork pull requests are skipped by design. Reviewers can copy the branch into the main repository to get a plan.
+X: B=After merge: speculative plans run on the pull request head branch before merge; a plan after merge would be a normal run.
+C=Apply permission: speculative plans cannot be applied, so no apply permission is involved; the trigger is the pull request event.
+D=Separate workspace copy: variables and workspaces live in the organization, a fork does not duplicate them.
+T: Speculative plans run only for same-repository pull requests; fork pull requests are skipped for safety.
+V: HCP Terraform
+
+@ TF-IEP002 D4 T4.1 advanced troubleshooting
+S: After a team adds -detailed-exitcode to its plan step, the pipeline starts failing on every run that has pending changes, though the plans are valid. What explains this?
+A: Exit code 2 means success with changes present, and a step that treats any non-zero status as failure reads it as an error
+B: The flag makes Terraform return 1 for a non-empty plan, which signals a partial failure that the job must retry automatically
+C: The flag requires -out, and without a saved plan file the command ends with an unspecified error status
+D: The flag adds an interactive prompt, which cannot be answered in CI and therefore aborts the step
+K: A
+G: ## Exit codes of plan
+Without the flag, plan returns 0 on success (whether or not changes exist) and non-zero on error. With `-detailed-exitcode` the meanings become:
+- `0` success, empty diff (no changes)
+- `1` error
+- `2` success, non-empty diff (changes present)
+## Pipeline use
+The flag lets a pipeline branch: exit 0 skips the approval and apply stages, exit 2 raises the approval gate, exit 1 fails the build. The shell step must therefore capture the status and treat 2 explicitly, rather than relying on the default "non-zero is failure" behavior.
+W: Exit code 2 is the documented success-with-changes result, so a naive step that fails on non-zero marks every plan with changes as failed. The script should map 0, 1 and 2 separately.
+X: B=Return 1: 1 remains an error status; changes present is distinct as 2.
+C=Needs -out: the flag works without a plan file; -out only decides whether the plan is saved.
+D=Interactive prompt: plan never prompts for approval, and the flag changes only the exit status.
+T: With -detailed-exitcode, 0 means no changes, 1 error, 2 changes; handle 2 explicitly in the pipeline.
+V: Terraform
+
+@ TF-IEP002 D4 T4.1 applied troubleshooting
+S: A CI job runs terraform apply -input=false with no plan file and no -auto-approve. It ends without changing anything and reports a failure. What is the cause and the usual fix?
+A: Input is disabled, so Terraform cannot ask for approval and assumes none; apply a saved plan instead
+B: The flag makes apply run in refresh-only mode, so the job only updates state and must switch to the default mode to see changes
+C: The job lacks -lock=false, and the lock held by the previous job cannot be released without the flag
+D: The flag forces plan -out to a default file, and apply fails because it cannot find that file
+K: A
+G: ## Non-interactive apply
+By default `terraform apply` creates a plan and asks the operator to approve it. `-input=false` disables all prompts, **including** the approval prompt, and the docs say Terraform then conservatively assumes you do not wish to apply, so the operation fails.
+## Ways to automate
+- Apply a saved plan: passing `tfplan` counts as approval, which suits a pipeline with a review gate in the middle.
+- Use `-auto-approve` when no human gate is wanted (for example on an ephemeral environment).
+Keep `-input=false` in automation so a missing variable value fails fast instead of waiting for input.
+W: Without the prompt, there is no way to approve, so Terraform applies nothing. The pipeline should use the saved plan from the plan stage, or -auto-approve if no gate is intended.
+X: B=Refresh-only: -input=false changes nothing about planning modes.
+C=-lock=false: no lock is involved, and disabling locking would be dangerous for concurrent pipelines.
+D=Implicit -out: apply does not generate or look up a default plan file.
+T: -input=false removes the approval prompt, so non-interactive apply needs a saved plan or -auto-approve.
+V: Terraform
+
+@ TF-IEP002 D4 T4.1 advanced troubleshooting
+S: An API-driven pipeline creates runs with the save-plan option on a workspace where auto-apply is enabled. Plans finish, but no run ever applies until a person confirms it. What explains the behavior?
+A: Saved plan runs are never auto-applied, even when the workspace enables auto-apply; they apply only after confirmation
+B: Auto-apply works only for runs started from the UI, so API runs always need confirmation regardless of options
+C: The workspace is in speculative mode, so none of the plans can be applied by anyone in the organization
+D: Auto-apply needs a policy check, and runs without a policy set attached are held until confirmed
+K: A
+G: ## Run modes in HCP Terraform
+The default run does a plan and then applies it. With auto-apply enabled on the workspace and a VCS or API workflow, a successful plan applies immediately; otherwise the run waits for confirmation.
+## Saved plan runs differ in three ways
+- They ignore the per-workspace run queue during planning, so they can plan while another run is active.
+- They are never auto-applied, whatever the workspace setting says; confirmation is always required.
+- HCP Terraform discards a saved plan automatically if another run applies (or state changes) before it is confirmed.
+These runs fit custom CI workflows that want explicit approval of an exact plan.
+W: Saved plan runs deliberately skip auto-apply so that the plan someone approves is the one that runs. The pipeline needs a confirm step (API or UI), or should stop using the option.
+X: B=UI only: with auto-apply, standard API runs do apply automatically after a successful plan.
+C=Speculative: speculative (plan-only) runs can never be applied, but this workspace does produce confirmable saved plans.
+D=Policy requirement: without policies, auto-apply still proceeds for ordinary runs; the pause is a property of saved plans.
+T: Saved plan runs always wait for confirmation, even with auto-apply on, and are discarded if state moves first.
+V: HCP Terraform
+
+@ TF-IEP002 D4 T4.2 advanced use-case
+S: A team runs a web tier on two identical stacks, blue and green, behind one load balancer. They want the cutover and the rollback to be a small, low-risk apply. Which design fits?
+A: Keep both stacks defined and switch traffic with one variable such as active_color that only changes the listener's target
+B: Destroy the blue stack in the same apply that creates the green stack, using create_before_destroy on every resource
+C: Use one stack and change its AMI in place, then rely on terraform apply -replace on the instances to roll back if monitoring complains
+D: Define a green stack only when releasing and delete it right afterwards, with the previous blue stack found by tags
+K: A
+G: ## Blue/green with Terraform
+Terraform does not ship a deployment engine; it applies the desired state you declare. Blue/green is therefore a **modeling choice**: two complete stacks coexist and one object (a load balancer listener, a DNS weight, a routing rule) decides which one receives traffic.
+- Create green while blue serves traffic; test it directly.
+- Cutover is a plan that changes only the routing object, so the diff is tiny and reviewable.
+- Rollback is the same one-line change back, because blue is still running.
+- Remove the old stack later, in a separate apply, when confidence is high.
+A common implementation is a map or `for_each` over colors with a variable selecting the active one.
+W: Keeping both stacks and flipping the routing target makes cutover and rollback two minimal, symmetrical applies, with the old stack available for instant fallback.
+X: B=Create-before-destroy everywhere: this replaces the old stack inside the same apply, so after the apply there is no previous stack to fall back to.
+C=In-place AMI change: an in-place update has no parallel environment, and -replace after a failure means rebuilding under pressure.
+D=Disposable green: removing the standby immediately after release eliminates the quick rollback path that blue/green exists to give.
+T: Model blue and green as coexisting stacks and flip one routing value; remove the old stack in a later apply.
+V: Terraform
+
+@ TF-IEP002 D4 T4.2 advanced tradeoff
+S: A team wants a canary release: 5 percent of traffic to the new version, then 25, then 100. What does a Terraform-based design need to supply that Terraform does not do on its own?
+A: A pipeline gate between applies that checks metrics and decides whether the weight variable moves on
+B: A provisioner on the listener that sleeps and raises the weight on a timer with no external check of application health
+C: A lifecycle setting that makes the provider observe error rates and revert the weight when failures increase
+D: A single apply with count increasing by one each minute so that the weight grows continuously while it runs
+K: A
+G: ## Terraform and progressive traffic shifting
+Terraform computes and applies a diff; it does not watch application health after the apply completes. Canary rollouts therefore combine two parts:
+- **Configuration**: a variable (for example `canary_weight`) feeding a weighted target group, DNS record or routing rule, so each step is a small, reviewable change.
+- **Orchestration**: the pipeline applies step one, waits, evaluates metrics from a monitoring system, and only then runs the next apply with a higher value. Failing the gate stops the rollout or applies the previous value.
+Provisioner sleeps and timers are fragile and do not look at health, and no lifecycle argument performs automatic reversal.
+W: Terraform lacks feedback from running traffic, so the pipeline must evaluate metrics between applies and decide whether to move the weight forward or back.
+X: B=Provisioner timer: it moves traffic regardless of health and provisioners are a last resort; a timer is not a canary analysis.
+C=Lifecycle revert: lifecycle arguments control creation, replacement and drift handling, not monitoring-driven rollback.
+D=Count over time: a single apply is one graph walk to a final state; it does not pace itself over minutes and cannot pause for analysis.
+T: Canary with Terraform means a weight variable plus a pipeline gate on metrics between small applies.
+V: Terraform
+
+@ TF-IEP002 D4 T4.2 advanced use-case
+S: A change to the AMI would replace all twelve instances of one resource in a single apply, and the service cannot lose them together. Which approach gives a batched rollout with plain Terraform?
+A: Split the instances into groups keyed in a for_each map and roll the new AMI through one group per apply
+B: Set -parallelism=1 on the apply so that the instances are replaced one after another within the single run
+C: Add replace_triggered_by to every instance so that they take turns being replaced in a safe sequence
+D: Use -target on the whole resource block so that Terraform processes only a subset of the instances at a time
+K: A
+G: ## Rolling changes in Terraform
+A plan expresses a final state. If one argument change forces replacement of every instance, the plan contains twelve replacements, and the apply walks them as the dependency graph allows. Terraform has no built-in "batch size".
+## Techniques
+- Give each group its own key (for example `blue`, `green`, or `batch1..batch3`) in a `for_each` map, with a per-group version value. Roll one group, verify, then another.
+- Delegate rolling to a platform that does it (an autoscaling group's instance refresh or a managed service) and let Terraform change the launch template only.
+- Avoid `-target` for routine releases; the docs reserve it for exceptional situations.
+W: Per-group keys give the pipeline independent diffs. Each apply replaces only the group whose version changed, so capacity remains in the other groups.
+X: B=-parallelism=1: it only limits concurrency; the walk order across the twelve instances is not controlled, so all of them can be destroyed before any is created, and there are no health checks between steps.
+C=replace_triggered_by: it makes one resource's replacement cascade to another, which tends to widen the replacement, not stagger it across applies.
+D=-target on the block: the block address covers every instance, and -target is for exceptional use, not release control.
+T: Batch a rollout by keying groups in for_each and applying one group at a time; parallelism and -target do not do that.
+V: Terraform
+
+@ TF-IEP002 D4 T4.2 applied comparison
+S: A company promotes changes from dev to staging to prod. Which practice best keeps the three environments comparable?
+A: Promote the same commit or module version tag through each environment, differing only in per-environment variable values
+B: Keep a long-lived Git branch per environment, and cherry-pick fixes between the branches whenever somebody remembers to do it
+C: Let each environment pin the module to its own latest main branch commit so that each stays current
+D: Copy the production directory into dev when needed, and edit the copy to remove the expensive resources
+K: A
+G: ## Progressive environments
+Promotion works when the thing being promoted is fixed and only inputs differ. The unit of promotion is a version: a Git tag of the configuration, or a version of a module in a registry. The environment contributes variable values (sizes, counts, names) and its own backend and credentials.
+- Same code, different inputs makes a staging result a prediction for prod.
+- Per-environment branches and copied directories drift apart: a fix tested in staging is not what reaches prod.
+- Floating references to a branch tip make "what is deployed" depend on the moment of the last init.
+Pin versions, promote them in order, and keep differences in `.tfvars` or variables.
+W: Promoting one pinned version with different variables makes each stage a faithful rehearsal for the next, and differences are limited to reviewable inputs.
+X: B=Branch per environment: the branches diverge, and cherry-picking by memory means prod runs code that staging never tested.
+C=Each tracks main: environments then receive unvetted changes at different times, so staging proves nothing about prod.
+D=Edited directory copy: removing resources by hand creates a different configuration from the start, and drift grows with each edit.
+T: Promote a pinned version through environments and vary only inputs; branch-per-environment and floating references drift.
+V: Terraform
+
+@ TF-IEP002 D4 T4.2 advanced troubleshooting
+S: In HCP Terraform, workspace app-staging has a run trigger from app-dev. A run in dev applies successfully; a run is queued in staging but then waits and does not apply. What is the most likely reason?
+A: Runs started by run triggers do not auto-apply unless the separate Auto-apply run triggers setting is enabled
+B: Run triggers only copy state from the source workspace and never start runs, so a person must start staging manually
+C: The staging workspace needs the same name as the source workspace, otherwise queued runs are held until renamed
+D: Run triggers fire only when the source run is a speculative plan, so a normal apply does not release staging
+K: A
+G: ## Run triggers
+A run trigger connects a workspace to up to 20 source workspaces. When a run in a source workspace **applies successfully**, a run is queued in the workspace holding the trigger. It is the way to chain dependent workspaces (network, then app; dev, then staging) when one reads values the other produces.
+## Applying the triggered run
+- Runs created by a trigger do **not** auto-apply unless the *Auto-apply run triggers* setting is enabled.
+- That setting is independent of the workspace's own auto-apply setting.
+- Without it, the run waits for confirmation. This is useful as a promotion gate, since a person or policy decides whether staging may take the dev change.
+W: Run triggers queue the run but leave confirmation to a person unless Auto-apply run triggers is enabled, which acts as a deliberate gate for promotion.
+X: B=Copy state only: triggers do start runs; that is their purpose. The run is already queued here.
+C=Same name: workspaces in a trigger relationship have different names and no naming rule exists.
+D=Speculative sources: triggers fire on successful applies of the source, not on plan-only runs.
+T: Run-triggered runs wait for confirmation unless Auto-apply run triggers is on, giving a built-in promotion gate.
+V: HCP Terraform
+
+@ TF-IEP002 D4 T4.2 advanced use-case
+S: A team wants a short-lived preview environment for every pull request, built from the same configuration, and each one must be destroyable without affecting staging or the other previews. Which design fits?
+A: Give each pull request its own state (a distinct backend key or workspace) and variable values, and run terraform destroy against that state when the pull request closes
+B: Keep one shared state, add a map entry per pull request in a tfvars file, and remove the entry when the pull request closes so that the next apply cleans up
+C: Reuse the staging state and use -target on the new resources at apply, then target the same addresses with a destroy when the review ends
+D: Apply each preview into the staging state, and on close run terraform state rm for its resources so that Terraform stops tracking them
+K: A
+G: ## Ephemeral environments
+A preview environment is the same configuration instantiated with different inputs and, above all, its own state. State is the unit that Terraform creates, updates and destroys, so isolating it makes cleanup a single, predictable operation.
+- Parameterize names and sizes with variables (for example `-var="env=pr-142"`), so that globally unique names do not collide.
+- Point the backend at a per-environment location, for example with `terraform init -backend-config="key=previews/pr-142.tfstate"`, or select a workspace named after the pull request.
+- On close, the pipeline runs `terraform destroy` with the same state location and variables. Nothing else is in that state, so nothing else can be removed.
+- Add a scheduled cleanup for previews whose pull request was closed without the hook firing.
+This is a pipeline design choice, not a Terraform feature: Terraform only supplies state isolation and `destroy`.
+W: A separate state per pull request limits both create and destroy to that environment, so closing the pull request removes exactly its resources and staging is never in the plan.
+X: B=Shared state with map entries: removal does work in principle, but every preview change plans against one shared state and lock, and a bad apply or a lock held by one pull request blocks and endangers all the others.
+C=Staging state with -target: -target is for exceptional use, leaves the plan partial, and mixes preview resources with staging so a mistaken destroy can reach staging.
+D=terraform state rm: it makes Terraform forget the objects without deleting them, so the preview resources keep running and costing money, orphaned.
+T: Preview environments get their own state and inputs per pull request, and a destroy on close removes only that environment.
+V: Terraform
+
+@ TF-IEP002 D4 T4.3 advanced definition
+S: Which TWO statements accurately describe how HCP Terraform dynamic provider credentials work? (Select TWO)
+A: Each plan and apply gets a workload identity token that follows OIDC standards and names the organization, workspace and run stage
+B: The cloud platform verifies the token with HCP Terraform's public signing key and returns fresh temporary credentials for the run
+C: HCP Terraform stores a long-lived cloud access key per workspace and rotates it on a schedule you configure in the trust policy
+D: The token contains the cloud credentials themselves, encrypted so that only the cloud platform can open it
+E: The same temporary credentials are reused by every run in the workspace until they expire, to avoid extra token requests
+K: A,B
+G: ## The flow of dynamic credentials
+Dynamic credentials replace static secrets with a trust relationship between HCP Terraform and the cloud platform. You configure the platform to trust HCP Terraform as an OpenID Connect issuer, and define rules for which workspaces and runs may assume which role. Then for each plan and apply:
+- HCP Terraform generates a **workload identity token** (OIDC) with claims about the organization, the project, the workspace and the run stage.
+- It sends the token to the cloud platform, which verifies it with HCP Terraform's public signing key.
+- If verification and rules pass, the platform returns fresh temporary credentials.
+- HCP Terraform places them in the run environment for the provider, and discards them when the run ends.
+Nothing long-lived is stored, so nothing needs rotation.
+W: A=Workload identity token: an OIDC token generated for each plan and apply, whose claims identify organization, workspace and run stage so that the cloud can write precise rules.
+B=Verification and exchange: the platform checks the signature with the published public key and, if its rules match, issues new temporary credentials for that run.
+X: C=Stored access key: the design avoids stored keys; the credentials are short-lived and generated per run.
+D=Credentials inside the token: the token carries identity claims only; credentials come back from the cloud platform after verification.
+E=Reuse across runs: each plan and apply gets fresh credentials, which are discarded when the run environment is torn down.
+T: HCP Terraform proves identity with a per-run OIDC token; the cloud returns temporary credentials that expire with the run.
+V: HCP Terraform
+
+@ TF-IEP002 D4 T4.3 advanced troubleshooting
+S: A platform team creates the AWS role trust policy for HCP Terraform with one condition on the token's aud claim and nothing on sub. A reviewer says the setup is unsafe. Why?
+A: Any workspace in any HCP Terraform organization presenting a token with that audience could assume the role, so sub must be checked
+B: The aud claim is secret, so storing it in the trust policy discloses the audience to every user who can read the role
+C: Roles in a trust policy can only be assumed by the account that owns the OIDC provider, so tokens from external issuers are rejected anyway in every case
+D: The trust policy applies only to the plan phase, so apply tokens would be blocked by the missing condition
+K: A
+G: ## Trust policy conditions
+The OIDC identity provider in AWS trusts tokens from HCP Terraform's issuer. The **role trust policy** then decides which tokens may assume the role. HCP Terraform tokens carry:
+- `aud`: the audience, default `aws.workload.identity` (or the value of `TFC_AWS_WORKLOAD_IDENTITY_AUDIENCE`).
+- `sub`: a subject of the form `organization:ORG:project:PROJECT:workspace:WORKSPACE:run_phase:PHASE`.
+The docs warn that you should always check, at minimum, the audience and the organization name, to prevent unauthorized access from other HCP Terraform organizations. The default audience is public knowledge, so it is not a secret that protects the role.
+## Narrowing further
+Match the project and workspace too, and use separate roles for plan and apply when permissions differ.
+W: Because the default audience is well known and every HCP Terraform organization is signed by the same issuer, checking only aud lets other organizations' runs assume the role; sub must pin at least the organization.
+X: B=Secret audience: aud is not a secret and does not have to be; it identifies the intended consumer of the token.
+C=Account-only assumption: web identity federation is exactly for external identities; with a trusting provider the policy is the only barrier.
+D=Plan-only: a condition without sub does not select a run phase; it matches both phases.
+T: Always restrict sub (at least the organization) in the trust policy; the audience alone does not identify your organization.
+V: HCP Terraform, AWS IAM
+
+@ TF-IEP002 D4 T4.3 advanced use-case
+S: Plans in one workspace must be read-only against AWS, while applies need write access. How should the dynamic credentials be set up?
+A: Create two roles whose trust policies match the plan and apply run phases, and set TFC_AWS_PLAN_ROLE_ARN and TFC_AWS_APPLY_ROLE_ARN
+B: Create one broad role, and use TFC_AWS_RUN_ROLE_ARN, because the role used for plans is limited automatically by Terraform
+C: Create one role and add an IAM condition that denies writes whenever the command line contains the word plan
+D: Set TFC_AWS_PROVIDER_AUTH to plan on the workspace, so the apply phase falls back to a separate default identity
+K: A
+G: ## Run phase in the token
+The `sub` claim ends with `run_phase:plan` or `run_phase:apply`. A trust policy that uses `StringEquals` on the full subject matches exactly one phase, so permissions can differ per phase. The docs note that if plan and apply need different permissions, you must create two roles and trust policies, one per phase.
+## HCP Terraform side
+- `TFC_AWS_PROVIDER_AUTH` must be `true` to enable authentication.
+- `TFC_AWS_PLAN_ROLE_ARN` and `TFC_AWS_APPLY_ROLE_ARN` select the role per phase.
+- `TFC_AWS_RUN_ROLE_ARN` is the fallback when a phase-specific variable is not set.
+For the same permissions in both phases, use one role and a `StringLike` match with a `*` after `run_phase:`.
+W: Separate roles are bound to the plan and apply subjects, and the phase-specific variables tell HCP Terraform which one to assume, so plan runs hold only read permissions.
+X: B=One broad role: the run role applies to both phases, and Terraform does not reduce its permissions during plan.
+C=Command-line condition: IAM cannot see the Terraform command, only the identity of the caller and the AWS API request.
+D=PROVIDER_AUTH set to plan: the variable only switches authentication on with true; it does not select a phase.
+T: Different plan and apply permissions need two roles bound to run_phase:plan and run_phase:apply, selected by the PLAN and APPLY role variables.
+V: HCP Terraform, AWS IAM
+
+@ TF-IEP002 D4 T4.3 advanced use-case
+S: Forty workspaces in one project should share a single AWS role through dynamic credentials. Which TWO actions are needed? (Select TWO)
+A: Put TFC_AWS_PROVIDER_AUTH=true and TFC_AWS_RUN_ROLE_ARN in a variable set and apply it to the project's workspaces
+B: Write the role's trust policy sub condition with StringLike and a pattern that wildcards the workspace and run phase within the project
+C: Copy the same two environment variables into each workspace by hand, since variable sets cannot hold environment variables
+D: Create forty OIDC identity providers in AWS, one for every workspace name, so that each token has its own issuer
+E: Replace the sub condition by a wildcard for the entire organization so that new workspaces work without trust policy changes
+K: A,B
+G: ## Sharing one identity
+Dynamic credentials are configured through environment variables. The docs say you can set them as workspace variables, or use a **variable set** to share one AWS role across multiple workspaces. A variable set can be applied to a project or to selected workspaces, so one change updates all of them.
+## The trust side
+The OIDC provider in AWS is created once for the HCP Terraform address; the role's trust policy still decides which subjects may assume it. The `sub` is `organization:ORG:project:PROJECT:workspace:WORKSPACE:run_phase:PHASE`; using `StringLike` with `*` allows a family of workspaces. Scope the pattern to the organization and project, not wider, to keep least privilege.
+W: A=Variable set: environment variables for dynamic credentials can be shared by a variable set, avoiding forty copies.
+B=Wildcarded subject: the trust policy must accept all forty subjects, so StringLike with a pattern limited to the project is the way to cover the workspaces without opening the role to others.
+X: C=Manual copies: variable sets can contain environment variables, and the docs name them as the way to share a role.
+D=Forty providers: one identity provider per HCP Terraform address suffices; per-workspace separation is done in the trust policy conditions.
+E=Organization-wide wildcard: it also admits workspaces in other projects that should not hold this role, which defeats least privilege.
+T: Share one role through a variable set and match a project-scoped subject pattern with StringLike in the trust policy.
+V: HCP Terraform, AWS IAM
+
+@ TF-IEP002 D4 T4.3 advanced troubleshooting
+S: With Azure dynamic credentials, plans work but every apply fails to authenticate, although the same service principal is configured in the workspace. What is the likely cause?
+A: Federated credentials match the subject as a direct string, and only the one for run_phase:plan exists, not the apply one
+B: The apply phase needs an SSH key stored in the workspace because Azure accepts OIDC tokens only for read-only operations such as plans
+C: The audience defaults to a different value in apply runs, which must be set separately for each phase
+D: The service principal's client secret expired, which affects apply runs but not plan runs
+K: A
+G: ## Azure side of the trust
+On Azure the trust is a **federated identity credential** on the application. The docs require its subject identifier to match the token's subject exactly, for example `organization:my-org:project:my-project:workspace:my-workspace:run_phase:plan`, and note that the match is a direct string comparison. Therefore each workspace using dynamic credentials needs two federated credentials, one for `run_phase:plan` and one for `run_phase:apply`.
+## HCP Terraform variables
+`TFC_AZURE_PROVIDER_AUTH` enables authentication, `TFC_AZURE_RUN_CLIENT_ID` (or the plan and apply variants) selects the application, and the audience defaults to `api://AzureADTokenExchange`. No client secret is involved.
+W: Plans succeed because their subject matches the credential that exists; the apply token has a different subject that nothing matches, so Azure rejects it. Create the second federated credential.
+X: B=SSH key: OIDC tokens are not limited to read operations, and SSH keys play no part in this flow.
+C=Phase-specific audience: the audience default is the same for both phases; only the subject differs.
+D=Expired secret: dynamic credentials use no client secret, so none can expire.
+T: Azure subjects are matched as exact strings, so create one federated credential for run_phase:plan and one for run_phase:apply.
+V: HCP Terraform, Microsoft Entra ID
+
+@ TF-IEP002 D4 T4.3 advanced troubleshooting
+S: A workspace uses dynamic credentials for a default AWS configuration. The team adds a second account via tagged variables such as TFC_AWS_RUN_ROLE_ARN_PROD and declares the tfc_aws_dynamic_credentials variable. Now the default provider no longer authenticates. What was missed?
+A: After adding configurations, every provider block, default included, must map its shared config files from the supplied variable
+B: The tag PROD is a reserved keyword, so the tagged variables are ignored until a different tag name is chosen
+C: Tagged variables are read only when the default variables are deleted from the workspace, so both cannot coexist
+D: The second configuration must live in a separate workspace, because one workspace supports exactly one dynamic identity per provider type and run
+K: A
+G: ## Multiple dynamic credential configurations
+A workspace can hold several configurations of the same provider type. You append a tag to the environment variable names (`[VAR_NAME]_[TAG]`) and can set shared values once with `TFC_DEFAULT_` variables; an explicit value overrides the default. The tag may contain letters, numbers and underscores, and `TYPE` is reserved.
+## Mapping to provider blocks
+HCP Terraform then supplies an input variable (for AWS, `tfc_aws_dynamic_credentials`) with a `default` object and an `aliases` map keyed by tag. Your code must pass these to providers, for example `shared_config_files = [var.tfc_aws_dynamic_credentials.default.shared_config_file]` for the default block and the `aliases["PROD"]` entry for `alias = "prod"`. The docs stress that once extra configurations exist, authentication information must be mapped manually for all providers, including the default one.
+W: Adding tagged configurations switches the workspace to explicit mapping. The default provider block needs its shared_config_files argument set from the default entry of the supplied variable.
+X: B=Reserved tag: only the keyword TYPE is reserved for tags, and PROD contains letters only, so the tagged variables are read normally.
+C=No coexistence: default and tagged variables work together; defaults even provide shared values.
+D=One identity per workspace: the feature exists to give several aliases in one workspace their own tokens and roles.
+T: With extra tagged configurations, map every provider block, default included, to the supplied dynamic credentials variable.
+V: HCP Terraform, AWS provider
+
+@ TF-IEP002 D4 T4.3 advanced troubleshooting
+S: Dynamic AWS credentials are enabled in a workspace, but runs still act as an old IAM user. The AWS provider block sets access_key and secret_key from variables. What should the team do?
+A: Remove static credential arguments and conflicting AWS environment variables, since other authentication methods can interfere
+B: Add the static keys to a variable set with a higher priority, so that the dynamic credentials are used only as a fallback when keys fail
+C: Set TFC_AWS_PROVIDER_AUTH to false so that the static keys are accepted without conflict by the provider
+D: Increase the token lifetime so that the old IAM user session expires before the run begins
+K: A
+G: ## Provider configuration for dynamic credentials
+HCP Terraform makes the temporary credentials available to the provider in the run environment (for AWS through its supported environment or shared configuration mechanisms). Explicit credentials in the provider block or competing environment variables are earlier in the provider's own lookup order, so they win.
+The docs advise to pass a region (argument or `AWS_REGION`) and to not use the other arguments or methods from the provider's authentication section, since they may interfere. Static keys in the provider block or in environment variables are such methods.
+## Result
+After removing static keys, every run authenticates with a role chosen by trust policy and permissions follow the role, not the old IAM user. Also delete the stale user's keys.
+W: Static arguments and credential variables take precedence in the provider, so the old identity keeps being used; removing them lets the dynamic credentials apply and ends reliance on long-lived keys.
+X: B=Variable set priority: priority controls which variable value wins, not which authentication method; static keys would still be used and be the main identity.
+C=Disable auth: turning it off removes dynamic credentials completely and keeps the long-lived secret.
+D=Token lifetime: the issue is provider precedence of explicit keys, not any session expiry.
+T: Remove static keys and conflicting AWS variables; explicit credentials in the provider override dynamic credentials.
+V: HCP Terraform, AWS provider
+
+@ TF-IEP002 D4 T4.3 advanced comparison
+S: A company on Terraform Enterprise wants cloud credentials for runs but will not expose its instance's OIDC metadata endpoints to the public internet. Which approach does the HCP Terraform documentation describe for this?
+A: Vault-backed dynamic credentials, where Vault accepts the workload identity token and issues cloud credentials from a secrets engine
+B: Native OIDC dynamic credentials with the cloud provider, which needs public metadata endpoints for the cloud to verify the tokens
+C: Static access keys in a global variable set, rotated by a scheduled pipeline job
+D: A self-signed token generated by the pipeline and pasted into a workspace variable at the start of each run
+K: A
+G: ## Two ways to get short-lived credentials
+- **Native dynamic credentials**: the cloud platform trusts HCP Terraform or Terraform Enterprise as an OIDC issuer and verifies tokens itself. In Terraform Enterprise this means the cloud must reach the instance's OIDC metadata endpoints (`/.well-known/openid-configuration` and `/.well-known/jwks`).
+- **Vault-backed dynamic credentials**: Vault trusts the workload identity token, and its AWS, GCP or Azure secrets engines generate the short-lived credentials. Only Vault needs to reach the metadata endpoints, which do not have to be public; the docs mention that an air-gapped setup is possible when Vault is in the same secure network.
+Vault-backed is also useful when you want one place to manage cloud credentials.
+W: With Vault-backed credentials, only Vault verifies tokens against the TFE metadata endpoints, so the endpoints can remain private while the runs still receive short-lived cloud credentials.
+X: B=Native only: native OIDC needs the cloud to verify tokens, so it needs the keys endpoint; this is why Vault-backed is the described alternative.
+C=Rotated static keys: these are long-lived secrets in variables, the opposite of the goal.
+D=Self-made token: the cloud has no trust in an arbitrary self-signed token, and pasting tokens in variables is not an identity flow.
+T: Vault-backed dynamic credentials keep OIDC metadata endpoints private by letting Vault, not the cloud, verify tokens.
+V: HCP Terraform, Vault
+
+@ TF-IEP002 D4 T4.4 applied use-case
+S: A root module declares variable "size". The directory has terraform.tfvars with size = "small", prod.auto.tfvars with size = "large", and the shell exports TF_VAR_size=medium. The command is terraform plan with no flags. Which value is used?
+A: large, because auto.tfvars files outrank terraform.tfvars and environment variables
+B: medium, because environment variables are read last and so win over any file
+C: small, because terraform.tfvars is the canonical file for the root module
+D: The plan stops with an error, as the same variable is assigned from several sources
+K: A
+G: ## Precedence for root module variables
+When a root variable gets values from several sources, Terraform uses this order, highest first:
+- `-var` and `-var-file` on the command line (in the order given), and variables from HCP Terraform
+- `*.auto.tfvars` and `*.auto.tfvars.json`, in lexical order
+- `terraform.tfvars.json`
+- `terraform.tfvars`
+- environment variables (`TF_VAR_name`)
+- the `default` in the variable block
+Conflicts are not errors. Only assigning the same variable twice in the **same file** is invalid.
+## Applying it
+Here no flags are given. The auto file beats terraform.tfvars and the environment, so the answer is `large`.
+W: *.auto.tfvars files rank above terraform.tfvars and above TF_VAR_ environment variables, so prod.auto.tfvars supplies large.
+X: B=Environment wins: environment variables are near the bottom of the order, just above the variable default.
+C=terraform.tfvars: it ranks below auto files and the JSON file; being the conventional name gives no priority.
+D=Error: multiple sources are allowed, and the precedence list resolves them silently.
+T: Order: command line and HCP Terraform, then auto.tfvars, terraform.tfvars.json, terraform.tfvars, TF_VAR_, default.
+V: Terraform
+
+@ TF-IEP002 D4 T4.4 applied troubleshooting
+S: A team keeps one variable file per environment in the root directory, and a pipeline step runs terraform plan with no flags. Which of these files does Terraform load without being told to?
+A: team.auto.tfvars
+B: prod.tfvars
+C: terraform.prod.tfvars
+D: variables.tfvars.json
+K: A
+G: ## Which variable files load automatically
+Terraform loads variable definition files without flags only when the name matches a fixed pattern:
+- `terraform.tfvars`
+- `terraform.tfvars.json`
+- any file ending in `.auto.tfvars` or `.auto.tfvars.json`
+All other `.tfvars` files, whatever their content, are ignored unless passed with `-var-file="prod.tfvars"`. This is why a file named for an environment is usually either given the `.auto.tfvars` suffix (always on) or kept without it and selected explicitly in a pipeline step per environment.
+A file ending in `.json` is parsed as a JSON object with variable names as keys.
+W: team.auto.tfvars: the .auto.tfvars suffix marks files that are loaded automatically, in lexical order.
+X: B=prod.tfvars: the name matches no automatic pattern; it must be passed with -var-file.
+C=terraform.prod.tfvars: only the exact name terraform.tfvars qualifies, not a prefix.
+D=variables.tfvars.json: a .tfvars.json file is auto-loaded only when named terraform.tfvars.json or ending in .auto.tfvars.json.
+T: Automatic: terraform.tfvars, terraform.tfvars.json and *.auto.tfvars(.json); everything else needs -var-file.
+V: Terraform
+
+@ TF-IEP002 D4 T4.4 applied troubleshooting
+S: A directory holds 10-base.auto.tfvars with region = "eu-west-1" and 20-prod.auto.tfvars with region = "us-east-1", and the pipeline passes no flags. Which region is used, and why?
+A: us-east-1, because auto.tfvars files load in lexical order and later files override earlier ones
+B: eu-west-1, because the first file Terraform finds sets the value and later assignments are ignored
+C: The plan fails because two auto.tfvars files may not set the same variable
+D: eu-west-1, because the file with the smaller numeric prefix has higher priority
+K: A
+G: ## Order inside the auto group
+Terraform loads all `*.auto.tfvars` and `*.auto.tfvars.json` files in **lexical order of file name**. For a variable defined in more than one of them, the last file loaded provides the final value. So numeric prefixes (`10-`, `20-`) are a deliberate way to layer a common base file and a more specific override.
+## Cautions
+- The same variable twice in **one** file is an error; across files it is a layering feature.
+- Lexical order is string order, so `100-x` sorts before `20-x`; zero-pad prefixes.
+- An explicit `-var-file` or `-var` on the command line wins over every auto file.
+W: 20-prod.auto.tfvars sorts after 10-base.auto.tfvars, so its region replaces the earlier one.
+X: B=First wins: it is the opposite; later values in the order take over.
+C=Failure: setting a variable in several files is allowed, only repeating it in one file is an error.
+D=Smaller prefix wins: lexical order determines load sequence, and the later file in that sequence has the final say.
+T: Auto var files load in lexical order and the last one wins; zero-pad numeric prefixes.
+V: Terraform
+
+@ TF-IEP002 D4 T4.4 advanced comparison
+S: A workspace in HCP Terraform (CLI workflow) has a workspace variable instance_type = m5.large. The uploaded directory has an auto.tfvars file with instance_type = m5.xlarge, and nothing else sets it. Which value does the run use?
+A: m5.large, because variables set in HCP Terraform take precedence over auto.tfvars files
+B: m5.xlarge, because files in the configuration are closer to the code and override workspace settings
+C: The run fails, because HCP Terraform forbids both a workspace variable and a tfvars file for one name
+D: m5.xlarge for plan and m5.large for apply, since each phase reads a different source
+K: A
+G: ## HCP Terraform in the precedence list
+The documented order places variables from HCP Terraform (workspace variables and variable sets) above `*.auto.tfvars`, `terraform.tfvars` and environment variables, but below `-var` and `-var-file` on the command line. Within HCP Terraform the platform then orders:
+- Prioritized variable sets (global, then project and workspace scoped) and command-line `-var` or `-var-file` values
+- local `TF_VAR_` variables in a CLI workflow
+- workspace-specific variables
+- non-priority variable sets (workspace-scoped, project-scoped, global), where variable sets with names earlier in lexical order win ties
+So a file in the uploaded directory does not override a workspace variable. If someone needs to override from the CLI, they use `-var` or `-var-file`.
+W: Variables set in HCP Terraform outrank auto.tfvars files in the uploaded directory, so the plan and the apply both use m5.large.
+X: B=File wins: configuration-side tfvars files rank below HCP Terraform variables.
+C=Failure: setting a name in several places is allowed; precedence settles it without an error.
+D=Per phase: one set of variable values applies to the whole run.
+T: HCP Terraform variables outrank auto.tfvars files; only -var, -var-file, TF_VAR_ in a CLI run, and priority sets rank above workspace variables.
+V: HCP Terraform
+
+@ TF-IEP002 D4 T4.4 advanced comparison
+S: An organization-wide variable set has region = us-east-1 and is marked as a priority variable set applied to all workspaces. One workspace has its own variable region = eu-west-1. Which value do its runs use?
+A: us-east-1, because a priority global variable set overrides all other variables with the same key
+B: eu-west-1, because workspace-specific variables always overwrite variable set values
+C: eu-west-1, because the more specific scope always wins whatever priority setting is chosen
+D: The run is blocked until an administrator removes one of the two definitions
+K: A
+G: ## Variable set precedence
+Variable sets share variables across workspaces or projects. Their precedence has two layers:
+- **Priority variable sets** (an option on the set) override variables with the same key at more specific scopes. A prioritized global set is at the top of the order, above every other variable; prioritized project- and workspace-scoped sets follow, with organization-owned sets above project-owned ones.
+- **Non-priority sets** rank below workspace-specific variables: a workspace variable always overwrites a set value with the same key.
+## When to use priority
+Use a priority set for values that must not be overridden locally, such as a mandatory region, a tag or a policy-related setting.
+W: Because the set is marked priority and global, its value rules over every other source with that key, including the workspace's own variable.
+X: B=Workspace always wins: that rule holds for non-priority sets only, and the priority marking reverses it.
+C=Specific scope always wins: priority sets exist to override specific scopes.
+D=Blocked run: HCP Terraform marks overwritten variables in the UI and does not stop runs on conflicts.
+T: Priority variable sets beat workspace variables; non-priority sets lose to them.
+V: HCP Terraform

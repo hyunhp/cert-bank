@@ -1,0 +1,550 @@
+# TF-IEP002 b04: D3 Infrastructure workflow and lifecycle (T3.1-T3.5)
+# src: https://developer.hashicorp.com/terraform/cli/commands/plan
+# src: https://developer.hashicorp.com/terraform/cli/commands/apply
+# src: https://developer.hashicorp.com/terraform/language/block/import
+# src: https://developer.hashicorp.com/terraform/language/import
+# src: https://developer.hashicorp.com/terraform/language/meta-arguments/lifecycle
+# src: https://developer.hashicorp.com/terraform/cli/workspaces
+# src: https://developer.hashicorp.com/terraform/language/state/remote-state-data
+
+@ TF-IEP002 D3 T3.1 advanced tradeoff
+S: One root module holds networking, a database tier and 40 application services. Every plan takes 25 minutes and a typo in a service change once put the database in the same plan. Which restructuring best addresses both problems?
+A: Split it into configurations along ownership and change-frequency lines, each with its own state, sharing values via outputs
+B: Keep one configuration and always run plans with -target for the service being changed, so only that service is refreshed and planned
+C: Convert the services to CLI workspaces inside the same directory so that each service gets a separate state file under the one backend
+D: Raise -parallelism to a much higher value so the graph walk finishes sooner, and keep a single state for easier cross-references
+K: A
+G: ## Why large root modules hurt
+A configuration and its state form one unit: every plan refreshes every resource in the state and every apply can touch any of them. Two costs follow.
+- **Time**: refresh and graph walking grow with resource count, and API rate limits make raising concurrency a poor fix.
+- **Blast radius**: one mistake in a frequently changed part can show up in the same plan as a rarely changed, critical part such as a database.
+## What the docs recommend
+The `-target` documentation says to prefer breaking large configurations into several smaller ones that can be applied independently, using data sources to read objects from other configurations. Typical boundaries are ownership (network team, platform team, app team) and change frequency (foundation changes rarely, services change daily).
+W: Splitting by ownership and change frequency gives each part its own state, so plans refresh only that part, a service change cannot include database changes, and access can be granted per configuration. Shared values flow through published outputs or data sources.
+X: B=Routine -target: the plan documentation reserves -target for exceptional cases; used routinely it hides drift and leaves the state unrelated to the configuration, and the single state still holds everything.
+C=CLI workspaces: workspaces are copies of the same configuration with different state, not separate components. They would multiply the same 40 services, not divide the system, and all share one backend and credentials.
+D=Higher parallelism: concurrency only helps up to provider API rate limits, and it does nothing for blast radius because one state and one plan still cover everything.
+T: Split big configurations at ownership and change-frequency boundaries; -target and workspaces do not decompose a system.
+V: Terraform
+
+@ TF-IEP002 D3 T3.1 applied comparison
+S: A network configuration exposes its VPC ID as a root output, and an application configuration in another state reads it with a terraform_remote_state data source. A security reviewer objects. Which concern is accurate?
+A: The consumer needs read access to the entire state snapshot of the network configuration, which may hold sensitive values beyond the one output
+B: The data source copies the network outputs into the application state, so any later change to the output is never seen by the consumer
+C: The data source can only read outputs from a state stored locally, so the setup silently fails once the network state is moved to a remote backend
+D: The data source takes a lock on the network state during the read, so every application plan blocks all network changes
+K: A
+G: ## What terraform_remote_state exposes
+The data source reads the latest state snapshot from a backend and returns only the root module **output values**. But to read it, the caller's credentials need access to the whole state file, and state often contains secrets such as generated passwords or connection strings.
+## Alternatives
+- Publish the value to a dedicated store (a parameter store, DNS record, key/value store) with its own access controls, then read it with a matching data source.
+- Look the object up by tags with the provider's data source.
+- In HCP Terraform, the `tfe_outputs` data source is recommended because it does not require full access to workspace state.
+W: The data source exposes only outputs, but the consumer must be allowed to read the full state snapshot. That access exposes any sensitive data in state, which is why explicitly published data or tfe_outputs is recommended.
+X: B=Copied outputs: the data source reads the latest snapshot each time it is evaluated. A changed output appears at the next plan of the consumer, nothing is stored permanently in its state.
+C=Local only: the data source is designed for remote backends such as S3, azurerm or HCP Terraform; it takes the backend type in its configuration.
+D=Locking: reading a snapshot does not hold the producing configuration's lock, so consumer plans do not block producer changes.
+T: terraform_remote_state returns only outputs but needs access to the whole state; prefer published data or tfe_outputs for sensitive setups.
+V: Terraform
+
+@ TF-IEP002 D3 T3.1 advanced troubleshooting
+S: A team uses CLI workspaces named dev and prod with one S3 backend. Auditors find that engineers with dev credentials can run terraform workspace select prod and apply. What is the underlying design flaw?
+A: CLI workspaces within a directory share one backend and its credentials, so they do not provide access separation between environments
+B: The prod workspace was created with terraform workspace new, which grants every user of the backend write access to it by default
+C: CLI workspaces store state in the .terraform directory on each laptop, which any engineer can overwrite with a copy of dev state
+D: The default workspace is always mapped to production, and selecting any other workspace therefore inherits its permissions
+K: A
+G: ## What a CLI workspace is
+A CLI workspace is a separate instance of state inside the same working directory and backend. The documentation describes workspaces as technically equivalent to renaming the state file. The same configuration, backend settings and credentials are used for all of them.
+## Consequence for environments
+The docs say that organizations commonly want strong separation between deployments for different stages or teams, where each backend often has different credentials and access controls. CLI workspaces are not a suitable isolation mechanism for that. The alternative is one small root module per environment, each instantiating shared modules with its own backend.
+W: Because both workspaces live in one backend reachable with one credential set, selecting prod needs no extra permission. Separate configurations with separate backends and credentials are the documented alternative.
+X: B=Default access: workspace creation grants nothing; access comes from the backend and cloud IAM, which are shared by all workspaces here.
+C=State on laptops: with a remote backend, workspace states live in the backend. Only the selected workspace name is cached locally in .terraform.
+D=Default maps to production: the default workspace is just the one that exists in every directory; it has no special link to production and no permission model.
+T: CLI workspaces share backend and credentials, so use separate configurations and backends when environments need different access.
+V: Terraform
+
+@ TF-IEP002 D3 T3.1 advanced use-case
+S: A shared VPC was created in the monolith state, and it must move to a new network configuration without destroying it. Which sequence achieves this?
+A: Add an import block in the new configuration for the VPC, apply it, then drop the object from the old state without destroying it
+B: Delete the VPC resource block from the old configuration and apply, then recreate it in the new configuration under the same name
+C: Copy terraform.tfstate into the new directory and delete the VPC block from the old one, which makes the new state authoritative
+D: Add replace_triggered_by in the new configuration, which transfers the VPC object from the old state during the next plan
+K: A
+G: ## Moving ownership between states
+Terraform ties a real object to exactly one state entry. Moving ownership means: first make the destination state adopt the object, then make the source state forget it, and never let both plan changes to it at once.
+- **Adopt**: an `import` block (`to` = new resource address, `id` = the cloud ID) with a matching `resource` block in the destination.
+- **Forget**: a `removed` block with `lifecycle { destroy = false }` in the source, or `terraform state rm`. Simply deleting the resource block would plan a destroy.
+## Ordering
+Import first, then remove from the source, so the object always has an owner and nothing is destroyed.
+W: Importing into the new state gives it ownership, and removing the object from the old state without destroying (removed block with destroy set to false) stops the old configuration from managing or deleting it.
+X: B=Delete and recreate: deleting the block makes the old apply destroy the real VPC, taking every dependent resource with it; the recreation is a new object.
+C=Copying the state file: it would hold the whole monolith, so both states claim the same objects, and each configuration would plan to destroy what the other manages.
+D=replace_triggered_by: it only forces replacement of a resource when another changes. It cannot transfer objects between states.
+T: Move an object between states by importing it into the new one and removing it, without destroy, from the old one.
+V: Terraform
+
+@ TF-IEP002 D3 T3.1 advanced use-case
+S: Which TWO situations justify splitting a Terraform project into separate configurations with separate states? (Select TWO)
+A: A team owns the shared network and must grant others only read access to its outputs, never write access to its state
+B: Plan times are growing and the stable foundation resources are refreshed on every application release for no reason
+C: Two engineers want to avoid editing the same file, so the project is divided into a main.tf and a network.tf per person
+D: A module call is repeated three times, so each repetition must be stored in its own state to keep names unique
+E: A variable has become long, so its default is moved to a separate state to shorten the code
+K: A,B
+G: ## What a state boundary buys
+A separate state means a separate plan scope, lock, access policy and apply history. Splitting is a runtime and governance decision, not a file layout decision.
+- **Different owners or permissions**: each configuration can have its own backend access.
+- **Different change rates**: stable foundations are not refreshed on each application release.
+- **Smaller blast radius**: a failed or mistaken apply affects only that scope.
+Splitting adds coupling work (outputs, remote state, ordering), so it is not free.
+W: A=Ownership and access: a separate state and backend lets the network team control who can modify it and share only outputs.
+B=Change frequency: the stable foundation does not have to be refreshed and planned with each release when it has its own state.
+X: C=Files per engineer: files in one directory belong to the same module and state; splitting files changes nothing about plans or locking.
+D=Repeated module calls: repeated calls with different names or for_each keys coexist in one state without conflict, and splitting them is not needed for naming.
+E=Long variable: code readability is unrelated to state boundaries, and defaults cannot live in a state.
+T: Split states for ownership, access and change-rate reasons, not for file organisation or naming.
+V: Terraform
+
+@ TF-IEP002 D3 T3.2 advanced use-case
+S: An instance is healthy in the console but its disk is corrupted and the team wants a fresh one with the same configuration. Which command plans exactly that without changing the code?
+A: terraform plan -replace=aws_instance.web
+B: terraform plan -refresh-only
+C: terraform plan -target=aws_instance.web
+D: terraform plan -destroy
+K: A
+G: ## Forcing replacement
+`-replace=ADDRESS` plans a **replace** action (destroy and create, or create then destroy if create_before_destroy is set) for that instance even when the configuration and refreshed state show no difference. It is the successor of `terraform taint` (docs: use taint before v0.15.2) and fits immutable-infrastructure patterns when a remote object is degraded.
+## Why the others differ
+- `-refresh-only` updates state and outputs to match reality and never changes infrastructure.
+- `-target` only narrows scope; with no diff it plans nothing.
+- `-destroy` plans removal of everything, and cannot combine with `-replace`.
+W: -replace tells Terraform to plan replacement of the specified instance regardless of configuration drift, which gives a fresh resource with identical configuration.
+X: B=-refresh-only: only reconciles state with reality, so the corrupted disk, which Terraform cannot see, changes nothing.
+C=-target: restricts the scope, but a resource with no differences yields no action, so nothing is replaced.
+D=-destroy: removes all managed resources, not one instance, and it cannot be used together with -replace.
+T: Use plan -replace=ADDRESS to rebuild one healthy-looking resource without editing code.
+V: Terraform
+
+@ TF-IEP002 D3 T3.2 advanced troubleshooting
+S: Someone resized a managed database in the console. The team wants Terraform state to record the new size, but must not change any infrastructure yet. Which command and result fit?
+A: terraform apply -refresh-only, which updates state and outputs to match the real size and modifies no resources
+B: terraform apply -target=aws_db_instance.main, which sets the state size and leaves the database unchanged
+C: terraform plan -refresh=false, which stores the observed size in state without proposing any changes
+D: terraform apply with a saved plan, which accepts remote changes into state first and then reverts them
+K: A
+G: ## Refresh-only mode
+`-refresh-only` is a planning mode that creates a plan to update Terraform state and root module output values with the real-world values. Reviewing it shows what drifted; applying it records the changes in state only. No resource is created, changed or destroyed.
+## What follows
+After accepting the new state, the next normal plan compares configuration with the updated state. If the configuration still says the old size, that plan will propose to change the database back. The team must either update the code to match or accept the revert.
+W: Apply in refresh-only mode records the observed size in state and outputs without touching infrastructure, so drift is acknowledged first and decided on later.
+X: B=Targeted apply: it plans and applies configuration changes for the resource, which would reset the size to the configured value.
+C=-refresh=false: the flag does the opposite, skipping the refresh so the state is not updated with real values, and plan never writes state.
+D=Saved plan: a saved plan executes decisions already made; it does not accept remote changes and revert them.
+T: terraform apply -refresh-only updates state to match reality without changing infrastructure.
+V: Terraform
+
+@ TF-IEP002 D3 T3.2 advanced use-case
+S: A pipeline saves a plan with terraform plan -out=tfplan and uploads it as a build artifact for later approval. Which TWO statements about the saved file are accurate? (Select TWO)
+A: It can contain sensitive values in cleartext even though the terminal output hides them, so the artifact needs restricted access
+B: terraform show tfplan lets reviewers inspect the planned changes before anyone applies the file
+C: It is a portable text format, so a reviewer can edit values in it and apply the edited file
+D: It is valid for any later run, no matter how the state changes in between, because it stores the final result
+E: It can be safely given a .tf suffix, which makes Terraform merge it into the configuration
+K: A,B
+G: ## Saved plan files
+`-out=FILENAME` writes the plan in an opaque, non-standard format. It holds the full configuration, all values associated with planned changes and all plan options, including input variables. If the plan includes sensitive data, it is saved in cleartext, even though the terminal output is obscured.
+- Inspect it with `terraform show tfplan` (or `-json` for tools).
+- A suffix such as `.tf` makes Terraform try to read it as configuration, causing syntax errors.
+- Apply refuses a plan when the state it was based on has changed since (a stale plan).
+W: A=Cleartext sensitive values: the file contains everything needed to apply, including values hidden in the console, so treat the artifact like a secret.
+B=terraform show: this command renders a saved plan for review, which supports approval gates.
+X: C=Editable text: the format is opaque and not meant for other software; changing it is unsupported, and inputs are fixed at plan time.
+D=Valid for any state: if the state changes after the plan was created, Terraform rejects the plan as stale and a new one is needed.
+E=.tf suffix: a .tf name makes Terraform try to read the file as configuration source, which fails with syntax errors.
+T: A saved plan is an opaque, sensitive artifact: inspect with terraform show, protect it, and apply it before state moves on.
+V: Terraform
+
+@ TF-IEP002 D3 T3.3 applied use-case
+S: A pipeline's apply stage runs terraform apply -auto-approve -var="size=large" tfplan after a reviewer approved tfplan. What happens?
+A: Terraform rejects the extra -var, because a saved plan fixes all planning options and variable values already
+B: Terraform applies the plan with size set to large, because command-line variables override those stored in the plan
+C: Terraform prompts for confirmation despite -auto-approve, because a saved plan must always be approved interactively
+D: Terraform discards the saved plan, makes a new plan with size=large and applies that
+K: A
+G: ## Saved plan mode
+When a saved plan is passed to `terraform apply`, Terraform performs the planned operations without a prompt: passing the file is the approval. The docs add that you cannot specify any additional planning modes or options, because those options only affect which actions Terraform decides on, and the plan file already holds the final result of those decisions (including input variables).
+- `-auto-approve` is ignored for saved plans.
+- To change a value, create a new plan, have it reviewed, and apply that file.
+W: Planning options and variables are fixed in the saved plan, so apply refuses an extra -var; the reviewer's approved plan is exactly what runs.
+X: B=Overriding variables: variable values are recorded in the plan; apply cannot override them without a new plan.
+C=Forced prompt: passing the plan file is treated as approval, so there is no prompt, and -auto-approve is simply ignored.
+D=Silent re-plan: apply never re-plans when given a saved plan; that would defeat the review.
+T: A saved plan is final: apply accepts no extra planning options, and passing the file counts as approval.
+V: Terraform
+
+@ TF-IEP002 D3 T3.3 advanced troubleshooting
+S: A plan was saved at 10:00 and reviewed. At 10:30 another pipeline applied a change to the same state. The first pipeline now runs terraform apply tfplan. What is the expected outcome?
+A: Terraform fails because the saved plan is stale compared to the current state, and a new plan must be created and reviewed
+B: Terraform applies the changes in the plan and merges them with the other pipeline's changes automatically
+C: Terraform applies the plan after re-reading the configuration, so the later change is treated as drift and reverted
+D: Terraform applies only the plan actions whose resources are unaffected by the other pipeline's change
+K: A
+G: ## Stale plans
+A saved plan records the state it was computed against. If state has changed since, Terraform refuses to apply it with an error about a stale plan, rather than apply decisions based on outdated facts. This protects against two pipelines changing the same infrastructure with conflicting assumptions.
+## Operations
+- Serialize runs per state (locking helps, but locks release between plan and apply when planning and applying are separate jobs).
+- On a stale-plan error, re-plan, re-review and apply.
+W: Terraform detects that the state moved after the plan was made and refuses the apply, so a fresh plan has to be generated and reviewed.
+X: B=Automatic merge: Terraform never merges plans; each plan is valid only for the state version it was made against.
+C=Reverting as drift: a saved plan does not re-read configuration; the apply either runs the exact plan or fails.
+D=Partial application: there is no selective execution of a saved plan; the whole plan is valid or rejected.
+T: A saved plan is valid only for the state it was made from; after state changes, plan again.
+V: Terraform
+
+@ TF-IEP002 D3 T3.3 advanced troubleshooting
+S: During apply, 30 resources are planned. After 12 succeed, the 13th fails with a provider API error and Terraform stops. What is the state of the project?
+A: The 12 successes are recorded in state; after fixing the cause, a new plan will propose only the remaining work
+B: Terraform rolls back the 12 successful resources automatically so that the infrastructure returns to its previous state
+C: Nothing is recorded in state until the whole apply completes, so the 12 resources are orphaned and must be imported
+D: The state is marked tainted for the whole configuration, and the next apply recreates all 30 resources
+K: A
+G: ## Partial failures
+Terraform has no transactions or rollback. It writes state as it goes, so each resource that was created or updated before the failure is recorded. Independent resources that were already running when the error occurred normally finish; dependents of the failed resource are not attempted.
+## What to do
+Read the error, fix the cause (permissions, quota, invalid argument), and run plan again. The plan compares configuration with the updated state and shows only the unfinished work. A resource that failed partway (created but failed a later step) may be recorded as tainted, so the plan shows a replacement for that one resource only.
+W: State is updated incrementally, so the 12 successes stay and the next plan is limited to what is left. There is no rollback.
+X: B=Automatic rollback: Terraform does not undo successful operations; the 12 resources remain in place.
+C=State written only at the end: state is persisted during the apply, including on failure, so nothing becomes orphaned.
+D=Everything tainted: tainting is per resource and applies only where creation failed partway, not to the whole configuration.
+T: Apply is not transactional: successes stay in state, and the next plan finishes the rest.
+V: Terraform
+
+@ TF-IEP002 D3 T3.4 applied use-case
+S: Fifty existing buckets must be brought under Terraform, reviewed in a pull request before anything is applied. Which approach follows the declarative import workflow?
+A: Write import blocks (to and id) with matching resource blocks and run plan to review them before applying
+B: Run terraform apply with a resource block per bucket, which attaches to buckets with the same name
+C: Run terraform plan -refresh-only, which discovers unmanaged buckets and adds them to state
+D: Copy the bucket settings into a data block, which then manages the buckets
+K: A
+G: ## Config-driven import
+An `import` block has `to` (the resource instance address) and `id` (the provider's ID, or `identity` instead) and optional `for_each` and `provider`. The `to` address must match a `resource` block (unless configuration is generated).
+- `terraform plan` shows each as "to import", so the pull request can review the exact operations.
+- `terraform apply` records the objects in state, with later diffs shown as normal updates.
+- Blocks can stay in version control as a record, or be removed after the import is applied.
+## Compared with `terraform import`
+The CLI command changes state immediately with no plan, review or CI visibility.
+W: Import blocks make the import part of the plan, so reviewers see what will be adopted before apply. The resource blocks supply the configuration that the imported objects are compared with.
+X: B=Resource blocks only: a resource block with an existing name would plan a create, which fails or duplicates; Terraform does not adopt objects by name.
+C=-refresh-only: it refreshes objects already in state; it cannot discover unmanaged infrastructure.
+D=Data block: a data block only reads; it never manages the object.
+T: Use import blocks plus resource blocks so imports go through plan and review.
+V: Terraform
+
+@ TF-IEP002 D3 T3.4 advanced use-case
+S: A root configuration creates one bucket per name in var.names via for_each. All three buckets already exist. Which import block imports every one with a single block?
+A: import { for_each = toset(var.names) to = aws_s3_bucket.b[each.key] id = each.value }
+B: import { count = length(var.names) to = aws_s3_bucket.b[count.index] id = var.names[count.index] }
+C: import { to = aws_s3_bucket.b id = var.names }
+D: import { for_each = var.names to = aws_s3_bucket.b id = each.value }
+K: A
+G: ## import with for_each
+The `import` block accepts `for_each` as a map or a set of strings. Inside it, `each.key` and `each.value` can be used in `to` and `id`. For a set of strings, key and value are the same string. This avoids writing dozens of blocks for resources created by for_each.
+- `to` must be the specific instance address, such as `aws_s3_bucket.b["logs"]`, so `[each.key]` selects the instance.
+- `id` must evaluate to a string known during plan.
+- `count` is not an argument of `import`.
+W: for_each over the set of names with the instance address indexed by each.key and id set to each.value creates one import per bucket.
+X: B=count: the import block has no count argument, so this is a configuration error.
+C=Single address and list id: id takes one string, and the target needs the instance key for each of the buckets.
+D=for_each with a bare address: the list is not a set or map, and without the instance key all three imports would target the same address.
+T: Use import for_each over a map or set, with each.key in the to address and each.value in id.
+V: Terraform
+
+@ TF-IEP002 D3 T3.4 advanced troubleshooting
+S: After an import block is applied, the next plan shows an in-place update to several arguments of the imported resource. What does this indicate?
+A: The resource block differs from the real object's settings, so apply would modify the object to match the code
+B: The import failed halfway, and Terraform is replaying the import operation to finish writing the state
+C: Import copies the object's settings into the resource block automatically, so the diff is a provider bug
+D: The import block must be re-applied, because only the id is stored until the second apply
+K: A
+G: ## Import records state, not configuration
+Import attaches an existing object to a resource address in state. It does not edit your `.tf` files unless you used generated configuration, and even then the generated code should be reviewed. The next plan compares the written arguments with the object's recorded attributes.
+- A diff in the next plan means the code and the object disagree.
+- Decide per argument: update the code to match reality, or accept the change to the object.
+- Iterate until the plan shows no changes.
+## Generated configuration
+`plan -generate-config-out=PATH` can write a first draft of resource blocks for import blocks; the docs flag it as experimental, so review and tidy it before use.
+W: The state now has the real attributes, and the code has different values, so Terraform plans an update. Aligning the code until the plan is empty is the normal finish of an import.
+X: B=Failed import: a failed import ends the operation with an error; it is not retried as an update later.
+C=Automatic code copy: import does not change the written configuration; the diff is the expected signal.
+D=Second apply required: the whole attribute set is stored during the first apply; the diff comes from the code.
+T: An update after import shows code and reality disagree; align the code until the plan is clean.
+V: Terraform
+
+@ TF-IEP002 D3 T3.4 advanced use-case
+S: A team writes import { to = aws_s3_bucket.logs id = "logs-prod" } with no matching resource block for aws_s3_bucket.logs and no generate flag. What does plan do?
+A: It fails with an error because the import target has no configuration, so a matching resource block must exist
+B: It imports the bucket and creates a minimal resource block in a new file named generated.tf automatically
+C: It imports the bucket with empty settings and plans to update every argument on the next run
+D: It ignores the import block and plans no changes until the resource block is written
+K: A
+G: ## Import needs a destination
+The `to` argument must match the address of an existing `resource` block. Two ways exist to satisfy it:
+- Write the `resource` block by hand (recommended for review).
+- Run `terraform plan -generate-config-out=generated.tf`, which writes HCL for imported resources not yet in configuration into a **new** file (an existing file causes an error). The docs mark this flag experimental.
+Without either, Terraform stops during planning, so no state is changed.
+W: Terraform cannot import to an address with no configuration unless it generates it, so planning fails with an error, and no state is altered.
+X: B=Automatic generation: configuration is only generated when the plan flag is given, and the output file path is chosen by the user.
+C=Empty import: no object is attached to the state when planning fails; there is no blank resource.
+D=Ignored block: Terraform validates import targets and reports an error rather than skipping them.
+T: An import target needs a matching resource block; without one, plan fails and state is unchanged.
+V: Terraform
+
+@ TF-IEP002 D3 T3.4 advanced comparison
+S: Which TWO statements correctly compare import blocks with the terraform import command? (Select TWO)
+A: Import blocks appear in the plan output, so a reviewer or pipeline approval can examine them before state is changed
+B: Import blocks can use for_each to adopt many objects with one block, such as a set of names
+C: The terraform import command shows a plan first and only writes state after an apply is confirmed
+D: Import blocks must be removed before the apply or Terraform fails with a duplicate-address error
+E: The terraform import command creates the matching resource block in the configuration for you
+K: A,B
+G: ## Two import mechanisms
+- The **import block** is declarative. It is part of the configuration, evaluated during `plan`, and executed in `apply`. It supports `for_each`, `id` or `identity`, and `provider`.
+- The **CLI command** `terraform import ADDRESS ID` writes the object to state immediately, outside any plan. You must already have a matching `resource` block.
+Block imports therefore fit code review and CI; the command remains a quick manual tool.
+W: A=Plan visibility: the block's imports are listed in plan, which supports review and gating before state changes.
+B=for_each: the block supports for_each with a map or set of strings, so one block can adopt many objects.
+X: C=Command shows a plan: the command imports directly and modifies state without a plan or confirmation step.
+D=Must be removed: blocks may stay in the configuration; once the object is in state, they have no further effect.
+E=Command writes code: the command needs the resource block to exist first and does not generate it.
+T: Import blocks are planned, reviewable and support for_each; the CLI command changes state immediately.
+V: Terraform
+
+@ TF-IEP002 D3 T3.5 advanced use-case
+S: A load balancer name must be unique, and a change forces replacement of the load balancer that a listener depends on. Which setting gives zero-downtime replacement, and what happens to the listener?
+A: create_before_destroy on the load balancer; Terraform carries the same ordering to the listener that depends on it
+B: prevent_destroy on the load balancer; the dependent listener is updated in place while the old load balancer stays
+C: ignore_changes on the load balancer name; the listener keeps pointing at the old load balancer until replaced manually
+D: replace_triggered_by on the listener; the listener is created first and the load balancer after
+K: A
+G: ## Replacement order
+By default Terraform destroys the old object and then creates the new one. With `create_before_destroy = true` it creates the replacement first and destroys the old one afterwards, so there is no gap, provided the two can exist at the same time (names must differ, for example through a `name_prefix` or random suffix).
+## Propagation
+Terraform applies create_before_destroy to dependencies too. If resource A has it and depends on B, B implicitly gets it and the state records it; you cannot set it to false on B because that would form a dependency cycle. When the dependent is replaced, the same ordering applies.
+W: create_before_destroy builds the new load balancer before removing the old one, and the replacement order is carried through the dependency chain so the listener is replaced consistently.
+X: B=prevent_destroy: it rejects plans that would destroy the object with an error; it does not produce a replacement.
+C=ignore_changes on name: the name change would not be planned, so the load balancer would not be replaced at all, which defeats the intent.
+D=replace_triggered_by: it forces replacement when another resource changes; it does not alter the order of create and destroy.
+T: create_before_destroy replaces without a gap and propagates to dependencies; the name must allow two objects at once.
+V: Terraform
+
+@ TF-IEP002 D3 T3.5 advanced troubleshooting
+S: A database has lifecycle { prevent_destroy = true }. An engineer deletes the whole resource block and its configuration, then applies. What happens?
+A: Terraform destroys the database, because prevent_destroy is read from configuration and is gone with the block
+B: Terraform refuses the plan with an error, because prevent_destroy is stored in state with the database
+C: Terraform keeps the database and removes it from state, because prevent_destroy implies a forget operation
+D: Terraform asks for confirmation and destroys it only if the user types the resource address
+K: A
+G: ## What prevent_destroy protects against
+`prevent_destroy = true` makes Terraform reject any plan that would destroy the object, including replacements and `terraform destroy`. The argument must be present in the configuration. Except for create_before_destroy, lifecycle rules are not stored in state.
+## The gap
+If the whole resource block is removed, the rule disappears with it, so Terraform plans a normal destroy. The docs state that this applies even if prevent_destroy is enabled, and point to removing the resource from state (for example with a `removed` block with `destroy = false`) to retire a resource without deleting it.
+W: The rule lives in configuration only. With the block deleted, nothing blocks the planned destroy. Real protection for deletions needs review, policy or provider-level deletion protection.
+X: B=Stored in state: only create_before_destroy is recorded in state; prevent_destroy is not.
+C=Implicit forget: prevent_destroy never changes state; forgetting without destroying needs a removed block or terraform state rm.
+D=Typed confirmation: destroy confirmation is the usual apply prompt (yes); there is no per-resource typed address.
+T: prevent_destroy blocks planned destroys only while it is in the configuration; deleting the block removes the guard.
+V: Terraform
+
+@ TF-IEP002 D3 T3.5 advanced use-case
+S: An autoscaling service's desired_count is changed by an external autoscaler, and every plan proposes to reset it to the configured value. Which setting stops these resets while still managing the other arguments?
+A: lifecycle { ignore_changes = [desired_count] } on the service resource
+B: lifecycle { prevent_destroy = true } on the service resource
+C: lifecycle { create_before_destroy = true } on the service resource
+D: lifecycle { ignore_changes = all } on the service resource
+K: A
+G: ## ignore_changes
+By default, Terraform plans an update whenever the real value differs from the configuration. `ignore_changes` lists attributes that Terraform should not consider when planning updates after creation. It lets Terraform share responsibility for an object with another process, such as an autoscaler or a tagging tool.
+- A list targets specific attributes (`[desired_count]`, `[tags]`).
+- The keyword `all` ignores every attribute: Terraform can create and destroy the object but never proposes updates.
+- Only attributes defined by the resource type can be listed, not meta-arguments or ignore_changes itself.
+W: Listing only desired_count leaves it to the autoscaler after creation, and every other argument continues to be reconciled.
+X: B=prevent_destroy: it only blocks planned destruction; the update to desired_count would still be proposed.
+C=create_before_destroy: it affects replacement order and has nothing to do with attribute differences.
+D=ignore_changes = all: it stops the reset, but also stops managing every other argument, which the requirement says should continue.
+T: ignore_changes with a specific attribute list hands that attribute to another process while keeping the rest managed.
+V: Terraform
+
+@ TF-IEP002 D3 T3.5 advanced use-case
+S: A virtual machine should be rebuilt whenever the value of var.config_version changes. A plain variable cannot be listed in replace_triggered_by. Which approach works?
+A: Store the variable in a terraform_data resource and reference that resource in replace_triggered_by
+B: Reference var.config_version directly in replace_triggered_by, since variables have their own planned actions
+C: Put var.config_version in ignore_changes of the VM so that a change is reported as a replacement
+D: Add depends_on on the variable, which makes the VM replace whenever the variable changes
+K: A
+G: ## replace_triggered_by
+Terraform replaces the resource when any referenced resource, instance or instance attribute changes. The decision is based on **planned actions of managed resources**, so only managed-resource references are allowed. Local values and input variables have no planned actions.
+## Workaround
+The docs suggest giving plain values a resource-like lifecycle with a `terraform_data` resource: set `input = var.config_version` on it; when the value changes, that resource is updated and the VM, referencing `terraform_data.version` in replace_triggered_by, is replaced.
+Other behaviors: a reference to a multi-instance resource triggers if any instance is updated or replaced; in count/for_each blocks you may use `count.index` / `each.key` for matching instances.
+W: terraform_data turns the value into a managed resource that shows an update when the value changes, and the VM's replace_triggered_by reacts to that planned action.
+X: B=Direct variable: replace_triggered_by accepts only managed resources and their attributes, because plain values have no planned actions.
+C=ignore_changes: it suppresses differences; it cannot cause a replacement.
+D=depends_on: it only orders operations, and does not turn a change into a replacement.
+T: To replace on a plain value, wrap it in terraform_data and reference that in replace_triggered_by.
+V: Terraform
+
+@ TF-IEP002 D3 T3.5 advanced comparison
+S: Which TWO statements about the lifecycle meta-arguments are accurate? (Select TWO)
+A: prevent_destroy makes Terraform reject plans that would destroy or replace the object, so some configuration changes become impossible to apply until it is removed
+B: ignore_changes can list the lifecycle block's own create_before_destroy setting, so that the replacement order stays fixed
+C: create_before_destroy is recorded in state when it is propagated to a dependency, unlike the other lifecycle rules
+D: replace_triggered_by accepts any expression, including input variables and local values, as long as the value is known at plan time
+E: ignore_changes = all stops Terraform from creating or destroying the object, but still lets it propose updates
+K: A,C
+G: ## Behaviors to know
+- `prevent_destroy`: plans that would destroy the object (including a replacement) fail with an error. The docs warn it makes certain changes impossible to apply, so use sparingly.
+- `create_before_destroy`: the only lifecycle rule recorded in state, because it is propagated to dependencies.
+- `ignore_changes`: can list only attributes defined by the resource type, not meta-arguments such as lifecycle settings. With `all`, Terraform creates and destroys but never proposes updates.
+- `replace_triggered_by`: only managed resources, instances or their attributes.
+W: A=prevent_destroy: a destroy or forced replacement is rejected, which is its purpose and its cost.
+C=Stored in state: create_before_destroy propagated to a dependency is saved to state, which is why it cannot be set to false there.
+X: B=ignore_changes on lifecycle: it works for attributes of the resource type only, not for meta-arguments or itself.
+D=Any expression: only managed resources count, since plain values have no planned actions; terraform_data is the workaround.
+E=all semantics reversed: all means no updates are ever proposed, while creation and destruction still happen.
+T: prevent_destroy blocks destroy and replace, create_before_destroy is the one lifecycle rule kept in state.
+V: Terraform
+
+@ TF-IEP002 D3 T3.5 advanced troubleshooting
+S: A resource with create_before_destroy = true has a destroy-time provisioner that cleans up a registration. During replacement the cleanup never runs. Why?
+A: With create_before_destroy set, Terraform does not run the provisioner defined for the destroy operation
+B: Destroy-time provisioners run only with terraform destroy, never during a replacement of any kind
+C: The provisioner runs before the new object exists, and its failure is silently ignored by Terraform
+D: Terraform runs destroy-time provisioners only for resources that also set prevent_destroy to true
+K: A
+G: ## Provisioners and replacement order
+The lifecycle documentation states that when a resource contains a provisioner that runs during the destroy operation, setting `create_before_destroy` to `true` also prevents the provisioner from running. Without it, destroy-time provisioners run when an object is destroyed, including as part of a replacement.
+## What to do
+Provisioners are a last resort. Move cleanup to the provider, to a lifecycle-aware tool or to an agent, and avoid relying on destroy-time provisioners for essential cleanup.
+W: The documented interaction: create_before_destroy disables destroy-time provisioners, so the registration cleanup is skipped. The cleanup needs another mechanism.
+X: B=Only on destroy: destroy-time provisioners also run when a resource is destroyed as part of a replacement with the default order.
+C=Run too early, errors swallowed: the cause is the documented disable, not ordering, and Terraform would report provisioner failures.
+D=Needs prevent_destroy: the two settings are unrelated, and prevent_destroy would block the destroy altogether.
+T: create_before_destroy = true prevents destroy-time provisioners from running.
+V: Terraform
+
+@ TF-IEP002 D3 T3.1 advanced troubleshooting
+S: After splitting a project, the application configuration reads the network configuration's vpc_id output through terraform_remote_state. On a new environment, the application plan fails with an error that the output vpc_id is not found. What is the most likely cause?
+A: The network configuration was not applied yet in that environment, so its state holds no vpc_id output for the consumer to read
+B: The data source reads outputs only after the consumer has been applied once, so the first plan always fails by design
+C: Root module outputs are exposed to other configurations only when each one is marked sensitive in its output block
+D: The consumer must declare a variable named vpc_id, because remote state outputs are matched to input variables by name
+K: A
+G: ## Ordering after a split
+Splitting a project turns implicit graph dependencies into **ordering between runs**. `terraform_remote_state` reads whatever the latest state snapshot of the producer holds. If the producer has never been applied, or its output was added in code but not yet applied, the snapshot has no such output.
+- Apply producers before consumers; encode the order in the pipeline.
+- Add an output in the producer and apply it before consumers reference it.
+- Outputs must be root module outputs; values of child modules are not visible unless re-exported at the root.
+W: The snapshot is empty or lacks the new output until the network configuration is applied, so the consumer's reference fails. The fix is the run order, not the consumer's code.
+X: B=First plan always fails: nothing about the consumer's state affects the read; once the producer has the output, the first consumer plan succeeds.
+C=Sensitive marking: sensitivity only hides values in display; an output does not need it to be readable and it is unrelated to visibility.
+D=Matching variable: remote state outputs are accessed as data.terraform_remote_state.NAME.outputs.vpc_id; no variable binding exists.
+T: After splitting, run order matters: apply producers so their outputs exist before consumers plan.
+V: Terraform
+
+@ TF-IEP002 D3 T3.2 advanced tradeoff
+S: A pipeline in a hurry uses terraform plan -refresh=false to speed up planning against a big state. What is the main risk?
+A: The plan compares configuration with stored state, not real objects, so out-of-band changes are missing from the actions
+B: The plan cannot be saved with -out, because apply rejects any plan that skipped refresh
+C: The state lock is skipped, so two concurrent plans can corrupt the shared state during the run
+D: Data sources are not read, so every attribute they provide becomes unknown in the resulting plan
+K: A
+G: ## What refresh does in plan
+By default, plan first refreshes: it reads the current attributes of every object in state from the provider, so the comparison includes drift. `-refresh=false` skips that step and trusts the recorded state.
+- Faster, fewer API calls (useful with throttled APIs).
+- A changed or deleted object is not noticed, so a plan may miss a needed update or propose actions built on stale values.
+- Plans can still be saved and applied; locking is separate (`-lock`).
+It is a trade-off to consider only if drift is checked elsewhere, for example by scheduled refresh-only runs.
+W: Without refresh, Terraform plans against what it last recorded, so real-world drift is invisible and the plan can be wrong. Another check must cover drift.
+X: B=Not applicable: nothing prevents saving or applying such a plan; it is just based on older observations.
+C=Skipped lock: locking is controlled by -lock; refresh settings do not change it.
+D=Unknown data: data sources are not part of the skipped refresh of managed resources and are still read when needed.
+T: -refresh=false trades drift detection for speed; the plan reflects state, not reality.
+V: Terraform
+
+@ TF-IEP002 D3 T3.3 advanced troubleshooting
+S: An apply created a server but failed on a later step, so the resource shows as tainted. The next plan will propose what for that resource?
+A: Replacement of that resource, because a tainted object is planned to be destroyed and recreated
+B: An in-place update that repairs the failed step on the existing server without destroying it
+C: Nothing, because tainted objects are excluded from planning until they are untainted manually
+D: Destruction of every resource that depends on the server, leaving the server itself in place untouched
+K: A
+G: ## Tainted objects
+If creating a resource fails after the object was partly created (for example, a provisioner failed), Terraform saves it in state as **tainted**. A tainted object is considered degraded and unsafe to use. The next plan proposes to replace it: destroy and create (or create then destroy if create_before_destroy is set).
+- `terraform plan -replace=ADDRESS` achieves the same result on demand for a healthy-looking object.
+- `terraform untaint` marks it healthy again if you have verified it.
+Dependents are planned according to the replacement of the server, not destroyed first on their own.
+W: A tainted resource shows as "must be replaced" in the next plan, so the only change planned is its recreation (and any dependents affected by new attributes).
+X: B=In-place update: Terraform does not attempt repair of a tainted object; replacement is the only planned action.
+C=Excluded from plan: tainted resources are part of every plan and are the ones marked for replacement.
+D=Dependents destroyed, server kept: it is the reverse; the server is replaced and dependents are updated only if their arguments change.
+T: A failed-partway creation leaves the object tainted, and the next plan replaces it.
+V: Terraform
+
+@ TF-IEP002 D3 T3.4 advanced troubleshooting
+S: An import block uses id = aws_instance.base.id, but the instance is created in the same configuration during this apply. What does plan report?
+A: An error, because the id of an import block must be known during the plan operation
+B: A successful plan that imports the object after the instance is created in the apply
+C: A warning only, because the id is evaluated lazily when the import runs
+D: A plan that imports a new empty resource and fills in the id after apply
+K: A
+G: ## Import ids must be known at plan time
+The docs for the `id` argument state that it takes a string or an expression that evaluates to a string, and that the ID must be known during the plan operation. Import is part of the planned actions, so Terraform needs the real ID to look up the object, which can come from variables, locals or data sources whose arguments are already known.
+- A value that only exists after another resource is created is unknown at plan time and fails.
+- Create the dependency in a separate run first, then import in a later one.
+W: Unknown values cannot be used as import ids because the import is planned before anything is applied, so Terraform reports an error.
+X: B=Deferred import: imports are planned operations; Terraform does not defer them to after other resources are created.
+C=Lazy evaluation: the plan stops with an error, not a warning, as the id must be known.
+D=Empty resource: import never creates placeholders; it needs an existing remote object.
+T: An import block's id must be known at plan time, so it cannot depend on resources created in the same apply.
+V: Terraform
+
+@ TF-IEP002 D3 T3.5 advanced troubleshooting
+S: A security group uses create_before_destroy = true with a fixed name = "web-sg". A change that forces replacement now fails during apply. What explains the failure?
+A: The new group is created while the old exists, and both would share a fixed name that must be unique
+B: create_before_destroy cannot be combined with a name argument, so Terraform rejects the configuration during validation
+C: The old group is destroyed first despite the setting, because security groups are exempt from ordering rules
+D: The new group is created in a different region first, which fails because of mismatched endpoints
+K: A
+G: ## Constraint behind the opt-in
+`create_before_destroy` is opt-in because many remote objects have unique name requirements or other constraints that must hold for both old and new objects at once. The docs mention that some resource types offer options like a name prefix (appending a random suffix) to avoid collisions, but Terraform cannot enable those itself.
+## Fix
+Use `name_prefix` (or a generated suffix, for example with random_id) so the replacement gets a different name from the original, and keep create_before_destroy for the zero-downtime benefit.
+W: Both objects exist at the same time during replacement, so a fixed unique name collides. A prefix or generated suffix makes the names differ.
+X: B=Validation rejection: the combination is valid; the failure happens at the API when the second object with the same name is created.
+C=Excluded types: the ordering applies to any resource; no resource types are exempt.
+D=Different region: the replacement is created in the configured region with the same provider; region is not involved.
+T: create_before_destroy needs names that can coexist: use name_prefix or a generated suffix.
+V: Terraform
+
+@ TF-IEP002 D3 T3.2 advanced comparison
+S: Which TWO statements about Terraform planning modes are accurate? (Select TWO)
+A: terraform plan -destroy proposes to destroy all remote objects managed by the configuration and can be saved and reviewed before use
+B: terraform plan -refresh-only proposes to update state and root module outputs to match reality without changing any infrastructure
+C: terraform plan -replace=ADDRESS can be combined with -destroy to rebuild one resource and remove the rest
+D: terraform plan -target=ADDRESS is the mode that updates state to match the objects found in the cloud account
+E: terraform plan -refresh=false is a planning mode that creates a plan to delete drifted objects from state
+K: A,B
+G: ## Modes and options
+Terraform plan has three modes: the normal mode (reconcile infrastructure with configuration), `-destroy` (plan to destroy all remote objects) and `-refresh-only` (plan to update state and root module outputs). Options such as `-replace`, `-target` and `-refresh=false` adjust how a plan is produced and can combine with the normal mode.
+- `-replace` cannot be used with `-destroy`.
+- `-target` narrows scope, it is for exceptional use.
+- `-refresh=false` skips the refresh step.
+W: A=-destroy mode: it creates a plan for removal of every managed object, and the plan can be written with -out and reviewed before it is applied.
+B=-refresh-only mode: it records the real values in state and outputs, leaving infrastructure untouched.
+X: C=-replace with -destroy: the documentation states you cannot use -replace with -destroy.
+D=-target as state sync: it only restricts which resource instances and dependencies are planned.
+E=-refresh=false as a mode: it is an option that skips reading real objects; it does not delete anything from state.
+T: Plan modes are normal, -destroy and -refresh-only; -replace, -target and -refresh=false are options.
+V: Terraform

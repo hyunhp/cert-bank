@@ -1,8 +1,8 @@
 # TODO
 
 ## Now (warm start — keep this section current; update it with every merge)
-Updated 2026-10-30.
-- In progress: nothing. HashiCorp TF-TA004 and VLT-VA003 merged. Next candidates: Terraform Infrastructure Engineer Professional, other Google Cloud
+Updated 2026-11-01.
+- In progress: nothing (TF-IEP002 bank, 20-day study guide and glossary done on branch `tf-iep002`, PR pending merge). Other candidates: other Google Cloud
   Professional exams (developer.hashicorp.com and cloud.google.com reachable). Open gaps: Gemini app and Gems (GAIL T2.2); Gemini Cloud Assist is
   private preview (noted in PCA); Spark API pages are blocked (403) for the DBX bank.
 - Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; GCP-CDL bank and study guide; MLA-C02 study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
@@ -257,6 +257,13 @@ duplicates). Study guide 15 days, 3 writers + 3 reviewers (about 25 fixes); glos
 returns a nonce; policy matching: different patterns use only the highest-priority match (first glob occurring later wins), identical patterns merge; SSH dynamic keys removed in
 1.13; Agent API proxy deprecated; Agent persistent cache Kubernetes-only; VSO instant updates and CSI driver Enterprise-only; replication, performance standbys, Seal HA Enterprise;
 raft-wal experimental. Checked only from memory (re-check): Seal HA seal-count limit; hvs./hvb./hvr. token prefixes are on the tokens docs (confirmed).
+
+TF-IEP002 bank DONE 2026-11-01 (branch `tf-iep002`, unmerged): Terraform Infrastructure Engineer Professional (002), exam page read 2026-11-01 (7 sections, 43 objectives, 90 min,
+Terraform 1.15 tested, launch at IBM TechXchange 2026; question count, weights, pass mark unpublished: mock uses 60 q, equal weights, own domain labels). 252 questions in b01-b09
+from PLAN.md, each reviewed (about 30 fixes; invalid one-line HCL stems, unconfirmed claims reframed). Docs show v1.17: nothing added after 1.15 keyed (state show -json 1.16,
+native Terraform policy 1.17, variable `deprecated` 1.15, `const` module sources out). Unconfirmed on docs (re-check): exact "Cycle"/"Missing resource instance key"/"Duplicate object key"
+messages (b01), `-lock-timeout` default 0s (b05), cross-variable validation version. Report `need` shows 300 (default); 252 is the chosen target.
+TF-IEP002 study guide DONE 2026-11-01: 20 days (D1 4, D2 3, D3 4, D4 2, D5 2, D6 2, D7 2, final), 3 writers + 3 reviewers (about 20 fixes: outputs take only `precondition`, speculative plans not run for fork PRs, cost data only in policy checks, dynamic credentials "may interfere" not lookup order); glossary +10 `tf-*` terms (Sonnet-reviewed), 13 tagged. Unconfirmed error-message strings were turned into descriptions.
 
 ## Future: other certifications (researched 2026-10-29, not started)
 Ideas the owner asked to keep for later. Each needs its vendor's guide and docs hosts allowed in the environment's

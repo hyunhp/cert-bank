@@ -64,6 +64,7 @@ Amazon Web Services, Palantir Technologies, Microsoft, Google과 관련 없는 �
 | Databricks | Associate | DBX-DEA Data Engineer Associate | 225 | 20 |
 | HashiCorp | Associate | TF-TA004 Terraform Associate (004) | 266 | 18 |
 | | | VLT-VA003 Vault Associate (003) | 253 | 15 |
+| | Professional | TF-IEP002 Terraform Infrastructure Engineer Professional (002) | 252 | 20 |
 
 여러 시험에 공통으로 쓰이는 문항이 있어 시험별 합계는 전체 고유 문항 수보다 많습니다. Palantir는 섹션 비중을
 공개하지 않아 모든 섹션을 같은 비중으로 다루고, Azure는 비중을 범위로 공개해 모의고사는 그 중간값을 씁니다. Google Cloud는
