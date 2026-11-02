@@ -53,13 +53,17 @@ with sync_playwright() as p:
     check("aws level headings", heads == ["Foundational", "Associate", "Professional", "Specialty"], heads)
     check("no level segmented control", pg.locator(".levelseg, .lseg, #levelRow").count() == 0)
     check("specialty chips under their heading", pg.eval_on_selector_all("#chipRow .lvlgroup[aria-label='Specialty'] .chip", "els => els.map(e => e.dataset.code)") == ["ANS-C01", "SCS-C03"])
+    # Phones: only the selected exam's level is open; another level opens from its heading.
+    check("phone: other levels are collapsed", not pg.is_visible("#chipRow .chip[data-code='SCS-C03']") and pg.is_visible("#chipRow .chip[data-code='SAA-C03']"))
+    pg.click(".lvlhead[data-level='specialty']")
+    check("phone: heading opens its level and closes the other", pg.is_visible("#chipRow .chip[data-code='SCS-C03']") and not pg.is_visible("#chipRow .chip[data-code='SAA-C03']"))
     check("chip shows exam name", "Advanced Networking" in pg.inner_text("#chipRow"))
     # Picking a chip folds the picker to a one-line summary; the head reopens it.
     pg.click("#chipRow .chip[data-code='SCS-C03']"); pg.wait_for_function("location.hash === '#exam=SCS-C03'")
     check("picker folds after a pick", pg.get_attribute("#examToggle", "aria-expanded") == "false" and not pg.is_visible("#chipRow"))
     check("folded summary names the exam", "SCS-C03" in pg.inner_text("#examSum") and "Specialty" in pg.inner_text("#examSum"), pg.inner_text("#examSum"))
     pg.click("#examToggle")
-    check("head reopens the picker", pg.is_visible("#chipRow .chip[data-code='SAA-C03']"))
+    check("head reopens the picker", pg.is_visible("#chipRow .chip[data-code='SCS-C03']"))
     pg.click(".vtab[data-vendor='palantir']"); pg.wait_for_selector(".qcard")
     codes = pg.eval_on_selector_all("#chipRow .chip[data-code]", "els => els.map(e => e.dataset.code)")
     check("palantir has one level and no heading", pg.locator("#chipRow .lvlhead").count() == 0 and pg.locator("#chipRow .lvlgroup").count() == 1)

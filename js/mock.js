@@ -176,8 +176,13 @@ function injectStyles() {
 .mk .qnum{font-size:.8rem;color:var(--muted);margin-bottom:6px;display:flex;align-items:center;gap:8px}
 .mk .flag{margin-left:auto;font:inherit;font-size:.8rem;border:1px solid var(--line);background:var(--surface);color:var(--muted);border-radius:7px;padding:4px 10px;cursor:pointer}
 .mk .flag.on{border-color:var(--amber);color:var(--amber);background:var(--amber-bg)}
+.mk .flagmark{color:var(--amber);font-weight:600}
 .mk .selnote{font-size:.8rem;color:var(--amber);margin:-4px 0 10px;font-weight:600}
-.mk .nav{display:flex;justify-content:space-between;gap:8px;margin-top:12px}
+/* Prev / Flag / Next stay pinned to the bottom of the screen, so a long question can be flagged without scrolling back up. */
+.mk .nav{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;margin-top:12px;position:sticky;bottom:0;z-index:14;background:var(--bg);border-top:1px solid var(--line);padding:8px 0 calc(8px + env(safe-area-inset-bottom,0px))}
+.mk .nav .btn:first-child{justify-self:start}
+.mk .nav .btn:last-child{justify-self:end}
+.mk .nav .flag{margin-left:0;padding:8px 12px;font-size:.85rem;font-weight:600;border-radius:9px}
 .mk .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(44px,1fr));gap:6px;margin:10px 0}
 .mk .cell{font:inherit;font-size:.82rem;font-family:"IBM Plex Mono","IBM Plex Sans KR",monospace;padding:8px 0;border-radius:7px;border:1px solid var(--line);background:var(--surface);color:var(--muted);cursor:pointer;position:relative}
 .mk .cell.ans{background:var(--accent-bg);color:var(--accent-ink);border-color:var(--accent)}
@@ -477,8 +482,7 @@ async function renderExam() {
       <span class="timer${left !== null && left < 300 ? " low" : ""}">${left !== null ? fmtTime(left) : "untimed"}</span>
       <button class="btn ghost" data-act="grid">Review</button><button class="btn" data-act="grid">Finish</button></div>
     <div class="qcard">
-      <div class="qnum">Question ${state.cur + 1} of ${n}${multi ? ' · <span class="badge multi">Multiple Answers</span>' : ""}
-        <button class="flag${flagged ? " on" : ""}" data-act="flag" type="button">${flagged ? "⚑ Flagged" : "⚐ Flag for review"}</button></div>
+      <div class="qnum">Question ${state.cur + 1} of ${n}${multi ? ' · <span class="badge multi">Multiple Answers</span>' : ""}${flagged ? ' · <span class="flagmark">⚑ Flagged</span>' : ""}</div>
       <div class="stem">${esc(q.stem)}</div>
       ${multi ? `<div class="selnote">Select ${q.correctKeys.length}.</div>` : ""}
       <div class="choices">${state.order[id].map((k, i) => {
@@ -487,6 +491,7 @@ async function renderExam() {
       }).join("")}</div>
     </div>
     <div class="nav"><button class="btn ghost" data-act="prev"${state.cur === 0 ? " disabled" : ""}>← Previous</button>
+      <button class="flag${flagged ? " on" : ""}" data-act="flag" type="button" aria-pressed="${flagged}">${flagged ? "⚑ Flagged" : "⚐ Flag"}</button>
       ${state.cur < n - 1 ? `<button class="btn" data-act="next">Next →</button>` : `<button class="btn" data-act="grid">Review &amp; submit</button>`}</div>
   </div>`;
   root.onclick = (e) => {

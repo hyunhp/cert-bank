@@ -35,6 +35,9 @@ with sync_playwright() as p:
     ok("20 questions drawn", len(st["ids"]) == 20)
     ok("timer running", ":" in pg.inner_text(".mkbar .timer"))
     ok("answers hidden during exam", pg.locator("#mockRoot .choice.correct").count() == 0 and pg.locator("#mockRoot .explain").count() == 0)
+    # The flag button sits in the bottom Prev/Flag/Next bar (sticky), not in the question header, so a long question never needs a scroll back up.
+    ok("flag button is in the bottom bar", pg.locator("#mockRoot .nav [data-act=\"flag\"]").count() == 1 and pg.locator("#mockRoot .qnum [data-act=\"flag\"]").count() == 0)
+    ok("bottom bar is sticky", pg.eval_on_selector("#mockRoot .nav", "e => getComputedStyle(e).position") == "sticky")
     # answer: first 12 correct, next 5 wrong, last 3 unanswered; flag 2
     expect_correct = 0
     for i, qid in enumerate(st["ids"][:17]):
