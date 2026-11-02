@@ -169,6 +169,7 @@ function injectStyles() {
 .mk .v-ready{color:var(--good)} .mk .v-border{color:var(--amber)} .mk .v-work{color:var(--bad)}
 .mkbar{position:sticky;top:0;z-index:15;background:var(--bg);border-bottom:1px solid var(--line);padding:calc(env(safe-area-inset-top,0px) + 8px) 0 8px;margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .mkbar .code{font-family:"IBM Plex Mono","IBM Plex Sans KR",monospace;font-weight:600;font-size:.82rem}
+.mkbar .mkfill{position:absolute;left:0;bottom:-1px;height:3px;border-radius:2px;background:var(--accent);transition:width .2s}
 .mkbar .prog{font-size:.85rem;color:var(--muted)}
 .mkbar .timer{font-family:"IBM Plex Mono","IBM Plex Sans KR",monospace;font-weight:600;font-size:.95rem;margin-left:auto;font-variant-numeric:tabular-nums}
 .mkbar .timer.low{color:var(--bad)}
@@ -179,10 +180,11 @@ function injectStyles() {
 .mk .flagmark{color:var(--amber);font-weight:600}
 .mk .selnote{font-size:.8rem;color:var(--amber);margin:-4px 0 10px;font-weight:600}
 /* Prev / Flag / Next stay pinned to the bottom of the screen, so a long question can be flagged without scrolling back up. */
-.mk .nav{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;margin-top:12px;position:sticky;bottom:0;z-index:14;background:var(--bg);border-top:1px solid var(--line);padding:8px 0 calc(8px + env(safe-area-inset-bottom,0px))}
+.mk .nav{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;margin-top:8px;position:sticky;bottom:0;z-index:14;background:var(--bg);border-top:1px solid var(--line);padding:5px 0 calc(5px + env(safe-area-inset-bottom,0px))}
+.mk .nav .btn{padding:6px 14px;font-size:.85rem}
 .mk .nav .btn:first-child{justify-self:start}
 .mk .nav .btn:last-child{justify-self:end}
-.mk .nav .flag{margin-left:0;padding:8px 12px;font-size:.85rem;font-weight:600;border-radius:9px}
+.mk .nav .flag{margin-left:0;padding:6px 12px;font-size:.85rem;font-weight:600;border-radius:9px}
 .mk .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(44px,1fr));gap:6px;margin:10px 0}
 .mk .cell{font:inherit;font-size:.82rem;font-family:"IBM Plex Mono","IBM Plex Sans KR",monospace;padding:8px 0;border-radius:7px;border:1px solid var(--line);background:var(--surface);color:var(--muted);cursor:pointer;position:relative}
 .mk .cell.ans{background:var(--accent-bg);color:var(--accent-ink);border-color:var(--accent)}
@@ -191,7 +193,7 @@ function injectStyles() {
 .mk .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:.78rem;color:var(--muted);align-items:center}
 .mk .legend .sw{display:inline-block;width:12px;height:12px;border-radius:3px;border:1px solid var(--line);background:var(--surface);vertical-align:-2px;margin-right:4px;position:relative}
 .mk .legend .sw.ans{background:var(--accent-bg);border-color:var(--accent)}
-.mk .legend .sw.cur{outline:2px solid var(--ink);outline-offset:1px}
+.mk .legend .sw.cur{border:2px solid var(--ink)}
 .mk .legend .sw.flg::after{content:"";position:absolute;top:1px;right:1px;width:5px;height:5px;border-radius:50%;background:var(--amber)}
 /* Results: review choices as one even row, then the two way-out buttons side by side. */
 .mk .btnrow.reviewrow{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
@@ -214,7 +216,7 @@ function injectStyles() {
 .mk .rvhead .ok{color:var(--good);font-weight:700} .mk .rvhead .no{color:var(--bad);font-weight:700}
 @media (max-width:480px){.mk .modes{grid-template-columns:1fr}}
 .mk select + select{margin-top:8px}
-@media (max-width:520px){.mkbar{gap:8px}.mkbar .prog .lbl{display:none}}
+@media (max-width:520px){.mk .startbtn{width:100%;padding:12px 16px}.mkbar{gap:8px}.mkbar .prog .lbl{display:none}}
 `;
   document.head.appendChild(s);
 }
@@ -436,7 +438,7 @@ async function renderSetup(extra) {
       <label class="row"><input type="checkbox" id="mkTimed"${setupTimed ? " checked" : ""}> Timer (auto-submits at 0:00)</label>
       <div class="meta">Pool: ${pool.length} questions${setupDomain ? " in this section" : ""} · ${unseen} not yet seen in mock exams · ${passMarkMeta(spec)}${setupDomain ? " (whole exam)" : ""}</div>
       ${unseen < (mode === "short" ? shortN : fullN) ? `<div class="meta" style="color:var(--amber)">Fewer unseen questions than needed, so some repeats will be included.</div>` : ""}
-      <div class="btnrow"><button class="btn" data-act="start">Start exam</button>
+      <div class="btnrow"><button class="btn startbtn" data-act="start">Start exam</button>
       ${seen.size ? `<button class="linkbtn" data-act="resetseen">Reset seen questions for ${setupExam}</button>` : ""}</div>
     </div>
     <div class="panel"><b>Recent attempts · ${setupExam}</b>
@@ -478,7 +480,7 @@ async function renderExam() {
   const choiceByKey = new Map((q.choices || []).map(c => [c.key, c]));
   const left = state.timed ? (state.deadline - Date.now()) / 1000 : null;
   root.innerHTML = `<div class="mk">
-    <div class="mkbar"><span class="code">${state.exam}</span><span class="prog">${answered}/${n}<span class="lbl"> answered</span></span>
+    <div class="mkbar"><i class="mkfill" style="width:${Math.round(answered / n * 100)}%"></i><span class="code">${state.exam}</span><span class="prog">${answered}/${n}<span class="lbl"> answered</span></span>
       <span class="timer${left !== null && left < 300 ? " low" : ""}">${left !== null ? fmtTime(left) : "untimed"}</span>
       <button class="btn ghost" data-act="grid">Review</button><button class="btn" data-act="grid">Finish</button></div>
     <div class="qcard">
@@ -523,7 +525,7 @@ function renderGrid(confirming) {
     <div class="mkbar"><span class="code">${state.exam}</span><span class="prog">${n - unanswered}/${n}<span class="lbl"> answered</span></span>
       <span class="timer${left !== null && left < 300 ? " low" : ""}">${left !== null ? fmtTime(left) : "untimed"}</span></div>
     <div class="panel"><b>Review</b>
-      <div class="legend"><span><i class="sw ans"></i>answered</span><span><i class="sw"></i>unanswered</span><span><i class="sw flg"></i>flagged</span><span><i class="sw cur"></i>current</span></div>
+      <div class="legend"><span><i class="sw ans"></i>answered ${n - unanswered}</span><span><i class="sw"></i>unanswered ${unanswered}</span><span><i class="sw flg"></i>flagged ${state.flags.length}</span><span><i class="sw cur"></i>current</span></div>
       <div class="grid">${state.ids.map((id, i) => `<button class="cell${(state.answers[id] || []).length ? " ans" : ""}${state.flags.includes(id) ? " flg" : ""}${i === state.cur ? " cur" : ""}" data-go="${i}" type="button">${i + 1}</button>`).join("")}</div>
       <div class="btnrow"><button class="btn ghost" data-act="back">Return to question ${state.cur + 1}</button><button class="btn" data-act="ask">Submit exam</button></div>
       ${confirming ? `<div class="confirm">${unanswered ? `<b>${unanswered} unanswered</b> question${unanswered > 1 ? "s" : ""} will be marked wrong. ` : ""}Submit now? You can't change answers afterwards.
