@@ -41,6 +41,8 @@ with sync_playwright() as p:
     check("EXAMS lists every exam in exam-specs.json", sorted(c for c, _, _ in ex) == sorted(spec_exams), sorted(set(spec_exams) ^ {c for c, _, _ in ex}))
     check("EXAMS vendor and EXAM_LEVEL match exam-specs.json", all(spec_exams.get(c, {}).get("vendor") == v and spec_exams.get(c, {}).get("level") == l for c, v, l in ex),
           [(c, v, l) for c, v, l in ex if spec_exams.get(c, {}).get("vendor") != v or spec_exams.get(c, {}).get("level") != l])
+    last = pg.evaluate("LAST_DAY")
+    check("LAST_DAY matches lastDay in exam-specs.json", last == {c: v["lastDay"] for c, v in spec_exams.items() if "lastDay" in v}, last)
     check("tab totals", [int(t[2]) for t in tabs] == [total(v) for v in ("aws", "palantir", "azure", "gcp", "databricks", "hashicorp")], tabs)
     codes = pg.eval_on_selector_all("#chipRow .chip[data-code]", "els => els.map(e => e.dataset.code)")
     check("aws chips only", "SAA-C03" in codes and not any(c.startswith("PLTR-") for c in codes), codes)
