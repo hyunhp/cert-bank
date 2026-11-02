@@ -1,7 +1,8 @@
 # TODO
 
 ## Now (warm start — keep this section current; update it with every merge)
-Updated 2026-11-01.
+Updated 2026-11-02.
+- UI pass (owner asked 2026-11-02), branches `ui-nav-fixes` (level pick opens first exam; vendor tabs full names + edge fade, ★ Bookmarks moved to header pill), then `ui-exam-picker` (levels grouped in one collapsible exam picker), then `ui-cleanup` (stats row, emoji buttons, old-version badges).
 - In progress: nothing (TF-IEP002 bank, 20-day study guide and glossary done on branch `tf-iep002`, PR pending merge). Other candidates: other Google Cloud
   Professional exams (developer.hashicorp.com and cloud.google.com reachable). Open gaps: Gemini app and Gems (GAIL T2.2); Gemini Cloud Assist is
   private preview (noted in PCA); Spark API pages are blocked (403) for the DBX bank.
