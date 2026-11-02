@@ -2,7 +2,7 @@
 
 ## Now (warm start — keep this section current; update it with every merge)
 Updated 2026-11-02.
-- UI pass 2026-11-02 DONE (PR 82 level pick/tabs/★ pill, PR 83 exam picker, this PR cleanup: one-line stats, text buttons + Shuffle/Sequential segment, `lastDay` badge on retiring exams). Open: study.html still has the old level segmented control + chip row (port the exam picker if wanted); `lastDay` also lives in index.html `LAST_DAY` (test keeps them equal).
+- UI pass 2026-11-02 DONE (PR 82 level pick/tabs/★ pill, PR 83 exam picker, this PR cleanup: one-line stats, text buttons + Shuffle/Sequential segment, `lastDay` badge on retiring exams). study.html uses the same exam picker (starts folded; no `ENDS` badge there). Open: `lastDay` also lives in index.html `LAST_DAY` (test keeps them equal).
 - In progress: nothing (TF-IEP002 bank, 20-day study guide and glossary done on branch `tf-iep002`, PR pending merge). Other candidates: other Google Cloud
   Professional exams (developer.hashicorp.com and cloud.google.com reachable). Open gaps: Gemini app and Gems (GAIL T2.2); Gemini Cloud Assist is
   private preview (noted in PCA); Spark API pages are blocked (403) for the DBX bank.
