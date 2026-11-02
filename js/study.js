@@ -182,6 +182,7 @@ function renderExamRow() {
   fade(); vrow.onscroll = fade;
   const chipHtml = ([code, name]) =>
     `<button class="chip${code === current.exam ? " active" : ""}" data-exam="${code}" title="${esc(name)}"><span class="cd">${code}${isNewVersion(name) ? `<span class="new">NEW</span>` : ""}</span><span class="nm">${esc(shortName(name))}</span></button>`;
+  $("#examRow").classList.toggle("multi", levels.length > 1);
   $("#examRow").innerHTML = levels.map(([l, label]) => {
     const list = exams.filter(e => e[2] === l);
     return `<div class="lvlgroup" role="group" aria-label="${label}">${levels.length > 1 ? `<div class="lvlhead">${label}<span class="cnt">${list.length}</span></div>` : ""}<div class="lvlchips">${list.map(chipHtml).join("")}</div></div>`;
