@@ -38,7 +38,7 @@ const vendorOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[3];
 const isNewVersion = name => / \(new\)$/.test(name);
 const shortName = name => name.replace(/ – (Associate|Professional|Expert|Specialty)( \(new\))?$/, "");
 const LEVELS = [["foundational", "Foundational"], ["associate", "Associate"], ["professional", "Professional"], ["expert", "Expert"], ["specialty", "Specialty"]];
-let examOpen = false;   // the exam picker starts folded (an exam is always open here); a vendor switch unfolds it, picking an exam folds it
+let examOpen = true;   // the exam picker starts unfolded, as in the question bank; picking an exam folds it, a vendor switch unfolds it
 // Exams with a published guide (listed in exams-index.json); all of them if the index is missing.
 const available = () => STUDY_EXAMS.filter(([c]) => !dataIndex || !dataIndex.study || c in dataIndex.study);
 

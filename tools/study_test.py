@@ -75,8 +75,7 @@ with sync_playwright() as p:
     first = "CLF-C02" if "CLF-C02" in idx.get("study", {}) else "AIF-C01"
     pg.goto(BASE + "study.html"); pg.wait_for_selector(".daytitle")
     check("default opens first exam", pg.evaluate("location.hash") == f"#exam={first}&day=1", pg.evaluate("location.hash"))
-    check("picker starts folded with the exam in its summary", pg.get_attribute("#examToggle", "aria-expanded") == "false" and first in pg.inner_text("#examSum"), pg.inner_text("#examSum"))
-    pg.click("#examToggle")
+    check("picker starts unfolded with the exam in its summary", pg.get_attribute("#examToggle", "aria-expanded") == "true" and first in pg.inner_text("#examSum"), pg.inner_text("#examSum"))
     heads = pg.eval_on_selector_all("#examRow .lvlhead", "els => els.map(e => e.firstChild.textContent)")
     check("level headings", heads == ["Foundational", "Associate", "Professional", "Specialty"], heads)
     check("no level segmented control", pg.locator(".levelseg, .lseg, #levelRow").count() == 0)
