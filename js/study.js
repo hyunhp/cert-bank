@@ -33,7 +33,7 @@ const STUDY_EXAMS = [
   ["VLT-VA003", "Vault Associate (003)", "associate", "hashicorp"],
   ["TF-IEP002", "Terraform Infrastructure Engineer Professional (002)", "professional", "hashicorp"],
 ].map(([code, name, level, vendor]) => [code, name, level, vendor || "aws"]);
-const VENDORS = [["aws", "AWS"], ["palantir", "Palantir", "PLTR"], ["azure", "Azure"], ["gcp", "Google Cloud", "GCP"], ["databricks", "Databricks", "DBX"], ["hashicorp", "HashiCorp", "HC"]];   // [id, name, short name on phones]
+const VENDORS = [["aws", "AWS"], ["palantir", "Palantir"], ["azure", "Azure"], ["gcp", "Google Cloud", "GCP"], ["databricks", "Databricks"], ["hashicorp", "HashiCorp"]];   // [id, name, short name on phones]
 const vendorOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[3];
 const isNewVersion = name => / \(new\)$/.test(name);
 const shortName = name => name.replace(/ – (Associate|Professional|Expert|Specialty)( \(new\))?$/, "");
@@ -174,6 +174,14 @@ function renderExamRow() {
   $("#vendorRow").hidden = vendors.length < 2;
   $("#vendorRow").innerHTML = vendors.map(([v, label, short]) =>
     `<button class="vtab" role="tab" aria-selected="${v === vendor}" data-vendor="${v}"${short ? ` title="${label}"` : ""}>${short ? `<span class="vname">${label}</span><span class="vshort">${short}</span>` : label}<span class="cnt">${all.filter(e => e[3] === v).length}</span></button>`).join("");
+  const vrow = $("#vendorRow");
+  const fade = () => {
+    vrow.classList.toggle("fade-l", vrow.scrollLeft > 4);
+    vrow.classList.toggle("fade-r", vrow.scrollLeft + vrow.clientWidth < vrow.scrollWidth - 4);
+  };
+  const vsel = vrow.querySelector('[aria-selected="true"]');
+  if (vsel && vrow.scrollWidth > vrow.clientWidth) vrow.scrollLeft = vsel.offsetLeft - (vrow.clientWidth - vsel.offsetWidth) / 2;
+  fade(); vrow.onscroll = fade;
   $("#levelRow").hidden = !levels.length;   // shown even for one level, so every vendor looks the same
   $("#levelRow").innerHTML = levels.map(([l, label]) =>
     `<button class="lseg" aria-pressed="${l === level}" data-level="${l}">${label}<span class="cnt">${exams.filter(e => e[2] === l).length}</span></button>`).join("");

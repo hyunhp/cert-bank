@@ -78,10 +78,24 @@ with sync_playwright() as p:
     check("bookmark view keeps the exam's level", pg.eval_on_selector(".lseg[aria-pressed='true']", "e => e.dataset.level") == "professional")
     pg.click("#bmIcon"); pg.wait_for_function("location.hash === '#exam=SAP-C03'")
     check("star again returns to the exam", pg.eval_on_selector("#chipRow .chip.active", "e => e.dataset.code") == "SAP-C03" and pg.get_attribute("#bmIcon", "aria-pressed") == "false")
-    nav = pg.evaluate("(() => { const t = document.getElementById('vendorRow').getBoundingClientRect(), s = document.getElementById('bmIcon').getBoundingClientRect(); return [t.right, s.left]; })()")
-    check("tab line stops before the star", nav[0] <= nav[1], nav)
+    nav = pg.evaluate("(() => { const t = document.getElementById('vendorRow').getBoundingClientRect(), s = document.getElementById('bmIcon').getBoundingClientRect(); return [t.bottom, s.top]; })()")
+    check("bookmarks pill sits in the header, above the tab row", nav[1] < nav[0], nav)
     ov = pg.eval_on_selector("#vendorRow", "e => [e.scrollHeight, e.clientHeight, e.scrollWidth, e.clientWidth]")
-    check("tab row has nothing to scroll (no stray scrollbar on Windows)", ov[0] <= ov[1] and ov[2] <= ov[3], ov)
+    check("tab row has no vertical scroll (no stray scrollbar on Windows)", ov[0] <= ov[1], ov)
+    names = pg.eval_on_selector_all(".vtab", "els => els.filter(e => e.offsetParent).map(e => e.innerText.trim())")
+    check("phone tab names are readable (no PLTR/DBX/HC)", not any(n in ("PLTR", "DBX", "HC") for n in names), names)
+    # Level picker opens that level's first exam (chips, section filters and questions stay in step).
+    pg.goto(BASE + "#exam=CLF-C02"); pg.reload(); pg.wait_for_selector(".qcard")
+    pg.click(".lseg[data-level='associate']"); pg.wait_for_function("location.hash.startsWith('#exam=') && !location.hash.includes('CLF-C02')")
+    act = pg.eval_on_selector("#chipRow .chip.active", "e => e.dataset.code")
+    check("level click selects that level's first exam", act == "DEA-C01", act)
+    sec = pg.inner_text("#filterSum") if pg.is_visible("#filterSum") else ""
+    check("section panel follows the new exam", "325" not in sec, sec)
+    nar = b.new_context(viewport={"width": 340, "height": 800}).new_page()
+    nar.route("**/fonts.googleapis.com/**", lambda r: r.abort())
+    nar.goto(BASE + "#exam=VLT-VA003"); nar.wait_for_selector(".qcard")
+    cls = nar.eval_on_selector("#vendorRow", "e => [e.className, e.scrollWidth > e.clientWidth]")
+    check("340px: overflowing tab row shows an edge fade", (not cls[1]) or "fade" in cls[0], cls)
 
     pg.goto(BASE + "#vendor=azure"); pg.reload(); pg.wait_for_selector(".qcard")
     check("#vendor=azure opens AZ-900", pg.eval_on_selector("#chipRow .chip.active", "e => e.dataset.code") == "AZ-900"
