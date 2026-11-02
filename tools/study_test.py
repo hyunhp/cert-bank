@@ -83,7 +83,7 @@ with sync_playwright() as p:
     check("every AWS level lists its chips", "AIF-C01" in chips and "SAA-C03" in chips and "ANS-C01" in chips and "SCS-C03" in chips, chips)
     vt = pg.eval_on_selector_all(".vtab", "els => els.map(e => [e.dataset.vendor, +e.querySelector('.cnt').textContent])")
     check("all exams reachable", sum(n for _, n in vt) == len(files), vt)
-    pg.click("#examRow .chip[data-exam='SCS-C03']"); pg.wait_for_function("location.hash.startsWith('#exam=SCS-C03')")
+    pg.click(".lvlhead[data-level='specialty']"); pg.click("#examRow .chip[data-exam='SCS-C03']"); pg.wait_for_function("location.hash.startsWith('#exam=SCS-C03')")
     check("picking an exam folds the picker", pg.get_attribute("#examToggle", "aria-expanded") == "false" and "SCS-C03" in pg.inner_text("#examSum"), pg.inner_text("#examSum"))
 
     pg.goto(BASE + "study.html#exam=SAA-C03&day=3"); pg.reload(); pg.wait_for_selector(".daytitle")
