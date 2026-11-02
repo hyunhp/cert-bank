@@ -70,7 +70,7 @@ with sync_playwright() as p:
     check("stale domain falls back to all", pg.locator(".qcard").count() == len(qs))
     pg.goto(BASE + "?x=3#exam=SAA-C03"); pg.wait_for_selector(".qcard")
     check("filter row for another exam", pg.locator("#domainRow .fchip[data-d]").count() >= 4)
-    pg.click(".lseg[data-level='foundational']"); pg.click(".chip[data-code='AIF-C01']"); pg.wait_for_selector(".qcard")
+    pg.click(".chip[data-code='AIF-C01']"); pg.wait_for_selector(".qcard")
     check("switching exam clears filter", "d=" not in pg.evaluate("location.hash"))
 
     # a version that reorganised its tasks: shared questions take their task from exam-shared-tasks.json
@@ -128,7 +128,7 @@ with sync_playwright() as p:
     pg.click("#filterToggle")
     check("unfold shows the section chips", pg.locator("#domainRow .fchip[data-d='D4']").is_visible())
     # phone width: exam chips are two-column tiles, and a new version is marked with a badge, not "(new)"
-    pg.click(".lseg[data-level='associate']")
+    pg.click("#examToggle") if pg.get_attribute("#examToggle", "aria-expanded") == "false" else None
     check("new-version chip has a badge", pg.locator(".chip[data-code='DVA-C03'] .new").count() == 1 and "(new)" not in pg.inner_text(".chip[data-code='DVA-C03']"))
     check("no horizontal overflow at phone width", pg.evaluate("document.documentElement.scrollWidth <= innerWidth"))
     # mock exam: "this section only" from the active filter, and from a link

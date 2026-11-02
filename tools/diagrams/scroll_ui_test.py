@@ -25,7 +25,7 @@ with sync_playwright() as p:
         pg.mouse.wheel(0,3000); pg.wait_for_timeout(500)
         ok(f"[{scheme}] bar shown after scroll", vis("#examBar"))
         ok(f"[{scheme}] bar shows SAP-C02", pg.inner_text("#examBarCode")=="SAP-C02" and pg.inner_text("#examBarName")=="Solutions Architect")
-        chip_top=pg.evaluate("document.getElementById('chipRow').getBoundingClientRect().bottom")
+        chip_top=pg.evaluate("document.getElementById('examPicker').getBoundingClientRect().bottom")
         ok(f"[{scheme}] chip row scrolled away (not sticky)", chip_top<0)
         ok(f"[{scheme}] top button shown", vis("#toTop"))
         bh=pg.evaluate("document.getElementById('examBar').getBoundingClientRect().height")
@@ -38,7 +38,7 @@ with sync_playwright() as p:
         except Exception: pass
         ok(f"[{scheme}] bar shows score", "/" in pg.inner_text("#examBarScore"))
         pg.click("#examBarChange"); pg.wait_for_timeout(100); settle(pg)
-        ct=pg.evaluate("document.getElementById('chipRow').getBoundingClientRect().top")
+        ct=pg.evaluate("document.getElementById('examPicker').getBoundingClientRect().top")
         ok(f"[{scheme}] Change scrolls to chips (top={ct:.0f})", -5<=ct<=60)
         pg.mouse.wheel(0,4000); pg.wait_for_timeout(100); settle(pg); pg.wait_for_selector("#toTop.show")
         pg.click("#toTop"); pg.wait_for_timeout(100); settle(pg)
