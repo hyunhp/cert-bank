@@ -200,8 +200,18 @@ function injectStyles() {
 .mk .btnrow.exitrow{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
 .mk .btnrow.reviewrow .btn,.mk .btnrow.exitrow .btn{padding-inline:8px;text-align:center}
 .mk .confirm{border:1px solid var(--bad-line);background:var(--bad-bg);border-radius:10px;padding:12px;margin-top:10px;font-size:.9rem}
-.mk .score{font-size:2.4rem;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
-.mk .verdict{font-weight:700;font-size:1.05rem;margin:4px 0}
+.mk .scorerow{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.mk .score{font-size:2.6rem;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+.mk .score.v-ready{color:var(--good)} .mk .score.v-border{color:var(--amber)} .mk .score.v-work{color:var(--bad)}
+.mk .verdict{font-weight:700;font-size:.85rem;padding:3px 10px;border-radius:999px;border:1px solid currentColor}
+.mk .verdict.v-ready{background:var(--good-bg)} .mk .verdict.v-border{background:var(--amber-bg)} .mk .verdict.v-work{background:var(--bad-bg)}
+.mk .statchips{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 8px}
+.mk .statchips span{font-size:.8rem;padding:3px 9px;border-radius:7px;background:var(--surface-2);color:var(--ink);font-variant-numeric:tabular-nums}
+.mk p.meta{margin:4px 0}
+.mk .passnote{font-size:.78rem;padding-top:6px;border-top:1px solid var(--line);margin-top:8px}
+.mk .dhead{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
+.mk .rvlabel{font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;font-weight:600;color:var(--muted);margin:14px 0 6px 2px}
+.mk .btn.ghost.emph{border-color:var(--accent);color:var(--accent-ink);background:var(--accent-bg)}
 .mk .dom{margin:8px 0}
 .mk .dom .top{display:flex;justify-content:space-between;font-size:.84rem;gap:8px}
 .mk .dom .bar{height:7px;border-radius:4px;background:var(--surface-2);overflow:hidden;margin-top:4px}
@@ -554,23 +564,24 @@ function renderResults() {
     <h2>${state.exam} · ${state.mode === "short" ? "Short practice" : "Full mock exam"}</h2>
     <p class="sub">${esc(examName(state.exam))}${state.auto ? " · submitted automatically when time ran out" : ""}</p>
     <div class="panel">
-      <div class="score">${pct}%</div>
-      <div class="verdict v-${v.key}">${v.label}</div>
-      <div class="meta">${correct} of ${total} correct · time used ${fmtTime(used)}${state.timed ? " of " + fmtTime(state.duration) : ""} · ${esc(v.note)}</div>
-      <div class="meta">${esc(passMarkNote(spec))}</div>
+      <div class="scorerow"><div class="score v-${v.key}">${pct}%</div><div class="verdict v-${v.key}">${v.label}</div></div>
+      <div class="statchips"><span>${correct} of ${total} correct</span><span>${wrong} incorrect</span><span>time ${fmtTime(used)}${state.timed ? " of " + fmtTime(state.duration) : ""}</span></div>
+      <p class="meta">${esc(v.note)}</p>
+      <p class="meta passnote">${esc(passMarkNote(spec))}</p>
     </div>
-    <div class="panel"><b>By domain</b>
+    <div class="panel"><div class="dhead"><b>By domain</b><span class="meta">Below 70% shows in red</span></div>
       ${spec.domains.map(d => {
         const [c, t] = dom[d.code] || [0, 0]; const p = t ? Math.round((c / t) * 100) : null;
         return `<div class="dom${p !== null && p < 70 ? " weak" : ""}"><div class="top"><span>${d.code} ${esc(d.name)}</span><span>${t ? `${c}/${t} · ${p}%` : "—"}</span></div><div class="bar"><div class="fill" style="width:${p || 0}%"></div></div></div>`;
       }).join("")}
     </div>
+    <div class="rvlabel">Review answers</div>
     <div class="btnrow reviewrow">
-      <button class="btn" data-review="incorrect"${wrong ? "" : " disabled"}>Incorrect (${wrong})</button>
+      <button class="btn ghost${wrong ? " emph" : ""}" data-review="incorrect"${wrong ? "" : " disabled"}>Incorrect (${wrong})</button>
       <button class="btn ghost" data-review="flagged"${nflag ? "" : " disabled"}>Flagged (${nflag})</button>
       <button class="btn ghost" data-review="all">All (${total})</button>
     </div>
-    <div class="btnrow exitrow"><button class="btn ghost" data-act="new">New mock exam</button><button class="btn ghost" data-act="exit">Question bank</button></div>
+    <div class="btnrow exitrow"><button class="btn" data-act="new">New mock exam</button><button class="btn ghost" data-act="exit">Question bank</button></div>
     <p class="support">${(navigator.language || "").toLowerCase().startsWith("ko")
       ? `도움이 되셨나요? 후원은 선택이며, 모든 문제는 계속 무료입니다. <a href="support.html">☕ Support this site</a>`
       : `Found this useful? Support is optional, and all questions stay free. <a href="support.html">☕ Support this site</a>`}</p>
