@@ -38,7 +38,7 @@ const vendorOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[3];
 const isNewVersion = name => / \(new\)$/.test(name);
 const shortName = name => name.replace(/ – (Associate|Professional|Expert|Specialty)( \(new\))?$/, "");
 const LEVELS = [["foundational", "Foundational"], ["associate", "Associate"], ["professional", "Professional"], ["expert", "Expert"], ["specialty", "Specialty"]];
-const levelOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[2];
+let examOpen = false;   // the exam picker starts folded (an exam is always open here); a vendor switch unfolds it, picking an exam folds it
 // Exams with a published guide (listed in exams-index.json); all of them if the index is missing.
 const available = () => STUDY_EXAMS.filter(([c]) => !dataIndex || !dataIndex.study || c in dataIndex.study);
 
@@ -86,7 +86,7 @@ let specs = null;       // data/exam-specs.json (domain names)
 let glossary = null;    // data/glossary.json: {terms:[{id, term, full, match, en, ko, exams}]}
 let glossaryReady = Promise.resolve();
 const guides = {};      // exam -> {exam, days}
-let current = { exam: null, day: 1, vendor: null, level: null };   // vendor/level: what was picked, if not the current exam's
+let current = { exam: null, day: 1, vendor: null };   // vendor: what was picked, if not the current exam's
 
 const $ = sel => document.querySelector(sel);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -168,8 +168,6 @@ function renderExamRow() {
   const vendor = current.vendor || vendorOf(current.exam) || (all[0] || [])[3];
   const exams = all.filter(e => e[3] === vendor);
   const levels = LEVELS.filter(([l]) => exams.some(e => e[2] === l));
-  const level = current.level && levels.some(([l]) => l === current.level) ? current.level
-    : vendorOf(current.exam) === vendor ? levelOf(current.exam) : (levels[0] || [])[0];
   const vendors = VENDORS.filter(([v]) => all.some(e => e[3] === v));
   $("#vendorRow").hidden = vendors.length < 2;
   $("#vendorRow").innerHTML = vendors.map(([v, label, short]) =>
@@ -182,11 +180,18 @@ function renderExamRow() {
   const vsel = vrow.querySelector('[aria-selected="true"]');
   if (vsel && vrow.scrollWidth > vrow.clientWidth) vrow.scrollLeft = vsel.offsetLeft - (vrow.clientWidth - vsel.offsetWidth) / 2;
   fade(); vrow.onscroll = fade;
-  $("#levelRow").hidden = !levels.length;   // shown even for one level, so every vendor looks the same
-  $("#levelRow").innerHTML = levels.map(([l, label]) =>
-    `<button class="lseg" aria-pressed="${l === level}" data-level="${l}">${label}<span class="cnt">${exams.filter(e => e[2] === l).length}</span></button>`).join("");
-  $("#examRow").innerHTML = exams.filter(e => e[2] === level).map(([code, name]) =>
-    `<button class="chip${code === current.exam ? " active" : ""}" data-exam="${code}" title="${esc(name)}"><span class="cd">${code}${isNewVersion(name) ? `<span class="new">NEW</span>` : ""}</span><span class="nm">${esc(shortName(name))}</span></button>`).join("");
+  const chipHtml = ([code, name]) =>
+    `<button class="chip${code === current.exam ? " active" : ""}" data-exam="${code}" title="${esc(name)}"><span class="cd">${code}${isNewVersion(name) ? `<span class="new">NEW</span>` : ""}</span><span class="nm">${esc(shortName(name))}</span></button>`;
+  $("#examRow").innerHTML = levels.map(([l, label]) => {
+    const list = exams.filter(e => e[2] === l);
+    return `<div class="lvlgroup" role="group" aria-label="${label}">${levels.length > 1 ? `<div class="lvlhead">${label}<span class="cnt">${list.length}</span></div>` : ""}<div class="lvlchips">${list.map(chipHtml).join("")}</div></div>`;
+  }).join("");
+  const cur = STUDY_EXAMS.find(([c]) => c === current.exam);
+  $("#examSum").innerHTML = cur
+    ? `<span class="code">${cur[0]}</span> ${esc(shortName(cur[1]))}${isNewVersion(cur[1]) ? ` <span class="new">NEW</span>` : ""} <span class="lv">· ${(LEVELS.find(([l]) => l === cur[2]) || [, ""])[1]}</span>`
+    : "Choose an exam";
+  $("#examPicker").classList.toggle("folded", !examOpen);
+  $("#examToggle").setAttribute("aria-expanded", String(examOpen));
 }
 
 function dayListHTML(guide, progress) {
@@ -267,7 +272,7 @@ function answer(qEl, picked) {
 async function show(exam, day) {
   hideTerm();
   current.exam = exam;
-  current.vendor = current.level = null;
+  current.vendor = null;
   renderExamRow();
   $("#main").innerHTML = `<div class="loading">Loading ${exam}…</div>`;
   let guide;
@@ -336,9 +341,9 @@ document.addEventListener("click", e => {
   if (pop.btn && t !== pop.btn) hideTerm();
   if (!t) return;
   if (t.classList.contains("term")) return pop.btn === t && pop.pinned ? hideTerm() : showTerm(t, true);
-  if (t.dataset.exam) return go(t.dataset.exam, null);
-  if (t.dataset.vendor) { current.vendor = t.dataset.vendor; current.level = null; return renderExamRow(); }
-  if (t.dataset.level) { current.level = t.dataset.level; return renderExamRow(); }
+  if (t.dataset.exam) { examOpen = false; renderExamRow(); return go(t.dataset.exam, null); }
+  if (t.dataset.vendor) { current.vendor = t.dataset.vendor; examOpen = true; return renderExamRow(); }
+  if (t.id === "examToggle") { examOpen = !examOpen; return renderExamRow(); }
   if (t.id === "prevBtn" || t.id === "barPrev") return go(current.exam, current.day - 1);
   if (t.id === "nextBtn" || t.id === "barNext") return go(current.exam, current.day + 1);
   if (t.id === "toTop") return window.scrollTo({ top: 0, behavior: smooth ? "smooth" : "auto" });
