@@ -6,6 +6,8 @@
 const KEY_ACTIVE = "aws_qbank_mock_active_v1";
 const KEY_HISTORY = "aws_qbank_mock_history_v1";
 const KEY_SEEN = "aws_qbank_mock_seen_v1";
+const KEY_RECENT = "aws_qbank_mock_recent_v1";   // per exam: ids of the last RECENT_KEEP drawn mocks; survives "Reset seen questions"
+const RECENT_KEEP = 2;
 const SHORT_N = 20;
 const SECTION_N = 40;   // "Full section": up to this many questions of one exam domain
 const HISTORY_MAX = 200;
@@ -39,12 +41,36 @@ function loadSeen() {
   Object.entries(v).forEach(([k, arr]) => { if (Array.isArray(arr)) out[k] = arr.filter(x => typeof x === "string"); });
   return out;
 }
-export function resetAllMockData() { [KEY_ACTIVE, KEY_HISTORY, KEY_SEEN].forEach(drop); }
+function loadRecent() {
+  const v = load(KEY_RECENT, {});
+  if (!isObj(v)) return {};
+  const out = {};
+  Object.entries(v).forEach(([k, runs]) => { if (Array.isArray(runs)) out[k] = runs.filter(Array.isArray).map(r => r.filter(x => typeof x === "string")).slice(0, RECENT_KEEP); });
+  return out;
+}
+export function resetAllMockData() { [KEY_ACTIVE, KEY_HISTORY, KEY_SEEN, KEY_RECENT].forEach(drop); }
 
 // ---------- helpers ----------
 const esc = (s) => (s == null ? "" : String(s)).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const LETTERS = "ABCDEFGH";
-function shuffle(a) { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+// Uniform integer in [0, n) from the browser's crypto source (rejection sampling, so no modulo bias); Math.random only as a fallback.
+function randInt(n) {
+  const c = globalThis.crypto;
+  if (c && c.getRandomValues) {
+    const lim = Math.floor(0x100000000 / n) * n, b = new Uint32Array(1);
+    do { c.getRandomValues(b); } while (b[0] >= lim);
+    return b[0] % n;
+  }
+  return Math.floor(Math.random() * n);
+}
+export function shuffle(a) { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = randInt(i + 1); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+// Priority tiers for a draw: never seen and not in the last mocks, then recent-but-unseen (only after a reset), then seen and not recent, then the rest.
+const tierOf = (id, seen, recent) => (seen.has(id) ? 2 : 0) + (recent.has(id) ? 1 : 0);
+function byTier(ids, seen, recent) {
+  const tiers = [[], [], [], []];
+  ids.forEach(id => tiers[tierOf(id, seen, recent)].push(id));
+  return tiers.flatMap(shuffle);
+}
 function fmtTime(sec) {
   sec = Math.max(0, Math.round(sec));
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
@@ -79,32 +105,27 @@ export function allocate(n, domains, supply) {
 }
 
 // Section-only draw: n questions of one domain, unseen first, final order shuffled.
-export function drawFocused(exam, n, docs, domain, map, seenIds) {
-  const seen = new Set(seenIds || []);
+export function drawFocused(exam, n, docs, domain, map, seenIds, recentIds) {
+  const seen = new Set(seenIds || []), recent = new Set(recentIds || []);
   const pool = docs.filter(q => domainOf(q, exam, map) === domain).map(q => q.id);
-  const fresh = shuffle(pool.filter(id => !seen.has(id))), old = shuffle(pool.filter(id => seen.has(id)));
-  return shuffle(fresh.concat(old).slice(0, n));
+  return shuffle(byTier(pool, seen, recent).slice(0, n));
 }
 
 // Draw n question ids: stratified by domain, unseen first, then final order shuffled.
-export function draw(exam, n, docs, spec, map, seenIds) {
-  const seen = new Set(seenIds || []);
+export function draw(exam, n, docs, spec, map, seenIds, recentIds) {
+  const seen = new Set(seenIds || []), recent = new Set(recentIds || []);
   const groups = {};
-  for (const d of spec.domains) groups[d.code] = { unseen: [], seen: [] };
+  for (const d of spec.domains) groups[d.code] = [];
   for (const q of docs) {
-    const dom = domainOf(q, exam, map);
-    const g = groups[dom];
+    const g = groups[domainOf(q, exam, map)];
     if (!g) continue;              // question tagged with a domain this exam doesn't have
-    (seen.has(q.id) ? g.seen : g.unseen).push(q.id);
+    g.push(q.id);
   }
   const supply = {};
-  for (const k in groups) supply[k] = groups[k].unseen.length + groups[k].seen.length;
+  for (const k in groups) supply[k] = groups[k].length;
   const alloc = allocate(n, spec.domains, supply);
   let picked = [];
-  for (const k in groups) {
-    const pool = shuffle(groups[k].unseen).concat(shuffle(groups[k].seen));
-    picked = picked.concat(pool.slice(0, alloc[k] || 0));
-  }
+  for (const k in groups) picked = picked.concat(byTier(groups[k], seen, recent).slice(0, alloc[k] || 0));
   return shuffle(picked);
 }
 
@@ -309,10 +330,14 @@ async function startExam(mode, timed) {
   const docs = await docsFor(setupExam);
   const pool = domainDocs(docs);
   const n = mode === "short" ? Math.min(SHORT_N, pool.length) : Math.min(setupDomain ? SECTION_N : spec.questions, pool.length);
-  const seenAll = loadSeen();
-  const ids = setupDomain ? drawFocused(setupExam, n, docs, setupDomain, domainMap, seenAll[setupExam])
-                          : draw(setupExam, n, docs, spec, domainMap, seenAll[setupExam]);
+  const seenAll = loadSeen(), recentAll = loadRecent();
+  const recentIds = (recentAll[setupExam] || []).flat();
+  const ids = setupDomain ? drawFocused(setupExam, n, docs, setupDomain, domainMap, seenAll[setupExam], recentIds)
+                          : draw(setupExam, n, docs, spec, domainMap, seenAll[setupExam], recentIds);
   if (!ids.length) return;
+  // Remember this draw at once (even if the exam is abandoned) so the next one steers clear of it.
+  recentAll[setupExam] = [ids].concat(recentAll[setupExam] || []).slice(0, RECENT_KEEP);
+  save(KEY_RECENT, recentAll);
   const byId = new Map(docs.map(q => [q.id, q]));
   const order = {};
   ids.forEach(id => { order[id] = shuffle((byId.get(id).choices || []).map(c => c.key)); });
@@ -492,7 +517,7 @@ async function renderExam() {
   root.innerHTML = `<div class="mk">
     <div class="mkbar"><i class="mkfill" style="width:${Math.round(answered / n * 100)}%"></i><span class="code">${state.exam}</span><span class="prog">${answered}/${n}<span class="lbl"> answered</span></span>
       <span class="timer${left !== null && left < 300 ? " low" : ""}">${left !== null ? fmtTime(left) : "untimed"}</span>
-      <button class="btn ghost" data-act="grid">Review</button><button class="btn" data-act="grid">Finish</button></div>
+      <button class="btn" data-act="grid">Review &amp; finish</button></div>
     <div class="qcard">
       <div class="qnum">Question ${state.cur + 1} of ${n}${multi ? ' · <span class="badge multi">Multiple Answers</span>' : ""}${flagged ? ' · <span class="flagmark">⚑ Flagged</span>' : ""}</div>
       <div class="stem">${esc(q.stem)}</div>

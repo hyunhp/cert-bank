@@ -1,5 +1,5 @@
 // Unit tests for mock exam drawing: node tools/mock_unit_test.mjs
-import { draw, drawFocused, allocate, domainOf } from "../js/mock.js";
+import { draw, drawFocused, allocate, domainOf, shuffle } from "../js/mock.js";
 import fs from "fs";
 const specs = JSON.parse(fs.readFileSync("data/exam-specs.json"));
 const map = JSON.parse(fs.readFileSync("data/exam-domains.json"));
@@ -29,6 +29,15 @@ for (const exam of Object.keys(specs).filter(k => !k.startsWith("_"))) {
       ok(`${exam} n=${n} ${d.code} weight`, Math.abs(got - expect) <= 1 || (supply < expect && got === supply) || (othersShort && got >= Math.floor(expect) && got <= supply), `${got} vs ${expect.toFixed(1)} (supply ${supply})`);
       if (supply < expect) console.log(`  note: ${exam} ${d.code} pool (${supply}) is smaller than one full exam needs (${expect.toFixed(1)})`);
     }
+  }
+  // recent memory: even with nothing marked seen (after "Reset seen"), a draw avoids the last mocks while the pool allows
+  {
+    const a = draw(exam, spec.questions, docs, spec, map, [], []);
+    const b = draw(exam, spec.questions, docs, spec, map, [], a);
+    const supplyByDom = Object.fromEntries(spec.domains.map(d => [d.code, docs.filter(q => domainOf(q, exam, map) === d.code).length]));
+    const allocA = allocate(spec.questions, spec.domains, supplyByDom);
+    const forced = spec.domains.reduce((s, d) => s + Math.max(0, (allocA[d.code] || 0) - (supplyByDom[d.code] - (allocA[d.code] || 0))), 0);
+    ok(`${exam} recent draw is avoided`, b.filter(id => a.includes(id)).length <= forced, `${b.filter(id => a.includes(id)).length} > ${forced}`);
   }
   // unseen preference: after one full exam, the next draws avoid those ids while unseen supply lasts
   const first = draw(exam, spec.questions, docs, spec, map, []);
@@ -60,5 +69,13 @@ for (const exam of Object.keys(specs).filter(k => !k.startsWith("_"))) {
 // allocation edge cases
 const a = allocate(10, [{ code: "D1", weight: 50 }, { code: "D2", weight: 50 }], { D1: 2, D2: 100 });
 ok("allocate caps by supply and redistributes", a.D1 === 2 && a.D2 === 8, JSON.stringify(a));
+// the shuffle is uniform: each of 4 items lands in each slot about 1/4 of the time
+{
+  const N = 40000, slots = Array.from({ length: 4 }, () => [0, 0, 0, 0]);
+  for (let r = 0; r < N; r++) shuffle([0, 1, 2, 3]).forEach((item, pos) => slots[item][pos]++);
+  const worst = Math.max(...slots.flat().map(c => Math.abs(c / N - 0.25)));
+  ok("shuffle is uniform", worst < 0.01, worst);
+  ok("shuffle keeps every item once", shuffle([1, 2, 3, 4, 5]).sort().join() === "1,2,3,4,5");
+}
 console.log(fails ? `${fails} FAILED` : "ALL PASS");
 process.exit(fails ? 1 : 0);
