@@ -1,5 +1,5 @@
 // Unit tests for mock exam drawing: node tools/mock_unit_test.mjs
-import { draw, drawFocused, allocate, domainOf, shuffle, verdictFor } from "../js/mock.js";
+import { draw, drawFocused, allocate, domainOf, shuffle, verdictFor, readiness, targetPct } from "../js/mock.js";
 import fs from "fs";
 const specs = JSON.parse(fs.readFileSync("data/exam-specs.json"));
 const map = JSON.parse(fs.readFileSync("data/exam-domains.json"));
@@ -76,6 +76,22 @@ ok("allocate caps by supply and redistributes", a.D1 === 2 && a.D2 === 8, JSON.s
   ok("perfect score note differs for short and full", verdictFor(sp, 100, "short").note !== verdictFor(sp, 100, "full").note);
   ok("99% is still pass-ready with the margin note", verdictFor(sp, 99).label === "Pass-ready" && /comfortable margin/.test(verdictFor(sp, 99).note));
   ok("perfect score never says 80%+ on first attempts", !/\d+%\+/.test(verdictFor(sp, 100, "full").note));
+}
+// readiness: 3 full timed exams in a row at the target, mostly unseen, finished in time, and every domain 70%+
+{
+  const sp = { level: "associate", domains: [{ code: "D1", name: "a", weight: 50 }, { code: "D2", name: "b", weight: 50 }] };
+  const run = (pct, o = {}) => ({ exam: "X", mode: "full", domain: null, timed: true, auto: false, fresh: 65, total: 65, correct: Math.round(65 * pct / 100), dom: { D1: [pct, 100], D2: [pct, 100] }, ...o });
+  ok("target: associate 80, professional 85, percent pass mark +10", targetPct(sp) === 80 && targetPct({ level: "professional" }) === 85 && targetPct({ passingPct: 70 }) === 80);
+  ok("no history is not ready", !readiness(sp, []).ready && readiness(sp, []).streak === 0);
+  ok("three qualifying exams are ready", readiness(sp, [run(82), run(85), run(81)]).ready);
+  ok("two are not enough", readiness(sp, [run(82), run(85)]).streak === 2 && !readiness(sp, [run(82), run(85)]).ready);
+  ok("a latest exam below target breaks the streak", readiness(sp, [run(85), run(85), run(70)]).streak === 0);
+  ok("running out of time does not count", readiness(sp, [run(85), run(85), run(85, { auto: true })]).streak === 0);
+  ok("untimed does not count", readiness(sp, [run(85), run(85), run(85, { timed: false })]).streak === 0);
+  ok("mostly repeated questions do not count", readiness(sp, [run(85), run(85), run(85, { fresh: 20 })]).streak === 0);
+  ok("unknown freshness (older history) still counts", readiness(sp, [run(85), run(85), run(85, { fresh: undefined })]).ready);
+  ok("a weak domain blocks readiness", !readiness(sp, [run(85, { dom: { D1: [95, 100], D2: [20, 100] } }), run(85), run(85)]).ready);
+  ok("short practice and section drills are ignored", readiness(sp, [run(85), run(85), run(85), run(10, { mode: "short" }), run(10, { domain: "D1" })]).ready);
 }
 // the shuffle is uniform: each of 4 items lands in each slot about 1/4 of the time
 {

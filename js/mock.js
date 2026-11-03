@@ -135,15 +135,48 @@ function timeFor(spec, n) { return Math.ceil((spec.minutes * n) / spec.questions
 // Practice targets sit a margin above the official pass mark: AWS scaled scores are not percentages, so
 // AWS and Azure (scaled 700/1000 or more) use 80% (Foundational/Associate) or 85% (Professional/Expert/Specialty); vendors that publish a percent
 // pass mark (Palantir: 70%) use that mark + 10. Google Cloud publishes no pass mark (pass/fail only): same 80/85% targets.
-export function verdictFor(spec, pct, mode) {
+// The score that counts as comfortably ready: 10 points over a published percent pass mark, else 80% (85% for professional-level exams).
+export function targetPct(spec) {
   const level = spec && spec.level;
-  const hi = (spec && spec.passingPct) ? Math.min(100, spec.passingPct + 10)
+  return (spec && spec.passingPct) ? Math.min(100, spec.passingPct + 10)
     : (level === "professional" || level === "expert" || level === "specialty") ? 85 : 80;
+}
+export function verdictFor(spec, pct, mode) {
+  const hi = targetPct(spec);
   const mid = (spec && spec.passingPct) ? spec.passingPct : hi - 10;
   if (pct === 100) return { key: "ready", label: "Perfect score", note: mode === "short" ? "Every question correct. Try a full exam or another section to keep testing yourself." : "Every question correct. Keep the edge with questions you have not seen yet." };
   if (pct >= hi) return { key: "ready", label: "Pass-ready", note: `${hi}%+ on first attempts is a comfortable margin.` };
   if (pct >= mid) return { key: "border", label: "Borderline", note: `Aim for ${hi}%+ before booking the exam.` };
   return { key: "work", label: "Needs work", note: `Focus on the weakest domains below, then retake.` };
+}
+
+// Readiness: the latest READY_RUNS full exams must each be timed, finished in time, drawn mostly from questions not seen before,
+// and score at least the target; and every domain must reach DOMAIN_FLOOR% across those exams. Short practice and section drills do not count.
+export const READY_RUNS = 3, DOMAIN_FLOOR = 70, FRESH_MIN = 0.8;
+export function readiness(spec, hist) {
+  const target = targetPct(spec);
+  const pctOf = h => Math.round((h.correct / h.total) * 100);
+  const runs = hist.filter(h => h.mode === "full" && !h.domain).slice(-READY_RUNS);
+  const why = h => !h.timed ? "untimed" : h.auto ? "ran out of time"
+    : (h.fresh != null && h.fresh / h.total < FRESH_MIN) ? "mostly repeated questions" : pctOf(h) < target ? "below target" : null;
+  let streak = 0;
+  for (let i = runs.length - 1; i >= 0; i--) { if (why(runs[i])) break; streak++; }
+  const sums = {};
+  runs.forEach(h => Object.entries(h.dom || {}).forEach(([k, v]) => { const t = sums[k] || (sums[k] = [0, 0]); t[0] += v[0]; t[1] += v[1]; }));
+  const domains = spec.domains.map(d => { const [c, t] = sums[d.code] || [0, 0]; const p = t ? Math.round((c / t) * 100) : null; return { code: d.code, name: d.name, pct: p, ok: p !== null && p >= DOMAIN_FLOOR }; });
+  const domainsOk = runs.length > 0 && domains.every(d => d.ok);
+  return { target, need: READY_RUNS, floor: DOMAIN_FLOOR, streak, runs: runs.map(h => ({ pct: pctOf(h), why: why(h) })), domains, domainsOk, ready: streak >= READY_RUNS && domainsOk };
+}
+function readinessHTML(r, exam) {
+  const li = (ok, main, sub) => `<li class="${ok ? "ok" : ""}"><span class="mark" aria-hidden="true">${ok ? "✓" : "○"}</span><div>${main}${sub ? `<div class="meta">${sub}</div>` : ""}</div></li>`;
+  const latest = r.runs.length ? "Latest: " + r.runs.map(x => `${x.pct}%${x.why ? ` (${x.why})` : ""}`).join(" · ") : "No full exam yet.";
+  const low = r.domains.filter(d => !d.ok).map(d => `${d.code} ${d.pct === null ? "–" : d.pct + "%"}`);
+  return `<div class="panel readiness"><div class="dhead"><b>Exam readiness · ${esc(exam)}</b><span class="meta ${r.ready ? "v-ready" : ""}">${r.ready ? "Ready to book" : "Not yet"}</span></div>
+    <ul class="rdy">
+      ${li(r.streak >= r.need, `${r.target}%+ on ${r.need} full exams in a row <b>${r.streak}/${r.need}</b>`, latest)}
+      ${li(r.domainsOk, `Every domain ${r.floor}%+ across those exams`, r.runs.length && low.length ? "Below: " + low.join(" · ") : "")}
+    </ul>
+    <div class="meta">Counts full timed exams finished in time with mostly unseen questions. Short practice and section drills do not count.</div></div>`;
 }
 
 function passMarkNote(spec) {
@@ -233,6 +266,11 @@ function injectStyles() {
 .mk p.meta{margin:4px 0}
 .mk .passnote{font-size:.78rem;padding-top:6px;border-top:1px solid var(--line);margin-top:8px}
 .mk .dhead{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
+.mk .rdy{list-style:none;margin:8px 0;padding:0}
+.mk .rdy li{display:flex;gap:10px;margin:10px 0;font-size:.9rem}
+.mk .rdy .mark{flex:none;width:22px;height:22px;border-radius:50%;border:1px solid var(--line);display:grid;place-items:center;font-size:.78rem;color:var(--muted)}
+.mk .rdy li.ok .mark{background:var(--good-bg);border-color:var(--good-line);color:var(--good)}
+.mk .readiness>.meta{margin-top:6px}
 .mk .rvlabel{font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;font-weight:600;color:var(--muted);margin:14px 0 6px 2px}
 .mk .btn.ghost.emph{border-color:var(--accent);color:var(--accent-ink);background:var(--accent-bg)}
 .mk .dom{margin:8px 0}
@@ -348,8 +386,9 @@ async function startExam(mode, timed) {
   const order = {};
   ids.forEach(id => { order[id] = shuffle((byId.get(id).choices || []).map(c => c.key)); });
   const dur = timeFor(spec, ids.length);
+  const seenBefore = new Set(seenAll[setupExam] || []);
   state = {
-    v: 1, exam: setupExam, domain: setupDomain, mode, ids, order, answers: {}, flags: [], cur: 0,
+    v: 1, exam: setupExam, domain: setupDomain, mode, ids, order, answers: {}, flags: [], cur: 0, fresh: ids.filter(id => !seenBefore.has(id)).length,
     startedAt: Date.now(), duration: dur, timed: !!timed, deadline: timed ? Date.now() + dur * 1000 : null,
     submitted: false,
   };
@@ -401,7 +440,7 @@ async function submit(auto) {
   state.summary = { correct, total: state.ids.length, dom, used };
   // history + seen
   const hist = loadHistory();
-  hist.push({ exam: state.exam, domain: state.domain || null, mode: state.mode, at: Date.now(), correct, total: state.ids.length, dom, used, timed: state.timed, auto: state.auto });
+  hist.push({ exam: state.exam, domain: state.domain || null, mode: state.mode, at: Date.now(), correct, total: state.ids.length, dom, used, timed: state.timed, auto: state.auto, fresh: state.fresh });
   save(KEY_HISTORY, hist.slice(-HISTORY_MAX));
   const seen = loadSeen();
   seen[state.exam] = Array.from(new Set((seen[state.exam] || []).concat(state.ids)));
@@ -482,6 +521,7 @@ async function renderSetup(extra) {
       <div class="btnrow"><button class="btn startbtn" data-act="start">Start exam</button>
       ${seen.size ? `<button class="linkbtn" data-act="resetseen">Reset seen questions for ${setupExam}</button>` : ""}</div>
     </div>
+    ${readinessHTML(readiness(spec, loadHistory().filter(h => h.exam === setupExam)), setupExam)}
     <div class="panel"><b>Recent attempts · ${setupExam}</b>
       ${hist.length ? `<table><tr><th>Date</th><th>Mode</th><th>Score</th><th>Result</th></tr>${hist.map(h => {
         const pct = Math.round((h.correct / h.total) * 100); const v = verdictFor(spec, pct);
@@ -609,6 +649,7 @@ function renderResults() {
       }).join("")}
       ${worst ? `<button class="linkbtn practice" data-practice="${worst.code}" type="button">Practice ${worst.code} (weakest) in the question bank →</button>` : ""}
     </div>
+    ${readinessHTML(readiness(spec, loadHistory().filter(h => h.exam === state.exam)), state.exam)}
     <div class="rvlabel">Review answers</div>
     <div class="btnrow reviewrow">
       <button class="btn ghost${wrong ? " emph" : ""}" data-review="incorrect"${wrong ? "" : " disabled"}>Incorrect (${wrong})</button>

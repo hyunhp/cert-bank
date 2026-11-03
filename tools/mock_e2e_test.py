@@ -71,6 +71,8 @@ with sync_playwright() as p:
     ok("domain totals add up to 20", dom_total == 20, dom_total)
     ok("active state cleared", state(pg) is None)
     ok("results offer a weakest-domain shortcut", pg.locator("[data-practice]").count() == 1)
+    ok("results show the readiness checklist", pg.locator(".readiness .rdy li").count() == 2 and "Not yet" in pg.inner_text(".readiness"), pg.inner_text(".readiness")[:200])
+    ok("a short practice does not count toward readiness", "0/3" in pg.inner_text(".readiness"), pg.inner_text(".readiness")[:200])
     pg.click('[data-review="incorrect"]'); pg.wait_for_selector(".rv")
     ok("review incorrect lists 8", pg.locator(".rv").count() == 8)
     ok("review shows explanation + answer", pg.locator(".rv .ans-line").count() == 8)
