@@ -1,6 +1,7 @@
 """Question pool expansion pipeline.
 
     python3 tools/qgen/qgen.py plan AIB-C01            # gaps per domain / task statement, multi-answer quota
+    python3 tools/qgen/qgen.py stamp                   # write examDomain / examTask (the exam's own domain and task) into every data file
     python3 tools/qgen/qgen.py check tools/qgen/batches/AIB-C01/b01.txt   # validate only
     python3 tools/qgen/qgen.py ingest tools/qgen/batches/AIB-C01/b01.txt  # validate + write data/*.json
     python3 tools/qgen/qgen.py report                  # all exams vs target
@@ -142,6 +143,31 @@ def domain_of(q, exam, dmap):
     if q["examCodes"][0] == exam:
         return q["domainCode"]
     return dmap.get(q["id"], {}).get(exam, q["domainCode"])
+
+
+def exam_task(q, exam, tmap):
+    """The task a question has in `exam`: its own, a sharing rule's, or its own again when the exam reuses the primary's tasks (tasksFrom)."""
+    primary = q["examCodes"][0]
+    if primary == exam:
+        return q.get("taskId")
+    return tmap.get(q["id"], {}).get(exam) or (q.get("taskId") if SPECS[exam].get("tasksFrom") == primary else None)
+
+
+def stamp_exam_fields():
+    """Write `examDomain` and `examTask` into every question of every exam file: the domain and task of THAT exam.
+    A question shared from another exam keeps that exam's `domainCode`/`taskId` (the site reads exam-domains.json and
+    exam-shared-tasks.json for the other exams), so anything that reads a data file directly should use these two fields."""
+    dmap, tmap = domain_map(), task_map()
+    for code in EXAMS:
+        path = DATA / f"{code}.json"
+        if not path.exists():
+            continue
+        qs = json.loads(path.read_text(encoding="utf-8"))
+        for q in qs:
+            q.pop("examDomain", None); q.pop("examTask", None)
+            q["examDomain"] = domain_of(q, code, dmap)
+            q["examTask"] = exam_task(q, code, tmap)
+        path.write_text(json.dumps(qs, indent=1, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
 
 
 def target(code):
@@ -576,6 +602,7 @@ def ingest_explanations(explains):
         save_exam(e, files[e])
     print(f"ingested: {len(done)} explanations rewritten")
     sys.path.insert(0, str(ROOT / "tools"))
+    stamp_exam_fields()
     import build_data_index
     build_data_index.build()
 
@@ -655,6 +682,7 @@ def ingest(items, state):
     print(f"ingested: {added} new, {updated} updated")
     # keep the site's download index (counts + cache-busting hashes) in step with data/
     sys.path.insert(0, str(ROOT / "tools"))
+    stamp_exam_fields()
     import build_data_index
     build_data_index.build()
 
@@ -708,6 +736,7 @@ def share(dst):
     print(f"shared: {added} questions of {src} now also in {dst} ({len(exclude)} excluded"
           + (f"; removed from {dst}: {', '.join(removed)}" if removed else "") + ")")
     sys.path.insert(0, str(ROOT / "tools"))
+    stamp_exam_fields()
     import build_data_index
     build_data_index.build()
 
@@ -737,6 +766,11 @@ if __name__ == "__main__":
     elif cmd == "share":
         for e in sys.argv[2:]:
             share(e)
+    elif cmd == "stamp":                     # (re)write examDomain / examTask in every exam file
+        stamp_exam_fields()
+        sys.path.insert(0, str(ROOT / "tools"))
+        import build_data_index
+        build_data_index.build()
     elif cmd in ("check", "ingest"):
         # check --siblings also compares against the not-yet-ingested batch files next to it (parallel writers)
         sib = cmd == "check" and "--siblings" in sys.argv

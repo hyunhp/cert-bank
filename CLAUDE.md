@@ -4,6 +4,12 @@ Static GitHub Pages site with original certification practice questions, grouped
 (AWS, Palantir, Microsoft Azure, Google Cloud, Databricks, HashiCorp). The repo was renamed from `aws_qbank` on 2026-10-14; Pages now serves https://hyunhp.github.io/cert-bank/ and the old address no longer redirects. No build step: `index.html`, `js/*.js`, `data/*.json`, `diagrams/*.json`.
 Explanations live apart from the questions: `data/<EXAM>.json` has none, `data/explanations/<EXAM>.json` is `{id: text}`
 (qgen `load_exam`/`save_exam` merge and split them; the site fetches them on first reveal).
+Shared questions (a question that belongs to several exams, e.g. SAP-C02 -> SAP-C03) sit in every exam file with the PRIMARY
+exam's `domainCode`/`taskId`; the other exams' domain and task come from `data/exam-domains.json` and `data/exam-shared-tasks.json`.
+So `data/SAP-C03.json` has questions whose raw `domainCode: D2` means SAP-C02 "Design for New Solutions", not SAP-C03 "Security".
+qgen therefore stamps `examDomain` and `examTask` (this exam's own values) into every question of every exam file
+(`python3 tools/qgen/qgen.py stamp`; ingest/share run it). Anything that reads the raw files (reports, exports, article
+generators) must group by `examDomain`/`examTask`, never by `domainCode`/`taskId`. `tools/data_scope_test.py` guards it.
 Section filter chips (domain/task, `#exam=X&d=D4&t=T4.1`), per-domain accuracy (localStorage only, not in the bookmark
 backup) and the mock exam "one section only" option read `data/exam-specs.json`, `exam-domains.json` and
 `exam-tasks.json` (English task names; keep it in step with `tools/qgen/tasks.json`).
@@ -78,4 +84,4 @@ answer), stem length. `python3 tools/qgen/length_bias.py <batch>` lists the ques
 - Docs for writers/reviewers: `python3 tools/learn_fetch.py [--grep "<terms>"] <url>` (shared text cache in
   ~/.cache/cert-bank-docs; batches list their pages as `# src: <url>` lines so reviewers reuse them)
 - Tests (all must pass before commit):
-  `node tools/mock_unit_test.mjs && python3 tools/study_test.py && python3 tools/mock_e2e_test.py && python3 tools/mock_link_test.py && python3 tools/bookmark_backup_test.py && python3 tools/loading_perf_test.py && python3 tools/domain_filter_test.py && python3 tools/vendor_tabs_test.py && python3 tools/explain_format_test.py && python3 tools/resume_test.py && python3 tools/support_test.py && python3 tools/diagrams/scroll_ui_test.py && python3 tools/diagrams/check.py && python3 tools/diagrams/site_test.py`
+  `node tools/mock_unit_test.mjs && python3 tools/study_test.py && python3 tools/mock_e2e_test.py && python3 tools/mock_link_test.py && python3 tools/bookmark_backup_test.py && python3 tools/loading_perf_test.py && python3 tools/domain_filter_test.py && python3 tools/vendor_tabs_test.py && python3 tools/explain_format_test.py && python3 tools/data_scope_test.py && python3 tools/resume_test.py && python3 tools/support_test.py && python3 tools/diagrams/scroll_ui_test.py && python3 tools/diagrams/check.py && python3 tools/diagrams/site_test.py`
