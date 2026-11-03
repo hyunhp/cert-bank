@@ -39,7 +39,7 @@ const vendorOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[3];
 const isNewVersion = name => / \(new\)$/.test(name);
 const shortName = name => name.replace(/ – (Associate|Professional|Expert|Specialty)( \(new\))?$/, "");
 const LEVELS = [["foundational", "Foundational"], ["associate", "Associate"], ["professional", "Professional"], ["expert", "Expert"], ["specialty", "Specialty"]];
-let openLevel = null;   // phones: the level group opened by hand (null = the current exam's level)
+let openLevel = null;   // phones: the level group opened by hand (null = the current exam's level, "" = all closed)
 let examOpen = true;   // the exam picker starts unfolded, as in the question bank; picking an exam folds it, a vendor switch unfolds it
 // Exams with a published guide (listed in exams-index.json); all of them if the index is missing.
 const available = () => STUDY_EXAMS.filter(([c]) => !dataIndex || !dataIndex.study || c in dataIndex.study);
@@ -187,7 +187,9 @@ function renderExamRow() {
   $("#examRow").classList.toggle("multi", levels.length > 1);
   $("#examRow").innerHTML = levels.map(([l, label]) => {
     const list = exams.filter(e => e[2] === l);
-    const open = levels.length < 2 || l === (openLevel || levelOfExam(current.exam)) || (!levels.some(([x]) => x === levelOfExam(current.exam)) && l === levels[0][0]);
+    const want = openLevel === null ? levelOfExam(current.exam) : openLevel;
+    const cur = openLevel === "" ? "" : levels.some(([x]) => x === want) ? want : levels[0][0];
+    const open = levels.length < 2 || l === cur;
     return `<div class="lvlgroup${open ? " open" : ""}" role="group" aria-label="${label}">${levels.length > 1 ? `<button class="lvlhead" type="button" data-level="${l}" aria-expanded="${open}"><span>${label}</span><span class="cnt">${list.length}</span><span class="chev" aria-hidden="true">▾</span></button>` : ""}<div class="lvlchips">${list.map(chipHtml).join("")}</div></div>`;
   }).join("");
   const cur = STUDY_EXAMS.find(([c]) => c === current.exam);
@@ -345,7 +347,7 @@ document.addEventListener("click", e => {
   if (pop.btn && t !== pop.btn) hideTerm();
   if (!t) return;
   if (t.classList.contains("term")) return pop.btn === t && pop.pinned ? hideTerm() : showTerm(t, true);
-  if (t.classList.contains("lvlhead")) { openLevel = t.dataset.level; return renderExamRow(); }
+  if (t.classList.contains("lvlhead")) { openLevel = t.getAttribute("aria-expanded") === "true" ? "" : t.dataset.level; return renderExamRow(); }
   if (t.dataset.exam) { examOpen = false; openLevel = null; renderExamRow(); return go(t.dataset.exam, null); }
   if (t.dataset.vendor) { current.vendor = t.dataset.vendor; examOpen = true; openLevel = null; return renderExamRow(); }
   if (t.id === "examToggle") { examOpen = !examOpen; return renderExamRow(); }

@@ -58,6 +58,10 @@ with sync_playwright() as p:
     pg.click(".lvlhead[data-level='specialty']")
     check("phone: heading opens its level and closes the other", pg.is_visible("#chipRow .chip[data-code='SCS-C03']") and not pg.is_visible("#chipRow .chip[data-code='SAA-C03']"))
     check("chip shows exam name", "Advanced Networking" in pg.inner_text("#chipRow"))
+    pg.click(".lvlhead[data-level='specialty']")
+    check("phone: tapping the open level again closes it", pg.locator("#chipRow .chip:visible").count() == 0 and pg.get_attribute(".lvlhead[data-level='specialty']", "aria-expanded") == "false")
+    pg.click(".lvlhead[data-level='specialty']")
+    check("phone: and a third tap opens it again", pg.is_visible("#chipRow .chip[data-code='SCS-C03']"))
     # Picking a chip folds the picker to a one-line summary; the head reopens it.
     pg.click("#chipRow .chip[data-code='SCS-C03']"); pg.wait_for_function("location.hash === '#exam=SCS-C03'")
     check("picker folds after a pick", pg.get_attribute("#examToggle", "aria-expanded") == "false" and not pg.is_visible("#chipRow"))
