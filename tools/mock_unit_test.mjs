@@ -77,20 +77,25 @@ ok("allocate caps by supply and redistributes", a.D1 === 2 && a.D2 === 8, JSON.s
   ok("99% is still pass-ready with the margin note", verdictFor(sp, 99).label === "Pass-ready" && /comfortable margin/.test(verdictFor(sp, 99).note));
   ok("perfect score never says 80%+ on first attempts", !/\d+%\+/.test(verdictFor(sp, 100, "full").note));
 }
-// readiness: 3 full timed exams in a row at the target, mostly unseen, finished in time, and every domain 70%+
+// readiness: 3 full timed exams in a row at the target, mostly unseen, finished in time, and 70%+ in every domain of each exam
 {
   const sp = { level: "associate", domains: [{ code: "D1", name: "a", weight: 50 }, { code: "D2", name: "b", weight: 50 }] };
   const run = (pct, o = {}) => ({ exam: "X", mode: "full", domain: null, timed: true, auto: false, fresh: 65, total: 65, correct: Math.round(65 * pct / 100), dom: { D1: [pct, 100], D2: [pct, 100] }, ...o });
   ok("target: associate 80, professional 85, percent pass mark +10", targetPct(sp) === 80 && targetPct({ level: "professional" }) === 85 && targetPct({ passingPct: 70 }) === 80);
-  ok("no history is not ready", !readiness(sp, []).ready && readiness(sp, []).streak === 0);
+  ok("no history is not ready", !readiness(sp, []).ready && readiness(sp, []).scoreStreak === 0);
   ok("three qualifying exams are ready", readiness(sp, [run(82), run(85), run(81)]).ready);
-  ok("two are not enough", readiness(sp, [run(82), run(85)]).streak === 2 && !readiness(sp, [run(82), run(85)]).ready);
-  ok("a latest exam below target breaks the streak", readiness(sp, [run(85), run(85), run(70)]).streak === 0);
-  ok("running out of time does not count", readiness(sp, [run(85), run(85), run(85, { auto: true })]).streak === 0);
-  ok("untimed does not count", readiness(sp, [run(85), run(85), run(85, { timed: false })]).streak === 0);
-  ok("mostly repeated questions do not count", readiness(sp, [run(85), run(85), run(85, { fresh: 20 })]).streak === 0);
+  ok("two are not enough", readiness(sp, [run(82), run(85)]).scoreStreak === 2 && !readiness(sp, [run(82), run(85)]).ready);
+  ok("a latest exam below target breaks the score streak", readiness(sp, [run(85), run(85), run(70)]).scoreStreak === 0);
+  ok("running out of time does not count", readiness(sp, [run(85), run(85), run(85, { auto: true })]).scoreStreak === 0);
+  ok("untimed does not count", readiness(sp, [run(85), run(85), run(85, { timed: false })]).scoreStreak === 0);
+  ok("mostly repeated questions do not count", readiness(sp, [run(85), run(85), run(85, { fresh: 20 })]).scoreStreak === 0);
   ok("unknown freshness (older history) still counts", readiness(sp, [run(85), run(85), run(85, { fresh: undefined })]).ready);
-  ok("a weak domain blocks readiness", !readiness(sp, [run(85, { dom: { D1: [95, 100], D2: [20, 100] } }), run(85), run(85)]).ready);
+  // the 70% floor is per exam: one weak domain in one exam blocks readiness even if the three exams average above 70
+  const weakRun = run(85, { dom: { D1: [95, 100], D2: [50, 100] } });
+  const rw = readiness(sp, [weakRun, run(85), run(85)]);
+  ok("a weak domain in one exam blocks readiness", !rw.ready && rw.scoreStreak === 3 && rw.domStreak === 2, JSON.stringify([rw.scoreStreak, rw.domStreak]));
+  ok("the weak domain is named for that exam", rw.runs[0].weak.length === 1 && rw.runs[0].weak[0].code === "D2" && rw.runs[0].weak[0].pct === 50);
+  ok("a weak domain in the latest exam resets the domain streak", readiness(sp, [run(85), run(85), weakRun]).domStreak === 0);
   ok("short practice and section drills are ignored", readiness(sp, [run(85), run(85), run(85), run(10, { mode: "short" }), run(10, { domain: "D1" })]).ready);
 }
 // the shuffle is uniform: each of 4 items lands in each slot about 1/4 of the time

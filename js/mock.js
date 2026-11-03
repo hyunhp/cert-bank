@@ -150,31 +150,31 @@ export function verdictFor(spec, pct, mode) {
   return { key: "work", label: "Needs work", note: `Focus on the weakest domains below, then retake.` };
 }
 
-// Readiness: the latest READY_RUNS full exams must each be timed, finished in time, drawn mostly from questions not seen before,
-// and score at least the target; and every domain must reach DOMAIN_FLOOR% across those exams. Short practice and section drills do not count.
+// Readiness: each of the latest READY_RUNS full exams must be timed, finished in time, drawn mostly from questions not seen
+// before, reach the target score, and reach DOMAIN_FLOOR% in every domain (checked per exam, not summed).
+// Short practice and section drills do not count.
 export const READY_RUNS = 3, DOMAIN_FLOOR = 70, FRESH_MIN = 0.8;
 export function readiness(spec, hist) {
   const target = targetPct(spec);
   const pctOf = h => Math.round((h.correct / h.total) * 100);
-  const runs = hist.filter(h => h.mode === "full" && !h.domain).slice(-READY_RUNS);
-  const why = h => !h.timed ? "untimed" : h.auto ? "ran out of time"
-    : (h.fresh != null && h.fresh / h.total < FRESH_MIN) ? "mostly repeated questions" : pctOf(h) < target ? "below target" : null;
-  let streak = 0;
-  for (let i = runs.length - 1; i >= 0; i--) { if (why(runs[i])) break; streak++; }
-  const sums = {};
-  runs.forEach(h => Object.entries(h.dom || {}).forEach(([k, v]) => { const t = sums[k] || (sums[k] = [0, 0]); t[0] += v[0]; t[1] += v[1]; }));
-  const domains = spec.domains.map(d => { const [c, t] = sums[d.code] || [0, 0]; const p = t ? Math.round((c / t) * 100) : null; return { code: d.code, name: d.name, pct: p, ok: p !== null && p >= DOMAIN_FLOOR }; });
-  const domainsOk = runs.length > 0 && domains.every(d => d.ok);
-  return { target, need: READY_RUNS, floor: DOMAIN_FLOOR, streak, runs: runs.map(h => ({ pct: pctOf(h), why: why(h) })), domains, domainsOk, ready: streak >= READY_RUNS && domainsOk };
+  const runs = hist.filter(h => h.mode === "full" && !h.domain).slice(-READY_RUNS).map(h => {
+    const weak = spec.domains.map(d => { const v = (h.dom || {})[d.code]; return v && v[1] ? { code: d.code, pct: Math.round((v[0] / v[1]) * 100) } : null; })
+      .filter(d => d && d.pct < DOMAIN_FLOOR);
+    const why = !h.timed ? "untimed" : h.auto ? "ran out of time" : (h.fresh != null && h.fresh / h.total < FRESH_MIN) ? "mostly repeated questions" : null;
+    return { pct: pctOf(h), why, scoreOk: !why && pctOf(h) >= target, domOk: !why && weak.length === 0, weak };
+  });
+  const streak = key => { let n = 0; for (let i = runs.length - 1; i >= 0 && runs[i][key]; i--) n++; return n; };
+  const scoreStreak = streak("scoreOk"), domStreak = streak("domOk");
+  return { target, need: READY_RUNS, floor: DOMAIN_FLOOR, scoreStreak, domStreak, runs, ready: scoreStreak >= READY_RUNS && domStreak >= READY_RUNS };
 }
 function readinessHTML(r, exam) {
   const li = (ok, main, sub) => `<li class="${ok ? "ok" : ""}"><span class="mark" aria-hidden="true">${ok ? "✓" : "○"}</span><div>${main}${sub ? `<div class="meta">${sub}</div>` : ""}</div></li>`;
-  const latest = r.runs.length ? "Latest: " + r.runs.map(x => `${x.pct}%${x.why ? ` (${x.why})` : ""}`).join(" · ") : "No full exam yet.";
-  const low = r.domains.filter(d => !d.ok).map(d => `${d.code} ${d.pct === null ? "–" : d.pct + "%"}`);
+  const score = r.runs.length ? "Latest: " + r.runs.map(x => `${x.pct}%${x.why ? ` (${x.why})` : x.scoreOk ? "" : " (below target)"}`).join(" · ") : "No full exam yet.";
+  const dom = r.runs.length ? "Latest: " + r.runs.map(x => x.why ? `(${x.why})` : x.weak.length ? x.weak.map(d => `${d.code} ${d.pct}%`).join(", ") : "✓").join(" · ") : "";
   return `<div class="panel readiness"><div class="dhead"><b>Exam readiness · ${esc(exam)}</b><span class="meta ${r.ready ? "v-ready" : ""}">${r.ready ? "Ready to book" : "Not yet"}</span></div>
     <ul class="rdy">
-      ${li(r.streak >= r.need, `${r.target}%+ on ${r.need} full exams in a row <b>${r.streak}/${r.need}</b>`, latest)}
-      ${li(r.domainsOk, `Every domain ${r.floor}%+ across those exams`, r.runs.length && low.length ? "Below: " + low.join(" · ") : "")}
+      ${li(r.scoreStreak >= r.need, `${r.target}%+ on ${r.need} full exams in a row <b>${r.scoreStreak}/${r.need}</b>`, score)}
+      ${li(r.domStreak >= r.need, `Every domain ${r.floor}%+ in each of those exams <b>${r.domStreak}/${r.need}</b>`, dom)}
     </ul>
     <div class="meta">Counts full timed exams finished in time with mostly unseen questions. Short practice and section drills do not count.</div></div>`;
 }
@@ -266,6 +266,8 @@ function injectStyles() {
 .mk p.meta{margin:4px 0}
 .mk .passnote{font-size:.78rem;padding-top:6px;border-top:1px solid var(--line);margin-top:8px}
 .mk .dhead{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
+.mk .delhist{font:inherit;font-size:1.1rem;line-height:1;color:var(--muted);background:none;border:none;cursor:pointer;padding:2px 8px;border-radius:6px}
+@media (hover:hover){.mk .delhist:hover{color:var(--bad);background:var(--bad-bg)}}
 .mk .rdy{list-style:none;margin:8px 0;padding:0}
 .mk .rdy li{display:flex;gap:10px;margin:10px 0;font-size:.9rem}
 .mk .rdy .mark{flex:none;width:22px;height:22px;border-radius:50%;border:1px solid var(--line);display:grid;place-items:center;font-size:.78rem;color:var(--muted)}
@@ -523,15 +525,19 @@ async function renderSetup(extra) {
     </div>
     ${readinessHTML(readiness(spec, loadHistory().filter(h => h.exam === setupExam)), setupExam)}
     <div class="panel"><b>Recent attempts · ${setupExam}</b>
-      ${hist.length ? `<table><tr><th>Date</th><th>Mode</th><th>Score</th><th>Result</th></tr>${hist.map(h => {
+      ${hist.length ? `<table><tr><th>Date</th><th>Mode</th><th>Score</th><th>Result</th><th></th></tr>${hist.map(h => {
         const pct = Math.round((h.correct / h.total) * 100); const v = verdictFor(spec, pct);
-        return `<tr><td>${new Date(h.at).toLocaleDateString()}</td><td>${h.mode === "short" ? "Short" : "Full"}${h.domain ? " · " + esc(h.domain) : ""}</td><td>${h.correct}/${h.total} (${pct}%)</td><td class="v-${v.key}">${v.label}</td></tr>`;
+        return `<tr><td>${new Date(h.at).toLocaleDateString()}</td><td>${h.mode === "short" ? "Short" : "Full"}${h.domain ? " · " + esc(h.domain) : ""}</td><td>${h.correct}/${h.total} (${pct}%)</td><td class="v-${v.key}">${v.label}</td><td><button class="delhist" data-delhist="${h.at}" type="button" aria-label="Remove this attempt from the history" title="Remove this attempt">×</button></td></tr>`;
       }).join("")}</table>` : `<div class="meta">No attempts yet.</div>`}
     </div></div>`;
   root.onclick = async (e) => {
-    const t = e.target.closest("[data-act],.mode[data-mode]");   // not the root itself: it carries data-mode too
+    const t = e.target.closest("[data-act],.mode[data-mode],[data-delhist]");   // not the root itself: it carries data-mode too
     if (!t) return;
     if (t.dataset.mode) { renderSetup({ mode: t.dataset.mode }); return; }
+    if (t.dataset.delhist) {   // drop one attempt, e.g. an exam that was only set up and never taken
+      if (window.confirm("Remove this attempt from your history?")) { save(KEY_HISTORY, loadHistory().filter(h => !(h.exam === setupExam && String(h.at) === t.dataset.delhist))); renderSetup(); }
+      return;
+    }
     const act = t.dataset.act;
     if (act === "exit") exit();
     else if (act === "start") startExam(root.dataset.mode, root.querySelector("#mkTimed").checked);
