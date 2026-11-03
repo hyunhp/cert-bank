@@ -153,6 +153,16 @@ with sync_playwright() as p:
     ok("removing it restores the streak and readiness", "Ready to book" in pg.inner_text(".readiness") and pg.inner_text(".readiness").count("3/3") == 2, pg.inner_text(".readiness")[:240])
     ctx.close()
 
+    # an exam submitted without answering is not saved: no history row, no seen questions
+    ctx = b.new_context(viewport={"width": 900, "height": 900})
+    pg = ctx.new_page(); pg.route("**/fonts.googleapis.com/**", lambda r: r.abort())
+    pg.goto(BASE + "#mock=DEA-C01"); pg.wait_for_selector("#mkExam")
+    pg.click('[data-mode="short"]'); pg.click('[data-act="start"]'); pg.wait_for_selector(".mkbar")
+    pg.click('[data-act="grid"]'); pg.click('[data-act="ask"]'); pg.click('[data-act="submit"]'); pg.wait_for_selector("#mockRoot .score")
+    ok("an empty attempt says it was not saved", "Not saved" in pg.inner_text(".mk"))
+    ok("an empty attempt leaves no history or seen questions", pg.evaluate("localStorage.getItem('aws_qbank_mock_history_v1')") is None and pg.evaluate("localStorage.getItem('aws_qbank_mock_seen_v1')") is None)
+    ctx.close()
+
     # dark mode + desktop screenshot of exam screen
     ctx = b.new_context(color_scheme="dark", viewport={"width": 900, "height": 900})
     pg = ctx.new_page(); pg.route("**/fonts.googleapis.com/**", lambda r: r.abort())
