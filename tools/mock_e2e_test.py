@@ -70,6 +70,7 @@ with sync_playwright() as p:
     dom_total = sum(int(t.split("/")[1].split(" ")[0]) for t in pg.locator(".dom .top span:last-child").all_inner_texts() if "/" in t)
     ok("domain totals add up to 20", dom_total == 20, dom_total)
     ok("active state cleared", state(pg) is None)
+    ok("results offer a weakest-domain shortcut", pg.locator("[data-practice]").count() == 1)
     pg.click('[data-review="incorrect"]'); pg.wait_for_selector(".rv")
     ok("review incorrect lists 8", pg.locator(".rv").count() == 8)
     ok("review shows explanation + answer", pg.locator(".rv .ans-line").count() == 8)
@@ -85,6 +86,8 @@ with sync_playwright() as p:
     ok("review flagged lists 2", pg.locator(".rv").count() == 2)
     pg.click('[data-filter="all"]')
     ok("review all lists 20", pg.locator(".rv").count() == 20)
+    ok("review: wrong answers keep the explanation open, correct ones are collapsed", pg.locator("details.rvexp[open]").count() == 8 and pg.locator("details.rvexp").count() == 20)
+    ok("review shows the domain of each question", pg.locator(".rv .rvdom").count() == 20)
     # diagram inside review for a drawn question that has one
     ids = set(json.load(open(ROOT + "/diagrams/index.json", encoding="utf-8"))["ids"])
     with_diag = [q for q in st["ids"] if q in ids]
@@ -127,6 +130,10 @@ with sync_playwright() as p:
     pg.reload(); pg.wait_for_selector("#mockRoot .score", timeout=8000)
     ok("timer auto-submits", "submitted automatically" in pg.inner_text(".mk"))
     ok("multi answer scored correct (1/2)", "1 of 2 correct" in pg.inner_text(".mk"))
+    if pg.locator("[data-practice]").count():
+        dcode = pg.get_attribute("[data-practice]", "data-practice")
+        pg.click("[data-practice]"); pg.wait_for_function(f"location.hash.includes('d={dcode}')", timeout=8000)
+        ok("practice shortcut opens the bank on that section", pg.evaluate("document.getElementById('mockRoot').hidden") and pg.locator("#domainRow .fchip.active[data-d='%s']" % dcode).count() == 1, pg.evaluate("location.hash"))
     ok("no page errors", not errs, errs)
     ctx.close()
 

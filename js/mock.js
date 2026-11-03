@@ -235,7 +235,9 @@ function injectStyles() {
 .mk .rvlabel{font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;font-weight:600;color:var(--muted);margin:14px 0 6px 2px}
 .mk .btn.ghost.emph{border-color:var(--accent);color:var(--accent-ink);background:var(--accent-bg)}
 .mk .dom{margin:8px 0}
-.mk .dom .top{display:flex;justify-content:space-between;font-size:.84rem;gap:8px}
+.mk .dom .top{display:flex;justify-content:space-between;align-items:flex-start;font-size:.84rem;gap:8px}
+.mk .dom .top span:last-child{white-space:nowrap;flex:none}
+.mk .practice{margin-top:10px;font-weight:600}
 .mk .dom .bar{height:7px;border-radius:4px;background:var(--surface-2);overflow:hidden;margin-top:4px}
 .mk .dom .fill{height:100%;background:var(--accent)}
 .mk .dom.weak .fill{background:var(--bad)}
@@ -244,6 +246,8 @@ function injectStyles() {
 .mk .tab.on{border-color:var(--accent);color:var(--accent-ink);background:var(--accent-bg)}
 .mk .rv{margin-bottom:12px}
 .mk .rvhead{display:flex;align-items:center;gap:8px;font-size:.8rem;color:var(--muted);margin-bottom:8px}
+.mk .rvdom{font-family:"IBM Plex Mono","IBM Plex Sans KR",monospace;font-size:.72rem;padding:1px 6px;border-radius:5px;background:var(--surface-2);color:var(--muted)}
+.mk .rvexp summary{cursor:pointer;font-size:.85rem;font-weight:600;color:var(--accent-ink);margin:8px 0}
 .mk .yours{font-size:.75rem;font-weight:600;color:var(--muted);white-space:nowrap}
 .mk .rvhead .ok{color:var(--good);font-weight:700} .mk .rvhead .no{color:var(--bad);font-weight:700}
 @media (max-width:480px){.mk .modes{grid-template-columns:1fr}}
@@ -318,10 +322,10 @@ async function validActive(active) {
   return active;
 }
 
-function exit() {
+function exit(extra) {
   stopTicking();
   const ex = (state && state.exam) || setupExam;
-  if (onExit) onExit(ex);
+  if (onExit) onExit(ex, extra);
 }
 
 function persist() { if (state && !state.submitted) save(KEY_ACTIVE, state); }
@@ -585,6 +589,8 @@ function renderResults() {
   const v = verdictFor(spec, pct);
   const wrong = total - correct;
   const nflag = state.flags.length;
+  const scored = spec.domains.map(d => ({ code: d.code, c: (dom[d.code] || [0, 0])[0], t: (dom[d.code] || [0, 0])[1] })).filter(d => d.t > 0 && d.c / d.t < 0.7);
+  const worst = scored.sort((a, b) => a.c / a.t - b.c / b.t)[0];
   root.innerHTML = `<div class="mk">
     <button class="linkbtn" data-act="exit">← Question bank</button>
     <h2>${state.exam} · ${state.mode === "short" ? "Short practice" : "Full mock exam"}</h2>
@@ -600,6 +606,7 @@ function renderResults() {
         const [c, t] = dom[d.code] || [0, 0]; const p = t ? Math.round((c / t) * 100) : null;
         return `<div class="dom${p !== null && p < 70 ? " weak" : ""}"><div class="top"><span>${d.code} ${esc(d.name)}</span><span>${t ? `${c}/${t} · ${p}%` : "—"}</span></div><div class="bar"><div class="fill" style="width:${p || 0}%"></div></div></div>`;
       }).join("")}
+      ${worst ? `<button class="linkbtn practice" data-practice="${worst.code}" type="button">Practice ${worst.code} (weakest) in the question bank →</button>` : ""}
     </div>
     <div class="rvlabel">Review answers</div>
     <div class="btnrow reviewrow">
@@ -613,6 +620,8 @@ function renderResults() {
       : `Found this useful? Support is optional, and all questions stay free. <a href="support.html">☕ Support this site</a>`}</p>
   </div>`;
   root.onclick = (e) => {
+    const pr = e.target.closest("[data-practice]");
+    if (pr) return exit({ domain: pr.dataset.practice });
     const r = e.target.closest("[data-review]");
     if (r && !r.disabled) { reviewFilter = r.dataset.review; view = "review"; render(); window.scrollTo(0, 0); return; }
     const t = e.target.closest("[data-act]");
@@ -643,7 +652,7 @@ async function renderReview() {
       const letters = state.order[id].map((k, j) => want.has(k) ? LETTERS[j] : null).filter(Boolean).join(", ");
       const bm = qb.isBookmarked(id);
       return `<div class="qcard rv" data-qid="${esc(id)}">
-        <div class="rvhead"><span>#${i + 1}</span><span class="mono">${esc(id)}</span><span class="${ok ? "ok" : "no"}">${ok ? "✓ Correct" : got.size ? "✗ Incorrect" : "✗ Unanswered"}</span>${state.flags.includes(id) ? "<span>⚑ flagged</span>" : ""}
+        <div class="rvhead"><span>#${i + 1}</span><span class="mono">${esc(id)}</span><span class="${ok ? "ok" : "no"}">${ok ? "✓ Correct" : got.size ? "✗ Incorrect" : "✗ Unanswered"}</span><span class="rvdom">${esc(domainOf(q, state.exam, domainMap))}</span>${state.flags.includes(id) ? "<span>⚑ flagged</span>" : ""}
           <button class="bookmark-btn${bm ? " active" : ""}" data-bm="${esc(id)}" type="button" aria-label="Bookmark this question">${bm ? "★" : "☆"}</button></div>
         <div class="stem">${esc(q.stem)}</div>
         <div class="choices">${state.order[id].map((k, j) => {
@@ -651,7 +660,8 @@ async function renderReview() {
           const cls = want.has(k) ? "correct" : got.has(k) ? "incorrect" : "dim";
           return `<div class="choice locked ${cls}${got.has(k) ? " picked" : ""}"><span class="bubble"></span><span><span class="key">${LETTERS[j]}.</span> ${esc(c ? c.text : "")}${got.has(k) ? ' <span class="yours">· your answer</span>' : ""}</span></div>`;
         }).join("")}</div>
-        <div class="explain show ${ok ? "" : "wrong"}" id="mk-explain-${esc(id)}"><div class="ans-line">Answer: ${letters}</div>${qb.explainHtml ? qb.explainHtml(q.explanation, Object.fromEntries(state.order[id].map((k, j) => [k, LETTERS[j]]))) : `<div class="exp-body">${esc(q.explanation)}</div>`}</div>
+        <details class="rvexp"${ok ? "" : " open"}><summary>${ok ? "Show explanation" : "Explanation"}</summary>
+        <div class="explain show ${ok ? "" : "wrong"}" id="mk-explain-${esc(id)}"><div class="ans-line">Answer: ${letters}</div>${qb.explainHtml ? qb.explainHtml(q.explanation, Object.fromEntries(state.order[id].map((k, j) => [k, LETTERS[j]]))) : `<div class="exp-body">${esc(q.explanation)}</div>`}</div></details>
         <div class="remarks"><span class="tags">#${i + 1} · ${esc(id)}</span>
           <button class="bookmark-foot${bm ? " active" : ""}" data-bm="${esc(id)}" type="button" aria-label="Bookmark this question" title="Bookmark this question">${bm ? "★" : "☆"}</button></div>
       </div>`;
