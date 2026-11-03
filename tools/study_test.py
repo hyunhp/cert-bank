@@ -105,8 +105,18 @@ with sync_playwright() as p:
     check("wrong pick marked", "incorrect" in (first.locator(".choice").nth(wrong).get_attribute("class") or ""))
     check("right answer shown", "correct" in (first.locator(".choice").nth(q["answer"]).get_attribute("class") or "").split())
     check("explanation shown", q["explain"][:40] in first.inner_text())
+    check("quiz progress line after one answer", "1 of %d answered" % len(saa["days"][2]["quiz"]) in pg.inner_text("#quizSum") if len(saa["days"][2]["quiz"]) > 1 else True, pg.inner_text("#quizSum"))
+    check("wrong answer carries a cross mark", pg.eval_on_selector(".quiz-q .choice.incorrect", "e => getComputedStyle(e, '::after').content") == '"✗"')
     first.locator(".retry").click()
     check("retry resets", first.locator(".choice:disabled").count() == 0)
+    check("retry clears the progress line", pg.inner_text("#quizSum") == "")
+    for qi, qq in enumerate(saa["days"][2]["quiz"]):
+        pg.locator(".quiz-q").nth(qi).locator(".choice").nth(qq["answer"]).click()
+    check("all correct: result line", "correct. Nice" in pg.inner_text("#quizSum") and "allright" in pg.get_attribute("#quizSum", "class"), pg.inner_text("#quizSum"))
+    first.locator(".retry").click()
+    first.locator(".choice").nth(wrong).click()
+    check("some wrong: result line says to reread", "Reread the concepts" in pg.inner_text("#quizSum"), pg.inner_text("#quizSum"))
+    first.locator(".retry").click()
 
     pg.click("#doneBtn")
     check("marked studied", pg.get_attribute("#doneBtn", "aria-pressed") == "true")

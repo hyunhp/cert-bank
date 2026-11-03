@@ -216,7 +216,20 @@ function dayListHTML(guide, progress) {
 function quizHTML(quiz) {
   return quiz.map((q, qi) => `<div class="quiz-q" data-q="${qi}"><p class="q">${qi + 1}. ${text(q.q)}</p>` +
     q.choices.map((c, ci) => `<button class="choice" data-c="${ci}"><span class="k">${"ABCDE"[ci]}</span><span>${text(c)}</span></button>`).join("") +
-    `<div class="explain-slot"></div></div>`).join("");
+    `<div class="explain-slot"></div></div>`).join("") + `<div class="quizsum" id="quizSum" aria-live="polite"></div>`;
+}
+// One line under the quiz: progress while answering, the result once every question has an answer.
+function updateQuizSummary() {
+  const el = $("#quizSum");
+  if (!el) return;
+  const qs = [...document.querySelectorAll(".quiz-q")];
+  const done = qs.filter(q => q.querySelector(".choice:disabled"));
+  const right = done.filter(q => q.querySelector(".explain:not(.wrong)")).length;
+  el.className = "quizsum" + (done.length === qs.length && qs.length ? (right === qs.length ? " allright" : " some") : "");
+  el.textContent = !done.length ? ""
+    : done.length < qs.length ? `${done.length} of ${qs.length} answered`
+    : right === qs.length ? `${right} of ${qs.length} correct. Nice: mark this day as studied.`
+    : `${right} of ${qs.length} correct. Reread the concepts above for the ones you missed, then try again.`;
 }
 
 function renderDay() {
@@ -274,6 +287,7 @@ function answer(qEl, picked) {
   });
   qEl.querySelector(".explain-slot").innerHTML =
     `<div class="explain${ok ? "" : " wrong"}"><b>${ok ? "Correct" : "Not quite — answer: " + "ABCDE"[q.answer]}</b>${text(q.explain)}</div><button class="retry">Try again</button>`;
+  updateQuizSummary();
 }
 
 async function show(exam, day) {
@@ -370,6 +384,7 @@ document.addEventListener("click", e => {
   if (qEl && t.classList.contains("retry")) {
     qEl.querySelectorAll(".choice").forEach(b => { b.disabled = false; b.classList.remove("correct", "incorrect", "dim"); });
     qEl.querySelector(".explain-slot").innerHTML = "";
+    updateQuizSummary();
   }
 });
 
