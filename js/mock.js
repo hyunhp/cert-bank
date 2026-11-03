@@ -135,11 +135,12 @@ function timeFor(spec, n) { return Math.ceil((spec.minutes * n) / spec.questions
 // Practice targets sit a margin above the official pass mark: AWS scaled scores are not percentages, so
 // AWS and Azure (scaled 700/1000 or more) use 80% (Foundational/Associate) or 85% (Professional/Expert/Specialty); vendors that publish a percent
 // pass mark (Palantir: 70%) use that mark + 10. Google Cloud publishes no pass mark (pass/fail only): same 80/85% targets.
-function verdictFor(spec, pct) {
+export function verdictFor(spec, pct, mode) {
   const level = spec && spec.level;
   const hi = (spec && spec.passingPct) ? Math.min(100, spec.passingPct + 10)
     : (level === "professional" || level === "expert" || level === "specialty") ? 85 : 80;
   const mid = (spec && spec.passingPct) ? spec.passingPct : hi - 10;
+  if (pct === 100) return { key: "ready", label: "Perfect score", note: mode === "short" ? "Every question correct. Try a full exam or another section to keep testing yourself." : "Every question correct. Keep the edge with questions you have not seen yet." };
   if (pct >= hi) return { key: "ready", label: "Pass-ready", note: `${hi}%+ on first attempts is a comfortable margin.` };
   if (pct >= mid) return { key: "border", label: "Borderline", note: `Aim for ${hi}%+ before booking the exam.` };
   return { key: "work", label: "Needs work", note: `Focus on the weakest domains below, then retake.` };
@@ -586,7 +587,7 @@ function renderResults() {
   const spec = specs[state.exam];
   const { correct, total, dom, used } = state.summary;
   const pct = total ? Math.round((correct / total) * 100) : 0;
-  const v = verdictFor(spec, pct);
+  const v = verdictFor(spec, pct, state.mode);
   const wrong = total - correct;
   const nflag = state.flags.length;
   const scored = spec.domains.map(d => ({ code: d.code, c: (dom[d.code] || [0, 0])[0], t: (dom[d.code] || [0, 0])[1] })).filter(d => d.t > 0 && d.c / d.t < 0.7);
