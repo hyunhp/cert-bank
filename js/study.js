@@ -35,6 +35,7 @@ const STUDY_EXAMS = [
 ].map(([code, name, level, vendor]) => [code, name, level, vendor || "aws"]);
 const VENDORS = [["aws", "AWS"], ["palantir", "Palantir"], ["azure", "Azure"], ["gcp", "Google Cloud", "GCP"], ["databricks", "Databricks"], ["hashicorp", "HashiCorp"]];   // [id, name, short name on phones]
 const levelOfExam = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[2];
+const nf = n => Number(n).toLocaleString("en-US");
 const vendorOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[3];
 const isNewVersion = name => / \(new\)$/.test(name);
 const shortName = name => name.replace(/ – (Associate|Professional|Expert|Specialty)( \(new\))?$/, "");
@@ -173,7 +174,7 @@ function renderExamRow() {
   const vendors = VENDORS.filter(([v]) => all.some(e => e[3] === v));
   $("#vendorRow").hidden = vendors.length < 2;
   $("#vendorRow").innerHTML = vendors.map(([v, label, short]) =>
-    `<button class="vtab" role="tab" aria-selected="${v === vendor}" data-vendor="${v}"${short ? ` title="${label}"` : ""}>${short ? `<span class="vname">${label}</span><span class="vshort">${short}</span>` : label}<span class="cnt">${all.filter(e => e[3] === v).length}</span></button>`).join("");
+    `<button class="vtab" role="tab" aria-selected="${v === vendor}" data-vendor="${v}"${short ? ` title="${label}"` : ""}>${short ? `<span class="vname">${label}</span><span class="vshort">${short}</span>` : label}<span class="cnt">${nf(all.filter(e => e[3] === v).length)}</span></button>`).join("");
   const vrow = $("#vendorRow");
   const fade = () => {
     vrow.classList.toggle("fade-l", vrow.scrollLeft > 4);
@@ -190,7 +191,7 @@ function renderExamRow() {
     const want = openLevel === null ? levelOfExam(current.exam) : openLevel;
     const cur = openLevel === "" ? "" : levels.some(([x]) => x === want) ? want : levels[0][0];
     const open = levels.length < 2 || l === cur;
-    return `<div class="lvlgroup${open ? " open" : ""}" role="group" aria-label="${label}">${levels.length > 1 ? `<button class="lvlhead" type="button" data-level="${l}" aria-expanded="${open}"><span>${label}</span><span class="cnt">${list.length}</span><span class="chev" aria-hidden="true">▾</span></button>` : ""}<div class="lvlchips">${list.map(chipHtml).join("")}</div></div>`;
+    return `<div class="lvlgroup${open ? " open" : ""}" role="group" aria-label="${label}">${levels.length > 1 ? `<button class="lvlhead" type="button" data-level="${l}" aria-expanded="${open}"><span>${label}</span><span class="cnt">${nf(list.length)}</span><span class="chev" aria-hidden="true">▾</span></button>` : ""}<div class="lvlchips">${list.map(chipHtml).join("")}</div></div>`;
   }).join("");
   const cur = STUDY_EXAMS.find(([c]) => c === current.exam);
   $("#examSum").innerHTML = cur

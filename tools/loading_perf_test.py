@@ -35,7 +35,7 @@ with sync_playwright() as p:
     check("first visit loads one exam file", len(exam_files) == 1 and "SAA-C03" in exam_files[0], exam_files)
     check("index loaded", any("exams-index.json" in u for u in data_reqs), data_reqs)
     check("versioned exam URL", exam_files and exam_files[0].endswith("?v=" + index["exams"]["SAA-C03"]["v"]), exam_files)
-    check("stats from index", pg.inner_text("#statTotal").strip() == str(index["totalUnique"]), pg.inner_text("#statTotal"))
+    check("stats from index", pg.inner_text("#statTotal").strip() == f"{index['totalUnique']:,}", pg.inner_text("#statTotal"))
     check("chip counts from index", str(index["exams"]["SAA-C03"]["count"]) in pg.inner_text("#chipRow"))
 
     # bookmark something from another exam, then open Bookmarks in a fresh page

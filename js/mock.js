@@ -53,6 +53,7 @@ export function resetAllMockData() { [KEY_ACTIVE, KEY_HISTORY, KEY_SEEN, KEY_REC
 // ---------- helpers ----------
 const esc = (s) => (s == null ? "" : String(s)).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const LETTERS = "ABCDEFGH";
+const nf = (n) => Number(n).toLocaleString("en-US");
 // Uniform integer in [0, n) from the browser's crypto source (rejection sampling, so no modulo bias); Math.random only as a fallback.
 function randInt(n) {
   const c = globalThis.crypto;
@@ -471,7 +472,7 @@ async function renderSetup(extra) {
         <button class="mode${mode === "short" ? " on" : ""}" data-mode="short" type="button"><b>Short practice</b><span>${shortN} questions · ${Math.round(timeFor(spec, shortN) / 60)} min</span></button>
       </div>
       <label class="row"><input type="checkbox" id="mkTimed"${setupTimed ? " checked" : ""}> Timer (auto-submits at 0:00)</label>
-      <div class="meta">Pool: ${pool.length} questions${setupDomain ? " in this section" : ""} · ${unseen} not yet seen in mock exams · ${passMarkMeta(spec)}${setupDomain ? " (whole exam)" : ""}</div>
+      <div class="meta">Pool: ${nf(pool.length)} questions${setupDomain ? " in this section" : ""} · ${nf(unseen)} not yet seen in mock exams · ${passMarkMeta(spec)}${setupDomain ? " (whole exam)" : ""}</div>
       ${unseen < (mode === "short" ? shortN : fullN) ? `<div class="meta" style="color:var(--amber)">Fewer unseen questions than needed, so some repeats will be included.</div>` : ""}
       <div class="btnrow"><button class="btn startbtn" data-act="start">Start exam</button>
       ${seen.size ? `<button class="linkbtn" data-act="resetseen">Reset seen questions for ${setupExam}</button>` : ""}</div>
