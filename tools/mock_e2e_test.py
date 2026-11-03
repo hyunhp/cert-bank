@@ -72,7 +72,7 @@ with sync_playwright() as p:
     ok("active state cleared", state(pg) is None)
     ok("results offer a weakest-domain shortcut", pg.locator("[data-practice]").count() == 1)
     ok("results show the readiness checklist", pg.locator(".readiness .rdy li").count() == 2 and "Not yet" in pg.inner_text(".readiness"), pg.inner_text(".readiness")[:200])
-    ok("a short practice does not count toward readiness", "0/3" in pg.inner_text(".readiness"), pg.inner_text(".readiness")[:200])
+    ok("a short practice does not count toward readiness", pg.inner_text(".readiness").count("0/3") == 2, pg.inner_text(".readiness")[:200])
     pg.click('[data-review="incorrect"]'); pg.wait_for_selector(".rv")
     ok("review incorrect lists 8", pg.locator(".rv").count() == 8)
     ok("review shows explanation + answer", pg.locator(".rv .ans-line").count() == 8)
@@ -137,6 +137,20 @@ with sync_playwright() as p:
         pg.click("[data-practice]"); pg.wait_for_function(f"location.hash.includes('d={dcode}')", timeout=8000)
         ok("practice shortcut opens the bank on that section", pg.evaluate("document.getElementById('mockRoot').hidden") and pg.locator("#domainRow .fchip.active[data-d='%s']" % dcode).count() == 1, pg.evaluate("location.hash"))
     ok("no page errors", not errs, errs)
+    ctx.close()
+
+    # history: an attempt that was only set up (never taken) can be removed, and readiness reads the rest
+    ctx = b.new_context(viewport={"width": 900, "height": 900})
+    pg = ctx.new_page(); pg.route("**/fonts.googleapis.com/**", lambda r: r.abort())
+    pg.goto(BASE + "#mock=DEA-C01"); pg.wait_for_selector("#mkExam")
+    pg.evaluate("""() => { const mk = (at, pct, o = {}) => ({ exam: 'DEA-C01', domain: null, mode: 'full', at, correct: Math.round(65 * pct / 100), total: 65, used: 5000, timed: true, auto: false, fresh: 65,
+        dom: { D1: [pct, 100], D2: [pct, 100], D3: [pct, 100], D4: [pct, 100] }, ...o });
+      localStorage.setItem('aws_qbank_mock_history_v1', JSON.stringify([mk(1, 85), mk(2, 85), mk(3, 85), mk(4, 0)])); }""")
+    pg.reload(); pg.wait_for_selector("#mkExam")
+    ok("an untouched attempt breaks the streak", pg.inner_text(".readiness").count("0/3") == 2 and "Not yet" in pg.inner_text(".readiness"), pg.inner_text(".readiness")[:200])
+    pg.on("dialog", lambda d: d.accept())
+    pg.click('[data-delhist="4"]'); pg.wait_for_function("document.querySelectorAll('[data-delhist]').length === 3")
+    ok("removing it restores the streak and readiness", "Ready to book" in pg.inner_text(".readiness") and pg.inner_text(".readiness").count("3/3") == 2, pg.inner_text(".readiness")[:240])
     ctx.close()
 
     # dark mode + desktop screenshot of exam screen
