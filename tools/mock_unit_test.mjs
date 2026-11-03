@@ -1,5 +1,5 @@
 // Unit tests for mock exam drawing: node tools/mock_unit_test.mjs
-import { draw, drawFocused, allocate, domainOf, shuffle, verdictFor, readiness, targetPct } from "../js/mock.js";
+import { draw, drawFocused, allocate, domainOf, shuffle, verdictFor, readiness, targetPct, isEmptyAttempt } from "../js/mock.js";
 import fs from "fs";
 const specs = JSON.parse(fs.readFileSync("data/exam-specs.json"));
 const map = JSON.parse(fs.readFileSync("data/exam-domains.json"));
@@ -97,6 +97,15 @@ ok("allocate caps by supply and redistributes", a.D1 === 2 && a.D2 === 8, JSON.s
   ok("the weak domain is named for that exam", rw.runs[0].weak.length === 1 && rw.runs[0].weak[0].code === "D2" && rw.runs[0].weak[0].pct === 50);
   ok("a weak domain in the latest exam resets the domain streak", readiness(sp, [run(85), run(85), weakRun]).domStreak === 0);
   ok("short practice and section drills are ignored", readiness(sp, [run(85), run(85), run(85), run(10, { mode: "short" }), run(10, { domain: "D1" })]).ready);
+}
+// an exam submitted with under 25% answered is "set up, not taken"
+{
+  const ids = Array.from({ length: 20 }, (_, i) => "Q" + i);
+  const ans = n => Object.fromEntries(ids.slice(0, n).map(id => [id, ["A"]]));
+  ok("nothing answered is empty", isEmptyAttempt({}, ids));
+  ok("4 of 20 answered is empty", isEmptyAttempt(ans(4), ids));
+  ok("5 of 20 answered is a real attempt", !isEmptyAttempt(ans(5), ids));
+  ok("an answered list that is empty counts as unanswered", isEmptyAttempt({ Q0: [] }, ids));
 }
 // the shuffle is uniform: each of 4 items lands in each slot about 1/4 of the time
 {

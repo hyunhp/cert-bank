@@ -153,6 +153,13 @@ export function verdictFor(spec, pct, mode) {
 // Readiness: each of the latest READY_RUNS full exams must be timed, finished in time, drawn mostly from questions not seen
 // before, reach the target score, and reach DOMAIN_FLOOR% in every domain (checked per exam, not summed).
 // Short practice and section drills do not count.
+// An exam submitted with fewer than 25% of its questions answered was set up, not taken: it is not saved to the history
+// and its questions are not marked as seen.
+export const EMPTY_ATTEMPT = 0.25;
+export function isEmptyAttempt(answers, ids) {
+  const done = ids.filter(id => ((answers || {})[id] || []).length).length;
+  return ids.length > 0 && done / ids.length < EMPTY_ATTEMPT;
+}
 export const READY_RUNS = 3, DOMAIN_FLOOR = 70, FRESH_MIN = 0.8;
 export function readiness(spec, hist) {
   const target = targetPct(spec);
@@ -265,6 +272,7 @@ function injectStyles() {
 .mk .statchips span{font-size:.8rem;padding:3px 9px;border-radius:7px;background:var(--surface-2);color:var(--ink);font-variant-numeric:tabular-nums}
 .mk p.meta{margin:4px 0}
 .mk .passnote{font-size:.78rem;padding-top:6px;border-top:1px solid var(--line);margin-top:8px}
+.mk .notsaved{color:var(--amber);font-weight:600}
 .mk .dhead{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
 .mk .delhist{font:inherit;font-size:1.1rem;line-height:1;color:var(--muted);background:none;border:none;cursor:pointer;padding:2px 8px;border-radius:6px}
 @media (hover:hover){.mk .delhist:hover{color:var(--bad);background:var(--bad-bg)}}
@@ -441,12 +449,15 @@ async function submit(auto) {
   state.results = results;
   state.summary = { correct, total: state.ids.length, dom, used };
   // history + seen
-  const hist = loadHistory();
-  hist.push({ exam: state.exam, domain: state.domain || null, mode: state.mode, at: Date.now(), correct, total: state.ids.length, dom, used, timed: state.timed, auto: state.auto, fresh: state.fresh });
-  save(KEY_HISTORY, hist.slice(-HISTORY_MAX));
-  const seen = loadSeen();
-  seen[state.exam] = Array.from(new Set((seen[state.exam] || []).concat(state.ids)));
-  save(KEY_SEEN, seen);
+  state.notSaved = isEmptyAttempt(state.answers, state.ids);
+  if (!state.notSaved) {
+    const hist = loadHistory();
+    hist.push({ exam: state.exam, domain: state.domain || null, mode: state.mode, at: Date.now(), correct, total: state.ids.length, dom, used, timed: state.timed, auto: state.auto, fresh: state.fresh, answered: state.ids.filter(id => (state.answers[id] || []).length).length });
+    save(KEY_HISTORY, hist.slice(-HISTORY_MAX));
+    const seen = loadSeen();
+    seen[state.exam] = Array.from(new Set((seen[state.exam] || []).concat(state.ids)));
+    save(KEY_SEEN, seen);
+  }
   drop(KEY_ACTIVE);
   view = "results";
   reviewFilter = correct < state.ids.length ? "incorrect" : "all";
@@ -647,6 +658,7 @@ function renderResults() {
       <div class="statchips"><span>${correct} of ${total} correct</span><span>${wrong} incorrect</span><span>time ${fmtTime(used)}${state.timed ? " of " + fmtTime(state.duration) : ""}</span></div>
       <p class="meta">${esc(v.note)}</p>
       <p class="meta passnote">${esc(passMarkNote(spec))}</p>
+      ${state.notSaved ? `<p class="meta notsaved">Not saved: fewer than ${Math.round(EMPTY_ATTEMPT * 100)}% of the questions were answered, so this attempt is left out of your history, seen questions and readiness.</p>` : ""}
     </div>
     <div class="panel"><div class="dhead"><b>By domain</b><span class="meta">Below 70% shows in red</span></div>
       ${spec.domains.map(d => {

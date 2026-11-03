@@ -1,8 +1,10 @@
 # TODO
 
 ## Now (warm start — keep this section current; update it with every merge)
-Updated 2026-11-02.
-- UI pass 2026-11-02 DONE (PR 82 level pick/tabs/★ pill, PR 83 exam picker, this PR cleanup: one-line stats, text buttons + Shuffle/Sequential segment, `lastDay` badge on retiring exams). study.html uses the same exam picker (starts unfolded like the bank; no `ENDS` badge there). Open: `lastDay` also lives in index.html `LAST_DAY` (test keeps them equal).
+Updated 2026-11-03.
+- UI + mock pass 2026-11-02/03 DONE (PR 82-99, all merged): level pick opens first exam; vendor tabs + ★ pill; exam picker (level groups, 2 columns on desktop, accordion on phones, folds after a pick; same on study.html); one-line stats; text buttons; `lastDay` ENDS badge (`exam-specs.json` + `LAST_DAY` in index.html, test keeps them equal); mock: sticky Prev/Flag/Next bar, single `Review & finish`, results/review polish, weakest-domain shortcut, perfect-score verdict; draw avoids the last 2 mocks (`aws_qbank_mock_recent_v1`) + crypto shuffle; study quiz result line; number commas; explanation names with a colon repaired (212 lines) + `tools/explain_format_test.py`.
+- Mock readiness panel (setup + results): last 3 full exams each timed, in time, >=80% unseen, >= target (80 / 85 pro / pass+10), every domain >=70% per exam. Attempts under 25% answered are not saved (no history, no seen). `x` on Recent attempts removes one.
+- Open UI ideas: `ENDS` badge on study.html chips; per-day study quiz results are not stored; history has no per-question time.
 - In progress: nothing (TF-IEP002 bank, 20-day study guide and glossary done on branch `tf-iep002`, PR pending merge). Other candidates: other Google Cloud
   Professional exams (developer.hashicorp.com and cloud.google.com reachable). Open gaps: Gemini app and Gems (GAIL T2.2); Gemini Cloud Assist is
   private preview (noted in PCA); Spark API pages are blocked (403) for the DBX bank.
