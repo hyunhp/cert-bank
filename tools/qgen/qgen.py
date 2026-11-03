@@ -366,7 +366,8 @@ def rich_explanation(item, order):
     for pos, k in enumerate(order):
         ok = k in item["keys"]
         text = re.sub(r"\s*\n\s*", " ", (item.get("why_by") or {}).get(k, item["why"]) if ok else item["wrong"][k]).strip()
-        m = re.match(r"^([^:]{2,60}):\s+(.*)$", text)          # "Short name: reason"
+        # "Short name: reason". The name may hold a colon (kms:Encrypt); a wrong option's name is its answer text, so it may run longer.
+        m = re.match(r"^(.{2,%d}?):\s+(.*)$" % (60 if ok else 120), text, re.S)
         label = f"{'ABCDE'[pos]}. {m.group(1)}" if m else f"{'ABCDE'[pos]}."
         body = m.group(2) if m else text
         lines.append(f"- {'✓' if ok else '✗'} **{label}{' (correct)' if ok else ''}:** {body}")
