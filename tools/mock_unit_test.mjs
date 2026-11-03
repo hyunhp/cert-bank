@@ -1,5 +1,5 @@
 // Unit tests for mock exam drawing: node tools/mock_unit_test.mjs
-import { draw, drawFocused, allocate, domainOf, shuffle } from "../js/mock.js";
+import { draw, drawFocused, allocate, domainOf, shuffle, verdictFor } from "../js/mock.js";
 import fs from "fs";
 const specs = JSON.parse(fs.readFileSync("data/exam-specs.json"));
 const map = JSON.parse(fs.readFileSync("data/exam-domains.json"));
@@ -69,6 +69,14 @@ for (const exam of Object.keys(specs).filter(k => !k.startsWith("_"))) {
 // allocation edge cases
 const a = allocate(10, [{ code: "D1", weight: 50 }, { code: "D2", weight: 50 }], { D1: 2, D2: 100 });
 ok("allocate caps by supply and redistributes", a.D1 === 2 && a.D2 === 8, JSON.stringify(a));
+// verdicts: a perfect score has its own wording; 99% keeps the generic pass-ready note
+{
+  const sp = { level: "associate" };
+  ok("100% is a perfect score", verdictFor(sp, 100, "short").label === "Perfect score" && verdictFor(sp, 100, "full").label === "Perfect score");
+  ok("perfect score note differs for short and full", verdictFor(sp, 100, "short").note !== verdictFor(sp, 100, "full").note);
+  ok("99% is still pass-ready with the margin note", verdictFor(sp, 99).label === "Pass-ready" && /comfortable margin/.test(verdictFor(sp, 99).note));
+  ok("perfect score never says 80%+ on first attempts", !/\d+%\+/.test(verdictFor(sp, 100, "full").note));
+}
 // the shuffle is uniform: each of 4 items lands in each slot about 1/4 of the time
 {
   const N = 40000, slots = Array.from({ length: 4 }, () => [0, 0, 0, 0]);
