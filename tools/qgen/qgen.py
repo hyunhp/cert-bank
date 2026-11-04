@@ -610,7 +610,8 @@ def ingest_explanations(explains):
 def ingest(items, state):
     rng = random.Random()
     all_ids = [q["id"] for e in EXAMS for q in load_exam(e)]
-    next_num = max(int(i[1:]) for i in all_ids) + 1
+    # Ids are never reused: the ledger (hash -> id) also remembers ids of questions that were removed since.
+    next_num = max(int(i[1:]) for i in all_ids + [v for v in state.values() if isinstance(v, str) and re.fullmatch(r"Q\d+", v)]) + 1
     files = {e: load_exam(e) for e in EXAMS}
     dmap = domain_map()
     rules = share_rules()
