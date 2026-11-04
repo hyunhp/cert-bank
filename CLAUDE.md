@@ -39,6 +39,16 @@ link changes, regenerate it (`segno.make(url, error="m").save(path, scale=1, bor
 The header link, the sticky top bars (question bank exam bar, study day bar), the bottom card in `index.html`, the study
 page header and the mock exam results all point to it.
 
+Change log for the blog publisher (repo `hyunhp/blogger-publisher`, session `session_01Si5KVx8MgqrBHkp4YpUPFK`; it builds
+practice-set posts from this bank and re-sends posts when a question changes): every PR that changes question data
+(`data/<EXAM>.json`, `data/explanations/`, `data/exam-specs.json`) gets `data/changes/<PR>.json`. Open the PR, then run
+`python3 tools/qgen/changes.py <PR> --note "why"` (diffs against origin/main; kinds: added, removed, stem, choices, answer, explanation, domain,
+exam-added, exam-removed, lastDay, domains), commit the file to the same branch, merge. Entries marked `important` (stem, choices, answer, domain,
+removed, any exam change) mean an old post is wrong or obsolete: after the merge send the publisher session a short `send_message`
+(PR number + the important entries). Other kinds (added, explanation wording) get no message; the publisher reads `data/changes/`.
+Question ids are never reused (qgen takes the next id above every id in the pool and in `tools/qgen/ingested.json`); fix a question
+in place instead of delete + re-add. Announce a new `lastDay` (retired exam) as soon as it is known.
+
 ## Hard rules
 - Never create files or folders the site reads whose names start with `_` (GitHub Pages/Jekyll
   drops them; `.nojekyll` is a safety net, not a license). Mock exam broke on 2026-09-26 because of this.
@@ -84,4 +94,4 @@ answer), stem length. `python3 tools/qgen/length_bias.py <batch>` lists the ques
 - Docs for writers/reviewers: `python3 tools/learn_fetch.py [--grep "<terms>"] <url>` (shared text cache in
   ~/.cache/cert-bank-docs; batches list their pages as `# src: <url>` lines so reviewers reuse them)
 - Tests (all must pass before commit):
-  `node tools/mock_unit_test.mjs && python3 tools/study_test.py && python3 tools/mock_e2e_test.py && python3 tools/mock_link_test.py && python3 tools/bookmark_backup_test.py && python3 tools/loading_perf_test.py && python3 tools/domain_filter_test.py && python3 tools/vendor_tabs_test.py && python3 tools/explain_format_test.py && python3 tools/data_scope_test.py && python3 tools/resume_test.py && python3 tools/support_test.py && python3 tools/diagrams/scroll_ui_test.py && python3 tools/diagrams/check.py && python3 tools/diagrams/site_test.py`
+  `node tools/mock_unit_test.mjs && python3 tools/study_test.py && python3 tools/mock_e2e_test.py && python3 tools/mock_link_test.py && python3 tools/bookmark_backup_test.py && python3 tools/loading_perf_test.py && python3 tools/domain_filter_test.py && python3 tools/vendor_tabs_test.py && python3 tools/explain_format_test.py && python3 tools/data_scope_test.py && python3 tools/changes_test.py && python3 tools/resume_test.py && python3 tools/support_test.py && python3 tools/diagrams/scroll_ui_test.py && python3 tools/diagrams/check.py && python3 tools/diagrams/site_test.py`
