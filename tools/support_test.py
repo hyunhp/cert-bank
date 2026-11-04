@@ -88,6 +88,19 @@ with sync_playwright() as p:
         pg.goto(BASE + url); pg.wait_for_selector(".toplinks .pill:not([hidden])")
         hs = pg.eval_on_selector_all(".toplinks .pill:not([hidden]), .langseg", "els => els.map(e => Math.round(e.getBoundingClientRect().height))")
         check(f"{url or 'index'}: header pills same height", len(hs) >= 2 and len(set(hs)) == 1, hs)
+    # Blog link in the footnote: hidden before 2026-11-21 (label pages are empty until then), external and marked afterwards.
+    def clock(day):
+        return ("(() => { const D = Date, t = new D('%sT12:00:00Z').getTime(); "
+                "Date = class extends D { constructor(...a) { if (a.length) super(...a); else super(t); } static now() { return t; } }; })()" % day)
+    for day, shown in (("2026-11-20", False), ("2026-11-21", True), ("2027-01-01", True)):
+        c = b.new_context(); c.add_init_script(clock(day)); q = c.new_page()
+        q.route("**/fonts.googleapis.com/**", lambda r: r.abort())
+        q.goto(BASE); q.wait_for_selector(".footnote")
+        check(f"blog link on {day}: {'shown' if shown else 'hidden'}", q.is_visible("#blogLink") == shown)
+        if shown:
+            check("blog link is the hub page, opens in a new tab, is marked external", q.get_attribute("#blogLink a", "href") == "https://bigdatabreakthroughs.blogspot.com/p/exams.html"
+                  and q.get_attribute("#blogLink a", "target") == "_blank" and "noopener" in q.get_attribute("#blogLink a", "rel") and "external site" in q.inner_text("#blogLink"))
+        c.close()
     check("no page errors", not errs, errs)
     b.close()
 print(f"{ok}/{ok + fail} passed"); sys.exit(1 if fail else 0)
