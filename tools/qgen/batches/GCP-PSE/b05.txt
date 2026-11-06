@@ -1,0 +1,541 @@
+# GCP-PSE D2 T2.3 private connectivity (PGA for on-premises hosts, restricted VIP, Private Service Connect, encryption on hybrid links, Cloud NAT, peering and Shared VPC security); D3 T3.1 Sensitive Data Protection
+# src: https://docs.cloud.google.com/vpc/docs/configure-private-google-access-hybrid
+# src: https://docs.cloud.google.com/vpc/docs/private-service-connect
+# src: https://docs.cloud.google.com/vpc/docs/about-accessing-google-apis-endpoints
+# src: https://docs.cloud.google.com/vpc/docs/about-accessing-vpc-hosted-services-endpoints
+# src: https://docs.cloud.google.com/vpc/docs/manage-private-service-connect-services
+# src: https://docs.cloud.google.com/network-connectivity/docs/interconnect/concepts/macsec-overview
+# src: https://docs.cloud.google.com/network-connectivity/docs/interconnect/concepts/ha-vpn-interconnect
+# src: https://docs.cloud.google.com/nat/docs/overview
+# src: https://docs.cloud.google.com/nat/docs/monitoring
+# src: https://docs.cloud.google.com/vpc/docs/vpc-peering
+# src: https://docs.cloud.google.com/vpc/docs/shared-vpc
+# src: https://docs.cloud.google.com/sensitive-data-protection/docs/pseudonymization
+# src: https://docs.cloud.google.com/sensitive-data-protection/docs/transformations-reference
+# src: https://docs.cloud.google.com/sensitive-data-protection/docs/data-profiles
+# src: https://docs.cloud.google.com/sensitive-data-protection/docs/redacting-sensitive-data-images
+# src: https://docs.cloud.google.com/sensitive-data-protection/docs/deidentify-sensitive-data
+
+@ GCP-PSE D2 T2.3 advanced use-case
+S: A insurer's on-premises batch servers upload files to Cloud Storage and query BigQuery over HA VPN tunnels, never over the internet. The security team also runs VPC Service Controls around the data projects and wants the servers to be unable to reach any Google API that VPC Service Controls cannot protect. Which design meets this?
+A: Resolve all Google API names on premises to the restricted.googleapis.com addresses, and advertise that range from the Cloud Router
+B: Resolve all Google API names on premises to the private.googleapis.com addresses, and advertise that range through the Cloud Router so every Google API stays reachable over the tunnels
+C: Give each on-premises server a public route to Google APIs, then add VPC Service Controls ingress rules that deny any API request arriving from outside the perimeter
+D: Enable Private Google Access on the VPC subnets that terminate the tunnels, because that setting also covers requests that originate in the on-premises network
+K: A
+G: ## Private Google Access for on-premises hosts
+On-premises systems can reach Google APIs privately by sending the traffic to a special virtual IP range over Cloud VPN or a VLAN attachment. Two domains exist, and the one you point DNS at decides which APIs are reachable:
+- `private.googleapis.com` (`199.36.153.8/30`) reaches most Google APIs, including ones that do not support VPC Service Controls.
+- `restricted.googleapis.com` (`199.36.153.4/30`) reaches only the APIs that VPC Service Controls supports, so a client cannot fall back to an API outside the perimeter model.
+## What is needed end to end
+- On-premises DNS must resolve the API names (typically a `*.googleapis.com` CNAME) to the chosen domain, and on-premises routes must send that range into the tunnel.
+- The VPC network needs routes for the range, and the Cloud Router advertises it back to on-premises as a custom advertised route.
+## Applying it here
+The requirement "cannot reach APIs that VPC Service Controls cannot protect" is exactly what the restricted VIP enforces, while keeping all traffic on the private tunnels.
+W: Restricted VIP with DNS and route advertisement: the restricted range only serves VPC Service Controls-supported APIs, so unprotected APIs become unreachable, and the advertised route keeps the traffic inside the tunnels.
+X: B=Private VIP: it reaches most Google APIs regardless of whether VPC Service Controls supports them, so it does not prevent use of APIs outside the protection model.
+C=Public route plus ingress rules: sending traffic over the internet breaks the stated private-path requirement, and ingress rules only evaluate requests to protected services, not APIs outside the perimeter.
+D=Subnet Private Google Access flag: that setting applies to VM clients inside the subnet; on-premises hosts need DNS and routes to a special VIP instead.
+T: For on-premises hosts under VPC Service Controls, point DNS at restricted.googleapis.com and route its range over the hybrid link.
+
+@ GCP-PSE D2 T2.3 applied troubleshooting
+S: After a migration, on-premises clients that use Private Google Access for on-premises hosts show intermittent failures: some Cloud Storage calls succeed and others time out. Investigation shows the on-premises DNS zone for googleapis.com holds an A record for restricted.googleapis.com, but the CNAME and a manually added A record for storage.googleapis.com use addresses from the private.googleapis.com range. Routes and tunnels are healthy. What should the engineer do?
+A: Point every record in the zone at one virtual IP range, either restricted or private, and do not mix addresses from both
+B: Add a second Cloud Router in another region so that both address ranges are advertised over separate tunnels
+C: Raise the TTL on the googleapis.com records so that clients cache one answer and always use the same address
+D: Move the manual storage.googleapis.com record to a public DNS zone so that the resolver chooses the nearest address
+K: A
+G: ## One virtual IP range per resolution path
+The `private.googleapis.com` and `restricted.googleapis.com` ranges serve different sets of services. When DNS hands a client addresses from both, the client's connections are served by whichever range the answer happened to contain, so a request for a service that the restricted range does not serve fails intermittently. Google's guidance is to configure DNS for exactly one of the two domains and not mix addresses.
+## Diagnosing
+- Healthy routes and tunnels with failures that vary by hostname or by lookup point to DNS content, not the network path.
+- The fix is a single consistent zone: the `A` records for the chosen VIP and a `*.googleapis.com` CNAME to it.
+W: One VIP range everywhere: removing the mixed answers makes every lookup land on the range that the security design chose, which ends the intermittent behaviour.
+X: B=Second Cloud Router: more routers do not change which service set a destination range offers, and the tunnels are already healthy.
+C=Higher TTL: caching only freezes whichever mixed answer a client received, so some clients stay broken for longer.
+D=Public DNS record: a public answer would send the client over the internet, defeating the private-path purpose.
+T: Configure DNS for either the private or the restricted VIP, never both, or lookups fail unpredictably.
+
+@ GCP-PSE D2 T2.3 applied tradeoff
+S: A media firm is allowed to use only Google APIs that VPC Service Controls supports in its regulated analytics environment, but its marketing environment, connected to the same data center, must also call Google Maps Platform APIs from on premises. Which approach respects both rules with the least duplication?
+A: Use the restricted range for regulated resolvers and the private range for marketing resolvers, each in its own DNS scope
+B: Use restricted.googleapis.com for all on-premises resolvers, since the stricter range also reaches the Google Maps Platform APIs
+C: Use private.googleapis.com for all on-premises resolvers and rely on a VPC Service Controls perimeter to block unsupported services
+D: Use public Google API addresses for marketing and the restricted range for analytics, since the private range excludes Maps APIs
+K: A
+G: ## Choosing the VIP per environment
+The restricted range exists to keep clients inside the set of services that VPC Service Controls can protect. The private range serves a broader set, including Google Maps Platform, Google Ads and many other APIs, but offers no such guardrail. The choice is made by DNS, so it can differ per client population as long as each population resolves consistently to one range.
+## Applying it here
+The regulated environment gets the restricted range; the marketing environment gets the private range, using separate DNS scopes or resolvers for the two populations. Both stay on the private hybrid path.
+W: Per-environment VIP choice: restricted for regulated clients enforces the supported-services-only rule, and private for marketing preserves Maps access, with no public path.
+X: B=Restricted for everyone: the restricted range denies services that VPC Service Controls does not support, which includes the Maps Platform APIs, so marketing breaks.
+C=Private for everyone with a perimeter: a perimeter only governs supported services, so analytics clients could still reach unsupported APIs through the broader range.
+D=Public addresses for marketing: the private range does serve these APIs, so leaving the private path is unnecessary and weakens the stated design.
+T: Select the private or restricted VIP per client population through DNS, based on whether unsupported APIs must be blocked.
+
+@ GCP-PSE D2 T2.3 applied troubleshooting
+S: To remove an exfiltration path, a network engineer deleted the default 0.0.0.0/0 route from a VPC network that hosts private VMs with no external IP addresses. Since then, those VMs can no longer call Google APIs, even though DNS already maps googleapis.com names to the restricted.googleapis.com addresses. What is the minimal change that keeps the internet closed while restoring API access?
+A: Add a custom static route for the restricted.googleapis.com range whose next hop is the default internet gateway
+B: Re-create the 0.0.0.0/0 route and add an egress deny firewall rule for everything except Google API names
+C: Create a Cloud NAT gateway for the subnets so that the VMs can reach Google APIs through translated source addresses
+D: Add a VPC Network Peering connection to the Google services network so that API requests travel as internal traffic
+K: A
+G: ## Reaching the virtual IPs from a VPC network
+The restricted and private API ranges are routed by Google's edge, but your VPC network still needs a route that matches the destination. VMs normally rely on the default route to the default internet gateway for this. If the default route is removed, a more specific route for the VIP range with the default internet gateway as next hop restores access to just that range.
+## Why this keeps the internet closed
+- The route covers only `199.36.153.4/30`, not the whole internet.
+- Traffic to that range stays on Google's network and only reaches the services that VPC Service Controls supports.
+W: Specific route to the VIP range: a custom static route with the default internet gateway as next hop gives the VMs a path to only the restricted range, so nothing else becomes reachable.
+X: B=Default route back plus egress rules: this reopens a broad route that the engineer removed on purpose, and relies on firewall rules that cannot match Google API names by hostname.
+C=Cloud NAT: the VMs have no external IPs and Cloud NAT needs a route to the internet anyway; it is also not how the restricted range is reached.
+D=Peering to Google services: VPC Network Peering is not used for Google APIs, and no such peering exists for the restricted VIP.
+T: With the default route removed, add a specific route for the restricted or private VIP range using the default internet gateway.
+
+@ GCP-PSE D2 T2.3 applied comparison
+S: A bank wants each business unit's workloads and its on-premises data center to reach Cloud Storage and BigQuery using internal IP addresses that the bank allocates itself, with a separate endpoint per unit so network teams can steer, monitor and prove that traffic stays inside Google Cloud. Which feature fits best?
+A: Private Service Connect endpoints for Google APIs, using the vpc-sc API bundle for regulated units, with DNS names that map to each endpoint
+B: Private Google Access enabled on the subnets, because it assigns a dedicated internal address from the bank's range per business unit
+C: A Cloud NAT gateway per business unit, which gives each unit its own translated address for outbound calls to Google APIs
+D: Direct peering with Google, which exposes Cloud Storage and BigQuery on the bank's own address space
+K: A
+G: ## Private Service Connect endpoints for Google APIs
+A Private Service Connect (PSC) endpoint is a forwarding rule with an internal IP address from your VPC network that maps to a bundle of Google APIs. You can create as many as you need, name them in the `p.googleapis.com` zone, and reach them from on-premises hosts over Cloud VPN or VLAN attachments.
+- API bundles: `all-apis` or `vpc-sc` (the services supported by VPC Service Controls).
+- Compared with Private Google Access, you pick the IP address and get a per-endpoint resource, so routing and monitoring can differ by team.
+W: PSC endpoints for Google APIs: each endpoint is a customer-owned internal IP, can be reached from on premises, and the vpc-sc bundle limits regulated units to protectable services.
+X: B=Private Google Access: it lets VMs without external IPs reach Google APIs, but the destination addresses are Google's shared ones, not an address you allocate per business unit.
+C=Cloud NAT per unit: it translates outbound source addresses for internet-bound traffic from VMs without external IPs, and does not create internal endpoints for Google APIs.
+D=Direct peering: that is a public-edge exchange with Google's network, outside the VPC, so it does not give internal IPs in the bank's address space.
+T: Use a Private Service Connect endpoint when you want your own internal IPs and per-team control for Google API access.
+
+@ GCP-PSE D2 T2.3 applied troubleshooting
+S: An engineer creates a Private Service Connect endpoint named logs1 for Google APIs with the all-apis bundle and expects VMs to call storage-logs1.p.googleapis.com privately. A packet capture shows the traffic going to public Google addresses. The endpoint's forwarding rule is healthy and the VMs have no external IP addresses. What most likely explains this?
+A: The VMs resolve the name where no private zone has it, so public DNS wildcard answers return public addresses
+B: Endpoints can only be reached from the same region as the forwarding rule, and the VMs run in another region
+C: The all-apis bundle sends traffic to public front ends unless subnets also have Private Google Access on
+D: Private Service Connect for Google APIs needs a peering connection to the Google services network before DNS names work
+K: A
+G: ## DNS decides whether the endpoint is used
+When you create an endpoint for Google APIs, Google Cloud creates a private zone for `p.googleapis.com` with records such as `storage-logs1.p.googleapis.com` that return the endpoint's internal IP. If a client looks up a name that is missing from the private zone, the query goes to public DNS, whose `googleapis.com` records contain a wildcard and return public Cloud front-end addresses.
+## What to check
+- Is the client using the VPC resolver that sees the zone? On-premises clients need forwarding to the VPC network.
+- Does the name exist in the zone, or does it need a manually created record?
+W: Missing private DNS answer: the lookup falls through to public DNS, which returns public addresses, so the client connects publicly although the endpoint exists.
+X: B=Regional scope: endpoints for global Google APIs use a global internal address and their names are usable from every region of the VPC network.
+C=Bundle behaviour: the bundle only chooses the set of supported APIs and does not itself require another setting to be used privately.
+D=Peering requirement: endpoints are forwarding rules in your VPC and need no peering with any Google network.
+T: A Private Service Connect endpoint is used only when DNS resolves the API name to its internal IP.
+
+@ GCP-PSE D2 T2.3 applied troubleshooting
+S: A SaaS vendor publishes a managed service behind a Private Service Connect service attachment that explicitly accepts connections only from approved customer projects. A new customer creates an endpoint in its VPC network that targets the attachment, but the connection stays in the Pending state indefinitely. What should the vendor check first?
+A: Whether the customer's project is on the accept list and whether connection capacity remains
+B: Whether a VPC Network Peering connection exists between the two VPC networks
+C: Whether the customer's subnet range overlaps with the vendor's NAT subnet and must be renumbered
+D: Whether the customer's endpoint uses the same Service Directory namespace as the vendor's published service
+K: A
+G: ## Connection preference on a service attachment
+A published service chooses either to accept all connections automatically or to accept only consumers on its accept list, which can name projects, VPC networks, or individual endpoints. A connection that is not permitted by the list, or that exceeds the attachment's connection limit, stays `Pending` until the cause is resolved. A consumer on the reject list, or a producer organization policy block, gives `Rejected` instead.
+## Security view
+- Explicit approval is the recommended setting because it limits who can reach the service.
+- Changes to the lists affect new or pending connections; existing ones continue unless connection reconciliation is enabled.
+W: Accept list and connection limit: a pending state means the service attachment has not approved the connection, which happens when the consumer is not listed or the limit is reached.
+X: B=Peering connection: Private Service Connect does not rely on VPC Network Peering between the two networks, so its absence is irrelevant.
+C=Overlapping ranges: Private Service Connect translates addresses through the producer's NAT subnet and is designed to work with overlapping consumer and producer ranges.
+D=Service Directory namespace: namespaces matter for automatic DNS of Google API endpoints and do not govern approval of a published-service connection.
+T: A Pending Private Service Connect connection means approval or capacity is missing on the producer's service attachment.
+
+@ GCP-PSE D2 T2.3 advanced use-case
+S: A healthcare company publishes records through a regional managed service that it accesses via Private Service Connect. The security team wants to terminate TLS on its own certificate and domain in front of the service, apply Cloud Armor and centralised logging to the traffic, and fail over between two regions under its own control. Which Private Service Connect type should it use?
+A: Private Service Connect backends, using network endpoint groups behind an internal or external Application Load Balancer
+B: Private Service Connect endpoints, because a forwarding rule gives the same control over certificates and fail over
+C: Private Service Connect interfaces, because they let the consumer terminate certificates for the producer's service
+D: Private services access, because its allocated range provides load balancer features for managed services
+K: A
+G: ## Endpoints, backends and interfaces
+Private Service Connect has three consumer-side shapes:
+- **Endpoints**: a forwarding rule with an internal IP that gives layer 4 connectivity to a service.
+- **Backends**: a network endpoint group that lets a Google Cloud load balancer send traffic to a service attachment or a Google API. Because the load balancer is yours, you get custom domains and certificates, consumer-controlled failover between regions, and central security configuration.
+- **Interfaces**: a network interface in the producer's service that lets the producer initiate connections into the consumer network.
+## Applying it here
+Needs such as owning the certificate, using Cloud Armor, and controlling failover are load balancer features, which only backends provide.
+W: PSC backends with a load balancer: the consumer-side load balancer allows customer-owned domains and certificates, security policy attachment and regional failover control in front of the managed service.
+X: B=Endpoints: they give layer 4 connectivity only, with no certificate termination, no Cloud Armor and no failover logic.
+C=Interfaces: they exist so a producer can initiate connections to the consumer's network, not for terminating consumer certificates.
+D=Private services access: it connects to producer services through VPC Network Peering and an allocated range, and offers no load balancer features.
+T: Choose Private Service Connect backends when you need load balancer controls in front of a managed service.
+
+@ GCP-PSE D2 T2.3 advanced use-case
+S: A retailer connects its data center to Google Cloud with Dedicated Interconnect. A new policy says all traffic between on-premises networks and VPC networks must be encrypted at the network layer from end to end, not only on the physical link. Which design meets this?
+A: HA VPN over Cloud Interconnect, with IPsec tunnels established over the VLAN attachments
+B: MACsec on the Interconnect circuit alone, since it encrypts traffic between the two networks
+C: A second Dedicated Interconnect connection in another metro, since redundant circuits encrypt each path
+D: TLS on the application load balancers, since it encrypts all packets in the VPC network at layer 3
+K: A
+G: ## Encryption options on Cloud Interconnect
+Cloud Interconnect traffic is private but not encrypted by default. Two mechanisms exist:
+- **MACsec** (IEEE 802.1AE) encrypts at layer 2 between your on-premises router and Google's peering edge router. It does not provide encryption in transit within Google.
+- **HA VPN over Cloud Interconnect** builds IPsec tunnels over VLAN attachments, which gives layer 3 encryption between on-premises networks and the VPC network, with internal IPs on the VPN gateways.
+Google recommends layering these, plus TLS, for stronger protection.
+## Applying it here
+The policy asks for network-layer, end-to-end encryption, which is IPsec.
+W: HA VPN over Cloud Interconnect: IPsec tunnels over the VLAN attachments encrypt traffic at layer 3 between the networks while using the private Interconnect path.
+X: B=MACsec alone: it protects only the link between the customer's router and Google's edge, so traffic is not encrypted beyond that point.
+C=Second circuit: redundancy improves availability, but each circuit carries traffic unencrypted unless an encryption method is enabled.
+D=TLS on load balancers: it protects those application flows at the application layer and does not cover all traffic at the network layer.
+T: IPsec through HA VPN over Cloud Interconnect gives network-layer encryption; MACsec covers only the hop to Google's edge.
+
+@ GCP-PSE D2 T2.3 applied definition
+S: A network architect is reviewing MACsec for Cloud Interconnect for a Dedicated Interconnect link and a Partner Interconnect link. Which TWO statements are correct? (Select TWO)
+A: MACsec encrypts traffic between the on-premises router and Google's edge router
+B: MACsec encrypts traffic all the way to the VM in the VPC network, inside Google's network too
+C: On Partner Interconnect, the customer should work with the service provider so traffic is encrypted through the provider's network
+D: MACsec establishes IPsec tunnels that terminate on a Cloud Router in the VPC network
+E: Enabling MACsec makes IPsec and TLS redundant, so Google recommends dropping them
+K: A,C
+G: ## What MACsec protects
+MACsec is layer 2 encryption between adjacent routers, using a connectivity association key and key name that you generate and configure on your router. It protects the Interconnect hop, but Google states that it does not provide encryption in transit within Google, so it recommends layering it with IPsec and TLS.
+## Partner Interconnect
+The customer's circuit goes through a service provider, so MACsec needs to be coordinated with the provider so that the traffic is protected through the provider's network.
+W: A=Hop protected: MACsec secures the link between the on-premises router and Google's peering edge router.
+C=Provider coordination: on Partner Interconnect the provider's network is in the path, so encryption must be arranged with the provider.
+X: B=To the VM: MACsec ends at Google's edge router, so it does not cover the path to the VM.
+D=IPsec on Cloud Router: IPsec tunnels belong to HA VPN over Cloud Interconnect, a different feature from layer 2 MACsec.
+E=Dropping IPsec and TLS: Google recommends a layered approach instead, using MACsec together with other protocols.
+T: MACsec encrypts the router-to-Google-edge hop only; layer it with IPsec and TLS for wider coverage.
+
+@ GCP-PSE D2 T2.3 applied troubleshooting
+S: On-premises hosts in the Frankfurt region reach Google APIs through the restricted VIP over two VLAN attachments that connect to a VPC network. Requests leave the data center, but responses never arrive. The routes to the on-premises networks learned in the VPC network have next hops on a Cloud VPN tunnel and a VLAN attachment, both in a different region than the one the requests entered. What is the likely cause?
+A: The next hop toward on-premises is in another region than the request origin, so responses cannot return
+B: The restricted range is only reachable from on-premises IPv6 hosts, which Frankfurt does not use
+C: The Cloud Router advertises the restricted range with a higher MED, so Google drops the requests
+D: VPC firewall rules have an implied deny egress rule that blocks all replies to the on-premises network
+K: A
+G: ## Regional symmetry for Private Google Access from on premises
+For on-premises hosts, Google's response to an API request returns through the VPC network by a route to the on-premises network. The documentation states that the next-hop VPN tunnels or VLAN attachments for those routes must be in the same region where the request originated; otherwise the response will not reach the on-premises network.
+## Design consequence
+- Place attachments or tunnels in every region from which on-premises hosts send API traffic, or keep routing symmetric by region.
+- Use dynamic routing in a way that does not steer return traffic to other regions' attachments.
+W: Cross-region next hop: the return route points at an attachment in another region from the origin of the request, so the response is lost.
+X: B=IPv6 only: the restricted range is available over IPv4 (`199.36.153.4/30`) and IPv6 is optional.
+C=MED value: path preference affects route choice between attachments, but an unreachable response is explained by the regional next-hop condition rather than Google discarding requests.
+D=Implied egress rule: VPC firewalls include an implied allow egress rule, so responses to on-premises destinations are not blocked by default.
+T: For Private Google Access from on premises, return routes must use tunnels or attachments in the region where the request entered.
+
+@ GCP-PSE D2 T2.3 applied tradeoff
+S: A company has private build VMs in a subnet and sensitive data-processing VMs in another, and none of the VMs has an external IP address. Only the build VMs may download packages from the internet, and the security team wants no other VM to be able to initiate internet connections. What is the best design?
+A: Configure a Cloud NAT gateway serving only the build subnet, and give the sensitive subnet no NAT and no external IPs
+B: Configure a Cloud NAT gateway that serves all subnets in the region, then add a firewall rule to block the sensitive VMs from using it
+C: Give the build VMs external IP addresses, because Cloud NAT cannot be limited to a subset of a VPC network
+D: Place a Cloud Router in the sensitive subnet, because it filters outbound connections by the source VM
+K: A
+G: ## Scoping Cloud NAT
+Cloud NAT is a software-defined service that gives resources without external IPs outbound access to the internet. A gateway is attached to a Cloud Router and applies only to the subnets (or subnet ranges) you configure. It supports established inbound response packets but not unsolicited inbound connections.
+## Least privilege for egress
+- Limiting the gateway to the build subnet means VMs elsewhere have no source for internet connections at all.
+- An organization policy that blocks external IPs on VMs prevents the sensitive subnet from getting one by mistake.
+- Egress firewall rules can further limit destinations for the build subnet.
+W: Gateway scoped to the build subnet: only that subnet gets translation, so the sensitive VMs have no external IP and no NAT and cannot start internet connections.
+X: B=Gateway for all subnets with a block rule: it makes NAT available to sensitive VMs and depends on a rule staying correct, a weaker posture than not offering NAT at all.
+C=External IPs on build VMs: Cloud NAT can be limited to selected subnets or ranges, and giving VMs public addresses increases exposure.
+D=Cloud Router as a filter: a Cloud Router exchanges routes with BGP and does not filter connections.
+T: Scope Cloud NAT to the subnets that need internet egress and give everything else no path.
+
+@ GCP-PSE D2 T2.3 applied troubleshooting
+S: A partner reports suspicious scanning from one of the retailer's shared Cloud NAT external IP addresses. Hundreds of private VMs use that gateway, and the security team must work out which VM made the connections, using the gateway's records. What should have been configured on the gateway?
+A: Cloud NAT logging of translations, recording each connection with its internal VM and external address
+B: Cloud NAT logging for errors only, because dropped packets reveal every VM that opened a connection
+C: VPC flow logs only on the Cloud Router, because the router records the NAT translations
+D: A larger set of external IP addresses, because each VM then receives its own address that identifies it uniquely
+K: A
+G: ## Attributing NAT traffic
+Many VMs share a small set of external addresses, so a remote party only sees the NAT IP address. Cloud NAT logging writes entries to Cloud Logging when a connection using NAT is created and when a packet is dropped because no port was available. You can log either or both kinds of events.
+## Choosing what to log
+- Translation logs link the internal source VM and port with the external IP and port, which is what attribution needs.
+- Error-only logs miss connections that succeeded.
+W: Translation logging: a log entry per created NAT connection ties the shared external IP to the internal VM, which answers the attribution question.
+X: B=Errors only: error logging records packets dropped for lack of ports, so it misses normal connections that created no error.
+C=Flow logs on the Cloud Router: a Cloud Router handles BGP route exchange and has no traffic logs; flow logs are enabled on subnets.
+D=More external IPs: a bigger pool still shares addresses across VMs and does not provide a record of who connected.
+T: Enable Cloud NAT translation logging so shared external IPs can be traced back to internal VMs.
+
+@ GCP-PSE D2 T2.3 advanced use-case
+S: A consortium member's VPC network is peered with a partner's VPC network so a reporting application can reach one subnet, subnet-a. A second subnet, subnet-b, in the same VPC network holds regulated data and must stay unreachable from the partner. The partner's address ranges are known. What is the right control?
+A: Ingress rules in the member's own network allowing the partner ranges only to subnet-a targets, with implied deny for subnet-b
+B: A route filter on the peering connection that excludes subnet-b from the routes exchanged
+C: Firewall rules created by the partner's administrators, because peered networks apply each other's firewall rules to incoming traffic
+D: Network tags on the partner's VMs matching tags in the member's ingress rules so only tagged VMs reach subnet-a
+K: A
+G: ## What peering exchanges
+VPC Network Peering exchanges routes according to each side's settings, with subnet routes included. It does not exchange firewall rules or firewall policies. Each VPC network enforces its own implied deny ingress rule, so a peer can reach only what its own ingress allow rules permit.
+## Scoping access
+- Allow rules with the partner's source ranges and with targets limited to subnet-a workloads (service accounts, network tags, or secure Tags) give the access needed.
+- Subnet-b stays protected by the implied deny ingress, or by an explicit deny.
+- Tags and service accounts in a rule resolve only to instances inside the VPC network where the rule lives.
+W: Own ingress rules scoped to subnet-a: firewall enforcement is local to the member's network, so allowing partner ranges only to the intended targets keeps subnet-b closed.
+X: B=Route filter: peering exchanges subnet routes by default and offers no per-subnet filter, and routing alone is not an access control.
+C=Partner's firewall rules: peered networks do not exchange or apply each other's firewall rules, and ingress to the member's network is decided on the member's side.
+D=Matching network tags: network tags in a rule resolve only to instances in that rule's VPC network, so partner VMs cannot be identified by tag.
+T: Peering shares routes, not firewall rules, so control the peer's access with ingress rules in your own network.
+
+@ GCP-PSE D2 T2.3 applied definition
+S: A security architect is reviewing how a Cloud NAT gateway for Public NAT behaves before approving it for private workloads. Which TWO statements are correct? (Select TWO)
+A: The gateway is a distributed, software-defined service configured on a Cloud Router, with no proxy VMs in the traffic path
+B: Internet hosts can open new connections to a private VM through the gateway's external address once a source port is allocated
+C: The gateway translates only the subnets or subnet ranges selected for it, so VMs in other subnets of the region get no NAT from it
+D: Cloud NAT must be configured before VMs can reach Google APIs through the restricted.googleapis.com virtual IP range
+E: Each external address of the gateway is bound to one VM, so a remote party can tell from the address which VM connected
+K: A,C
+G: ## What Cloud NAT does and does not do
+Cloud NAT gives resources without external IP addresses outbound access to internet destinations. It is built into Google's Andromeda network virtualization, so there is no appliance or proxy VM to patch or scale. The control plane is a Cloud Router, but the Cloud Router does not carry the traffic.
+## Security consequences
+- A gateway serves only the subnets or subnet ranges you configure, so scoping it limits which workloads have any internet egress.
+- It translates established inbound response packets only, never unsolicited inbound connections.
+- Many VMs share the gateway's external addresses, so attributing a connection to a VM needs Cloud NAT logging.
+- Google API access through the private or restricted virtual IPs uses routes to those ranges, not NAT.
+W: A=Distributed service: Cloud NAT is software-defined on the Andromeda stack and is configured on a Cloud Router, so no proxy VMs sit in the path.
+C=Subnet scope: the gateway applies only to the subnets or ranges selected, so other subnets in the region are not translated by it.
+X: B=Inbound connections: Cloud NAT supports only established inbound response packets and does not allow unsolicited inbound connections.
+D=Google APIs: the virtual IP ranges are reached by a route to the range, and Cloud NAT is not required for them.
+E=One address per VM: VMs share the gateway's external addresses, so the address alone does not identify a VM; NAT logs are needed for that.
+T: Cloud NAT is outbound-only, scoped per subnet, and shares addresses, so log translations to attribute traffic.
+
+@ GCP-PSE D2 T2.3 advanced use-case
+S: A platform team runs a Shared VPC with one host project and many service projects. The security team wants to ensure that no team can attach its project to a host project outside the approved one, and that each team can place VMs and load balancers only in the shared subnets assigned to it. Which controls should be used?
+A: Org policy constraints on allowed host projects and usable subnets, plus subnet-level Compute Network User grants
+B: One organization-wide Compute Network User grant to all developers, with firewall rules limiting each team
+C: VPC Network Peering between each service project's own VPC network and the host project's network instead of Shared VPC
+D: Giving each service project administrator the Shared VPC Admin role, so they can manage their own subnet assignments
+K: A
+G: ## Constraining Shared VPC
+Shared VPC lets a host project's subnets be used by VMs, load balancers and other resources in service projects. Two organization policy constraints add guardrails:
+- `constraints/compute.restrictSharedVpcHostProjects` limits which host projects a project, folder or organization can attach to.
+- `constraints/compute.restrictSharedVpcSubnetworks` limits which shared subnets service projects can use for new VMs and load balancers. It does not affect existing resources or Private Service Connect forwarding rules.
+## Granting access
+Compute Network User on individual subnets, rather than at project level, grants each team its own slice. The Shared VPC Admin role should stay with a small central group.
+W: Org policy constraints plus subnet-level grants: the constraints stop attachment to unapproved hosts and use of unassigned subnets, and subnet-level IAM grants each team only its own subnets.
+X: B=Organization-wide grant: it gives everyone access to every shared subnet, and firewall rules cannot limit which subnet a VM is created in.
+C=Peering for each project: it loses the central ownership of subnets and firewall rules that Shared VPC provides, and does not restrict where teams place resources.
+D=Shared VPC Admin for each project owner: this role can attach projects and delegate subnet access, so spreading it widely removes the central control.
+T: Pair the Shared VPC org policy constraints with subnet-level Compute Network User grants.
+
+@ GCP-PSE D2 T2.3 applied comparison
+S: A team connects workloads to a managed Cloud SQL instance. It currently uses private services access, which allocates an IP range and peers with the Google-managed producer network. The security team now wants a design where the instance appears at an IP address chosen from the consumer subnet, each consumer project has its own connection, and on-premises clients reach the instance over a hybrid link without extra custom route export. What should the team use?
+A: Private Service Connect for Cloud SQL, with an endpoint in a consumer subnet
+B: Another private services access range, with custom routes exported on the peering to on premises
+C: Cloud NAT, which translates the instance's address for the on-premises clients
+D: A Private Google Access setting on the subnet, which lets Cloud SQL be reached by internal IP
+K: A
+G: ## Two private connection models for Google-managed services
+- **Private services access** uses an allocated internal range and a VPC Network Peering connection to the service producer's network. Peering is non-transitive, so reaching the service from on premises requires route exchange settings on the peering.
+- **Private Service Connect** gives the consumer an endpoint, an internal IP address in a chosen subnet, that forwards to the producer's service attachment. No range allocation or peering is involved, and the endpoint is reachable over Cloud VPN or VLAN attachments using ordinary routes.
+## Applying it here
+The wish for an address from the consumer's own subnet and per-project connections with simple on-premises reachability is what endpoints provide.
+W: Private Service Connect endpoint: it provides an address from the consumer's subnet, a distinct connection per consumer, and no peering route-exchange work for hybrid clients.
+X: B=Another allocated range: this keeps the peering model, in which the address comes from an allocated block and on-premises reach depends on exporting custom routes.
+C=Cloud NAT: it translates source addresses of outbound VM traffic and does not publish an address for a managed instance.
+D=Private Google Access: it covers access to Google APIs for VMs without external IPs, not private IP connections to Cloud SQL instances.
+T: Use Private Service Connect when a managed service must appear in the consumer's own address space without peering.
+
+@ GCP-PSE D2 T2.3 applied definition
+S: A security engineer lists requirements for letting on-premises hosts reach Google APIs privately over Cloud VPN or VLAN attachments with Private Google Access for on-premises hosts. Which TWO items are required? (Select TWO)
+A: On-premises DNS records resolving API names to the private.googleapis.com or restricted.googleapis.com addresses
+B: Routes for the chosen address range in both the on-premises network and the VPC network, so traffic enters the tunnel or attachment
+C: An external IP address on every on-premises host that calls the API, so Google can verify the source of requests
+D: A Cloud NAT gateway in the VPC network that translates the on-premises hosts' addresses
+E: A Compute Engine VM in every subnet that acts as a forwarding proxy for API calls
+K: A,B
+G: ## Requirements for hybrid Private Google Access
+Google's documentation lists the conditions: traffic for Google APIs must be directed to the addresses of `private.googleapis.com` or `restricted.googleapis.com`; the on-premises network must be connected through Cloud VPN or VLAN attachments; the VPC network and the on-premises network must both have routes for the range; and return routes must use next hops in the right region.
+## What is not needed
+There is no proxy, NAT or public address involved, since the traffic reaches a special VIP over the private connection.
+W: A=DNS mapping: without records pointing to the chosen VIPs, clients would resolve public addresses and bypass the private path.
+B=Routes on both sides: the on-premises routers need to send the range into the tunnel, and the VPC network needs matching routes and advertisement.
+X: C=External IPs on hosts: the design avoids public paths, and Google does not require public source addresses from on-premises.
+D=Cloud NAT: it serves VMs in the VPC network for internet egress and is not part of the on-premises path to the VIPs.
+E=Proxy VMs: no proxy is needed because the VIP is reached directly through routing.
+T: Hybrid Private Google Access needs DNS to the chosen VIP plus routes for that range on both sides.
+
+@ GCP-PSE D3 T3.1 advanced use-case
+S: A car insurer lets customers upload photos of driver's licences and claim forms to Cloud Storage. Before sending images to a third-party damage-assessment team, the insurer must obscure names, licence numbers and addresses printed in the images, and hide any visible licence plates. Which approach meets this?
+A: Use image redaction with infoTypes for text and licence plate objects, and share the returned redacted images
+B: Use character masking transformations on the image files, replacing characters in the picture with asterisks
+C: Run a discovery scan configuration, which blurs sensitive areas in images in the bucket after profiling
+D: Encrypt the images with a customer-managed key, so the third party sees only ciphertext of the sensitive areas of each picture
+K: A
+G: ## Redacting images
+Sensitive Data Protection can detect sensitive text in images using optical character recognition (OCR) and can also detect certain objects. You specify infoTypes (for text, for example `PERSON_NAME`, `EMAIL_ADDRESS`; for objects, for example `OBJECT_TYPE/LICENSE_PLATE`), and the service returns a new image in which detected items are covered by opaque rectangles. You can redact matching text, all detected text, or listed objects.
+## What it is not
+- Masking and tokenization are for text and structured data, not pixels.
+- Discovery profiles data and classifies it; it does not modify files.
+- Encryption protects a whole object at rest and does not hide parts of an image from an authorised viewer.
+W: Image redaction with infoTypes: OCR finds the printed text and object detectors find plates, and the redacted copy is what is shared externally.
+X: B=Character masking: this transformation works on text and structured values, and does not change pixels in an image.
+C=Discovery scan: the discovery service classifies and profiles data and generates insights, but it does not produce redacted versions of files.
+D=Customer-managed key: encryption protects the object as a whole, and the third party would need decryption to see anything, which defeats the purpose.
+T: Use Sensitive Data Protection image redaction when specific text or objects in pictures must be obscured before sharing.
+
+@ GCP-PSE D3 T3.1 applied tradeoff
+S: A security team wants to be told when a BigQuery table in any of 400 projects becomes more sensitive than before, for example because a new column now holds national ID numbers, and wants high-risk findings to appear next to other issues in its central security tooling. Which setup meets this?
+A: Create an organization-level discovery scan configuration with actions for Security Command Center and Pub/Sub on sensitivity changes
+B: Schedule inspection jobs on each table nightly, and write the findings to a spreadsheet for the team to review
+C: Use Data Access audit logs to find which columns are read, and treat frequently read columns as sensitive
+D: Apply a de-identification template to every table, so all columns are treated as sensitive regardless of their real content
+K: A
+G: ## Discovery as continuous monitoring
+The Sensitive Data Protection discovery service (the data profiler) scans an organization, folder or project, classifies data into infoTypes, and calculates sensitivity and data risk levels. It produces table, column and project profiles for BigQuery, and keeps profiling when data is added or changed.
+## Actions
+A scan configuration can send profiles to Security Command Center and Knowledge Catalog, and can publish a Pub/Sub notification when a profile's sensitivity level changes, which can trigger automation.
+## Applying it here
+Only discovery gives continuous coverage across many projects with change notifications; one-off jobs and access logs do not classify content.
+W: Organization-level discovery with actions: continuous profiling covers all projects, Security Command Center shows the high-risk results with other findings, and Pub/Sub notifies on sensitivity changes.
+X: B=Nightly inspection jobs: these are per-table jobs that someone must configure for every table, and findings in a spreadsheet are not integrated with security tooling or change notification.
+C=Audit logs: they show who accessed data but say nothing about whether a column contains national IDs.
+D=De-identification on every table: this changes data rather than finding sensitivity, and treating all columns the same removes the signal the team wants.
+T: Discovery scan configurations give continuous, org-wide sensitivity profiling with Security Command Center and Pub/Sub actions.
+
+@ GCP-PSE D3 T3.1 applied definition
+S: A data governance lead is evaluating Sensitive Data Protection discovery for BigQuery and Cloud SQL. Which TWO statements are correct? (Select TWO)
+A: Profiling BigQuery data generates a table data profile, column data profiles and a project data profile
+B: Discovery can send profile results to Security Command Center, and can notify via Pub/Sub when sensitivity changes
+C: Discovery automatically masks the detected columns so that analysts see only asterisks
+D: Discovery requires each table to be exported to a dedicated Cloud Storage bucket before profiling
+E: Discovery profiles only the data in the project in which the scan configuration was created
+K: A,B
+G: ## What discovery produces
+Discovery continuously monitors data in the scope you select (organization, folder or project) and produces profiles. For BigQuery and Cloud SQL there is one table profile per table, one column profile per column and one project profile per scanned project. Profiles can be sent to Security Command Center and Knowledge Catalog, and a scan configuration can publish a Pub/Sub notification on changes.
+## What it does not do
+It classifies and assesses; it does not transform the data or require copies. The scope can be broader than one project.
+W: A=Profile levels: BigQuery profiles come at table, column and project level.
+B=Actions: results can be sent to Security Command Center, and Pub/Sub notifications fire when sensitivity changes.
+X: C=Automatic masking: discovery does not alter data; de-identification is a separate operation.
+D=Export to a bucket: tables are scanned in place through the BigQuery Storage Read API.
+E=Single project only: a configuration can be scoped to an organization or folder as well as a project.
+T: Discovery profiles in place at table, column and project level and feeds Security Command Center and Pub/Sub.
+
+@ GCP-PSE D3 T3.1 applied troubleshooting
+S: A pipeline tokenizes customer IDs with Sensitive Data Protection using deterministic encryption and a transient key. A month later, a compliance team must re-identify some IDs from archived tokens, but the re-identification fails, and tokens created on different days do not match for the same customer. What should have been done?
+A: Use a key wrapped by Cloud KMS, keep it available to the re-identifying service, and use the same key for every run
+B: Add a surrogate annotation to the tokens, because that restores the key used to create them
+C: Switch to cryptographic hashing, because hashed tokens can be re-identified using the original key
+D: Increase the likelihood threshold of the inspection, so that the tokenized values are recognised on re-identification
+K: A
+G: ## Keys for cryptographic de-identification
+Pseudonymization uses a cryptographic key. There are three choices:
+- **Cloud KMS wrapped key**: the most secure option; the data key is wrapped by a KMS key and can be stored and reused later for re-identification.
+- **Transient key**: generated at the time of de-identification and then discarded, so it keeps referential integrity only within one API request and cannot be used for re-identification.
+- **Unwrapped raw key**: not recommended because of leakage risk.
+## Applying it here
+Reversal across days requires the same key every time, so the wrapped key managed in Cloud KMS is the answer.
+W: Cloud KMS wrapped key reused across runs: the same key gives consistent tokens across runs (referential integrity) and the key remains available for later re-identification by authorised services.
+X: B=Surrogate annotation: it labels tokens for unstructured data re-identification, but it contains no key and cannot replace a discarded one.
+C=Cryptographic hashing: HMAC-SHA-256 tokens are one-way and cannot be re-identified at all.
+D=Likelihood threshold: that setting filters findings during inspection and has nothing to do with key availability.
+T: Reversible or cross-run consistent tokens need a persistent Cloud KMS wrapped key, never a transient key.
+
+@ GCP-PSE D3 T3.1 applied comparison
+S: A customer-service platform stores email addresses of very different lengths and containing any characters in a BigQuery column. Analysts must be able to join records for the same customer, and a privileged service must be able to reverse the tokens later. Which transformation fits best?
+A: Pseudonymization with deterministic encryption using AES-SIV and a Cloud KMS wrapped key
+B: Pseudonymization with format preserving encryption, using the numeric alphabet
+C: Pseudonymization with cryptographic hashing, which is reversible with the original key
+D: Redaction of the email column, with a copy of the original values kept in a second dataset
+K: A
+G: ## Choosing among crypto-based tokenization methods
+- **Deterministic encryption (AES-SIV)**: no limit on the characters in the input, same input gives the same token (referential integrity), reversible with the key. It does not preserve length or alphabet.
+- **Format preserving encryption (FPE-FFX)**: output has the same length and a chosen alphabet, for legacy systems that validate format. Input must be ASCII, at least two characters, and works best on short values of uniform length.
+- **Cryptographic hashing (HMAC-SHA-256)**: one-way, same input gives the same hash, cannot be re-identified.
+## Applying it here
+Emails of variable length with arbitrary characters, plus joinability and reversal, match AES-SIV.
+W: AES-SIV with a KMS wrapped key: deterministic tokens allow joins, any character set and length is accepted, and the key allows authorised reversal.
+X: B=FPE with numeric alphabet: email addresses contain letters and symbols and vary in length, which does not suit a fixed numeric alphabet.
+C=Cryptographic hashing: it is one-way, so the privileged service could never reverse the tokens.
+D=Redaction plus a copy: redaction removes the value so joins are impossible, and the copy recreates the exposure the project wanted to avoid.
+T: Use AES-SIV for reversible, joinable tokens of variable-length values; use FPE only when format must be preserved.
+
+@ GCP-PSE D3 T3.1 advanced use-case
+S: A marketing platform tokenizes email addresses so that the same person can be linked within a single campaign but must not be linkable across different campaigns by anyone holding the data. Which Sensitive Data Protection setting achieves this?
+A: Use a context tweak that references the campaign ID column when applying deterministic or format preserving encryption
+B: Use a different transient key per API request, so tokens never repeat across requests
+C: Use bucketing on the email column with one range per campaign
+D: Turn on a surrogate annotation using the campaign name, because that annotation changes the encrypted value itself
+K: A
+G: ## Context tweaks
+By default, cryptographic de-identification gives the same output for the same input and key, so tokens can be joined across the whole data set, which increases re-identification risk if patterns are known. A **context tweak** (the `context` field) points to another column whose value is mixed into the encryption. Identical input values with different tweak values produce different tokens, and the tweak value is needed to reverse them.
+## Applying it here
+Using the campaign ID as the tweak yields a consistent token per person within a campaign and unlinkable tokens between campaigns.
+W: Context tweak on the campaign ID column: the tweak scopes the token to a campaign, so within a campaign it links and across campaigns it does not.
+X: B=Transient keys per request: tokens change per API request, not per campaign, and batches in one campaign would split across requests, breaking links and reversal.
+C=Bucketing: it generalises numeric or similar values into ranges, and is not suited to email addresses.
+D=Surrogate annotation: this is a label prepended to tokens for context and re-identification of unstructured data, and does not alter the encrypted value.
+T: A context tweak scopes tokens, so the same value links only where the tweak matches.
+
+@ GCP-PSE D3 T3.1 applied troubleshooting
+S: A team de-identifies free-text chat transcripts with deterministic encryption, replacing detected phone numbers with tokens. Later, a re-identification request on the transcripts returns the tokens unchanged, although the right key is used. What was missing at de-identification time?
+A: A surrogate annotation on the tokens, which unstructured text needs to locate and reverse them
+B: A larger set of infoTypes in the inspection, because additional detectors let the service reverse any token it finds
+C: A masking character configuration, since masked tokens can be reversed by the key
+D: A bucketing range on the phone numbers, because ranges are needed to find them again
+K: A
+G: ## Re-identifying unstructured text
+For structured data, Sensitive Data Protection can reverse a whole column using a record transformation, even without annotations. In free text there are no columns, so the service must find tokens inside the text. A **surrogate annotation** is prepended to each token (for example `PHONE(44):...`) and is required for re-identification of unstructured data, along with the entire token and the original key.
+## Practical rule
+When tokenizing free-form text that may need to be reversed, always set a surrogate infoType; for column-based tables it is optional.
+W: Surrogate annotation: it marks tokens in free text so re-identification can detect and decrypt them, which is required for unstructured content.
+X: B=More infoTypes: infoTypes affect what is detected for de-identification, and do not make tokens locatable later.
+C=Masking: character masking is irreversible, so it cannot be undone by any key.
+D=Bucketing: bucketing replaces values with ranges and cannot be reversed.
+T: Unstructured text needs a surrogate annotation on tokens so they can be re-identified.
+
+@ GCP-PSE D3 T3.1 applied definition
+S: A privacy engineer must choose transformations that an authorised pipeline can later reverse to restore original values. Which TWO Sensitive Data Protection transformations support re-identification? (Select TWO)
+A: Pseudonymization with deterministic encryption using AES-SIV
+B: Pseudonymization with format preserving encryption (FPE-FFX)
+C: Pseudonymization with cryptographic hashing (HMAC-SHA-256)
+D: Redaction of the detected value
+E: Character masking of the value with an asterisk
+K: A,B
+G: ## Reversible versus irreversible
+Crypto-based tokenization produces either two-way or one-way tokens. Because AES-SIV and FPE-FFX use symmetric encryption, the key that generated the token can also reverse it, provided the key, any surrogate annotation and any context tweak are available. HMAC-SHA-256 hashing is one-way. Redaction deletes the value, and masking overwrites characters, so neither keeps what is needed to restore the original.
+## Choosing
+- Reversible: AES-SIV (any characters), FPE (same length and alphabet).
+- Irreversible but linkable: hashing.
+- Irreversible and not linkable: redaction and masking.
+W: A=AES-SIV: symmetric deterministic encryption, which the same key can decrypt on re-identification.
+B=FPE-FFX: format preserving encryption is reversible with the key, any context tweak and surrogate annotation.
+X: C=Cryptographic hashing: it produces a one-way token that cannot be re-identified.
+D=Redaction: the detected value is removed, so nothing remains to restore.
+E=Masking: characters are overwritten with a fixed character, so the original cannot be recovered.
+T: AES-SIV and FPE are reversible with the key; hashing, redaction and masking are not.
+
+@ GCP-PSE D3 T3.1 advanced use-case
+S: A platform team stores API credentials in the environment variables of Cloud Run services across many projects. The security team wants to learn about secrets stored there without moving them into every team's own tooling. Which capability helps?
+A: Sensitive Data Protection discovery, detecting secrets in Cloud Run environment variables and sending findings to Security Command Center
+B: Cloud NAT logging, which records the secret values leaving the services over translated connections
+C: Private Service Connect backends, which scan the traffic from the services for credential patterns
+D: Image redaction in Sensitive Data Protection, which scans the container environment variable text for any secrets inside
+K: A
+G: ## Secrets in Cloud Run environment variables
+The discovery service of Sensitive Data Protection can detect the presence of secrets in the environment variables of Cloud Run functions and Cloud Run service revisions and send findings to Security Command Center. This case produces findings rather than data profiles. The follow-up is to move the secrets to Secret Manager and reference them from the services.
+## Why not other features
+Network features carry traffic and do not inspect configuration. Image redaction works on pictures, not on service configuration.
+W: Discovery for Cloud Run environment variables: it finds secrets in service configuration at scale and reports to Security Command Center, where the security team already works.
+X: B=Cloud NAT logging: it records connection metadata such as addresses and ports, not secret values or service configuration.
+C=Private Service Connect backends: they connect services through load balancers and do not scan content for credentials.
+D=Image redaction: it is designed to detect text and objects in images, not environment variables.
+T: Sensitive Data Protection discovery can flag secrets in Cloud Run environment variables and report them to Security Command Center.
+
+@ GCP-PSE D3 T3.1 applied troubleshooting
+S: An inspection of support tickets flags many order numbers like ORD-48213 as national ID numbers, creating noise, while internal employee codes in a custom format are never found. What should the security engineer change in the inspection configuration?
+A: Add a custom regex infoType for the employee code and an exclusion rule for the order-number pattern in the inspection ruleset
+B: Switch to cryptographic hashing so that all numeric strings in the tickets are replaced by uniform tokens
+C: Lower the minimum likelihood to the lowest level, so more candidate matches are returned and the noise disappears
+D: Run the scan as a discovery configuration, which ignores any strings that are not found in a built-in infoType
+K: A
+G: ## Tuning detection
+Inspection uses infoTypes, which can be built-in detectors, custom regular expressions, or dictionaries. Inspection rules refine the results: **exclusion rules** drop findings that match a pattern or dictionary, and **hotword rules** raise or lower likelihood when a word appears nearby. A minimum likelihood setting filters out weak matches.
+## Applying it here
+Missing company-specific codes call for a custom infoType, and false positives from a known pattern call for an exclusion rule. Transformations such as hashing change data after detection; they do not improve detection.
+W: Custom regex infoType plus exclusion rule: the regex lets the scan find the employee codes and the exclusion rule suppresses order numbers that look like IDs.
+X: B=Hashing: it is a de-identification step after detection, so it neither finds the missing codes nor removes false positives.
+C=Lowest minimum likelihood: it returns more weak matches, which increases noise instead of removing it.
+D=Discovery scan: it uses the same infoTypes and an inspection template, and does not ignore unknown strings or add custom detection.
+T: Tune detection with custom infoTypes and inspection rules (exclusion, hotword), not with transformations.

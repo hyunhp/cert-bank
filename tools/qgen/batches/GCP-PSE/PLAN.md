@@ -1,0 +1,20 @@
+# GCP-PSE batch plan (topics owned per batch)
+Exam: Professional Cloud Security Engineer, guide read 2026-11-06. Target 275 (D1 69, D2 60, D3 63, D4 52, D5 31). Rules and facts:
+`tools/qgen/GCP.md` (GCP-PSE section, incl. the hot-spot owners). About 15-20% "(Select TWO)". Professional depth: choose the control, scope it and justify
+it against alternatives; never commands or console steps. Before writing, grep published GCP-PCA, GCP-ACE and GCP-PDE questions on the same product
+(data/GCP-*.json) and use new scenarios. Shared hot spots belong to ONE batch only; others may use them as distractors.
+
+| Batch | Tasks | Count | Owns | Leave to |
+|---|---|---|---|---|
+| b01 | T1.1 (12), T1.2 (16) | 28 | Cloud Identity: Google Cloud Directory Sync, SSO with a third-party IdP, super admin protection, user lifecycle automation, groups via API, Workforce Identity Federation; service accounts: default SAs, keys (disable creation, audit, mitigate), short-lived credentials, impersonation, Workload Identity Federation | IAM roles and conditions (b02) |
+| b02 | T1.3 (10), T1.4 (18) | 28 | password and session policy, SAML and OAuth, 2-step verification enforcement; privileged roles and separation of duties, IAM vs ACL, IAM conditions, deny policies, least privilege by level, Access Context Manager, Policy Intelligence (Recommender, Policy Troubleshooter, Analyzer), group-based permissions, Privileged Access Manager | hierarchy (b03) |
+| b03 | T1.4 (3), T1.5 (10), T2.1 (15) | 28 | T1.4: Policy Intelligence leftovers; T1.5: folders and projects at scale, prebuilt and custom org policies, inheritance; T2.1: Cloud NGFW rules, policies and layer 7 inspection, IAP, load balancers, Certificate Authority Service, Cloud Armor | VPC Service Controls, segmentation (b04) |
+| b04 | T2.1 (9), T2.2 (18) | 27 | T2.1: public vs private IP, Secure Web Proxy, Cloud DNS security, restricting and monitoring APIs; T2.2: VPC properties, peering, Shared VPC, N-tier isolation, VPC Service Controls use cases and configuration | private connectivity (b05) |
+| b05 | T2.3 (18), T3.1 (10) | 28 | Shared VPC and peering design, Private Google Access (incl. on-prem hosts), restricted Google access, Private Service Connect, HA VPN and Cloud Interconnect encryption, Cloud NAT; T3.1: Sensitive Data Protection (discovery, redaction, pseudonymization, FPE) | rest of T3.1 (b06) |
+| b06 | T3.1 (14), T3.2 (14) | 28 | T3.1: restricting access to BigQuery, Cloud Storage and Cloud SQL data, Secret Manager, instance metadata protection; T3.2: default encryption vs CMEK vs EKM, software vs hardware keys, rotation, revocation, key import | Confidential Computing, AI (b07) |
+| b07 | T3.2 (13), T3.3 (12), T4.1 (3) | 28 | T3.2: encryption in transit and in use, Cloud Storage lifecycle policies, Confidential Computing; T3.3: AI/ML security and privacy, IaaS- vs PaaS-hosted training, Gemini Enterprise Agent Platform controls; T4.1: CVE scanning in CI/CD (3) | rest of T4.1 (b08) |
+| b08 | T4.1 (17), T4.2 (11) | 28 | Binary Authorization for GKE and Cloud Run, VM and image hardening and patch management, policy and drift detection, CSPM, custom org policies and Security Health Analytics custom modules; T4.2: network logs (NGFW, VPC flow logs, Packet Mirroring, Cloud IDS, Log Analytics) | audit logs, sinks, SCC (b09) |
+| b09 | T4.2 (21), T5.1 (7) | 28 | logging strategy, incident detection and response, secure access to logs, export to external security systems, Cloud Audit Logs and data access logs, sinks and aggregated sinks, Security Command Center; T5.1: shared responsibility and scoping (7) | rest of T5.1 (b10) |
+| b10 | T5.1 (24) | 24 | compliance: technical needs for compute, data, network and storage, shared responsibility, Assured Workloads, org policies for compliance, Access Transparency, Access Approval, data and service regionalization, in-scope environment, mapping requirements to controls | covered in b09 (shared responsibility basics) |
+
+Waves (about 4 writers at a time): b01, b03, b05, b07; then b02, b04, b06, b08; then b09, b10.
