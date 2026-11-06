@@ -1,16 +1,20 @@
 # TODO
 
 ## Now (warm start — keep this section current; update it with every merge)
-Updated 2026-11-03.
+Updated 2026-11-06.
 - UI + mock pass 2026-11-02/03 DONE (PR 82-99, all merged): level pick opens first exam; vendor tabs + ★ pill; exam picker (level groups, 2 columns on desktop, accordion on phones, folds after a pick; same on study.html); one-line stats; text buttons; `lastDay` ENDS badge (`exam-specs.json` + `LAST_DAY` in index.html, test keeps them equal); mock: sticky Prev/Flag/Next bar, single `Review & finish`, results/review polish, weakest-domain shortcut, perfect-score verdict; draw avoids the last 2 mocks (`aws_qbank_mock_recent_v1`) + crypto shuffle; study quiz result line; number commas; explanation names with a colon repaired (212 lines) + `tools/explain_format_test.py`.
 - Mock readiness panel (setup + results): last 3 full exams each timed, in time, >=80% unseen, >= target (80 / 85 pro / pass+10), every domain >=70% per exam. Attempts under 25% answered are not saved (no history, no seen). `x` on Recent attempts removes one.
 - Data scope fix 2026-11-03: shared questions keep the primary exam's raw `domainCode`/`taskId`; qgen now stamps `examDomain`/`examTask` in every exam file (`qgen.py stamp`, run by ingest/share), guarded by `tools/data_scope_test.py`. External readers of the raw files must use those two fields (feedback: SAP-C03 D2 and SCS-C03 D4 sets looked off when grouped by raw `domainCode`).
 - Change log (owner agreed 2026-11-04): `data/changes/<PR>.json` per data PR via `tools/qgen/changes.py`; message the blogger-publisher session only for `important` entries (rules in CLAUDE.md). Backfilled PR 97 (explanation name fix, 175 entries, none important).
 - Blog link (owner delegated 2026-11-04): footer of index.html shows `Practice sets on the blog (external site, may show ads)` from `BLOG_FROM` 2026-11-21 (hub https://bigdatabreakthroughs.blogspot.com/p/exams.html; do not link single posts). Checked 2026-11-04: hub 200, label pages 200 but "No posts" yet, Blogger pages carry AdSense. Reminder set for 2026-11-22: all 34 `/search/label/<EXAM>` pages must list posts; else push `BLOG_FROM` later.
 - Open UI ideas: `ENDS` badge on study.html chips; per-day study quiz results are not stored; history has no per-question time.
-- In progress: nothing (TF-IEP002 bank, 20-day study guide and glossary done on branch `tf-iep002`, PR pending merge). Other candidates: other Google Cloud
-  Professional exams (developer.hashicorp.com and cloud.google.com reachable). Open gaps: Gemini app and Gems (GAIL T2.2); Gemini Cloud Assist is
-  private preview (noted in PCA); Spark API pages are blocked (403) for the DBX bank.
+- In progress (2026-11-06): PLTR top-up on branch `pltr-expand`, PR pending owner OK to merge (bulk add): DE +75 (b51-b53) = 475, AIE +75 (b51-b53) = 475,
+  APD +25 (b51) = 425, all single-answer, each reviewed (about 50 fixes; ~20 near-duplicates of published questions replaced). TF-IEP002 is already in main.
+  Palantir docs now only via `www.palantir.com/docs/foundry` (non-www and learn/certification.palantir.com give 403); `spark.apache.org` was allowed 2026-11-06.
+  Docs facts: Agent Studio is now "AIP Chatbot Studio" (guide and published questions still say AIP Agent / Agent Studio; new name only in G);
+  relevant-chunks context mode is beta (not keyed); prompt-injection items rest on the guide's layered-control principle, no documented setting.
+  Next: Google Cloud Professional Data Engineer or Security Engineer, then more Databricks exams. Open gaps: Gemini app and Gems (GAIL T2.2); Gemini Cloud Assist is
+  private preview (noted in PCA); re-check Spark claims now that spark.apache.org is reachable.
 - Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; GCP-CDL bank and study guide; MLA-C02 study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). www.databricks.com is still
