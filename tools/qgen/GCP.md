@@ -49,6 +49,32 @@ Writing rules (in addition to the shared ones below):
 - Overlap: GCP-ACE (hands-on) and GCP-CDL / GCP-GAIL share product facts; read their published questions first, test the
   architect's choice (which design and why), not the console step.
 
+### GCP-PDE Professional Data Engineer (added 2026-11-06)
+Sources: https://cloud.google.com/learn/certification/data-engineer (read 2026-11-06) and the exam guide
+https://services.google.com/fh/files/misc/professional_data_engineer_exam_guide_english.pdf; product facts on docs.cloud.google.com only.
+
+| Item | Value |
+|---|---|
+| Length | 2 hours |
+| Questions | "40-50 multiple choice and multiple select questions". This bank assumes 45 (mock length only) |
+| Pass mark | Not published. `passMarkUnpublished: true` |
+| Sections | D1 designing data processing systems ~22%, D2 ingesting and processing the data ~25%, D3 storing the data ~20%, D4 preparing and using data for analysis ~15%, D5 maintaining and automating data workloads ~18% |
+| Tasks | 19: 1.1-1.4, 2.1-2.3, 3.1-3.4, 4.1-4.3, 5.1-5.5 (`data/exam-tasks.json`) |
+| Prerequisites | None; 3+ years industry, 1+ year designing and managing solutions on Google Cloud recommended. Cert valid 2 years |
+
+Writing rules (in addition to the shared ones below):
+- Professional depth: pick the data design or service that fits business and technical requirements (latency, volume, cost,
+  governance, residency, operational effort), not command syntax. No console click paths, no prices, limits or quotas.
+- Use the guide's product names (Dataflow, Apache Beam, Dataproc, Cloud Data Fusion, Dataform, BigQuery, BigLake, BigQuery
+  Editions and reservations, BI Engine, Analytics Hub, Dataplex / Dataplex Catalog, Cloud Composer, Workflows, Datastream,
+  Database Migration Service, BigQuery Data Transfer Service, Transfer Appliance, Cloud DLP / Sensitive Data Protection,
+  BigQuery ML). Check each name on docs.cloud.google.com before keying: products get renamed (the ACE and PCA banks hit several).
+- Preview, beta and deprecated features stay out of keys; say so in G if a distractor depends on one.
+- Overlap: GCP-PCA and GCP-ACE already cover generic storage, IAM and networking; read their published questions first and test
+  the data engineer's choice (which pipeline, store, model or governance design and why).
+- Streaming facts (windowing, triggers, watermarks, late data, exactly-once) belong to ONE batch (b03); BigQuery capacity and
+  reservations to b08; Dataplex and governance to b06.
+
 ### GCP-GAIL Generative AI Leader (added 2026-10-30)
 Sources: https://cloud.google.com/learn/certification/generative-ai-leader and the exam guide
 https://services.google.com/fh/files/misc/generative_ai_leader_exam_guide_english.pdf (read 2026-10-30; the exam page
