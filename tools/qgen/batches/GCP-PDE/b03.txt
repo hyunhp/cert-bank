@@ -1,0 +1,514 @@
+# GCP-PDE D2 T2.1 pipeline planning (8), T2.2 streaming and Dataflow/Beam build (20)
+# src: https://docs.cloud.google.com/dataflow/docs/concepts/streaming-pipelines
+# src: https://docs.cloud.google.com/dataflow/docs/guides/streaming-modes
+# src: https://docs.cloud.google.com/dataflow/docs/streaming-engine
+# src: https://docs.cloud.google.com/dataflow/docs/horizontal-autoscaling
+# src: https://docs.cloud.google.com/dataflow/docs/guides/troubleshoot-autoscaling
+# src: https://docs.cloud.google.com/dataflow/docs/guides/updating-a-pipeline
+# src: https://docs.cloud.google.com/dataflow/docs/guides/stopping-a-pipeline
+# src: https://docs.cloud.google.com/dataflow/docs/guides/write-to-bigquery
+# src: https://docs.cloud.google.com/dataflow/docs/guides/write-to-bigtable
+# src: https://docs.cloud.google.com/dataflow/docs/guides/pipeline-workflows
+# src: https://docs.cloud.google.com/dataflow/docs/concepts/dataflow-templates
+# src: https://docs.cloud.google.com/pubsub/docs/subscriber
+# src: https://docs.cloud.google.com/pubsub/docs/exactly-once-delivery
+# src: https://docs.cloud.google.com/pubsub/docs/ordering
+# src: https://docs.cloud.google.com/pubsub/docs/replay-overview
+# src: https://docs.cloud.google.com/pubsub/docs/schemas
+# src: https://docs.cloud.google.com/pubsub/docs/handling-failures
+# src: https://docs.cloud.google.com/pubsub/docs/bigquery
+
+@ GCP-PDE D2 T2.1 applied comparison
+S: A fleet of delivery vans publishes JSON telemetry to a Pub/Sub topic. The analytics team needs every message stored in a BigQuery table within seconds. No filtering, enrichment or aggregation is needed, and the team wants the fewest components to monitor and the lowest cost. Which design fits?
+A: Create a BigQuery subscription on the topic so Pub/Sub writes the messages to the table directly
+B: Run a streaming Dataflow job that reads a pull subscription and writes each message to the table
+C: Create a push subscription that calls a Cloud Run service, which inserts each message into the table
+D: Run a Dataproc cluster with Spark Structured Streaming that reads the topic and appends rows to the table
+K: A
+G: ## Export subscriptions
+Pub/Sub has three subscription families. **Pull** and **push** subscriptions hand messages to a subscriber application you run. **Export subscriptions** (BigQuery, Cloud Storage) make the Pub/Sub service itself write each message to a Google Cloud resource, with automatic flow control and load balancing.
+## When no processing is needed
+Docs state that without an export subscription you need a subscriber such as Dataflow to read and write messages, and that the overhead of a Dataflow job is not necessary when messages need no additional processing before storage. A BigQuery subscription can also use the topic schema, and failed writes can go to a dead-letter topic.
+## Applying it here
+Plain JSON into a table with no transformation is the exact case the export subscription targets: nothing to deploy, scale or monitor.
+W: BigQuery subscription: the Pub/Sub service writes directly to the table, so there is no job or service to run, and cost and latency are lower than with a processing pipeline.
+X: B=Streaming Dataflow job: it works, but a continuously running job with workers adds cost and operations that are unnecessary when nothing is transformed.
+C=Push to Cloud Run: it delivers one message per request and needs custom insert code, retries and scaling that the service would otherwise handle for you.
+D=Spark Structured Streaming on Dataproc: a cluster must be sized, patched and monitored, which is the heaviest option for a pass-through load.
+T: When messages need no processing before storage, an export subscription replaces a Dataflow job.
+
+@ GCP-PDE D2 T2.1 applied tradeoff
+S: A payments company processes several gigabytes of Pub/Sub messages per second with a fleet of worker processes running in a private VPC network. The environment cannot expose a public HTTPS endpoint with a non-self-signed certificate. Throughput and efficient batching matter more than anything else. Which subscription type should the team choose?
+A: A push subscription, because Pub/Sub then controls flow and no client library is needed
+B: A pull subscription, because workers request batches and the client controls the delivery rate
+C: A BigQuery subscription, because it removes the need for any consumer to process the messages
+D: A push subscription behind an internal load balancer, because messages are delivered one per request
+K: B
+G: ## Choosing between pull and push
+- **Pull**: the subscriber client asks Pub/Sub for messages. It suits large volumes (GBs per second) where efficiency matters, and environments that cannot offer a public HTTPS endpoint. Batched delivery and acknowledgment plus massively parallel consumption give high throughput at low CPU and bandwidth, and the client controls the delivery rate and can extend the acknowledgment deadline.
+- **Push**: Pub/Sub calls an HTTPS endpoint that needs a non-self-signed certificate and a public DNS name. It delivers one message per request and limits outstanding messages, so it fits webhooks, Cloud Run functions or App Engine subscribers.
+- **Export**: Pub/Sub writes to BigQuery or Cloud Storage with no processing.
+## Applying it here
+Private workers, very high volume and no public endpoint point to pull.
+W: Pull subscription: workers fetch messages in batches and acknowledge them in batches, which gives the best throughput, works without any inbound public endpoint, and lets each worker control its own pace.
+X: A=Push for flow control: push needs a reachable HTTPS endpoint with a valid certificate, which the environment cannot provide, and delivers per-request rather than in batches.
+C=BigQuery subscription: it only stores messages in a table; the payments workers must process the messages themselves, so it does not meet the requirement.
+D=Push behind an internal load balancer: push delivery targets a publicly reachable endpoint, and one message per request is the opposite of the throughput the team needs.
+T: Very high volume and no public endpoint call for pull; push suits webhooks and serverless receivers.
+
+@ GCP-PDE D2 T2.1 applied use-case
+S: Four product teams publish order events to a shared Pub/Sub topic. Subscribers keep breaking because some publishers send events with missing or misnamed fields. The data engineering lead wants the field names and types defined centrally and malformed events rejected at publish time. What should be done?
+A: Attach a Pub/Sub schema in Avro or Protocol Buffer format to the topic so non-conforming messages are not published
+B: Add a Dataflow step in every subscriber pipeline that drops events with unexpected fields after they are delivered
+C: Give each publishing team a separate topic and let each team document its own field names and types independently
+D: Turn on message ordering on the subscription so that malformed events are delivered after valid events
+K: A
+G: ## Pub/Sub schemas
+A Pub/Sub schema is an optional feature that enforces the format of the message data field. It creates a contract between publishers and subscribers: you define names and data types in **Apache Avro** or **Protocol Buffer** format and associate the schema with a topic. A message that does not conform is not published, and schemas can have revisions. This gives a central authority for message types across teams.
+## Applying it here
+Enforcement at the topic stops bad data at the source, so every downstream consumer sees only valid events.
+W: Topic schema: it defines the contract once, and Pub/Sub refuses non-conforming messages, so malformed events never reach any subscriber.
+X: B=Filtering in each subscriber: every team must re-implement validation, and malformed events still occupy the topic and subscriptions.
+C=Separate topics per team: this does not define a shared contract, and consumers must now integrate with four undocumented formats.
+D=Message ordering: ordering keys sequence related messages and do nothing to validate field names or types.
+T: Attach an Avro or Protocol Buffer schema to a Pub/Sub topic to make bad messages fail at publish time.
+
+@ GCP-PDE D2 T2.1 advanced tradeoff
+S: Which TWO of the following workloads are good candidates for Dataflow at-least-once streaming mode, accepting occasional duplicates in return for lower cost and latency? (Select TWO)
+A: A map-only job that parses application logs and writes them to BigQuery, where a downstream view removes duplicates
+B: A job that keeps a running per-card transaction count used by a fraud-detection rule
+C: An ETL job that only translates each change record to a target schema, with no aggregation
+D: A job that appends the current processing time to each message, where the timestamp is stored as the record key
+E: A job that sums order quantities per product to drive an ecommerce inventory dashboard
+K: A,C
+G: ## Exactly-once versus at-least-once streaming
+Dataflow streaming jobs run in **exactly-once mode** by default: records are neither dropped nor duplicated as they move through the pipeline. In **at-least-once mode** no input record is lost, but duplicates are possible, and the mode can significantly lower cost and latency. The baseline duplicate rate is typically low but can spike when workers fail.
+## Choosing
+- Exactly-once: aggregations (count, sum, mean) and business-critical cases such as fraud detection or inventory dashboards.
+- At-least-once: map-only pipelines (log processing, change data capture, per-element schema translation), pipelines where deduplication happens downstream, and pipelines whose sink cannot guarantee exactly-once.
+- Element-wise transforms are not always idempotent: a function that appends the current time makes a duplicate produce different outputs.
+W: A=Map-only log parsing with downstream dedup: no aggregation is involved and duplicates are removed later, which is the documented fit for at-least-once mode.
+C=Schema-translating ETL: per-element transforms without aggregation tolerate an occasional duplicate and benefit from lower cost and latency.
+X: B=Per-card count: a duplicate inflates the count and can trigger false fraud decisions, so exactly-once is needed.
+D=Timestamp-appending job: the transform is not idempotent, so a duplicate yields a distinct output record, which the downstream consumer cannot remove by key.
+E=Inventory sums: aggregations double count duplicates, so the dashboard would show wrong stock.
+T: Use at-least-once for map-only or downstream-deduplicated pipelines; keep exactly-once for aggregations and critical decisions.
+
+@ GCP-PDE D2 T2.1 applied troubleshooting
+S: A data engineer with the project Owner role launches a Dataflow Flex template that reads a Pub/Sub subscription and writes to a BigQuery dataset in another project. Workers start, but the job fails with permission errors on the destination dataset. The engineer's own account can write to that dataset. What should be fixed?
+A: Grant the destination dataset access to the worker service account that the job's VMs run as
+B: Grant the Owner role to the Dataflow service agent used by the service to create worker VMs
+C: Grant the engineer's user account a Dataflow Admin role on the destination project
+D: Recreate the template specification file in Cloud Storage so the job inherits the engineer's permissions
+K: A
+G: ## Two identities in every Dataflow job
+Docs describe two service accounts: the **Dataflow service account** (service agent) used by the service to manipulate resources such as creating VMs, and the **worker service account** used by worker VMs to reach pipeline files and the resources the pipeline references, including its source and sink. Jobs launched from templates behave the same way.
+## Key point
+Code running on workers, including I/O connectors, acts as the worker service account, never as the user who launched the job. The launching user needs permission to create the job; the worker account needs data access.
+W: Worker service account on the dataset: the connector writes with the worker identity, so that identity needs write access to the destination dataset (and read access to the subscription).
+X: B=Owner to the service agent: the service agent manages VMs and orchestration, not the data writes, and Owner would be far broader than needed.
+C=Dataflow Admin for the user: the job already started, so the user's job-management rights are not the problem.
+D=Rebuilding the spec file: the specification only points to the container image; it carries no credentials, and jobs never inherit the launching user's permissions.
+T: Dataflow workers access sources and sinks as the worker service account, so grant data roles to it.
+
+@ GCP-PDE D2 T2.1 advanced use-case
+S: A streaming Dataflow job reads from Pub/Sub and serves a latency-sensitive application. The business accepts losing a few seconds of data during a rare regional outage, but wants processing to resume in another region quickly and does not want to pay for a full duplicate pipeline running at all times. Which design matches?
+A: Keep two independent subscriptions on the topic, one per region, and start a replacement job on the backup subscription
+B: Run identical pipelines in two regions all the time, both writing to the same sink without any coordination of their outputs, so one region can take over
+C: Rely on the Dataflow service to move the failed job automatically to another region without any prior configuration
+D: Wait for the region to recover and restart the job from the same subscription, because messages are kept
+K: A
+G: ## Regional failure options for streaming Dataflow
+Docs list options by tolerance for data loss:
+- **Wait** for the outage to end: simplest and cheapest, but not for latency-sensitive workloads.
+- **High availability, no data loss**: duplicate pipelines in two regions consuming the same data; highest cost, and downstream consumers must switch between the two outputs.
+- **Failover, some potential data loss**: make the source available in multiple regions, for example two independent Pub/Sub subscriptions on the same topic, one per region. After an outage, start a replacement pipeline in another region on the backup subscription and replay it to an appropriate time to limit loss. Only the data is duplicated, so it uses fewer resources.
+## Applying it here
+The tolerance for a few seconds of loss and the cost limit select the failover pattern.
+W: Two subscriptions plus a replacement job: the backup subscription keeps accumulating data while the primary region is down, so the replacement pipeline resumes quickly and a seek to a recent time limits loss, at the cost of only duplicated data.
+X: B=Always-on duplicate pipelines: this is the high-availability pattern, which has the highest cost and conflicts with the stated budget; uncoordinated writers also risk duplicate rows in the sink.
+C=Automatic cross-region move: a job runs in the region where it was launched; moving it requires your own restart in another region.
+D=Waiting: the data is safe, but processing is stalled for the entire outage, which a latency-sensitive application cannot accept.
+T: For failover with minimal duplicated resources, keep a second Pub/Sub subscription and start a replacement pipeline in another region.
+
+@ GCP-PDE D2 T2.1 applied use-case
+S: A new version of a subscriber application was deployed and, because of a bug, acknowledged thousands of Pub/Sub messages without processing them. The fix is ready. The team wants to reprocess the messages published during the faulty deployment window. What should they have in place to make this possible?
+A: Message retention on the topic or on acknowledged messages, then seek to a time before the deployment
+B: A dead-letter topic on the subscription, because acknowledged messages are automatically forwarded to it for later review
+C: Exactly-once delivery on the subscription, because it keeps every acknowledged message available for redelivery whenever the subscriber client asks for a new copy
+D: A push endpoint on the subscription, because push subscriptions can redeliver messages that were acknowledged earlier
+K: A
+G: ## Replay with seek
+After acknowledgment, messages become inaccessible to subscribers. **Seek** lets you change the acknowledgment state in bulk: you can seek to a **snapshot** (a point-in-time view of a subscription's ack state, taking one before a risky deploy is a documented practice) or to a **timestamp**. To seek to a time in the past and replay acknowledged messages you must configure message retention on the topic, or configure the subscription to retain acknowledged messages. A snapshot's lifetime is at most seven days.
+## Applying it here
+No snapshot was taken, so retention plus a timestamp seek is the recovery route, and the team should add a snapshot step to future deployments.
+W: Retention plus seek to a timestamp: retained messages can be marked unacknowledged again, so the fixed subscriber receives everything from the faulty window.
+X: B=Dead-letter topic: it only receives messages that could not be acknowledged after delivery attempts; acknowledged messages never go there.
+C=Exactly-once delivery: it prevents redelivery after a successful acknowledgment, so it would not bring back messages acknowledged in error.
+D=Push endpoint: the delivery type does not change retention, and acknowledged messages are not redelivered unless they are retained and a seek is performed.
+T: Replay needs retained messages and a seek to a snapshot or timestamp; take snapshots before risky deployments.
+
+@ GCP-PDE D2 T2.1 applied definition
+S: A Dataflow streaming job reads clickstream events from Pub/Sub and builds per-customer session windows. An engineer proposes enabling message ordering with ordering keys on the subscription so events arrive in order. What is the best guidance?
+A: Leave ordering disabled on the subscription; Dataflow handles order through event-time windowing, and ordering keys can slow the pipeline
+B: Enable ordering with the customer ID as key, because Dataflow requires an ordered subscription to build session windows
+C: Enable ordering and publish with the same key from every region, so that one global order holds
+D: Enable ordering only on the dead-letter topic, because Dataflow reads dead-letter messages in publication order
+K: A
+G: ## Ordering in Pub/Sub versus Dataflow
+Pub/Sub **ordering keys** deliver messages that share a key in publish order, provided all of them are published in the same region. Messages with different keys are not ordered relative to each other, and redelivery of a message triggers redelivery of later messages for that key.
+Dataflow has its own mechanism: it groups elements by their **event timestamps** into windows, so chronological handling is part of the windowing operations. The Pub/Sub docs say not to enable message ordering on subscriptions used with Dataflow because it can potentially reduce pipeline performance.
+## Applying it here
+Session windows depend on event time, not arrival order, so ordering on the subscription adds cost without benefit.
+W: Leave ordering off: windowing by event time already groups events correctly even when they arrive out of order, and ordering keys can slow the pipeline.
+X: B=Ordered subscription required: Dataflow does not need ordered delivery; session windows are computed from element timestamps.
+C=Single key everywhere: ordering is per key, not global, and one key would also cap publishing throughput for the whole stream.
+D=Ordering on the dead-letter topic: dead-letter topics hold undeliverable messages, are not the clickstream source, and give no such guarantee.
+T: Do not enable Pub/Sub ordering for Dataflow subscriptions; rely on event-time windowing.
+
+@ GCP-PDE D2 T2.2 applied use-case
+S: A streaming pipeline must output, every minute, the average temperature over the most recent five minutes for each sensor group. Consecutive results should overlap. Which windowing choice produces this?
+A: Hopping (sliding) windows five minutes long that start every minute
+B: Tumbling (fixed) windows five minutes long with no overlap
+C: Session windows with a five-minute gap duration per sensor group
+D: A global window with a trigger that fires after every minute of processing time
+K: A
+G: ## Window types in Dataflow and Beam
+Windows divide an unbounded collection into finite pieces by element timestamp:
+- **Tumbling** (Beam: fixed): consistent, disjoint intervals, such as 30 seconds each.
+- **Hopping** (Beam: sliding): fixed length windows that start every *period* and can overlap; docs use one-minute hopping windows with a thirty-second period for a running average.
+- **Session**: a window holds elements within a gap duration of each other; data after the gap starts a new window, assigned per key.
+## Applying it here
+Five-minute length with a one-minute period gives a running average that refreshes every minute.
+W: Hopping windows: each element belongs to several overlapping five-minute windows, and a new window closes every minute, producing the rolling average.
+X: B=Tumbling five-minute windows: results appear only once per five minutes and windows never overlap.
+C=Session windows: windows follow bursts of activity separated by gaps, so they would have irregular boundaries rather than a steady minute cadence.
+D=Global window with periodic trigger: it keeps all history in one window, so the output would not be limited to the latest five minutes.
+T: Use hopping (sliding) windows for rolling aggregates, tumbling for disjoint buckets, session for activity bursts.
+
+@ GCP-PDE D2 T2.2 applied use-case
+S: A news site wants a streaming job that reports page views per hour of the day, one report for each clock hour, with every event counted in exactly one report. Which windowing choice fits?
+A: Tumbling (fixed) windows of one hour, applied to the event timestamps
+B: Hopping (sliding) windows of one hour that start every ten minutes
+C: Session windows with a one-hour gap duration for each page
+D: Hopping windows of ten minutes with a one-hour period
+K: A
+G: ## Tumbling windows
+A tumbling window (Beam: fixed window) is a consistent, disjoint time interval: with thirty-second windows, elements stamped [0:00:00-0:00:30) fall in the first window and [0:00:30-0:01:00) in the second. Because windows never overlap, each element belongs to exactly one window, and tumbling and hopping windows contain all elements of the interval regardless of key.
+## Applying it here
+Hourly, non-overlapping totals with each event counted once are the textbook case.
+W: Tumbling one-hour windows: the intervals are disjoint, so every page view is counted in the single clock hour that holds its timestamp.
+X: B=Hourly hopping every ten minutes: windows overlap, so each event is counted in about six windows.
+C=Session windows: boundaries follow activity gaps for each key, not clock hours, so the report would not align with the hour.
+D=Ten-minute hopping with a one-hour period: the period is longer than the window, so most of each hour is left out of every window.
+T: Use tumbling windows for disjoint, regular intervals where each event is counted once.
+
+@ GCP-PDE D2 T2.2 applied use-case
+S: A mobile game wants to compute, for every player, the total time spent in each play session. A session ends when the player has produced no events for ten minutes, and sessions differ greatly in length. Which windowing function fits?
+A: Session windows with a ten-minute gap duration, keyed by player
+B: Tumbling windows of ten minutes applied across all players
+C: Hopping windows of ten minutes with a one-minute period
+D: Tumbling windows of one hour, with a trigger firing on every element
+K: A
+G: ## Session windows
+A session window contains elements that fall within a gap duration of another element. When data arrives after the gap, it begins a new window. Session windowing assigns different windows to each data key, unlike tumbling and hopping windows, which contain all elements in the interval regardless of key. Docs use user mouse activity as the example: long idle periods between many clicks.
+## Applying it here
+Key by player, set the gap to ten minutes, and each burst of activity forms its own variable-length window.
+W: Session windows with a ten-minute gap: window boundaries follow each player's own activity, so a session of any length is captured and an idle gap closes it.
+X: B=Ten-minute tumbling windows: boundaries are fixed clock intervals that cut sessions in the middle and ignore each player's behaviour.
+C=Ten-minute hopping windows: windows overlap on a fixed grid, so one session would be split across many windows and double counted.
+D=One-hour tumbling windows: a clock-based hour does not match sessions of differing lengths, and firing on every element only changes when results appear.
+T: When boundaries depend on gaps in a key's activity, use session windows.
+
+@ GCP-PDE D2 T2.2 applied tradeoff
+S: A pipeline counts web orders in hourly windows by event time. Mobile clients buffer events while offline, so some orders arrive up to 30 minutes after the hour has ended. With default settings the hourly counts are too low. Which change gives the most accurate results while still producing timely preliminary numbers?
+A: Allow late data (allowed lateness) and add a trigger that emits updated results when late elements arrive
+B: Switch the windows from event time to processing time so every order is counted in the hour in which the pipeline received it, however late the client sent it
+C: Replace the hourly tumbling windows with a global window and a single end-of-stream trigger
+D: Disable the watermark so no element is ever considered late and every window waits for all data
+K: A
+G: ## Watermarks, late data and triggers
+A **watermark** is a threshold for when Dataflow expects all data of a window to have arrived. If the watermark has passed the end of a window and an element with a timestamp inside that window arrives, it is **late data**. The source determines the watermark, and you can allow late data with the Apache Beam SDK. By default **triggers** emit results when the watermark passes the end of the window; they can also react to event time, processing time or element counts.
+## Handling late data
+Beam lets you set an allowed lateness for a window and add late triggers, so the pipeline emits an early or on-time result and later refinements. Data later than the allowed lateness is dropped.
+W: Allowed lateness plus a late trigger: the window state is kept for the lateness period, the on-time result is emitted when the watermark passes, and updated counts are emitted as late orders arrive.
+X: B=Processing time: it makes counts reflect arrival, not when orders happened, which breaks the hourly business meaning.
+C=Global window with end-of-stream trigger: a streaming source never ends, so no result would ever be produced.
+D=Disabling the watermark: the watermark is how the pipeline decides when to emit; windows would never close and results would never be produced on time.
+T: Use allowed lateness and late-firing triggers to refine results for event-time windows when data arrives late.
+
+@ GCP-PDE D2 T2.2 advanced definition
+S: Which TWO statements about watermarks and triggers in a Dataflow streaming pipeline are correct? (Select TWO)
+A: The data source determines the watermark, which signals when the pipeline expects all data for a window to have arrived
+B: By default a window emits its aggregated result when the watermark passes the end of that window
+C: A trigger can only be defined on processing time, because event time is unknown to the runner until a window closes
+D: The pipeline author sets the watermark as a fixed delay behind the wall clock in the Apache Beam SDK
+E: An element whose timestamp lies in a window that the watermark has already passed is always processed normally
+K: A,B
+G: ## Concepts
+- The **watermark** is a threshold indicating when Dataflow expects all data in a window to have arrived. Data is not guaranteed to arrive in time order or at predictable intervals, which is why Dataflow tracks it. The data source determines it.
+- **Triggers** decide when to emit aggregated results as data arrives. The default is when the watermark passes the end of the window. With the Beam SDK you can set triggers for each collection on event time (element timestamps), processing time, the number of elements, or combinations.
+- An element that arrives after the watermark passed its window is **late data**, and it is only included if you allowed it.
+W: A=Source-determined watermark: the source reports how far event time has progressed, and the runner uses that estimate to judge window completeness.
+B=Default trigger: with no custom trigger, results are emitted once the watermark passes the window end.
+X: C=Processing time only: triggers can operate on event time, processing time, element count or combinations.
+D=Fixed delay set by the author: the source determines the watermark; authors can allow late data but do not set the watermark itself.
+E=Always processed normally: late elements are dropped unless allowed lateness is configured.
+T: The source drives the watermark; the default trigger fires when it passes the window end, and late data needs explicit handling.
+
+@ GCP-PDE D2 T2.2 applied troubleshooting
+S: A streaming pipeline counts clicks per five-minute window. After a six-hour network outage at the collectors, the backlog was delivered all at once. The dashboard now shows a huge spike in the five minutes after recovery and nothing for the outage window. Which fix addresses the cause?
+A: Take the window timestamp from the click event's own time field instead of the arrival time at the pipeline
+B: Replace the five-minute tumbling windows with session windows so the backlog forms one large session
+C: Increase the maximum number of workers so the backlog is processed faster and the spike is shorter
+D: Switch the sink from BigQuery to Bigtable so the spike is written with a lower write latency
+K: A
+G: ## Event time versus processing time
+Windowing functions group an unbounded collection by the **timestamps of the individual elements**. If elements carry their processing or publish time, a delayed batch of old events lands in the current window. If the pipeline assigns each element the time at which the event actually occurred (event time), delayed events fall into the windows where they belong, and watermarks and triggers manage completeness.
+## Applying it here
+The spike is a symptom of counting by arrival, not a capacity problem.
+W: Event-time timestamps: assigning each click its own occurrence time puts the backlog into the original windows, filling the outage gap and removing the spike.
+X: B=Session windows: they group by activity gaps and would not restore the original five-minute distribution.
+C=More workers: capacity changes how fast the backlog is read, not which window each element is assigned to.
+D=Switching sinks: the sink does not affect window assignment; the counts would be equally wrong in Bigtable.
+T: Window on event time carried in the data, not arrival time, so delayed events land in the correct windows.
+
+@ GCP-PDE D2 T2.2 applied use-case
+S: A production streaming Dataflow job runs on worker VMs that run the whole pipeline and use large Persistent Disks. Scaling is slow after traffic jumps, and worker CPU and memory are heavily used. The team wants shuffle and state moved off the workers and finer-grained autoscaling. The job must not lose buffered data. What is the right approach?
+A: Drain the job, then launch it again with Streaming Engine enabled
+B: Update the running job in place with the Streaming Engine option enabled
+C: Cancel the job immediately and relaunch it with larger worker machine types
+D: Keep the job but add more Persistent Disk to every worker VM
+K: A
+G: ## Streaming Engine
+Streaming Engine moves pipeline execution out of worker VMs into the Dataflow service backend. Benefits listed in docs: less CPU, memory and Persistent Disk use on workers, more responsive and granular Horizontal Autoscaling (with a configurable latency tier), and service updates without redeploying. It works best with small worker machine types and has a service charge. It supports CMEK.
+## Switching on a running job
+Docs say you cannot update an already running pipeline to use Streaming Engine. Stop it with **Drain** (finish buffered data, stop reading new data), then rerun with the Streaming Engine parameter.
+W: Drain, then relaunch with Streaming Engine: drain completes in-flight work so no data is lost, and the new job runs with the offloaded execution model and better autoscaling.
+X: B=In-place update: the option cannot be applied to a running job through an update.
+C=Cancel and relaunch with larger machines: cancel does not finish buffered data, and bigger workers do not move shuffle and state off the VMs.
+D=More Persistent Disk: it adds storage cost without improving autoscaling responsiveness or CPU and memory pressure.
+T: Streaming Engine cannot be added by update; drain the job and relaunch it with the option.
+
+@ GCP-PDE D2 T2.2 advanced troubleshooting
+S: A streaming job that does not use Streaming Engine was launched with a maximum of 20 workers. Ahead of a campaign, an engineer updates the job and sets a maximum of 60 workers, expecting more capacity, but the job cannot scale beyond its original size. What explains this and what is the remedy?
+A: Without Streaming Engine the job is bound to the workers and disks allocated at launch, so relaunch with a higher maximum
+B: The update succeeded, but Dataflow applies a new worker maximum only after midnight UTC, so the job must simply wait
+C: Horizontal Autoscaling is not supported for streaming jobs, so the count can never exceed Pub/Sub partitions
+D: The job needs a larger worker machine type, because the worker count is capped by vCPU quota rather than by job options
+K: A
+G: ## Scaling range without Streaming Engine
+For streaming jobs that do not use Streaming Engine, Dataflow allocates Persistent Disk resources at launch and balances disks evenly across workers. Docs state you cannot scale beyond the number of workers and disks allocated when the original job started; when you update, you can only specify a worker count up to the original maximum (`maxNumWorkers`). Streaming Engine removes this constraint because state is kept in the service, and Horizontal Autoscaling is enabled by default for Streaming Engine jobs.
+## Applying it here
+Plan the maximum for peak load at launch, or use Streaming Engine so ranges can change with an update.
+W: Launch-time allocation: the original maximum fixes the disks and workers, so raise it by launching a new job (after a drain), or move to Streaming Engine, where scaling is not bound that way.
+X: B=Delay until midnight: there is no such scheduled application of the worker maximum; the limit comes from the launch allocation.
+C=Autoscaling unsupported: Horizontal Autoscaling is supported for streaming jobs, and Pub/Sub does not have partitions that cap workers.
+D=Bigger machine type: vCPU quota may matter in other cases, but the documented cause here is the launch-time disk and worker allocation.
+T: Non-Streaming-Engine streaming jobs cannot scale beyond their launch-time maximum; set it high or use Streaming Engine.
+
+@ GCP-PDE D2 T2.2 applied tradeoff
+S: A Streaming Engine job processes non-urgent audit events. The business accepts a few minutes of extra delay if that reduces worker cost. Which autoscaling setting expresses this preference?
+A: Configure a higher latency tier so the autoscaler waits for more backlog before it adds workers
+B: Set the autoscaling algorithm to NONE and fix the worker count to the peak value
+C: Raise the minimum number of workers so that the pipeline always has spare capacity
+D: Switch to a lower latency tier so that the autoscaler reacts to even the smallest backlog by adding workers quickly
+K: A
+G: ## Tuning streaming autoscaling
+Horizontal Autoscaling adjusts workers based on average CPU utilization and pipeline parallelism. For Streaming Engine jobs you can set a **latency tier** to tune the autoscaler's sensitivity to backlog duration, and update minimum workers, maximum workers or latency tier on a running job. With a medium or high latency tier, Dataflow intentionally waits for more backlog to accumulate before triggering upscale events, which saves cost for delay-tolerant jobs.
+## Applying it here
+A job that tolerates delay should not scale up at the first sign of backlog.
+W: Higher latency tier: scale-up waits until more backlog has built up, so fewer workers run at the cost of added delay the business accepts.
+X: B=Fixed peak-size worker count: disabling autoscaling pays for peak capacity at all times, which raises cost.
+C=Higher minimum: a larger floor guarantees more always-on workers and increases cost.
+D=Lower latency tier: this makes the autoscaler more eager to add workers, the opposite of the cost goal.
+T: Use a higher latency tier for delay-tolerant Streaming Engine jobs to cut worker cost.
+
+@ GCP-PDE D2 T2.2 advanced troubleshooting
+S: A streaming Dataflow job writes enriched events to Bigtable. Autoscaling raises the worker count when the Pub/Sub backlog grows, but the backlog keeps growing, output throughput stays flat and Bigtable cluster CPU is saturated. What should the engineer do?
+A: Add nodes to the Bigtable cluster, since write parallelism is determined by the number of cluster nodes
+B: Increase the maximum number of Dataflow workers further, because the sink scales with the worker count
+C: Move the Pub/Sub subscription to a push configuration to reduce the load on Bigtable
+D: Enable exactly-once streaming mode, because duplicate writes are what saturates the nodes
+K: A
+G: ## Sink-bound pipelines
+Autoscaling follows CPU and parallelism of the workers, but a pipeline can be limited by an external sink. For Bigtable, docs say parallelism is controlled by the number of nodes in the cluster, each managing one or more key ranges. If cluster CPU is saturated, extra Dataflow workers cannot raise throughput.
+## Applying it here
+The symptoms (more workers, flat throughput, saturated Bigtable CPU) indicate the sink is the bottleneck.
+W: Add Bigtable nodes: more nodes spread key ranges across more servers, raising the write capacity that limits the pipeline.
+X: B=More workers: the sink is already saturated, so additional writers only increase contention.
+C=Push subscription: the delivery mode changes how Dataflow receives messages, not how fast Bigtable accepts writes.
+D=Exactly-once mode: it is already the default, and duplicates are not the stated cause of saturation.
+T: When workers scale but throughput does not, check the sink; Bigtable write capacity scales with its node count.
+
+@ GCP-PDE D2 T2.2 advanced use-case
+S: A team must replace a running streaming pipeline with a new version in which two transforms were renamed. They want to keep the job's state and buffered data, and avoid launching a replacement that fails its compatibility check. Which TWO actions should they take? (Select TWO)
+A: Supply a transform name mapping that links each renamed transform to its old name
+B: Validate the replacement job graph first by using the graph validate only service option
+C: Set the update compatibility version to the SDK version of the new pipeline code
+D: Cancel the running job, so that its buffered data is dropped before the replacement starts
+E: Turn off Horizontal Autoscaling on the running job, as the compatibility check requires a fixed worker count
+K: A,B
+G: ## Replacing a streaming job
+Dataflow can update a job in flight for some options, but new pipeline code needs a **replacement job**. The service runs a **compatibility check** between the running and replacement job to make sure intermediate state and buffered data can be transferred.
+- If transform names changed, provide a **transform name mapping** (`--transformNameMapping` in Java, `--transform_name_mapping` in Python).
+- If the replacement uses a later Beam SDK version, set `--updateCompatibilityVersion` to the version of the *original* job.
+- To check validity before launching, add the `graph_validate_only` service option, then launch again without it.
+W: A=Transform name mapping: it tells the service which new transform corresponds to which old one, so state is carried over.
+B=Graph validation: the replacement graph is checked before launch, reducing the risk of failure after the update.
+X: C=Compatibility version of the new code: it must be the SDK version used in the original job, not the new one.
+D=Cancelling first: a cancelled job does not preserve buffered state and defeats the purpose of an update.
+E=Turning off autoscaling: the compatibility check does not require a fixed worker count.
+T: Map renamed transforms and validate the replacement graph before updating a streaming job.
+
+@ GCP-PDE D2 T2.2 applied troubleshooting
+S: A streaming job is draining before a planned release but never finishes. The log shows the same exception repeating in a DoFn that parses a field the producers changed. The team does not want to lose buffered data. What should they do?
+A: Update the draining job with code that fixes the parsing error so that the drain can complete
+B: Cancel the draining job at once and restart from the earliest unread message, accepting the lost buffered data
+C: Wait indefinitely, since Dataflow skips records that repeatedly fail and the drain finishes by itself
+D: Start a second identical job on the same subscription so that it takes over the failing records
+K: A
+G: ## Drain and stuck pipelines
+**Drain** applies to streaming jobs only: the job stops reading new input, marks sources with an event timestamp at infinity, and finishes processing buffered data. Dataflow streaming tolerates errors by retrying until you act, and while draining it continues to retry, which can leave a pipeline stuck. Docs say you can update a pipeline that is being drained: updating it with code that fixes the error enables a successful drain without data loss. You can also cancel a draining job, but that gives up buffered data.
+W: Update the draining job: the corrected DoFn lets the failed elements complete, so the drain finishes with all buffered data processed.
+X: B=Cancel: it ends the job quickly but does not process the data still buffered, which the team wants to keep.
+C=Waiting: Dataflow keeps retrying a failing element rather than skipping it, so the drain stays stuck.
+D=Second job on the same subscription: it would receive a different subset of messages and does not rescue the data held in the first job.
+T: A stuck drain is fixed by updating the draining job with corrected code, not by cancelling.
+
+@ GCP-PDE D2 T2.2 advanced comparison
+S: Which TWO statements about the BigQuery write methods of the Dataflow BigQuery connector in streaming pipelines are correct? (Select TWO)
+A: The Storage Write API mode (STORAGE_WRITE_API) provides exactly-once semantics
+B: The legacy streaming inserts mode is the default for unbounded collections, but it uses best-effort deduplication and is not recommended for new projects
+C: The STORAGE_API_AT_LEAST_ONCE mode guarantees that no duplicate rows are ever written
+D: The FILE_LOADS method is the recommended choice when the pipeline runs in at-least-once streaming mode
+E: Streaming inserts provide exactly-once semantics and cost less than the Storage Write API
+K: A,B
+G: ## Write methods
+For streaming pipelines Google recommends the Storage Write API (gRPC) with `STORAGE_WRITE_API` or `STORAGE_API_AT_LEAST_ONCE`:
+- `STORAGE_WRITE_API`: exactly-once semantics.
+- `STORAGE_API_AT_LEAST_ONCE`: lower latency for most pipelines, but duplicate writes are possible.
+- `STREAMING_INSERTS`: legacy streaming API, best-effort deduplication that can leave duplicates; the default for unbounded collections but not recommended; more expensive and slower than the Storage Write API.
+- `FILE_LOADS` is incompatible with at-least-once streaming mode. Match connector semantics to the streaming mode.
+W: A=Storage Write API: exactly-once, suited to pipelines that cannot accept duplicates.
+B=Streaming inserts: still the default for unbounded data, but only best-effort deduplication, so new pipelines should choose a Storage Write API mode.
+X: C=At-least-once API mode: duplicates are possible; the trade-off is lower latency.
+D=File loads with at-least-once: docs state the combination is incompatible.
+E=Streaming inserts as exactly-once: they are best-effort deduplicated and more expensive than the Storage Write API.
+T: Use STORAGE_WRITE_API for exactly-once and STORAGE_API_AT_LEAST_ONCE for low latency; avoid legacy streaming inserts.
+
+@ GCP-PDE D2 T2.2 applied use-case
+S: A streaming pipeline writes parsed events to BigQuery with the Storage Write API. A producer sometimes sends rows whose values do not fit the table schema. These rows must not block the pipeline, and the team wants to inspect and reprocess them later. What design fits?
+A: Collect failed rows as a separate PCollection and write them to a dead-letter table or bucket
+B: Let the pipeline fail on the first bad row, so the Dataflow retries stop the data from entering BigQuery
+C: Remove the schema from the destination table so that every row is accepted regardless of its fields
+D: Drop failed rows silently in the connector, because streaming pipelines cannot keep a record of them
+K: A
+G: ## Dead-letter pattern in pipelines
+With the Storage Write API, rows that cannot be written are placed in a separate `PCollection`, available through `getFailedStorageApiInserts` on the `WriteResult`. A common design routes those records (and parse failures from side outputs) to a **dead-letter sink** with the error and original payload, so the main flow continues and engineers can fix and replay them.
+## Why not other options
+Streaming Dataflow retries failing elements indefinitely rather than skipping them, so one bad record without a dead-letter path can stall the job.
+W: Failed-rows collection to a dead-letter sink: good data keeps flowing and bad rows are preserved with context for later inspection and reprocessing.
+X: B=Failing on the first bad row: streaming jobs retry rather than fail, so the pipeline stalls and good data piles up.
+C=Removing the schema: BigQuery tables need a schema, and this would destroy data quality for every consumer.
+D=Silent dropping: the connector exposes failed inserts, so there is no need to lose them.
+T: Send failed writes and unparseable records to a dead-letter sink so streaming flow continues and bad data is recoverable.
+
+@ GCP-PDE D2 T2.2 applied troubleshooting
+S: A subscriber on a Pub/Sub pull subscription repeatedly fails on one malformed message. Each retry blocks capacity and the same message keeps coming back. The team wants such messages moved aside after a limited number of attempts. What should they configure?
+A: A dead-letter topic with a maximum delivery attempts value, plus publish and subscribe roles for the Pub/Sub service account
+B: A shorter message retention duration on the topic, so the malformed message is deleted before it is redelivered
+C: Message ordering on the subscription, so that the malformed message is skipped because it has an empty ordering key and is treated as unordered
+D: A Cloud Storage subscription on the topic, which automatically excludes messages that a subscriber cannot parse
+K: A
+G: ## Dead-letter topics
+When a subscriber cannot acknowledge a message, Pub/Sub retries until the acknowledgment deadline is met or the message expires. With a **dead-letter topic**, after the configured maximum number of delivery attempts (5 to 100) Pub/Sub forwards the message, wrapped in a new one with attributes identifying the source subscription, to the dead-letter topic, where a separate subscription can inspect it. The count is approximate and best effort. Delivery attempts are counted only when the dead-letter topic is correctly configured with IAM permissions: Pub/Sub's service account (`service-PROJECT_NUMBER@gcp-sa-pubsub.iam.gserviceaccount.com`) needs the publisher role on the dead-letter topic and the subscriber role on the subscription.
+W: Dead-letter topic with maximum attempts: poison messages leave the main flow after the limit and are kept for analysis, once the service account has the needed roles.
+X: B=Shorter retention: retention governs how long messages are kept, not redelivery of an unacknowledged one, and it would risk losing good messages.
+C=Message ordering: an empty ordering key means a message is not ordered; it does not skip failures, and ordering can make a stuck message delay others.
+D=Cloud Storage subscription: it exports messages to a bucket and has no parsing or exclusion logic.
+T: Configure a dead-letter topic with a delivery-attempt limit and grant the Pub/Sub service account the needed roles.
+
+@ GCP-PDE D2 T2.2 applied comparison
+S: A team wants one reusable Dataflow template whose pipeline selects a different I/O connector depending on a parameter and validates the input parameters before the job starts. Which template type fits, and why?
+A: A Flex template, because the graph is built at launch from runtime parameters and can be validated first
+B: A classic template, because its job graph is a JSON serialization that can be changed by parameters at launch
+C: A classic template, because values wrapped in ValueProvider can alter which connector the static graph uses
+D: A Flex template, because it avoids Docker images and keeps the whole pipeline definition only in a Cloud Storage file
+K: A
+G: ## Flex versus classic templates
+- **Flex template**: the pipeline is packaged as a Docker image in Artifact Registry plus a template specification file in Cloud Storage. When run, the service starts a launcher VM, pulls the image and builds the execution graph dynamically from runtime parameters. It does not need `ValueProvider`, can choose a different I/O connector by parameter, and can validate parameters during construction. Google recommends Flex for new templates.
+- **Classic template**: the JSON serialization of a static job graph; runtime parameters must be wrapped in `ValueProvider`, which not every source and sink supports.
+W: Flex template: dynamic graph construction and a launcher VM for preprocessing allow connector choice and parameter validation.
+X: B=Classic with a changeable graph: a classic graph is static, so it cannot switch connectors.
+C=ValueProvider: it supplies values at runtime but does not change the graph structure, and some connectors do not support it.
+D=No Docker: Flex templates are packaged as Docker images in Artifact Registry.
+T: Choose Flex templates when the job graph or validation depends on runtime parameters.
+
+@ GCP-PDE D2 T2.2 applied use-case
+S: A platform team wants analysts to start a vetted streaming pipeline with their own parameters, without installing the Apache Beam SDK. The pipeline code must live in source control and ship through CI/CD. What should the platform team create?
+A: A Dataflow template stored as a versioned artifact that analysts launch with parameters
+B: A shared VM image that has the Beam SDK installed, from which each analyst runs the pipeline code
+C: A Dataproc workflow template that analysts instantiate to run the Beam pipeline on a cluster
+D: A Pub/Sub topic whose subscribers compile and run the pipeline when a message with parameters arrives
+K: A
+G: ## Dataflow templates
+Templates package a pipeline for deployment and separate design from deployment: a developer creates it, and a user with permission deploys it later. They accept parameters, can be launched from the console, gcloud CLI or REST API without a development environment or pipeline dependencies on the local machine, and are code artifacts that can be stored in source control and used in CI/CD. Google also provides open source pre-built templates for common scenarios. Jobs from templates can take roughly five to seven minutes to start running, and the worker service account needs access to source and sink.
+W: Dataflow template: parameters customize each run, no Beam environment is required to launch, and the artifact can be versioned and delivered through CI/CD.
+X: B=Shared VM with SDK: analysts still need a development setup, and access to a mutable image defeats vetting.
+C=Dataproc workflow template: it orchestrates cluster jobs and is not the Dataflow packaging mechanism for Beam pipelines.
+D=Message-driven compiler: it is an unsupported custom construction with no versioned artifact or access control over what runs.
+T: Dataflow templates let users launch vetted, parameterized pipelines without a development environment.
+
+@ GCP-PDE D2 T2.2 advanced definition
+S: Which TWO statements about Pub/Sub exactly-once delivery are correct? (Select TWO)
+A: Only pull subscriptions, including subscribers that use StreamingPull, support exactly-once delivery
+B: Exactly-once delivery is provided within a cloud region and is based on a unique message ID defined by Pub/Sub
+C: Push subscriptions support exactly-once delivery if the endpoint answers each request quickly
+D: Exactly-once delivery guarantees a single delivery across every region where subscribers connect worldwide
+E: With the feature on, subscribers no longer have to acknowledge within the acknowledgment deadline
+K: A,B
+G: ## Exactly-once delivery in Pub/Sub
+When enabled on a subscription:
+- Subscribers can determine whether acknowledgments succeeded.
+- No redelivery occurs after a successful acknowledgment or while a message is outstanding (until the deadline expires or it is acknowledged).
+- If there are multiple valid deliveries (deadline expiry or negative acknowledgment), only the latest acknowledgment ID can be used.
+Limits: only **pull** subscriptions (including StreamingPull) support it; push and export subscriptions do not. It works **within a cloud region**. Subscribers still must acknowledge within the deadline, keep processing progress information and use it to avoid duplicate work when an acknowledgment fails. A redelivery (after negative acknowledgment or a missed deadline) is valid and keeps the same message ID; a duplicate is a resend after a successful ack.
+W: A=Pull only: exactly-once delivery is available to pull and StreamingPull subscribers.
+B=Regional scope: the guarantee is regional and keyed on the Pub/Sub-defined message ID.
+X: C=Push with fast answers: push and export subscriptions do not support the feature regardless of endpoint behaviour.
+D=Worldwide single delivery: the guarantee applies within a cloud region only.
+E=No deadline: subscribers must still acknowledge within the deadline, or the message is redelivered.
+T: Pub/Sub exactly-once delivery is regional and limited to pull and StreamingPull subscriptions.
+
+@ GCP-PDE D2 T2.2 advanced troubleshooting
+S: A Streaming Engine job aggregates events per customer ID in windows that stay open for a long time. One placeholder customer ID, used for all anonymous visitors, receives a very large share of events. The job becomes stuck with rising system lag and a log message saying a limit on aggregated data per key was exceeded. What is the best fix?
+A: Redesign the key so anonymous traffic is spread across many keys by adding a shard component, then combine partial results
+B: Raise the worker machine type to a high-memory shape, because the limit applies to each worker's memory and not to the key
+C: Disable Streaming Engine so that state is held on worker disks, which have no per-key limit
+D: Convert the windows to a global window so the state for the key is released after every element
+K: A
+G: ## Hot keys and state per key
+In Streaming Engine, the aggregated input data for open windows (buffered elements plus custom state) has a documented limit per key. When a pipeline exceeds it, the pipeline becomes stuck with high system lag and the job log reports that the limit was exceeded. Docs advise avoiding pipeline designs that result in large keys.
+## Remedy
+Spread a hot key over several sub-keys (key salting or sharding), aggregate partially, then merge the partial results in a second step. Hot keys also hurt parallelism, since one key is processed serially.
+W: Sharded keys: each sub-key holds only a part of the state, the limit is no longer reached, and parallelism improves; a second combine step produces the final result.
+X: B=Bigger machines: the limit is per key, so more memory per worker does not raise it.
+C=Disabling Streaming Engine: it moves the pipeline to worker-based state with its own scaling limits and is a step backward; it does not address the hot key.
+D=Global window: a global window would retain even more state per key and change the meaning of the aggregation.
+T: Avoid hot keys in streaming aggregations by sharding the key, then combine partial results.
+
+@ GCP-PDE D2 T2.2 applied troubleshooting
+S: An engineer reads new CSV files that land in a Cloud Storage bucket, using a file-based source and the streaming flag, expecting a continuously running job. The job processes the files present at start and then stops. What is the design change that gives continuous processing?
+A: Have the bucket send notifications to Pub/Sub and read the subscription from the streaming pipeline
+B: Enable at-least-once streaming mode, which keeps a job alive when its bounded source is exhausted
+C: Increase the minimum number of workers so that the job has no idle capacity at which to shut down
+D: Switch to a Flex template, because only template-launched streaming jobs can remain running once their source has ended
+K: A
+G: ## Bounded versus unbounded sources
+An **unbounded** collection comes from a continuously updating source such as Pub/Sub. If a pipeline with a bounded source is run in streaming mode with the `--streaming` flag, the pipeline stops running when the bounded source is fully consumed, and batch sources are not supported in streaming mode. For new files in a bucket, a typical design is Cloud Storage notifications to Pub/Sub, with the pipeline reading from the subscription (an unbounded source) and fetching each referenced object.
+W: Pub/Sub notifications as an unbounded source: the job keeps waiting for new messages, each referencing a new file, so it runs continuously.
+X: B=At-least-once mode: the streaming mode only changes duplicate handling, not the stop behaviour of a bounded source.
+C=Higher minimum workers: the job ends because the source is finished, not because workers are idle.
+D=Flex template: the launch mechanism has no effect on whether a bounded source ends the job.
+T: A streaming job with a bounded source ends when the source is consumed; use an unbounded source such as Pub/Sub for continuous processing.
