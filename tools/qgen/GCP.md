@@ -70,6 +70,9 @@ Writing rules (in addition to the shared ones below):
   Database Migration Service, BigQuery Data Transfer Service, Transfer Appliance, Cloud DLP / Sensitive Data Protection,
   BigQuery ML). Check each name on docs.cloud.google.com before keying: products get renamed (the ACE and PCA banks hit several).
 - Preview, beta and deprecated features stay out of keys; say so in G if a distractor depends on one.
+- Renames seen on docs (2026-11-06): Dataplex Universal Catalog is now "Knowledge Catalog" (2026-04-10; API, CLI, IAM names unchanged);
+  Analytics Hub is "BigQuery sharing"; Dataproc is "Managed Service for Apache Spark"; Cloud Composer is "Managed Service for Apache
+  Airflow"; Vertex AI is "Agent Platform". Keys and options use the exam guide's names; the new name appears only in G.
 - Overlap: GCP-PCA and GCP-ACE already cover generic storage, IAM and networking; read their published questions first and test
   the data engineer's choice (which pipeline, store, model or governance design and why).
 - Streaming facts (windowing, triggers, watermarks, late data, exactly-once) belong to ONE batch (b03); BigQuery capacity and
