@@ -8,12 +8,13 @@ Updated 2026-11-06.
 - Change log (owner agreed 2026-11-04): `data/changes/<PR>.json` per data PR via `tools/qgen/changes.py`; message the blogger-publisher session only for `important` entries (rules in CLAUDE.md). Backfilled PR 97 (explanation name fix, 175 entries, none important).
 - Blog link (owner delegated 2026-11-04): footer of index.html shows `Practice sets on the blog (external site, may show ads)` from `BLOG_FROM` 2026-11-21 (hub https://bigdatabreakthroughs.blogspot.com/p/exams.html; do not link single posts). Checked 2026-11-04: hub 200, label pages 200 but "No posts" yet, Blogger pages carry AdSense. Reminder set for 2026-11-22: all 34 `/search/label/<EXAM>` pages must list posts; else push `BLOG_FROM` later.
 - Open UI ideas: `ENDS` badge on study.html chips; per-day study quiz results are not stored; history has no per-question time.
-- In progress (2026-11-06): PLTR top-up on branch `pltr-expand`, PR pending owner OK to merge (bulk add): DE +75 (b51-b53) = 475, AIE +75 (b51-b53) = 475,
-  APD +25 (b51) = 425, all single-answer, each reviewed (about 50 fixes; ~20 near-duplicates of published questions replaced). TF-IEP002 is already in main.
-  Palantir docs now only via `www.palantir.com/docs/foundry` (non-www and learn/certification.palantir.com give 403); `spark.apache.org` was allowed 2026-11-06.
-  Docs facts: Agent Studio is now "AIP Chatbot Studio" (guide and published questions still say AIP Agent / Agent Studio; new name only in G);
-  relevant-chunks context mode is beta (not keyed); prompt-injection items rest on the guide's layered-control principle, no documented setting.
-  Next: Google Cloud Professional Data Engineer or Security Engineer, then more Databricks exams. Open gaps: Gemini app and Gems (GAIL T2.2); Gemini Cloud Assist is
+- In progress (2026-11-06): GCP-PDE (Professional Data Engineer) bank DONE on branch `gcp-pde`, PR pending owner OK to merge (bulk add): 225 questions in b01-b08
+  from PLAN.md (40 multi-answer), each reviewed (about 35 fixes; wrong turbo-replication, Iceberg and AI.GENERATE claims corrected, ~5 duplicates of published questions replaced).
+  Study guide + glossary not started. PLTR top-up (DE 475, AIE 475, APD 425) merged in PR 104. Palantir docs only via `www.palantir.com/docs/foundry`;
+  `spark.apache.org` was allowed 2026-11-06. Docs renames: Agent Studio -> "AIP Chatbot Studio"; Dataplex Universal Catalog -> "Knowledge Catalog" (2026-04-10);
+  Analytics Hub -> "BigQuery sharing"; Dataproc -> "Managed Service for Apache Spark"; Composer -> "Managed Service for Apache Airflow" (notes in `tools/qgen/GCP.md`;
+  keys use the guide names). Not documented (kept general): Composer CI/CD, Dataplex data-mesh, relevant-chunks beta, prompt-injection settings.
+  Next: GCP-PDE study guide, Google Cloud Security Engineer, then more Databricks exams. Open gaps: Gemini app and Gems (GAIL T2.2); Gemini Cloud Assist is
   private preview (noted in PCA); re-check Spark claims now that spark.apache.org is reachable.
 - Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; GCP-CDL bank and study guide; MLA-C02 study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.

@@ -1,0 +1,565 @@
+# GCP-PDE D4 T4.2 embeddings and RAG data prep, vector search; T4.3 sharing; D5 T5.1 cost and resources; T5.2 Composer DAG design
+# src: https://docs.cloud.google.com/bigquery/docs/vector-search-intro
+# src: https://docs.cloud.google.com/bigquery/docs/vector-search
+# src: https://docs.cloud.google.com/bigquery/docs/analytics-hub-introduction
+# src: https://docs.cloud.google.com/bigquery/docs/authorized-views
+# src: https://docs.cloud.google.com/bigquery/docs/authorized-datasets
+# src: https://docs.cloud.google.com/bigquery/docs/best-practices-costs
+# src: https://docs.cloud.google.com/dataproc/docs/concepts/workflows/overview
+# src: https://docs.cloud.google.com/dataproc/docs/concepts/configuring-clusters/autoscaling
+# src: https://docs.cloud.google.com/dataproc/docs/concepts/configuring-clusters/scheduled-deletion
+# src: https://docs.cloud.google.com/dataproc/docs/concepts/compute/secondary-vms
+# src: https://docs.cloud.google.com/dataproc/docs/concepts/configuring-clusters/auto-zone
+# src: https://docs.cloud.google.com/dataflow/docs/guides/flexrs
+# src: https://docs.cloud.google.com/composer/docs/composer-3/write-dags
+
+@ GCP-PDE D4 T4.2 applied comparison
+S: A compliance team stores 150,000 contract-clause embeddings in a BigQuery table and runs a few similarity searches per day. Reviewers must always see the true closest clauses, because a missed clause is a legal risk, and the latency of each search is not important. How should the data engineer run the searches?
+A: Create a vector index and rely on approximate nearest neighbor results, since index-backed search always returns the same clauses as an exhaustive scan
+B: Run VECTOR_SEARCH without a vector index, or force brute force, so every stored vector is compared and results are exact
+C: Replace the stored embeddings with lower-dimension vectors so approximate search becomes exact on the smaller table
+D: Export the embeddings to a spreadsheet and ask reviewers to sort the clauses by similarity score manually
+K: B
+G: ## Exact versus approximate vector search
+`VECTOR_SEARCH` in BigQuery compares a query embedding with the vectors in a table and returns the nearest ones by a distance measure.
+- **Without a vector index** the function uses brute force: it measures the distance to every record, so the result is exact.
+- **With a vector index** (`CREATE VECTOR INDEX`, using inverted file indexing and the ScaNN algorithm) the function uses approximate nearest neighbor search. It is faster on large tables, with the trade-off of lower recall, so some true neighbors can be missed.
+- Even when an index exists, a query can ask for brute force to get exact results.
+## Choosing
+Pick approximate search when scale and latency matter and a small recall loss is acceptable (recommendations, semantic search). Pick exact search when the table is modest, searches are infrequent and a miss is costly, as here.
+W: B=Brute force: with no index, or with brute force forced, every vector is compared, so the closest clauses are guaranteed. At 150,000 vectors and a few queries per day the extra compute is acceptable.
+X: A=Index with approximate search: an index trades recall for speed, so it can miss true neighbors; the claim that results always match an exhaustive scan is wrong.
+C=Lower-dimension vectors: shrinking dimensions changes the embedding and loses information; it does not turn approximate search into exact search.
+D=Spreadsheet sorting: it moves a similarity workload out of the warehouse, does not scale and adds governance risk for contract data.
+T: Vector search without an index (or forced brute force) is exact; a vector index gives approximate results with lower latency and cost at scale.
+
+@ GCP-PDE D4 T4.2 applied definition
+S: A retailer generated product embeddings in BigQuery with a text embedding model that Google has announced will be retired. The team moves the pipeline to the replacement model. Which TWO actions keep similarity search results meaningful? (Select TWO)
+A: Regenerate the embeddings already stored in the table with the replacement model, then rebuild any vector index on that column
+B: Keep the stored vectors and embed only new rows with the replacement model, because the vector length is unchanged
+C: Generate each search query's embedding with the same replacement model that produced the stored table embeddings
+D: Apply L2 normalization to the old vectors so they share an embedding space with the replacement model's vectors
+E: Keep embedding search queries with the retiring model until its retirement date, then switch only the table
+K: A,C
+G: ## Embeddings from different models do not mix
+An embedding is a position in a space learned by one specific model. Vectors from different models, or different versions of one model, live in separate embedding spaces and are generally mathematically incompatible, even when they have the same number of dimensions. Comparing them gives inaccurate search and similarity results.
+## Migration steps for a deprecated embedding model
+- Regenerate the embeddings in existing tables with the replacement model so all stored vectors share one space.
+- Update any query or pipeline that generates embeddings at search time to use the same replacement model.
+- After regeneration, recreate or rebuild the vector index on the embedding column, because the index was built on the old vectors.
+W: A=Regenerate and rebuild: re-embedding every stored row puts the whole table in one embedding space, and the index must be rebuilt over the new vectors.
+C=Same model at query time: a query vector is only comparable with stored vectors from the same model, so search-time embedding must use the replacement model.
+X: B=Mixed table: new and old rows would sit in different spaces; the equal vector length does not make them comparable, so ranking becomes unreliable.
+D=Normalization: scaling a vector changes its length, not the space it was learned in, so it cannot align two models.
+E=Old model for queries: queries embedded by the retiring model would be compared with vectors from the replacement model, and they stop working after retirement.
+T: Keep every stored embedding and every query embedding on one model; after a model change, regenerate the table and rebuild the vector index.
+
+@ GCP-PDE D4 T4.2 applied definition
+S: An insurer wants an assistant that answers questions from 20,000 long policy PDFs. A data engineer is preparing the corpus in BigQuery for retrieval-augmented generation (RAG). Which preparation step is most important before generating embeddings?
+A: Concatenate all PDFs into one very long text row per product line so each embedding carries the whole context
+B: Split extracted text into passage-sized chunks, one row per chunk with a document identifier and metadata, then embed each chunk
+C: Embed only the title of each PDF, because titles are short and always describe the full document content accurately, then pass whole PDFs to the model
+D: Convert the PDF text into one-hot encoded word columns, which can then be searched with vector search directly
+K: B
+G: ## Retrieval-augmented generation in BigQuery
+RAG grounds a generative model in your own data. The usual flow in BigQuery is: parse documents, generate embeddings, optionally create a vector index, run `VECTOR_SEARCH` with the question's embedding, and pass the top matches to a Gemini model as context for the answer.
+## Why chunking matters
+- An embedding is a single vector for the text it was given. A whole document averages many topics, so a question about one clause matches poorly.
+- Passage-sized chunks give precise matches and keep the prompt small enough to pass to the model.
+- Each chunk row should keep a document identifier and metadata (product, date, access group), so answers can cite sources and filters can restrict the search.
+W: B=Chunk rows with metadata: each passage gets its own embedding, so retrieval returns the relevant clause, and the identifier and metadata allow citation and filtering.
+X: A=One huge row per product line: a single vector for a large amount of text blurs the meaning, retrieval loses precision, and the text may exceed what an embedding model or prompt can accept.
+C=Titles only: titles do not contain the answers, so the assistant would retrieve documents but never the content that answers the question.
+D=One-hot word columns: sparse word-presence columns are not embeddings, and vector search needs dense embedding vectors that capture semantics.
+T: For RAG, split documents into chunk rows with identifiers and metadata, embed each chunk, then retrieve the nearest chunks with vector search.
+
+@ GCP-PDE D4 T4.2 applied comparison
+S: A media company has precomputed embeddings for 8 million catalog items. Every night a job must find the 20 most similar items for each of 400,000 newly added items, and finish within the batch window. Which BigQuery capability fits best?
+A: AI.SIMILARITY called in a cross join between new and catalog items, computing a cosine similarity for every pair
+B: VECTOR_SEARCH over the embeddings, with a vector index on the catalog table to speed up the nearest neighbor lookups
+C: A LIKE predicate on item titles, ordered by the number of shared words, to approximate semantic similarity
+D: A scheduled query that exports all embeddings to Cloud Storage so a spreadsheet macro can rank neighbors
+K: B
+G: ## Choosing among the similarity functions
+BigQuery offers several ways to compare embeddings:
+- `AI.SIMILARITY` computes the cosine similarity between two inputs, and it works well for a small number of comparisons when you have not precomputed embeddings.
+- `VECTOR_SEARCH` should be used when performance is critical and the number of embeddings is large. With a vector index it uses approximate nearest neighbor search.
+## Applying it
+400,000 queries against 8 million precomputed vectors is a large nearest neighbor workload. Pairwise comparison of every combination is far too much work, while an indexed `VECTOR_SEARCH` returns only the top neighbors per query.
+W: B=VECTOR_SEARCH with vector index: it is built for many lookups over large embedding tables, and the approximate index avoids scanning every vector for each new item.
+X: A=AI.SIMILARITY cross join: it suits few comparisons, and a cross join of this size computes trillions of pairs, which is slow and costly.
+C=LIKE on titles: lexical matching misses items that are similar in meaning but use different words, which is the point of embeddings.
+D=Spreadsheet macro: this cannot process millions of vectors in a batch window and leaves the managed analytics platform.
+T: Use AI.SIMILARITY for a few ad hoc comparisons and VECTOR_SEARCH with a vector index for large-scale nearest neighbor lookups.
+
+@ GCP-PDE D4 T4.2 advanced tradeoff
+S: A team plans to add semantic search over 500 million embeddings in BigQuery and wants to forecast cost. Which TWO statements about the cost of vector search are accurate? (Select TWO)
+A: With on-demand pricing, a vector search is charged for bytes scanned in the base table, the index and the search query
+B: A vector index adds no storage cost, because index data is kept in a hidden system area
+C: Active vector indexes incur storage costs, and the index size is visible in INFORMATION_SCHEMA.VECTOR_INDEXES
+D: Vector search queries are accelerated by BI Engine, which removes the slot or scan charge for repeated searches
+E: Index building is billed per row indexed at a fixed rate, whatever the total size of the indexed data
+K: A,C
+G: ## Cost model for embeddings and vector search
+Vector search is billed as ordinary BigQuery compute plus storage:
+- `VECTOR_SEARCH` and `AI.SEARCH` use on-demand pricing (bytes scanned in the base table, the index and the query) or editions pricing (slots needed in your reservation).
+- `CREATE VECTOR INDEX` has no processing charge while the indexed table data stays below a per-organization limit. Beyond that limit you must supply your own reservation for index management jobs.
+- Embedding columns and active vector indexes are billed as storage. The index size and its coverage are visible in `INFORMATION_SCHEMA.VECTOR_INDEXES`.
+- Queries with `VECTOR_SEARCH` or `AI.SEARCH` are not accelerated by BI Engine.
+W: A=On-demand bytes: scan charges cover the base table, the index and the query, so large tables or poorly pruned searches cost more.
+C=Index storage: an active index is billed as storage, and the view shows its size and coverage, so it belongs in the forecast.
+X: B=Free index storage: indexes are charged as active storage, and there is no hidden free area.
+D=BI Engine acceleration: queries that contain vector search functions are not accelerated by BI Engine.
+E=Per-row index billing: index building has no processing charge below the organization limit, not a per-row rate.
+T: Forecast vector search as query cost (bytes or slots) plus storage for embeddings and active indexes; index builds are free below a limit and BI Engine does not help.
+
+@ GCP-PDE D4 T4.2 advanced use-case
+S: A bank holds 60 million customer records from three systems, with names and addresses typed differently in each. Exact joins miss many duplicates. The data engineer wants to prepare a deduplication step in BigQuery with the least custom infrastructure. What is the best approach?
+A: Embed a normalized text form of each record, use vector search for nearest-neighbor candidates, and review matches above a threshold
+B: Hash every record with a cryptographic hash and join on equal hashes, since identical meaning always gives identical hashes for names and addresses typed in several formats
+C: Export records to a self-managed server that runs a fuzzy matching service, then load the match results back into BigQuery
+D: Delete every record that shares a postal code with another record, since records that live close together are duplicates
+K: A
+G: ## Embeddings for entity resolution
+Entity resolution finds records that refer to the same real-world entity. Because embeddings place semantically similar text close together, they can match "12 Main St." with "12 Main Street" where an exact join fails. BigQuery documents entity resolution and deduplication (for example, deduplicating personally identifiable information records) as a vector search use case.
+## Pattern
+- Build a normalized text string per record and generate embeddings with `AI.GENERATE_EMBEDDING`.
+- Run `VECTOR_SEARCH` to retrieve each record's nearest neighbors as candidate pairs.
+- Apply a distance threshold and business rules, and send borderline pairs to review. Keep the records governed like any other PII.
+W: A=Embeddings plus vector search: it finds fuzzy matches inside the warehouse, needs no extra servers, and the threshold and review step control false merges.
+X: B=Cryptographic hash: any one-character difference gives a totally different hash, so it is no better than the exact join that already misses duplicates.
+C=Self-managed matcher: it adds infrastructure, data movement and governance burden that the in-warehouse approach avoids.
+D=Delete by postal code: many different customers share a postal code, so this destroys valid records.
+T: Embeddings with VECTOR_SEARCH give fuzzy candidate matching inside BigQuery; combine with thresholds and review to deduplicate records.
+
+@ GCP-PDE D4 T4.2 advanced troubleshooting
+S: A vector search runs against a 4 TB table of embeddings that holds ten years of support tickets, and analysts always want only the last 30 days. Queries scan far more data than expected, even with the vector index in place. The table is partitioned by ticket date. Which change reduces the scanned data most directly?
+A: Pre-filter on the partitioned date column in the VECTOR_SEARCH call so only recent partitions are read
+B: Drop the vector index so that the function compares only the vectors returned by a later WHERE clause
+C: Cluster the table on an unrelated column and filter on it in a subquery without storing that column in the vector index
+D: Switch the embedding column to a string type so that BigQuery can prune data with its text search index
+K: A
+G: ## Pre-filtering in vector search
+A pre-filter restricts which rows of the base table are candidates before the nearest neighbor search.
+- Pre-filtering data pruning is only optimized when the filter is on **partitioned columns** or **stored columns** of the vector index.
+- A pre-filter on a non-stored clustered column causes a full table scan.
+## Applying it
+The table is partitioned by ticket date and the question needs only 30 days, so a date pre-filter lets BigQuery read only those partitions. Under on-demand pricing this also reduces the bytes billed.
+W: A=Pre-filter on the partition column: only matching partitions are read, so the search scans a small part of the 4 TB table.
+X: B=Dropping the index: without an index the search is brute force and a later WHERE clause does not shrink the search, so cost and latency rise.
+C=Non-stored clustering column: a pre-filter on a clustered column that is not stored in the index results in a full table scan.
+D=String embeddings: embeddings must be numeric vectors for distance functions, and converting them to text would break the search.
+T: Pre-filter vector search on a partitioned (or stored) column to prune data; filters on non-stored clustered columns do not prune.
+
+@ GCP-PDE D4 T4.3 applied use-case
+S: A weather-data company wants to give about 40 customer companies, each with its own Google Cloud organization, read access to a curated, continuously updated BigQuery dataset. The company does not want to copy the data per customer, and each customer should pay for its own queries. What should the data engineer use?
+A: Publish a listing in an Analytics Hub (BigQuery sharing) data exchange so each customer subscribes and gets a linked dataset
+B: Schedule a nightly table copy into a new dataset in every customer's project, which the company owns and pays storage for
+C: Export the tables to a public Cloud Storage bucket so that customers can download files and load them into their own warehouses each night
+D: Add each customer's users to the dataset with the BigQuery Admin role on the publisher's project so they can query directly
+K: A
+G: ## Sharing in place with Analytics Hub
+Analytics Hub, shown in the console as BigQuery sharing, is a publish and subscribe service for sharing BigQuery datasets (and Pub/Sub topics) across projects and organizations without replicating data.
+- The publisher puts a **shared dataset** into a **listing** inside a **data exchange** and controls who can subscribe.
+- A subscriber subscribes to the listing and receives a **linked dataset**, a read-only pointer to the shared dataset in the subscriber's own project.
+- Publishers pay for storage; subscribers pay for the queries they run on the shared data (on-demand or capacity pricing). There is no extra cost to manage exchanges or listings.
+W: A=Analytics Hub listing: customers query live data through linked datasets, with no copies, and each customer's query charges land in its own project.
+X: B=Nightly copies per customer: copies multiply storage cost for the company, go stale between runs and need copy jobs for 40 targets.
+C=Public bucket: data is exposed to anyone, customers must build their own loads, and there is no access control per customer.
+D=BigQuery Admin on the publisher project: that role is far broader than read access, and customers' queries would bill the publisher's project.
+T: Use Analytics Hub listings and linked datasets to share live BigQuery data across organizations without copies; subscribers pay for their own queries.
+
+@ GCP-PDE D4 T4.3 applied definition
+S: A finance dataset has a table with customer names, account numbers and monthly totals. A group of regional analysts needs to query only the monthly totals by region, and must not be able to read the underlying table or dataset. What is the best way to share the data?
+A: Create a view that selects only region and monthly totals in a separate dataset, and authorize that view on the source dataset
+B: Grant the analysts the BigQuery Data Viewer role on the source dataset and ask them not to select the sensitive columns
+C: Copy the table into a new dataset every night with the sensitive columns removed, and grant the analysts access to the copy
+D: Give the analysts the BigQuery Job User role in the source project, which allows them to read tables referenced in their queries
+K: A
+G: ## Authorized views
+A BigQuery view is a virtual table defined by a SQL query. Normally, a user querying a view also needs access to the tables the view reads. An **authorized view** removes that requirement: the view is authorized on the source dataset, so it can read the source data on behalf of the analysts.
+- Analysts get access to the dataset that holds the view, and can query the view's rows and columns.
+- They cannot access the source dataset or table directly.
+- The view lives in a separate dataset, because access to the source dataset is not granted to the analysts.
+## Applying it
+The view returns region and totals only, so names and account numbers are never exposed, and the data is always current since no copy is made.
+W: A=Authorized view: the view reads the source on behalf of analysts, shares only the chosen columns, and needs no copied data.
+X: B=Data Viewer on the source dataset: this gives access to every column, and an instruction not to select some columns is not an access control.
+C=Nightly sanitized copy: it duplicates data, goes stale between runs and adds a pipeline to maintain, where a view stays current at no extra storage.
+D=Job User role: that role lets users run jobs but does not grant read access to table data, and it would not hide columns anyway.
+T: Use an authorized view in a separate dataset to share a subset of rows or columns without giving access to the source dataset.
+
+@ GCP-PDE D4 T4.3 applied comparison
+S: A reporting dataset contains 35 views that all read from a central sales dataset. Analysts hold access only to the reporting dataset. New views are added every week, and the team is tired of authorizing each new view on the sales dataset one by one. What should the data engineer configure?
+A: Authorize the reporting dataset on the sales dataset so that all views in it can read the sales data
+B: Grant the analysts the BigQuery Data Viewer role on the sales dataset so that every view works with their credentials
+C: Replace the views with a table copy of each query result and refresh them with scheduled queries
+D: Make the sales dataset a public exchange listing so any view can reach it with no further authorization
+K: A
+G: ## Authorized datasets
+An **authorized dataset** lets you authorize all views in a specified dataset to read the data of a second dataset. This replaces the need to configure individual authorized views.
+- The dataset that holds the views is the authorized dataset.
+- The dataset it reads from is the shared dataset (the source).
+- Principals are given access to the dataset with the views, or to individual views in it, as needed.
+## Applying it
+With 35 views and weekly additions, authorizing the reporting dataset once covers existing and future views, while analysts still cannot read the sales dataset.
+W: A=Authorized dataset: one authorization lets every current and future view in the reporting dataset read the sales data, and analysts stay out of the source.
+X: B=Data Viewer on sales dataset: it exposes every table to analysts directly, which defeats the point of reporting views.
+C=Copies refreshed by scheduled queries: it duplicates data, adds latency and needs a scheduled query for each of the views.
+D=Public exchange listing: listings share data with subscribers in other projects and do not authorize views, and a public exchange exposes data to all authenticated users.
+T: Authorize the dataset that contains the views once on the source dataset instead of authorizing each view separately.
+
+@ GCP-PDE D4 T4.3 advanced troubleshooting
+S: A data provider shares a licensed dataset through an Analytics Hub listing. An audit shows that a subscriber copied the shared tables into its own project with CREATE TABLE AS SELECT and exports, which breaks the license. The provider wants subscribers to keep querying but not extract the data. What should the provider do?
+A: Enable data egress restrictions on the listing so copy, export, snapshot and table writes are unavailable
+B: Delete the data exchange and send each subscriber a monthly Cloud Storage export with a signed URL
+C: Make the listing public so that every Google Cloud user can query it, which removes any reason for subscribers to copy the licensed tables
+D: Ask subscribers to turn off their own project billing so they cannot run extract jobs
+K: A
+G: ## Data egress restrictions
+A publisher can restrict subscribers from exporting data out of a linked dataset. Egress restrictions can be set on a listing, on query results, or both. When they apply:
+- Copy, clone, export and snapshot APIs and console options are unavailable.
+- BigQuery Data Transfer Service is unavailable on the restricted dataset.
+- `CREATE TABLE AS SELECT` and writing to a destination table or view are unavailable.
+Subscribers can still run queries against the linked dataset, so the data stays in place.
+W: A=Data egress restrictions: they block copy, export, snapshot and CTAS writes while leaving normal queries available, which fits the license.
+X: B=Monthly signed-URL exports: handing over files gives subscribers full copies, which is exactly what the provider wants to prevent.
+C=Public listing: opening the listing to all authenticated users increases exposure and does nothing to stop copying.
+D=Subscribers disabling billing: this would stop all queries, is not under the provider's control and is not a data access control.
+T: Use Analytics Hub data egress restrictions to let subscribers query shared data while blocking copy, export and CTAS.
+
+@ GCP-PDE D4 T4.3 applied definition
+S: Which TWO statements about a linked dataset in Analytics Hub (BigQuery sharing) are accurate? (Select TWO)
+A: It is a read-only pointer to the shared dataset in the subscriber's project, and creating it does not copy the data
+B: It is a full writable copy of the shared dataset, which the subscriber stores and pays for in its own project
+C: Subscribers can add or update tables inside it so they can enrich the shared data in place
+D: Subscribers can query it in real time and join it with tables in their own datasets
+E: Queries against it are billed to the publisher, because the publisher owns the underlying storage
+K: A,D
+G: ## What a subscription creates
+When a subscriber subscribes to a listing that references a shared dataset, BigQuery creates a **linked dataset** in the subscriber's project.
+- It is a reference to the publisher's shared dataset, not a copy, so there is nothing to refresh and no extra storage.
+- It is read-only: subscribers can query tables and views in real time but cannot add or update objects in it.
+- The subscriber pays for queries run on the shared data (on-demand or capacity pricing); the publisher pays for storage.
+- Because it is a normal dataset in the subscriber's project, queries can join it with the subscriber's own tables.
+W: A=Read-only pointer: the linked dataset references the shared data in place, so nothing is copied or stored again.
+D=Real-time query and joins: subscribers query current data and combine it with their own datasets using standard BigQuery features.
+X: B=Writable full copy: a linked dataset holds no copy of the data, and the subscriber is not billed for its storage.
+C=Writing objects: subscribers cannot add or update objects in a linked dataset; enrichment goes in a separate dataset they own.
+E=Publisher pays for queries: subscribers are charged for the queries they run, while publishers pay for storage.
+T: A linked dataset is a read-only, no-copy pointer in the subscriber's project that can be queried live and joined with local data; the subscriber pays for queries.
+
+@ GCP-PDE D4 T4.3 advanced tradeoff
+S: A supplier shares a pricing dataset through Analytics Hub. The contract limits it to three named retail partners, and the supplier's legal team requires that no other Google Cloud user can even discover it. How should the data engineer set up the sharing?
+A: Create a private data exchange and a private listing, and grant subscriber access only to the groups of the three partners
+B: Create a public data exchange so that all authenticated users can find it, and rely on the contract for restrictions
+C: Create a public listing in a private exchange so that the three partners can find it without extra IAM grants
+D: Publish the dataset as a commercial listing on Cloud Marketplace so that the partners can purchase access
+K: A
+G: ## Private versus public exchanges and listings
+- A data exchange is **private by default**: only users or groups with access to the exchange can view or subscribe to its listings.
+- A **public data exchange** lets all Google Cloud users (`allAuthenticatedUsers`) discover and subscribe to its listings.
+- A listing is private by default and shared with specific users or groups. A **public listing** is shared with all Google Cloud users, and listings in a public exchange are public.
+- Access can be granted at exchange or listing level, which avoids granting access on the underlying resources.
+## Applying it
+Named partners and no discoverability for others call for a private exchange and listing, with access granted to the partners' groups.
+W: A=Private exchange and listing: only the three partners' groups can view and subscribe, so nobody else can discover the data.
+X: B=Public exchange: every authenticated user could find and subscribe, and a contract is not a technical control.
+C=Public listing in a private exchange: public listings are open to all Google Cloud users, which contradicts the discoverability requirement.
+D=Cloud Marketplace commercial listing: that is for monetized offerings, and it widens visibility rather than limiting it to three partners.
+T: Keep Analytics Hub exchanges and listings private and grant named groups access when only specific partners may see the data.
+
+@ GCP-PDE D4 T4.3 applied use-case
+S: A logistics company streams vehicle telemetry into Pub/Sub and wants two partner companies to receive the same events in near real time in their own projects, without the company copying messages or managing partner IAM on its topic. What should the data engineer do?
+A: Share the Pub/Sub topic through an Analytics Hub listing; each partner gets a linked Pub/Sub subscription
+B: Write the events to a BigQuery table and give partners the table's dataset editor role to read them
+C: Create a push subscription for each partner pointing to a webhook endpoint that the partners must build, secure and keep available
+D: Mirror the topic to a topic in each partner project using a custom Dataflow pipeline running continuously
+K: A
+G: ## Sharing streams
+Analytics Hub (BigQuery sharing) supports two resource types: BigQuery datasets and Pub/Sub topics. A **shared topic** is the unit of streaming data sharing.
+- The publisher lists the topic in a data exchange.
+- A subscriber who subscribes to the listing gets a **linked Pub/Sub subscription** in its own project, so it can read messages published to the shared topic without extra IAM authorization on the source topic and without duplicating the topic or messages.
+- The publisher pays for data written; the subscriber pays for data read.
+W: A=Shared topic listing: partners receive the stream through linked subscriptions, with no copies and no IAM changes on the source topic.
+X: B=BigQuery table with editor role: it turns a stream into batch-style reads, and editor access allows partners to modify the table.
+C=Push subscriptions to partner webhooks: each partner must build and secure an endpoint, and delivery management stays with the publisher.
+D=Dataflow mirroring pipeline: a continuously running pipeline duplicates messages and adds cost and operational work that the listing avoids.
+T: Use an Analytics Hub listing of a Pub/Sub topic to share streaming data with linked subscriptions instead of copying or mirroring messages.
+
+@ GCP-PDE D4 T4.3 applied comparison
+S: A data platform team of a retailer sets up Analytics Hub in its organization. A data steward must create exchanges and decide who may publish, two engineers must publish listings of their datasets, and 200 analysts must browse and subscribe. Which role assignment follows least privilege?
+A: Admin to the steward, Publisher to the two engineers, and Subscriber to the analysts
+B: Analytics Hub Admin to everyone involved, since admins can also publish and subscribe in the same exchange
+C: Analytics Hub Viewer to the steward and engineers, and Analytics Hub Subscriber to the analysts
+D: Analytics Hub Publisher to the steward, Analytics Hub Admin to the analysts, and Subscriber to the engineers
+K: A
+G: ## Analytics Hub roles
+- **Admin** (`roles/analyticshub.admin`): creates data exchanges and grants permissions to publishers and subscribers on those exchanges.
+- **Publisher** (`roles/analyticshub.publisher`): publishes listings and manages subscriptions and usage metrics for them.
+- **Subscriber** (`roles/analyticshub.subscriber`): discovers data and subscribes to listings, which creates a linked dataset in the subscriber's project.
+- **Viewer** (`roles/analyticshub.viewer`): browses the exchanges and listings the user may see, and can request access, but cannot subscribe without subscription permission.
+## Least privilege
+Match each role to the job: administering exchanges, publishing listings, subscribing to data.
+W: A=Admin, Publisher, Subscriber by job: the steward administers exchanges, engineers publish, and analysts subscribe, each with only the permissions needed.
+X: B=Admin for everyone: it grants the power to create exchanges and change permissions to 200 analysts, far beyond their needs.
+C=Viewer for steward and engineers: viewers can only browse, so the steward could not create exchanges and the engineers could not publish.
+D=Roles swapped: analysts would administer exchanges and the steward could not create them, which reverses the intended duties.
+T: Assign Analytics Hub Admin for exchange management, Publisher for publishing listings and Subscriber for consuming them.
+
+@ GCP-PDE D4 T4.3 advanced use-case
+S: A data team shares an expensive aggregation of billions of web events with 300 internal analysts. The aggregate is refreshed with new events throughout the day. Analysts must query it without any access to the raw events dataset, and the repeated recomputation of the aggregation is driving up cost. What should the team build?
+A: A materialized view over the event table, shared as an authorized materialized view in a separate dataset
+B: A logical view on the raw table, shared by granting analysts the BigQuery Data Viewer role on the raw dataset
+C: A scheduled query that appends the aggregation to a new table every minute, readable by all authenticated users
+D: A dashboard export of the aggregate to a PDF that analysts download from Cloud Storage each morning
+K: A
+G: ## Authorized materialized views
+BigQuery supports both authorized views (for logical views) and **authorized materialized views**. A materialized view is a precomputed view that periodically caches the results of a query, which improves performance and efficiency when a view relies on a large or expensive query.
+- Authorizing the materialized view on the source dataset lets analysts query it without access to the underlying tables.
+- BigQuery refreshes materialized views automatically as base data changes, so analysts get current results without each query recomputing the aggregation.
+## Applying it
+Both requirements are met: restricted access to the raw events and reduced repeated computation.
+W: A=Authorized materialized view: precomputed results cut repeated computation, and authorization keeps the raw dataset closed to analysts.
+X: B=Logical view plus Data Viewer on raw data: analysts would see the raw events, and a logical view recomputes the aggregation on every query.
+C=Per-minute scheduled append: it creates duplicated aggregate rows and needless runs, and opening a table to all authenticated users exposes it widely.
+D=PDF export: it is static, loses queryability and moves data out of governed storage.
+T: Share an expensive, frequently queried aggregate as an authorized materialized view to combine access control with precomputation.
+
+@ GCP-PDE D4 T4.3 advanced tradeoff
+S: A publisher shares one large orders table through a single Analytics Hub listing. Several partners subscribe, and each partner must see only the rows for its own sales region. The publisher wants to avoid maintaining a separate table for each partner. What is the best design?
+A: Apply row-level access policies on the shared table that filter by region for each partner's group
+B: Create a separate dataset and a separate copy of the table per partner, each containing the partner's rows
+C: Let all partners see every row and ask them to add a region filter to their queries
+D: Encrypt the table with a different customer-managed key per partner so each sees only its own rows
+K: A
+G: ## Fine-grained security in shared datasets
+Shared datasets in Analytics Hub support column-level and row-level security, so one table can serve many subscribers with different visibility.
+- A **row-level access policy** defines which rows a principal or group can read, using a filter predicate such as a region condition.
+- Policies are managed on the table, so there is a single copy of the data and one place to update.
+- Column-level security (policy tags) can additionally hide sensitive columns.
+## Applying it
+One listing, one table and a row access policy per partner group give each partner only its region without per-partner copies.
+W: A=Row-level access policies: each partner group is limited to its region on a single shared table, with no extra copies to maintain.
+X: B=A table copy per partner: it multiplies storage and refresh work, which the publisher wants to avoid.
+C=Trusting query filters: the filter is voluntary, so partners could read other regions' rows and the requirement fails.
+D=Different key per partner: a customer-managed key controls encryption of data at rest, not which rows a reader sees.
+T: Use row-level access policies (and column-level security) on a shared table so several subscribers see only their permitted rows without copies.
+
+@ GCP-PDE D5 T5.1 applied tradeoff
+S: A media company runs a nightly Spark job on a persistent Dataproc cluster that sits idle for about 20 hours a day. All input and output data is in Cloud Storage and BigQuery. The company wants to cut cost without changing the Spark code. What should the data engineer do?
+A: Run the job from a Dataproc workflow template with a managed cluster that is deleted after the run
+B: Keep the cluster running and buy a larger machine type so the job finishes faster
+C: Move all input data into HDFS on the cluster, so the job reads local disks and the cluster can be shrunk
+D: Convert the Spark job into an Apache Airflow PythonOperator that runs in the Cloud Composer environment
+K: A
+G: ## Ephemeral clusters
+Dataproc (shown in current docs as Managed Service for Apache Spark) clusters are quick to create and bill while running. When data lives outside the cluster (Cloud Storage, BigQuery), compute can be treated as disposable: create a cluster for a workload and delete it when done.
+- A **workflow template** with a **managed cluster** creates an ephemeral cluster, runs a graph of jobs, and deletes the cluster when the workflow ends.
+- Ephemeral clusters are also easier to size, since each runs one workload.
+- For more advanced orchestration, Cloud Composer (Apache Airflow) can drive the same pattern.
+## Applying it
+The cluster is idle 20 of 24 hours, so paying only for the run window is the largest saving, and the Spark code stays the same.
+W: A=Workflow template with managed cluster: compute is billed only during the job, and the data in Cloud Storage and BigQuery is unaffected by deleting the cluster.
+X: B=Larger persistent machines: a persistent cluster still bills while idle, and bigger machines raise the hourly rate.
+C=HDFS on the cluster: HDFS ties data to cluster lifetime, blocks deletion of the cluster and adds disk cost.
+D=PythonOperator in Composer: this runs Spark workloads on the Composer environment's own workers, which are not sized for it and add environment cost.
+T: When data is in Cloud Storage or BigQuery, use ephemeral Dataproc clusters via workflow templates (or Composer) instead of paying for an idle persistent cluster.
+
+@ GCP-PDE D5 T5.1 applied use-case
+S: Data scientists share a small Dataproc cluster for ad hoc notebooks and queries submitted at unpredictable times by other tools. Clusters were often left running over weekends. What is the simplest control to stop paying for forgotten clusters?
+A: Set scheduled deletion on the cluster with an idle period so it is deleted after a stretch with no running jobs
+B: Enable autoscaling with a minimum of zero primary workers so the cluster costs nothing while idle
+C: Ask each scientist to delete the cluster manually each Friday and send a reminder email
+D: Convert the cluster into a workflow template with a managed cluster, even though jobs are submitted ad hoc
+K: A
+G: ## Scheduled deletion
+Cluster Scheduled Deletion removes a cluster automatically so inactive clusters stop incurring charges. It can delete a cluster:
+- after a specified idle period,
+- at a specified future time, or
+- after a specified duration from the time of the creation request.
+Idle time starts counting when the cluster has no running jobs (by default both the Jobs API and YARN activity must be idle).
+## Applying it
+For ad hoc queries or externally scheduled workloads, a cluster idle period is the matching control, because the jobs have no fixed schedule that a workflow template could encode.
+W: A=Scheduled deletion with idle period: forgotten clusters are removed automatically once jobs stop, which fits unpredictable usage.
+X: B=Autoscaling to minimum: a cluster always keeps its primary workers and master, and autoscaling is not recommended for shrinking an idle cluster; deleting and recreating is preferred.
+C=Manual Friday cleanup: it depends on people remembering and misses idle periods during the week.
+D=Workflow template for ad hoc jobs: workflows suit a known job graph, but this usage is interactive and externally triggered.
+T: Use Cluster Scheduled Deletion with an idle period for ad hoc Dataproc clusters so forgotten clusters stop billing automatically.
+
+@ GCP-PDE D5 T5.1 advanced tradeoff
+S: A Dataproc cluster for a recurring Spark batch ETL must be cheaper. Input and output are in Cloud Storage and a few failed tasks are tolerable if they are retried. Which TWO actions reduce cost while keeping jobs reliable? (Select TWO)
+A: Add Spot or preemptible secondary workers for extra capacity, keeping them under about half of the total workers
+B: Put all workers on secondary Spot VMs, including the nodes that host HDFS data, to reach the lowest hourly rate
+C: Increase the maximum number of task retries so jobs survive transient task failures from preempted workers
+D: Add non-preemptible secondary workers only and size them as large as the primary workers
+E: Store the job's intermediate data on secondary workers so that it is removed when they are preempted
+K: A,C
+G: ## Secondary workers for lower cost
+Dataproc has primary workers and secondary workers. Secondary workers can be Spot VMs, standard preemptible VMs or non-preemptible VMs, and they scale compute cheaply because they do not store HDFS data.
+- Preemptible workers lower per-hour cost for non-critical processing or to build very large clusters cheaply. For best results keep their number below 50% of all workers.
+- Expect more transient single-worker task failures. To tolerate them, raise task retry limits, similar to the defaults of autoscaling clusters.
+- Savings are not guaranteed, because preemptions can lengthen jobs. Short jobs fit better, and Enhanced Flexibility Mode helps.
+W: A=Secondary Spot workers under half: cheaper compute for a batch job, with enough stable primary workers to keep the cluster healthy.
+C=More task retries: transient failures from preempted workers are retried, which avoids failing the job.
+X: B=All Spot including HDFS nodes: HDFS data is hosted on primary workers, and a cluster with only preemptible capacity risks job instability.
+D=Non-preemptible secondary only: these are priced like regular VMs, so there is no discount relative to the cost goal.
+E=Intermediate data on secondary workers: losing the workers loses shuffle data and forces recomputation; Enhanced Flexibility Mode exists to avoid this.
+T: Add Spot or preemptible secondary workers (under about 50% of workers) and raise task retries; keep primary workers for stable capacity.
+
+@ GCP-PDE D5 T5.1 advanced troubleshooting
+S: A team enabled autoscaling on a Dataproc cluster with a minimum of two workers so the cluster would "cost almost nothing" overnight. Cost is still high, and the team suspects the policy design. Which guidance from Dataproc best applies?
+A: Autoscaling is not meant to shrink idle clusters; delete idle clusters and recreate them, for example with workflows
+B: Raise the autoscaling maximum so that the cluster has more workers to share the idle cost
+C: Use autoscaling on the on-cluster HDFS utilization metric, which is the best signal for scaling idle clusters
+D: Combine autoscaling with Spark Structured Streaming so the cluster scales down between micro-batches
+K: A
+G: ## What autoscaling is for
+The Dataproc autoscaling policy sets boundaries, frequency and aggressiveness for scaling workers. It suits clusters that store data in external services (Cloud Storage, BigQuery), clusters that process many jobs, and single-job clusters that need to scale up.
+It is **not recommended** for:
+- scaling an idle cluster down to a minimum size: creating a cluster is about as fast as resizing one, so delete idle clusters and recreate them (workflows, Cloud Composer or scheduled deletion);
+- on-cluster HDFS, because HDFS utilization is not a scaling signal;
+- Spark Structured Streaming, which autoscaling does not support.
+W: A=Delete and recreate: an idle cluster keeps its minimum workers and master billing, so removing it entirely is the cost control, using workflows, Composer or scheduled deletion.
+X: B=Higher maximum: the maximum only matters under load and does nothing about idle-time cost.
+C=HDFS utilization signal: autoscaling is not intended for scaling on-cluster HDFS, as HDFS utilization is not a scaling signal.
+D=Structured Streaming: Dataproc autoscaling does not support Spark Structured Streaming.
+T: Do not use autoscaling to shrink idle Dataproc clusters; delete and recreate ephemeral clusters instead.
+
+@ GCP-PDE D5 T5.1 applied use-case
+S: A weekly Dataflow batch pipeline re-indexes product data. It can run any time in a 12-hour window on Sunday, has no GPU needs and does not use Compute Engine reservations. The team wants the lowest compute cost. What should the data engineer enable?
+A: Flexible Resource Scheduling (FlexRS), mixing preemptible and regular VMs with a scheduling delay
+B: Streaming Engine on the batch job, which cuts cost by keeping state of a batch job in a dedicated service
+C: A fixed number of the largest workers with autoscaling off so the job always starts without delay
+D: Dataflow Prime vertical autoscaling and a custom worker image, with committed CPU hours on all nodes
+K: A
+G: ## FlexRS
+Flexible Resource Scheduling reduces the cost of **autoscaled batch** Dataflow pipelines through advanced scheduling, the Dataflow Shuffle service, and a combination of preemptible and regular VMs run in parallel.
+- Jobs have a **scheduling delay**, so FlexRS suits work that is not time-critical, such as daily or weekly jobs that finish within a window.
+- Turning on FlexRS automatically enables Dataflow Shuffle.
+- It does not support GPUs or Compute Engine reservations, and you cannot set the autoscaling algorithm option with it.
+## Applying it
+A weekly job with a 12-hour window tolerates delayed start, so FlexRS gives the lowest cost.
+W: A=FlexRS: delayed scheduling and discounted preemptible capacity lower cost for a flexible batch job, and the regular VMs keep progress steady.
+X: B=Streaming Engine on batch: it targets streaming pipelines, and does not provide the preemptible discount that cuts batch cost.
+C=Largest fixed workers: this guarantees an immediate start at the highest hourly price and wastes capacity during low-load stages.
+D=Prime plus committed hours: this adds cost and complexity, and a commitment does not suit a job that runs once a week.
+T: Use FlexRS for non-urgent autoscaled Dataflow batch pipelines to trade scheduling delay for lower cost.
+
+@ GCP-PDE D5 T5.1 advanced comparison
+S: One Dataproc cluster runs many short Spark jobs from analysts and also a single eight-hour training-data job. Autoscaling is on, but after a burst of short jobs the cluster stays large for hours, so the bill is high. What is the best fix?
+A: Run the eight-hour job on its own cluster and group similar short jobs on another autoscaling cluster
+B: Increase the autoscaling cooldown so scale-down decisions are made less often on the shared cluster
+C: Disable graceful decommissioning so that nodes are removed immediately even if a job still uses them
+D: Move the short jobs to the same worker nodes as HDFS, so the large job can borrow their spare memory
+K: A
+G: ## Mixed-size workloads and graceful scale-down
+Autoscaling scale-down uses graceful decommissioning: workers are removed after the work on them finishes. When small and large jobs share a cluster, the scale-down waits for the large job, so one long-running job delays the release of resources that the smaller jobs no longer need.
+Dataproc guidance: group similarly sized smaller jobs together on a cluster, and isolate each long-duration job on a separate cluster.
+W: A=Separate clusters by job size: the long job no longer holds the shared cluster's capacity, so it can scale down once the short jobs finish, and the long job's cluster is deleted after it ends.
+X: B=Longer cooldown: it makes scale-down slower, which worsens the problem.
+C=No graceful decommissioning: it risks killing running tasks and failing the long job, so it is unsafe.
+D=Colocating with HDFS: it does not remove the dependency on the long job, and autoscaling is not intended to scale around HDFS.
+T: Isolate long-running Dataproc jobs on their own clusters and group similar short jobs so autoscaling can scale down.
+
+@ GCP-PDE D5 T5.1 applied tradeoff
+S: Analysts in a data science project run exploratory queries on BigQuery with on-demand pricing. A few unfiltered queries on very large tables caused an unexpected bill. The data engineer must limit exposure now and help analysts avoid repeats. Which TWO measures should be applied? (Select TWO)
+A: Set custom daily query quotas on the project and per user to cap the data processed per day
+B: Move all tables to a spreadsheet tool, which removes the on-demand scan charges for large data
+C: Have analysts run a dry run, or check the estimated bytes in the query validator, before running a costly query
+D: Add LIMIT clauses to every query, which reduces the bytes billed on non-clustered tables
+E: Raise the project's slot quota so that queries finish faster and cost less per byte
+K: A,C
+G: ## Controlling on-demand query cost
+With on-demand pricing, you are charged for bytes processed, not for rows returned or time taken.
+- **Custom daily quotas** per project or per user are the way to restrict on-demand cost. They are a hard cap: once reached, users cannot run queries.
+- A **dry run** (or the query validator's estimate) shows how many bytes a query would process before it runs, so analysts can fix filters and column lists.
+- Capacity pricing instead lets you set a maximum slot count per reservation (covered with reservations elsewhere).
+## Applying it
+A quota bounds the worst case today, and dry runs build the habit of checking the estimate first.
+W: A=Custom daily quotas: they limit the data processed per day per project or user, so a runaway query cannot generate an unbounded bill.
+C=Dry run before running: it reports estimated bytes without charge, so analysts can correct unbounded scans.
+X: B=Spreadsheet tool: it does not handle large data and gives up the warehouse and its governance.
+D=LIMIT everywhere: LIMIT does not reduce the bytes billed for a scan on non-clustered tables, since the data is still read.
+E=Higher slot quota: slots belong to capacity pricing and do not lower the charge per byte under on-demand pricing.
+T: Cap on-demand BigQuery cost with custom daily quotas and use dry runs to estimate bytes before expensive queries.
+
+@ GCP-PDE D5 T5.1 applied troubleshooting
+S: A nightly Dataproc workflow often fails at cluster creation in one zone because that zone is short of the requested machine types. Reserved capacity exists in other zones of the same region. The team wants the highest chance that the cluster gets created without hard-coding a zone. What should the data engineer use?
+A: Auto Zone placement: omit the zone so one is chosen, prioritizing zones with matching reservations
+B: A cluster pinned to the zone with the lowest price, with a retry loop on creation failures
+C: A second cluster in another region that always runs in parallel to take over when the first fails
+D: Autoscaling on the failed cluster, so the missing machine capacity is added in the same zone later
+K: A
+G: ## Auto Zone placement
+When you create a Dataproc cluster you give a region. If you omit the zone, **Auto Zone** chooses a zone in that region for you, and all nodes are deployed in that one zone.
+- Auto Zone prioritizes a zone that has resource reservations covering the request, using reserved plus on-demand resources when needed.
+- If no zone can be fully satisfied from reservations plus on-demand capacity, it chooses the zone most likely to satisfy the request with on-demand resources.
+- Zones can be excluded from the selection if at least two non-excluded zones remain (CLI and REST).
+## Applying it
+Letting Dataproc pick the zone removes the dependency on one zone's capacity and uses the reserved capacity first.
+W: A=Auto Zone: the region is fixed, the zone is chosen per request, and zones with matching reservations come first, which raises the chance of success.
+X: B=Pinned cheapest zone: pinning keeps the dependency on a single zone's capacity, and retrying does not create capacity.
+C=Always-on cluster in another region: duplicating a running cluster doubles cost and may break data residency.
+D=Autoscaling later: the failure is at creation, so no cluster exists to autoscale.
+T: Omit the zone so Dataproc Auto Zone placement selects a zone with available capacity, preferring zones with matching reservations.
+
+@ GCP-PDE D5 T5.2 applied definition
+S: A data engineer wrote a Cloud Composer DAG whose single task, a PythonOperator, extracts data from an API, cleans it, loads it into BigQuery and sends a notification. When the load step fails, the whole task reruns and the data is duplicated. How should the DAG be redesigned?
+A: Split the work into separate idempotent tasks, so a failed step can be retried alone
+B: Keep one task but add a long sleep before the notification, so the load has time to finish properly
+C: Raise the task's retry count to the maximum so the same combined task keeps rerunning until it succeeds
+D: Move the logic into the DAG file's top level, so Airflow runs it every time the scheduler parses the file and the scheduler waits
+K: A
+G: ## DAG design in Cloud Composer
+Cloud Composer (shown in current docs as Managed Service for Apache Airflow) runs Apache Airflow. A DAG is a graph of tasks with dependencies.
+- Each task should be an **idempotent unit of work**: running it twice produces the same end state, for example by writing to a partition with overwrite instead of appending.
+- Avoid encapsulating a multi-step workflow in a single task, such as a complex program in one PythonOperator.
+- Separate tasks let Airflow retry, monitor and alert on each step, and show where a run stopped.
+## Applying it
+Extract, clean, load and notify become four tasks, and the load is made idempotent so a retry cannot duplicate rows.
+W: A=Small idempotent tasks: failures are isolated to one step, retries are safe, and the DAG shows which step failed.
+X: B=Longer sleep: timing does not fix the combined task, and the load failure still reruns everything.
+C=Maximum retries: rerunning a non-idempotent combined task repeats side effects, so duplicates multiply.
+D=Top-level code in the DAG file: code outside tasks runs at every parse, slows the scheduler and is not task execution.
+T: Design Composer DAG tasks as small idempotent steps so retries are safe and failures are easy to locate.
+
+@ GCP-PDE D5 T5.2 advanced troubleshooting
+S: A Composer DAG fans out one task per customer file, up to 300 tasks at a time, each calling the same partner API. The partner enforces an API quota and has started returning errors during peaks. The team wants to cap simultaneous calls without lowering the DAG's other parallelism. What should the data engineer do?
+A: Assign the API-calling tasks to an Airflow pool with a limited number of slots
+B: Reduce the number of Composer scheduler workers for the whole environment to a single worker
+C: Split the DAG into 300 DAGs, one per file, each with a distinct schedule time
+D: Replace the tasks with a SubDagOperator, which serializes all tasks inside it
+K: A
+G: ## Limiting concurrency with pools
+Airflow **pools** limit how many tasks run at the same time for a shared resource. You define pools in Airflow and associate tasks with a pool in the DAG. Typical uses are avoiding API usage limits and quotas, or avoiding too many simultaneous processes.
+- A pool has a fixed number of slots; tasks wait in the queue when all slots are in use.
+- Tasks outside the pool keep their normal parallelism.
+## Applying it
+Put the 300 API-calling tasks in a pool with, for example, 10 slots. Other tasks in the environment are unaffected.
+W: A=Airflow pool: only the pool's slots can call the API at once, and other tasks keep running in parallel.
+X: B=Single worker for the environment: this throttles every DAG, not just the API calls, and lowers overall throughput.
+C=300 DAGs on distinct schedules: it creates heavy scheduling overhead and still gives no guarantee on simultaneous calls.
+D=SubDagOperator: it is not recommended, and task groups are the suggested alternative for grouping tasks.
+T: Use Airflow pools to cap concurrent tasks that share a rate-limited resource such as an external API.
+
+@ GCP-PDE D5 T5.2 advanced use-case
+S: A Composer environment runs DAGs that include a task requiring Python libraries that conflict with the environment's installed packages, and another task that needs heavy CPU for an hour. Heavy tasks have slowed the scheduler and other DAGs. What is the recommended design?
+A: Run the isolated tasks with the KubernetesPodOperator against a separate GKE cluster
+B: Run them with the DockerOperator inside the environment, because Composer workers expose a Docker daemon
+C: Install both conflicting libraries into the same environment and accept that DAGs fail on version clashes
+D: Use the SubDagOperator to wrap the heavy tasks, as it creates separate resources for them
+K: A
+G: ## Isolating dependencies and heavy work
+Composer environments have a shared set of Python packages and worker resources. Two common problems are dependency conflicts and heavy tasks that compete with the scheduler and other DAGs.
+- `PythonVirtualenvOperator` separates Python dependencies for a task.
+- `KubernetesPodOperator` runs the task as a pod with its own image and resources in another cluster. Google advises against launching pods into the environment's own cluster because of resource competition.
+- `DockerOperator` is not recommended, as the environment's workers have no access to a Docker daemon.
+- `SubDagOperator` is not recommended; use task groups.
+## Applying it
+Running the conflicting and heavy tasks as pods in a separate cluster keeps the Composer environment small and stable.
+W: A=KubernetesPodOperator on a separate cluster: each task brings its own image and resources, with no dependency conflict and no competition with the scheduler.
+X: B=DockerOperator in the environment: the environment does not give operators access to Docker daemons, so it is not recommended.
+C=Conflicting libraries in one image: version clashes break DAGs and do not remove the resource competition.
+D=SubDagOperator: it is only a grouping construct, not a separate resource pool, and it is not recommended.
+T: Isolate conflicting or heavy tasks with KubernetesPodOperator on a separate cluster, not inside the Composer environment's own cluster.
