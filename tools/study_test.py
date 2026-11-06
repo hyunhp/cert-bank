@@ -86,6 +86,8 @@ with sync_playwright() as p:
     pg.click(".lvlhead[data-level='specialty']"); pg.click("#examRow .chip[data-exam='SCS-C03']"); pg.wait_for_function("location.hash.startsWith('#exam=SCS-C03')")
     check("picking an exam folds the picker", pg.get_attribute("#examToggle", "aria-expanded") == "false" and "SCS-C03" in pg.inner_text("#examSum"), pg.inner_text("#examSum"))
 
+    # wait until SCS-C03 has finished rendering: a late render would otherwise rewrite the hash after the jump below
+    pg.wait_for_function("(document.querySelector('.qblink') || {}).href && document.querySelector('.qblink').href.includes('SCS-C03')")
     pg.goto(BASE + "study.html#exam=SAA-C03&day=3"); pg.reload(); pg.wait_for_selector(".daytitle")
     check("deep link opens day 3", pg.inner_text(".daytitle") == saa["days"][2]["title"])
     check("domain badge", pg.inner_text(".eyebrow .dbadge") == saa["days"][2]["domain"])

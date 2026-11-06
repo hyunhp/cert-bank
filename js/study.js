@@ -28,6 +28,7 @@ const STUDY_EXAMS = [
   ["GCP-GAIL", "Generative AI Leader", "foundational", "gcp"],
   ["GCP-ACE", "Associate Cloud Engineer", "associate", "gcp"],
   ["GCP-PCA", "Professional Cloud Architect", "professional", "gcp"],
+  ["GCP-PDE", "Professional Data Engineer", "professional", "gcp"],
   ["DBX-DEA", "Data Engineer Associate", "associate", "databricks"],
   ["TF-TA004", "Terraform Associate (004)", "associate", "hashicorp"],
   ["VLT-VA003", "Vault Associate (003)", "associate", "hashicorp"],
