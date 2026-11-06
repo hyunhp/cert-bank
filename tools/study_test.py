@@ -84,6 +84,7 @@ with sync_playwright() as p:
     vt = pg.eval_on_selector_all(".vtab", "els => els.map(e => [e.dataset.vendor, +e.querySelector('.cnt').textContent.replace(/,/g, '')])")
     check("all exams reachable", sum(n for _, n in vt) == len(files), vt)
     pg.click(".lvlhead[data-level='specialty']"); pg.click("#examRow .chip[data-exam='SCS-C03']"); pg.wait_for_function("location.hash.startsWith('#exam=SCS-C03')")
+    pg.wait_for_function("document.querySelector('#examSum').textContent.includes('SCS-C03')")   # the summary renders after the hash changes
     check("picking an exam folds the picker", pg.get_attribute("#examToggle", "aria-expanded") == "false" and "SCS-C03" in pg.inner_text("#examSum"), pg.inner_text("#examSum"))
 
     # wait until SCS-C03 has finished rendering: a late render would otherwise rewrite the hash after the jump below
