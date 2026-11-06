@@ -1,0 +1,566 @@
+# GCP-PSE D4 T4.1 Binary Authorization, image and VM hardening, patching, posture and drift; T4.2 network logs (Cloud NGFW logging, VPC Flow Logs, Packet Mirroring, Cloud IDS, Log Analytics)
+# src: https://docs.cloud.google.com/binary-authorization/docs/overview
+# src: https://docs.cloud.google.com/binary-authorization/docs/key-concepts
+# src: https://docs.cloud.google.com/binary-authorization/docs/using-breakglass
+# src: https://docs.cloud.google.com/binary-authorization/docs/run/requiring-binauthz-cloud-run
+# src: https://docs.cloud.google.com/binary-authorization/docs/run/enabling-binauthz-cloud-run
+# src: https://docs.cloud.google.com/binary-authorization/docs/multi-project-setup-cli
+# src: https://docs.cloud.google.com/binary-authorization/docs/configuring-policy-console
+# src: https://docs.cloud.google.com/binary-authorization/docs/making-attestations
+# src: https://docs.cloud.google.com/binary-authorization/docs/cv-overview
+# src: https://docs.cloud.google.com/compute/docs/images/restricting-image-access
+# src: https://docs.cloud.google.com/compute/docs/os-patch-management
+# src: https://docs.cloud.google.com/compute/docs/os-patch-management/create-patch-job
+# src: https://docs.cloud.google.com/compute/docs/os-patch-management/schedule-patch-jobs
+# src: https://docs.cloud.google.com/artifact-registry/docs/repositories/virtual-repo
+# src: https://docs.cloud.google.com/security-command-center/docs/security-posture-overview
+# src: https://docs.cloud.google.com/security-command-center/docs/custom-modules-sha-overview
+# src: https://docs.cloud.google.com/resource-manager/docs/organization-policy/overview
+# src: https://docs.cloud.google.com/resource-manager/docs/organization-policy/creating-managing-custom-constraints
+# src: https://docs.cloud.google.com/firewall/docs/firewall-rules-logging
+# src: https://docs.cloud.google.com/vpc/docs/flow-logs
+# src: https://docs.cloud.google.com/vpc/docs/packet-mirroring
+# src: https://docs.cloud.google.com/intrusion-detection-system/docs/overview
+# src: https://docs.cloud.google.com/logging/docs/log-analytics
+
+@ GCP-PSE D4 T4.1 advanced use-case
+S: A company requires that production GKE workloads run only images that were both functionally tested by the QA team and security reviewed by the application security team. Each team signs images with its own key. Which Binary Authorization rule enforces this?
+A: Require attestations and list both the QA and the security attestor, so an image is admitted only when every listed attestor can verify an attestation
+B: Set the rule to require attestations and list both attestors, so an image is admitted when any one of the listed attestors can verify an attestation for it
+C: Create one attestor and have both teams share its single signing key, so that a single attestation represents both the QA and the security approval
+D: Keep the rule on allow all images and rely on the QA team to delete untested images from Artifact Registry before each weekly release window
+K: A
+G: ## Attestors and attestations
+Binary Authorization decides at deploy time whether an image may run. A policy has a default rule plus optional specific rules, and each rule has an evaluation mode and an enforcement mode.
+- An **attestation** is a record, signed with a private key, that states a specific image digest completed a stage such as QA or security review.
+- An **attestor** is the Binary Authorization resource that holds the matching public key and verifies those signatures at deploy time.
+- A rule in the require-attestations mode lists one or more attestors.
+## Modelling two independent approvals
+When several attestors are listed in one rule, the image must have attestations that are verified by all of them. One attestor per approving team therefore gives a logical AND. Each team keeps its own key, so neither can forge the other's approval.
+W: Require attestations with both attestors listed: the policy admits the image only when the QA attestor and the security attestor each verify an attestation, which enforces both approvals with separate keys.
+X: B=At-least-one semantics: listing several attestors does not behave as OR, so this would be a wrong description of the rule and would not guarantee both reviews.
+C=Single shared key: one signature cannot show that two independent teams approved, and either team could sign on behalf of the other, which destroys separation of duties.
+D=Allow all images with manual cleanup: allow all images disables deploy-time enforcement, and deleting images after the fact is a slow detective step that lets untested images run first.
+T: Several attestors in one require-attestations rule means every one of them must verify an attestation, which models independent approvals.
+
+@ GCP-PSE D4 T4.1 advanced tradeoff
+S: A regulated company wants to stop a compromised CI service account from approving its own malicious builds. The policy is enforced on production GKE clusters, and the security team wants separate ownership of the policy, the signing authority and the attestation records. Which setup achieves this?
+A: Use a multi-project setup: the deployment project holds the policy, an attestor project holds attestors and Cloud KMS keys, and a third stores attestations, each with its own IAM
+B: Place the policy, attestors, keys and attestations all in the production project and grant the CI service account the Owner role there so it can sign every build
+C: Keep one project for everything but name the attestor after the CI pipeline, so that the pipeline identity is visible in each audit log entry it produces
+D: Store the signing private key in a Cloud Storage bucket that only the CI service account can read, and load the key into the attestor at deploy time
+K: A
+G: ## One policy per project, resources elsewhere
+Each Google Cloud project can have exactly one Binary Authorization policy, and it must be in the project where the deployment platform runs. Attestors and attestations are separate resources that can live in other projects.
+## Separation of duties
+In a single-project setup everything is together, so anyone with enough IAM in that project can change the policy and also create the approval. In a **multi-project setup**:
+- the deployment project (for example the GKE project) holds only the policy;
+- the attestor project holds attestors and the Cloud KMS keys that sign and verify;
+- an attestation project holds the attestation records.
+IAM is configured separately in each project, so no single role can both create an approval and relax the rule that demands it.
+W: Multi-project configuration: the policy owner, signing authority and attestation store are different IAM boundaries, so a compromised pipeline identity cannot rewrite the policy or mint approvals outside the roles it was given.
+X: B=Owner for CI in production: giving the pipeline broad ownership lets one identity edit the policy and sign any image, the opposite of separation of duties.
+C=Naming the attestor: a label does not stop the same identity from signing and administering; it only improves readability of logs.
+D=Key in a bucket: a private signing key kept in object storage is exposed to anyone who obtains the service account, whereas Cloud KMS keeps the private key non-exportable and signs on request.
+T: Split policy, attestors and attestations into different projects so no single identity can both approve and relax enforcement.
+
+@ GCP-PSE D4 T4.1 applied use-case
+S: A security team plans to move a production GKE cluster from no Binary Authorization to a policy that requires attestations. Past releases suggest some teams deploy images that nobody has signed yet. The security team wants to measure impact for two weeks without breaking any deployment. What should it do?
+A: Use the Dry Run: Audit Log Only enforcement mode, so non-conformant images still deploy but each violation is written to Cloud Audit Logs, then switch to blocking
+B: Set the evaluation mode to disallow all images with Block and Audit Log, then relax the policy again for every team that raises a ticket during the period
+C: Enable the policy on a new empty test cluster only and assume production results will be identical because the policy definition is the same
+D: Leave the policy unchanged and review the GKE node logs of the production cluster for unsigned container image pulls over the two weeks
+K: A
+G: ## Evaluation mode versus enforcement mode
+Each rule has two independent settings:
+- The **evaluation mode** says what is checked: allow all images, disallow all images, or require attestations.
+- The **enforcement mode** says what happens when an image fails: **Block and Audit Log**, or **Dry Run: Audit Log Only**.
+## Using dry run to roll out safely
+Dry run lets the policy be tested in the real environment before enforcement takes effect. Non-conformant images are allowed, but the deployment details are recorded in Cloud Audit Logs. The team reviews those entries, signs or fixes the offending pipelines, and only then switches to Block and Audit Log. Most production rules use blocking; dry run is for validation.
+W: Dry Run: Audit Log Only: it tests the real policy against real deployments with no outage and produces the Cloud Audit Logs entries needed to find unsigned images.
+X: B=Disallow everything first: blocking from day one stops all deployments except exempt images and turns the measurement into an outage.
+C=Test only on an empty cluster: it exercises no real deployment pipelines, so it cannot reveal which production teams deploy unsigned images.
+D=Reading node logs: node pull logs do not record policy decisions or attestation status, so they cannot show what the policy would have blocked.
+T: Roll out a require-attestations rule in Dry Run: Audit Log Only first, read the audit log violations, then enforce with Block and Audit Log.
+
+@ GCP-PSE D4 T4.1 advanced use-case
+S: A site reliability team needs a way to deploy an urgent hotfix image to a GKE cluster when the attestation pipeline is down. The security team accepts this only if every use leaves an auditable trail. Which TWO statements about Binary Authorization break-glass are correct? (Select TWO)
+A: Break-glass is requested by adding a break-glass label to the Pod specification, so who may use it follows who is allowed to create Pods
+B: Every break-glass deployment is recorded in Cloud Audit Logs, so the security team can review it or trigger an alert on those entries
+C: Break-glass is enabled by creating a second, permissive Binary Authorization policy that the cluster uses only on weekends
+D: Using break-glass permanently removes the image from policy evaluation, so later deployments of the same digest never need a new attestation
+E: Break-glass writes an audit entry only when the image would have violated the policy; compliant images deployed with the label are not recorded
+K: A,B
+G: ## Break-glass
+Break-glass is an emergency escape hatch that lets a team deploy an image that Binary Authorization would block. It is consistent with the Kubernetes admission controller specification.
+- It is requested per Pod by adding the break-glass label to the Pod specification.
+- A **break-glass event** is automatically logged to Cloud Audit Logs, whether or not the image satisfied the policy.
+## Governing the exception
+Because the request is just a label on the Pod, Kubernetes RBAC on who may create Pods decides who can use it. The audit entries give the security team something to review or to wire to an alert.
+W: A=Label on the Pod specification: break-glass is requested in the workload itself, so Pod creation rights govern who can invoke it.
+B=Cloud Audit Logs entry: each use is logged automatically, and the entries can be audited or used to trigger alerts and downstream actions.
+X: C=Second weekend policy: break-glass is a per-Pod override, not a second policy, and a project has exactly one policy.
+D=Permanent exemption: the label affects only that deployment; it does not add the image to the exempt list or create attestations.
+E=Logging only violations: the event is logged regardless of whether the image would have satisfied the policy.
+T: Break-glass is a Pod label that overrides enforcement for one deployment and is always written to Cloud Audit Logs.
+
+@ GCP-PSE D4 T4.1 applied troubleshooting
+S: After a team set the default rule of a Binary Authorization policy to disallow all images with blocking enforcement, new GKE nodes fail to start system Pods such as the ones that provide networking. The team does not want to hand-maintain a list of Google image paths. What should it do?
+A: Enable the setting that trusts Google-maintained system images so they are exempt from further policy evaluation, while the default rule keeps blocking other images
+B: Change the default rule to allow all images and then use a cluster-specific rule to block application images in each namespace of every cluster
+C: Set the default rule to Dry Run: Audit Log Only permanently, because Binary Authorization cannot evaluate system images created by the platform
+D: Delete the policy and rely on GKE node auto-upgrade to reject untrusted container images at the node level before Pods are scheduled
+K: A
+G: ## Exempt images and system images
+A policy's rules apply to every image that is not exempt. Two mechanisms keep a strict default rule from blocking the cluster itself:
+- **Exempt images**: an allowlist of registry paths (`admissionWhitelistPatterns`) that Binary Authorization always allows. Paths such as `gcr.io/google_containers/*` and `k8s.gcr.io/**` are exempt by default because GKE needs them to start a cluster.
+- **Trust Google-maintained system images**: set with `globalPolicyEvaluationMode`; a Google-managed system policy is evaluated before and in addition to the user policy, so images GKE requires are not blocked.
+## Fix
+Turn on the system-image trust and keep the strict default for everything else.
+W: Trust Google-maintained system images: Google's list of required system images is exempted without the team maintaining paths, and the strict default rule still blocks any other image.
+X: B=Allow all by default: this flips the model from deny-by-default to allow-by-default, so any unsigned application image would be admitted unless a rule catches it.
+C=Permanent dry run: dry run stops all blocking, and the claim that system images cannot be evaluated is wrong; they are handled by exemption.
+D=Deleting the policy: removing the policy disables enforcement entirely, and node auto-upgrade does not evaluate image provenance.
+T: Pair a deny-by-default rule with the Google-maintained system images trust (or exempt paths) so GKE can start while everything else is blocked.
+
+@ GCP-PSE D4 T4.1 applied definition
+S: An organization must make sure every Cloud Run service in all of its projects is deployed under Binary Authorization policy, and that developers cannot turn it off per service. What is the correct mechanism?
+A: Set the Cloud Run Binary Authorization organization policy constraint at the organization to allow only the value default, so each project uses its own policy
+B: Create cluster-specific rules in each project's policy, because Cloud Run supports specific rules for individual revisions and services
+C: Add a Binary Authorization admission webhook to each Cloud Run service through Kubernetes configuration, then block changes to it with IAM
+D: Ask each team to add the Binary Authorization flag when it deploys a service and review the deployment history together every quarter
+K: A
+G: ## Binary Authorization on Cloud Run
+Cloud Run supports Binary Authorization policy for services and jobs. Differences from GKE:
+- Only the **default rule** is supported; specific rules (cluster, namespace, service account) are not available for Cloud Run.
+- The policy is read from the project where the service runs.
+## Requiring it centrally
+An organization policy constraint, `run.allowedBinaryAuthorizationPolicies`, can be set on an organization, folder or project to require enforcement. Allowing only the custom value `default` tells Cloud Run to use the Binary Authorization policy in the same project as the service. Because organization policies are inherited, individual teams cannot omit it.
+W: Organization policy allowing only default: it forces every Cloud Run deployment in scope to use the project's own policy and cannot be skipped per service.
+X: B=Specific rules for Cloud Run: Cloud Run supports only the default rule, so there are no cluster or service specific rules to create.
+C=Admission webhook: Cloud Run is fully managed and has no Kubernetes admission webhook configuration; enforcement is a platform integration.
+D=Per-deployment flag with quarterly review: it relies on each team remembering the flag, and violations stay undetected for months.
+T: Require Binary Authorization on Cloud Run with an organization policy constraint set to the value default; Cloud Run supports only the default rule.
+
+@ GCP-PSE D4 T4.1 advanced definition
+S: A team promotes the same container image digest from a staging Artifact Registry repository to a production repository in another project and expects the production Binary Authorization policy to admit it. The pipeline created one attestation for the digest when the image was built. What is true?
+A: One attestation can authorize identical images in different registries because it is bound to the digest, so the promoted copy needs no new signature
+B: The attestation is bound to the repository path, so the promoted copy needs a fresh attestation from the attestor after every copy between repositories
+C: Binary Authorization cannot evaluate images outside the repository where they were built, so the promoted copy must be rebuilt in the production project
+D: The attestation expires automatically when the image is copied to another project, because attestations are kept in the source repository
+K: A
+G: ## What an attestation is bound to
+An attestation is a signed record that contains the image's registry path and digest. The digest is the content hash of the image, so identical bytes have an identical digest wherever they are stored.
+## Promoting between registries
+Binary Authorization documentation states that a single attestation can authorize identical images stored in multiple locations or registries (Artifact Registry, Container Registry, or an external registry). A promotion pipeline that copies by digest can reuse the attestation, which also means the promoted image is provably the one that was approved. Deploying a rebuilt image would create a new digest and need a new attestation.
+W: Digest-bound attestation: identical images in different registries share a digest, so one attestation covers the staging copy and the promoted copy.
+X: B=Path-bound attestation: the signed content includes the digest, and the documentation says one attestation can authorize identical images across registries.
+C=Only Artifact Registry images: images in Container Registry and external registries are supported, so no rebuild is needed.
+D=Expiry on copy: attestations are stored in the attestation project as metadata, not in the repository, and are not removed when an image is copied.
+T: Attestations bind to the image digest, so one attestation can cover the same image in several registries.
+
+@ GCP-PSE D4 T4.1 applied comparison
+S: After a deployment, the security team tightens the Binary Authorization policy and asks whether Pods that already run unsigned images will be flagged. An engineer describes Binary Authorization enforcement as the control that protects running workloads continuously. Which statement corrects this?
+A: Enforcement validates an image once, at deploy time; checking Pods that already run for continued conformance needs the separate continuous validation feature
+B: Enforcement re-evaluates every running Pod each time the policy changes and evicts those that no longer conform to the new rules
+C: Enforcement checks images only at build time in Cloud Build, so deployed Pods are never evaluated by Binary Authorization on any platform
+D: Enforcement is continuous for Cloud Run and one-time for GKE, which is why the two platforms need different kinds of policies
+K: A
+G: ## Deploy-time versus ongoing checks
+Binary Authorization has two roles in the overview documentation:
+- **Enforce**: images being deployed to a supported platform are checked against policy, then allowed or blocked. The overview describes this as a one-time image validation at deploy time.
+- **Monitor**: **continuous validation (CV)** periodically checks the metadata of images associated with running Pods for continued conformance and logs violations to Cloud Logging.
+## Status to remember
+The check-based platform policy form of CV is marked Preview in the current documentation, so a production design should not depend on it being generally available; combine deploy-time enforcement with vulnerability monitoring and posture findings.
+W: One-time enforcement versus separate monitoring: enforcement decides at deployment, and ongoing conformance checks of running Pods are the job of continuous validation.
+X: B=Automatic re-evaluation and eviction: enforcement does not evict running Pods when the policy changes; that is not how the admission-time check works.
+C=Build-time only: enforcement happens at deployment on the target platform, not inside Cloud Build.
+D=Platform difference: neither platform is continuously enforced by the deploy-time check, and Cloud Run uses the same policy model with only a default rule.
+T: Binary Authorization enforcement is a deploy-time gate; monitoring running Pods is the separate (check-based, currently Preview) continuous validation feature.
+
+@ GCP-PSE D4 T4.1 advanced use-case
+S: A security team wants to limit which Compute Engine images developers can use for boot disks to the organization's hardened-image project plus Google public images. Developers are editors in their own projects. Which TWO statements about the trusted image constraint are correct? (Select TWO)
+A: Setting the trusted image projects constraint at the organization restricts creating disks from images to the listed image projects
+B: The constraint does not restrict custom images that already exist in a developer's own project, so a developer can still boot from a locally created image
+C: The constraint also blocks developers from creating new image resources in their own projects, so they can never build custom images at all
+D: The constraint validates the contents of image files in Cloud Storage buckets and rejects any that contain known vulnerabilities
+E: The constraint can be set only on individual projects, so it cannot be inherited from the organization or from a folder above them
+K: A,B
+G: ## Trusted image policies
+The constraint `compute.trustedImageProjects` is an organization policy that defines which projects' images principals may use to create persistent disks. It can be set on a project, folder or organization and is inherited.
+## What it does not do
+Documented limitations:
+- Custom images in the **local project** are not restricted.
+- Image files in **Cloud Storage buckets** are not restricted.
+- Users are not prevented from **creating image resources** in their local projects.
+So the constraint governs where approved images come from, but a developer who can create images in their own project can still use them. Closing that gap needs IAM that limits image creation, plus detection of images outside the golden project.
+W: A=Restricts image sources: setting the constraint at organization scope limits disk creation to images from the listed projects.
+B=Local-project gap: custom images in the developer's own project are not covered, so they remain usable unless image creation rights are restricted.
+X: C=Blocks image creation: the documentation states trusted image policies do not prevent users from creating images in their local projects.
+D=Scans Cloud Storage images: image files in buckets are listed as not restricted, and the constraint does not scan contents.
+E=Project-only scope: it can be set on a project, folder or organization and inherits down.
+T: compute.trustedImageProjects limits image sources org-wide but leaves local-project custom images and Cloud Storage image files uncovered.
+
+@ GCP-PSE D4 T4.1 advanced tradeoff
+S: A stateless web tier runs in a managed instance group. Every month the OS needs security updates. The security team wants every instance to be identical, tested before use, and free of configuration drift introduced by manual changes. Which approach fits best?
+A: Build a hardened image in a pipeline, scan and test it, publish it to an image family, then roll it out with a new template and a rolling replace
+B: Schedule VM Manager patch jobs each month on the running instances and let every VM reach its own update state through its package manager
+C: Allow administrators to connect over SSH to the group's VMs and apply the updates by hand, recording each change in a ticket afterwards
+D: Stop the group, patch one VM, and take a disk snapshot that is restored onto every other instance of the group when they restart
+K: A
+G: ## Immutable images versus in-place patching
+There are two ways to keep a fleet current:
+- **In-place patching** (VM Manager patch jobs) changes running machines. It fits stateful or long-lived VMs, but each machine ends up with its own history, and a failed patch leaves partial state.
+- **Immutable images** are built, tested and published once, then instances are replaced from the new image. Instances that fail health checks are never put in service.
+## Pipeline shape
+A build pipeline (for example Packer or Cloud Build) produces the image with hardening applied, runs vulnerability and conformance checks, and publishes it to an image family in a central image project. A new instance template references the family and a rolling update replaces instances gradually. Every instance is identical because it came from the same tested artifact.
+W: Hardened image pipeline with rolling replace: the tested artifact is promoted once, every instance is built from it, and drift disappears because machines are replaced rather than edited.
+X: B=Monthly patch jobs: patch jobs are valuable for long-lived VMs, but each machine is patched separately, so drift and partial failures remain and the result is not a single tested artifact.
+C=Manual SSH updates: hand edits are exactly the source of drift and cannot be tested or reproduced.
+D=Snapshot restore: restoring one patched disk onto others is a manual, error-prone copy that skips scanning and testing and carries instance-specific state.
+T: For stateless fleets, build, scan and publish a hardened image, then roll it out by replacement; reserve patch jobs for VMs you cannot replace.
+
+@ GCP-PSE D4 T4.1 applied troubleshooting
+S: A team set up OS patch management with VM Manager on a fleet of Linux VMs that have no external IP addresses. The OS Config agent is running and patch compliance data appears, but patch jobs fail to download updates from the distribution repositories. What is the best fix?
+A: Give the VMs a route to updates: host a local package repository or WSUS, or expose external update sources through Cloud NAT or a proxy
+B: Turn on Private Google Access on the subnet, because it carries traffic from the VMs to the operating system vendors' package repositories
+C: Reinstall the OS Config agent on each VM with a longer job timeout, because the agent downloads packages directly from Google Cloud Storage
+D: Apply the patches over SSH from a bastion host, because the patch job service cannot patch VMs that live in a private VPC network
+K: A
+G: ## How VM Manager patching gets its updates
+The OS Config service starts a patch job and the OS Config agent on each VM applies it through the native tool (`apt`, `yum`, `zypper`, Windows Update Agent). The patch service does **not host or maintain patches**: the VM pulls them from package repositories or a local repository.
+## The private VM case
+VMs without public IPs, or in a private VPC network, cannot reach those repositories on their own. Google recommends hosting your own local repository (or WSUS) for full control over the patch baseline; alternatively make external sources reachable through Cloud NAT or another proxy service.
+W: Local repository, WSUS, Cloud NAT or proxy: it gives the agent a path to the package sources, which is what fails; a local repository also makes the baseline controlled.
+X: B=Private Google Access: it reaches Google APIs and services, not third-party distribution repositories, so updates still cannot be downloaded.
+C=Reinstalling the agent: the agent is working and reports inventory; it applies updates through the OS tool from the configured repositories, not from a Google bucket.
+D=SSH from a bastion: patch jobs work on private VMs once the sources are reachable; abandoning them loses scheduling and compliance reporting.
+T: Patch jobs need reachable package sources; for private VMs provide a local repository or WSUS, or Cloud NAT or a proxy.
+
+@ GCP-PSE D4 T4.1 applied use-case
+S: A company wants monthly patching for all production VMs labelled env=prod, including VMs created after the schedule is set up. No more than 10 percent of VMs in any zone may be patched at the same time, and a service check must run before patching starts on each VM. Which design meets this?
+A: One recurring patch deployment with a label-based instance filter, a zone-by-zone rollout with a 10 percent disruption budget, and a pre-patch script
+B: One-time patch jobs that list the current VM names, recreated by hand each month after exporting the instance inventory to a spreadsheet
+C: A recurring patch deployment filtered by an explicit list of instance names, plus a cron job that adds newly created VMs to that list
+D: A recurring patch deployment that patches zones concurrently with no disruption budget, since the pre-patch script already prevents outages
+K: A
+G: ## Patch deployment building blocks
+A **patch deployment** schedules **patch jobs**, once or on a recurring schedule.
+- **Instance filters**: labels, zones, name prefixes. They are applied to each patch job when it runs, so VMs created later with a matching label are included automatically.
+- **Rollout options**: patch one zone at a time or concurrently, and set a **disruption budget**, the number or percentage of VMs in a zone that can be disrupted at once.
+- **Pre-patch and post-patch scripts**: one per OS, run before patching starts and after patching (and reboot) completes.
+## Matching the requirements
+Label filter handles new VMs; zone-by-zone with a budget limits concurrent disruption; the pre-patch script runs the service check.
+W: Label-filtered recurring deployment with zone rollout, budget and pre-patch script: each element maps to one requirement, and the filter is re-evaluated at every run.
+X: B=Manual one-time jobs: static lists miss new VMs and need monthly human effort.
+C=Name list with cron: it recreates by script what a label filter already does, and a gap between creation and the next cron run leaves new VMs unpatched.
+D=Concurrent zones without a budget: nothing then limits how many VMs are disrupted at once, and a pre-patch check does not cap concurrency.
+T: Use recurring patch deployments with label filters (re-evaluated each run), zone rollout, a disruption budget and pre-patch scripts.
+
+@ GCP-PSE D4 T4.1 applied use-case
+S: A platform team wants to define a set of organization policy constraints and Security Health Analytics detectors, deploy them to the organization, apply stricter ones to the production folder, and be alerted when a resource drifts from the intended state. Which Google Cloud capability should it use?
+A: The security posture service in Security Command Center, with a posture deployed at the organization and a stricter posture deployed at the production folder
+B: Cloud Asset Inventory feeds exported to BigQuery, with scheduled queries that the team writes to compare resources with a sheet of expected values
+C: Security Command Center Standard tier alone, since predefined detectors cover every resource and no posture needs to be defined or deployed
+D: A Binary Authorization policy attached at the organization node, since its policies are inherited by every folder and project below it
+K: A
+G: ## Security posture service
+Security Command Center includes a **security posture service** to define, deploy and monitor a security posture. It requires the Premium or Enterprise tier with SCC activated at the organization level.
+- A **posture** is one or more **policy sets**; each holds **policies**: preventative (organization policy constraints, including custom constraints) or detective (Security Health Analytics detectors, including custom modules).
+- A posture is **deployed** at an organization, folder or project; only one posture can be deployed to each resource.
+- Postures are **inherited**. If a lower-level posture defines a policy differently (Allow versus Deny), the lower-level definition is used by resources below it. Google recommends a broad organization posture with stricter ones on folders and projects.
+- After deployment, **drift** (an unauthorized change from the posture) is reported as SCC findings, which can be reviewed, filtered and exported.
+W: Security posture service with org-level and folder-level postures: it bundles preventative and detective policies, supports hierarchical inheritance and reports drift as findings.
+X: B=Asset Inventory plus hand-built queries: it can detect differences but the team must build and maintain the comparison and has no deployable preventative policies.
+C=Standard tier alone: the posture service is not available without Premium or Enterprise, and predefined detectors cannot enforce organization policy constraints.
+D=Binary Authorization policy: it governs container image deployment on supported platforms, not general resource configuration or drift.
+T: Use SCC security postures: bundle org policy constraints and SHA detectors, deploy hierarchically, and watch drift findings.
+
+@ GCP-PSE D4 T4.1 advanced definition
+S: Which TWO statements about the security posture service in Security Command Center are correct? (Select TWO)
+A: A policy in a posture can be an organization policy constraint, including a custom constraint, or a Security Health Analytics detector, including a custom module
+B: Drift from the deployed posture is reported as Security Command Center findings that can be reviewed and exported like other findings
+C: Several postures can be deployed to the same folder at once, and for each resource the strictest definition among them wins
+D: The service is available on the Standard tier of Security Command Center once a posture template has been imported by an administrator
+E: Postures apply only to resources of the project where they are created and are never inherited by child folders or projects
+K: A,B
+G: ## Components and behaviours
+- **Policies** are either preventative (organization policy constraints) or detective (SHA detectors, including custom modules and custom constraints).
+- **Posture templates** (for example CIS, NIST 800-53, ISO 27001, PCI DSS, and Google-recommended templates) give starting points.
+- **Deployment**: one posture per organization, folder or project; inherited by children; where definitions differ the lower-level one is used.
+- **Drift**: reported as findings; exportable.
+- **Availability**: Security Command Center Premium or Enterprise activated at the organization level.
+W: A=Policy types: the documentation lists organization policy constraints, including custom constraints, and SHA detectors, including custom modules, as the supported policies.
+B=Drift findings: Security Command Center reports instances of drift as findings you can review, filter, resolve and export.
+X: C=Multiple postures and strictest wins: only one posture can be deployed to each resource, and the lower-level definition is used, not the strictest.
+D=Standard tier: the posture service is available only with the Security Command Center Premium or Enterprise tier activated at organization level.
+E=No inheritance: postures are inherited by child folders and projects.
+T: A posture bundles org policy and SHA policies, deploys one per resource with inheritance, and reports drift as SCC findings on Premium or Enterprise.
+
+@ GCP-PSE D4 T4.1 advanced use-case
+S: Security Health Analytics predefined detector for public Cloud SQL instances flags any instance whose authorized networks include 0.0.0.0/0. The security team also needs findings for instances that are publicly reachable only in two restricted regions, and wants to ignore instances in maintenance. What should it do?
+A: Create a Security Health Analytics custom module whose CEL condition checks the region and state of Cloud SQL instances, and send its findings to Security Command Center
+B: Modify the predefined detector's logic in place so that it also checks the region property, then re-enable the changed detector for the organization's projects
+C: Write an organization policy custom constraint, since constraints generate findings in Security Command Center for existing resources
+D: Export Cloud SQL instance configuration to Cloud Storage every night and have an analyst filter the exported files by region and state
+K: A
+G: ## Extending Security Health Analytics
+Predefined detectors are fixed. **Custom modules** let you define your own detectors with YAML and **CEL** expressions: which resource types, which properties to evaluate, and what the finding contains. Any resource or asset that SCC supports can be targeted. Findings are written to Security Command Center.
+## What a custom module can express
+The documentation's example contrasts the predefined `PUBLIC_SQL_INSTANCE` detector (authorized networks set to `0.0.0.0/0`) with custom logic that matches address prefixes with wildcards, ignores instances in `MAINTENANCE` state, or triggers only for specific `region` values.
+## Limitation
+Custom module findings are not covered by attack path simulations, so they have no attack exposure scores or attack paths.
+W: Custom module with CEL: it can evaluate region and state properties, runs alongside predefined detectors and writes findings to SCC.
+X: B=Editing the predefined detector: predefined detectors are not user-editable; custom modules are the extension mechanism.
+C=Custom organization policy constraint: it governs create and update operations preventively, and does not produce findings for resources that already exist.
+D=Nightly export and manual filtering: it is a manual, delayed process with no SCC findings, severity or remediation workflow.
+T: Extend SHA with custom modules (YAML plus CEL) for finer detection, accepting that they have no attack exposure scores or attack paths.
+
+@ GCP-PSE D4 T4.1 advanced tradeoff
+S: A security team adopts a requirement that every new GKE cluster must have a specific hardening setting. Several existing clusters already violate it. The team wants to stop new violations without disrupting current clusters and also to see the existing ones. What combination fits?
+A: A custom organization policy constraint for cluster creation, tested first in dry-run mode, plus a Security Health Analytics custom module for existing clusters
+B: A custom organization policy constraint alone, because newly enforced constraints reconfigure every existing cluster that violates them
+C: A Security Health Analytics custom module alone, because its findings prevent the creation of any non-compliant cluster in the whole organization
+D: A Binary Authorization policy on each cluster, because it blocks the creation of other clusters whose settings are non-compliant
+K: A
+G: ## Prevent versus detect
+- **Organization policy** is preventative. A custom constraint is defined with CEL for a resource type and method (such as create) and denies or allows matching requests. Policy changes are usually not retroactive: if the policy restricts a state that a resource is already in, the resource is in violation but the service does not stop its behaviour, to protect business continuity. Violations must be fixed manually.
+- **Security Health Analytics custom modules** are detective: they scan existing resources and write findings to Security Command Center.
+## Testing before enforcement
+Policy Simulator and **dry-run mode** show or log how an organization policy would affect resources before it is enforced; in dry-run, violations are audit-logged but not denied.
+W: Custom constraint plus SHA custom module: the constraint prevents new violations after dry-run testing, and the module reports the pre-existing clusters.
+X: B=Constraint alone: new organization policies are usually not retroactive, so existing clusters stay as they are and are only flagged as violations.
+C=Module alone: a finding reports a state after the fact; it does not stop cluster creation.
+D=Binary Authorization: it checks container images at deployment, not cluster configuration settings.
+T: Combine a custom organization policy constraint (preventive, not retroactive) with a custom SHA module (detective) to cover new and existing resources.
+
+@ GCP-PSE D4 T4.1 advanced troubleshooting
+S: A company keeps internal Python packages in an Artifact Registry standard repository and proxies the public package index through a remote repository. Developers install through one virtual repository. A security review warns that an attacker could publish a public package with the same name as an internal one and a higher version number. How should the virtual repository be configured?
+A: Give the internal standard repository a higher priority than the remote repository so that Artifact Registry searches it first for any requested package
+B: Give both upstream repositories the same priority so that Artifact Registry serves the highest version it finds in either of them
+C: Give the remote repository the higher priority so developers receive the latest public fixes before any internal package is even considered by the repository
+D: Remove the virtual repository and let each developer install directly from both sources, using an index-url flag on every command
+K: A
+G: ## Virtual repositories and priority
+A **virtual repository** is one access point in front of one or more upstream repositories (standard or remote) of the same format. Each upstream gets a priority; **higher values take precedence**, and Artifact Registry evaluates them in descending order.
+- If equal priorities hold the requested package, Artifact Registry can serve it from either.
+- Leave gaps between priority values so new upstreams can be inserted.
+## Dependency confusion
+In this attack a public package shares the name of an internal one. If the public source is searched first, or equal, the attacker's package may be served. Placing the internal repository above the remote one makes the internal package win for names that exist internally.
+W: Internal repository with higher priority: the internal package is found first, so a same-named public package is not served in its place.
+X: B=Equal priority: the documentation says a package found in equal-priority repositories can be served from either, which leaves the confusion risk.
+C=Remote repository first: the public source would be searched first, which is exactly the exposure the review warns about.
+D=Direct installs from both sources: there is no central ordering, so each developer's tooling decides which source wins, and the control is lost.
+T: In a virtual repository, give internal repositories a higher priority than remote ones to blunt dependency confusion.
+
+@ GCP-PSE D4 T4.2 applied troubleshooting
+S: An auditor asks the security team to prove that a deny rule in a hierarchical firewall policy is blocking traffic. The team enables logging on the rule but also expects to see logs for traffic dropped by the VPC's implied deny ingress rule, and finds none. What explains this and what should the team do?
+A: Firewall policy rules logging is not supported for implied rules, so add an explicit lowest-priority deny-all ingress rule with logging turned on
+B: Logging works only on allow rules, so the team should convert the deny rule to an allow rule whose destination matches nothing
+C: Implied rules are logged only after the VM's machine type is upgraded, because the connection log rate depends on the machine size
+D: Logs for implied rules are written to the _Required bucket and are visible only to Google support engineers during an investigation of the project
+K: A
+G: ## What firewall policy rules logging records
+Logging is enabled **per rule** and is available for rules with an allow or deny action in either direction. A **connection record** is written to Cloud Logging with the source and destination IPs, protocol and ports, time, and a reference to the rule that applied.
+## Limits to remember
+- Logging is **not supported** for the implied deny ingress and implied allow egress rules of a regular VPC network.
+- It records only **TCP and UDP** connections.
+- Logging is connection-based; a denied connection repeats a log entry every 5 seconds while packets are still observed.
+## Workaround for implied rules
+Create explicit rules at the lowest priority that match what the implied rule would (for example deny all ingress) and enable logging on them. The behaviour is the same but now auditable.
+W: Explicit lowest-priority deny rule with logging: implied rules cannot log, so an explicit equivalent gives the auditor connection records that reference the rule.
+X: B=Logging only on allow rules: logging is an option for allow and deny rules in either direction.
+C=Machine type upgrade: machine type affects connection logging rate limits, not whether implied rules can be logged.
+D=Hidden _Required bucket: implied rules are not logged at all, and the _Required bucket holds admin audit logs.
+T: Implied rules are not loggable; mirror them with explicit lowest-priority rules that have logging enabled.
+
+@ GCP-PSE D4 T4.2 advanced troubleshooting
+S: Incident responders suspect that a compromised VM keeps one long-lived TCP connection open to an external server and transfers data over hours. Cloud NGFW firewall policy logging on the matching allow rule shows a single entry from the start of the connection. How can the team continue to see how the traffic evolves over time?
+A: Use VPC Flow Logs, which sample packets and write aggregated flow records for each interval for as long as the connection carries traffic
+B: Increase the verbosity of the firewall policy rule log, because a single rule can write continuous entries for every connection it allows
+C: Replace the allow rule with a deny rule, because deny logging is written only once for each connection that it drops
+D: Enable Cloud Audit Logs data access logging for Compute Engine, which records packet counts for each network connection of the VM
+K: A
+G: ## Connection-based versus flow-based logs
+**Firewall policy rules logging** writes a record when a connection is established, and an allowed connection is logged only once even if it lasts for hours, as long as packets keep moving at least every 10 minutes. It answers "which rule allowed or denied this" rather than "how much data moved".
+**VPC Flow Logs** sample packets and aggregate them by IP connection (5-tuple) over an aggregation interval, so a long-lived connection produces flow log entries throughout. Entries describe volume and timing, which suits monitoring, forensics and security analysis.
+## Choosing
+Use firewall logging to prove rule behaviour, and flow logs to follow ongoing traffic.
+W: VPC Flow Logs: aggregated records are produced per interval, so the growth of a long-lived connection is visible after its first packet.
+X: B=More rule log detail: an allowed connection is logged once regardless of duration; there is no setting to make the rule log continuously.
+C=Switching to deny: deny logging repeats every 5 seconds for dropped packets, so it would block the transfer instead of recording it; this changes the control rather than the visibility.
+D=Data access audit logs: they record API calls and not network packets or connection volumes.
+T: Firewall rule logs record a connection once; use VPC Flow Logs to watch a long-lived flow evolve.
+
+@ GCP-PSE D4 T4.2 applied use-case
+S: A company continuously creates new projects, each with its own VPC networks. The security team needs flow records from every subnet, every Cloud VPN tunnel and every VLAN attachment for forensics, including those in projects that do not exist yet. What is the most reliable way?
+A: Enable VPC Flow Logs with an organization-level configuration covering all subnets, VLAN attachments and Cloud VPN tunnels of every VPC network
+B: Enable flow logs on each subnet with a script run at project creation, and ask project owners to enable them on VPN tunnels manually
+C: Enable firewall policy rules logging on every rule, because it also records traffic that crosses Cloud VPN tunnels and VLAN attachments
+D: Configure Packet Mirroring on every subnet and keep the mirrored packets in a collector as the forensic record for the organization
+K: A
+G: ## Scopes for VPC Flow Logs
+Flow logs can be enabled at several scopes: organization, VPC network, subnet, VLAN attachment, Cloud VPN tunnel (and project level for specific networks, subnets, attachments or tunnels). An **organization-level configuration** enables flow logs for all subnets, VLAN attachments and Cloud VPN tunnels in all VPC networks in the organization, so resources created later are included.
+## Where logs go
+Logs are sent to Cloud Logging in the project of the VPC network that reported the flow, and stored for 30 days by default. Keep them longer by setting a custom retention period or exporting them.
+W: Organization-level flow log configuration: coverage is inherited by future networks, tunnels and attachments, so there is no per-project step to forget.
+X: B=Scripts and manual steps: coverage depends on every project owner and automation run succeeding, and gaps appear between creation and the script.
+C=Firewall policy logging: it records connections matched by rules on VM traffic, not hybrid gateway traffic, and covers only TCP and UDP.
+D=Packet Mirroring everywhere: it mirrors full packets from VMs to collectors, which is heavy on bandwidth and not a replacement for aggregated records; it also does not cover VPN tunnels and attachments.
+T: Use an organization-level VPC Flow Logs configuration so every current and future subnet, tunnel and attachment is covered.
+
+@ GCP-PSE D4 T4.2 advanced tradeoff
+S: A flow log bill is rising. The payment subnets must keep the highest-fidelity records for forensics, while the development subnets only need coarse traffic trends. Which approach balances cost and visibility?
+A: Give payment subnets full secondary sampling and complete metadata; give development subnets filters, lower secondary sampling and fewer metadata fields
+B: Disable flow logs on development subnets, and lower the primary sampling rate on payment subnets until the volume fits the budget
+C: Apply the same lowest sampling rate and no metadata to all subnets so that only one configuration has to be maintained, reviewed and audited
+D: Keep one configuration at the highest fidelity everywhere and delete all flow logs older than a day to save on storage costs
+K: A
+G: ## How flow log volume is shaped
+VPC Flow Logs samples packets with a **primary sampling rate that you cannot adjust**. After that, you control:
+- **Filtering**: generate logs only for matching traffic (for example particular VMs or metadata values).
+- **Aggregation interval**: how sampled packets are combined into one entry.
+- **Secondary sampling rate**: a second, configurable sampling of generated entries (1.0 means all).
+- **Metadata**: keep all fields, a chosen set, or none.
+## Matching fidelity to risk
+Different scopes can have different settings. High-value regulated subnets keep full secondary sampling and metadata so analysts can reconstruct events; low-risk subnets use filtering and lower sampling to cut cost while retaining trend visibility.
+W: Per-scope tuning: forensics value is concentrated in the payment subnets, which keep full fidelity, while the lower-risk subnets use the configurable cost controls.
+X: B=Disabling dev and lowering primary rate: the primary sampling rate cannot be adjusted, and disabling dev removes even trend visibility.
+C=Lowest rate everywhere: it reduces the forensic fidelity exactly where the company needs it.
+D=Highest fidelity everywhere with one-day retention: retention shorter than an investigation window defeats forensics; the cost lever is sampling and filtering.
+T: Tune flow logs per scope with filters, secondary sampling and metadata; keep full fidelity for sensitive subnets.
+
+@ GCP-PSE D4 T4.2 advanced use-case
+S: A forensics team needs complete packet payloads from web-tier VMs in one subnet to analyze with a third-party network detection appliance running on Compute Engine. Which TWO design elements are required? (Select TWO)
+A: A Packet Mirroring policy with mirrored sources and a collector instance group behind an internal passthrough load balancer whose forwarding rule is for mirroring
+B: Filters on the policy for protocol, CIDR range and direction, so only the traffic of interest is cloned and the extra VM bandwidth stays limited
+C: VPC Flow Logs with full secondary sampling and all metadata fields, because flow records carry the payload bytes of every sampled packet
+D: A Cloud NAT gateway for the appliance, because mirrored traffic must reach the collector through a public IP address of the gateway
+E: A Cloud IDS endpoint in each zone, because Cloud IDS forwards copies of the packet payloads to customer-owned inspection appliances
+K: A,B
+G: ## Packet Mirroring
+Packet Mirroring clones traffic of selected instances and forwards it for examination, including payloads and headers. Elements:
+- **Mirrored sources**: Compute Engine instances chosen by subnet, network tags or instance names. A subnet includes existing and future instances.
+- **Collector destination**: an instance group behind an **internal passthrough Network Load Balancer**; the forwarding rule must be configured for Packet Mirroring.
+- **Filters**: protocol, CIDR ranges (IPv4, IPv6, or both) and direction (ingress, egress or both).
+## Cost of mirroring
+Mirroring happens on the VMs and consumes additional bandwidth on them, so filters help limit load. It exports all traffic rather than a sample, which is why it suits threat analysis.
+W: A=Policy with sources and ILB collector: this is the defining structure of Packet Mirroring and delivers full payloads to the appliance.
+B=Filters on protocol, CIDR and direction: they narrow what is cloned, limiting the bandwidth that mirrored VMs spend on copies.
+X: C=Flow logs for payloads: flow logs are sampled and aggregated by 5-tuple and do not contain payload bytes.
+D=Cloud NAT for the collector: mirrored traffic goes to an internal load balancer inside the VPC network, not over a public address.
+E=Cloud IDS endpoints per zone: Cloud IDS inspects mirrored traffic on Google-managed peered VMs and does not hand packet copies to customer appliances.
+T: Packet Mirroring needs mirrored sources plus a collector behind an internal passthrough NLB; use filters to bound the bandwidth overhead.
+
+@ GCP-PSE D4 T4.2 applied comparison
+S: A team says it will turn on Cloud IDS and expects it to quarantine a VM as soon as command-and-control traffic is seen. Which statement about Cloud IDS is correct?
+A: Cloud IDS detects threats on mirrored traffic and raises alerts; acting on a threat needs another control such as Cloud NGFW rules
+B: Cloud IDS blocks detected intrusions inline by default and can be switched to alert-only mode through the chosen signature set
+C: Cloud IDS inspects traffic inside the guest operating system through an agent that is able to terminate malicious processes
+D: Cloud IDS runs only on traffic that leaves the VPC network, because intra-subnet traffic between VMs is never mirrored to it
+K: A
+G: ## What Cloud IDS is
+Cloud IDS is an intrusion **detection** service for intrusions, malware, spyware and command-and-control attacks. It creates a Google-managed peered network with mirrored VMs: traffic from your VMs is mirrored (via Packet Mirroring policies attached to an **IDS endpoint**) and inspected with Palo Alto Networks threat protection technologies.
+- It sees north-south and east-west traffic, including intra-subnet traffic, so it can find lateral movement.
+- It generates alerts into the threat log. It **does not prevent attacks or repair damage**; use products such as Cloud NGFW to take action.
+## Pairing
+Detection from Cloud IDS can drive blocking rules in Cloud NGFW, or automation from the alerts.
+W: Detection only: Cloud IDS alerts on mirrored traffic and leaves blocking to controls such as Cloud NGFW.
+X: B=Inline blocking: the service works on mirrored copies out of band, so it cannot block, and there is no mode switch.
+C=In-guest agent: Cloud IDS needs no agent; it inspects mirrored traffic outside the VM.
+D=External traffic only: Cloud IDS provides visibility into east-west traffic including intra-subnet inspection.
+T: Cloud IDS is out-of-band detection; use Cloud NGFW or automation to block.
+
+@ GCP-PSE D4 T4.2 advanced troubleshooting
+S: A security team has configured a Cloud IDS endpoint with a packet mirroring policy for a subnet, and also has a Cloud NGFW Layer 7 inspection firewall policy rule for the same traffic. The IDS endpoint shows no threat alerts for the matching traffic. What is the most likely cause?
+A: The two policies apply to the same traffic; the Layer 7 inspection policy takes priority and that traffic is not mirrored to the IDS endpoint
+B: Cloud IDS only inspects traffic that is already allowed by a firewall rule on which logging has been disabled for that connection in the policy
+C: Cloud IDS cannot be used in the same VPC network as Cloud NGFW, so the endpoint is automatically paused by the service
+D: The threat log is populated only after a minimum alert severity of Critical has been selected for the endpoint's signature set
+K: A
+G: ## Using Cloud IDS next to Cloud NGFW
+Cloud IDS depends on mirrored traffic; Cloud NGFW Layer 7 inspection intercepts traffic for deep inspection. The documented limitation: when you use Cloud NGFW Layer 7 inspection policies and Cloud IDS endpoint policies, make sure they do not apply to the same traffic. If they overlap, the **Layer 7 inspection policy takes priority and the traffic is not mirrored**.
+## Fix
+Scope the two to different traffic (for example different subnets, tags or ports) or choose one inspection approach per flow, so each flow has a defined inspection path.
+W: Overlapping scope: traffic matched by Layer 7 inspection never reaches the mirror, so the endpoint sees nothing to analyze.
+X: B=Dependency on logging being disabled: Cloud IDS does not depend on firewall logging settings.
+C=Incompatible products: the two can be used together as long as the policies cover different traffic.
+D=Critical severity requirement: severity only sets the minimum alert level; it does not gate the log, and a lower minimum shows more alerts.
+T: Do not apply Cloud NGFW Layer 7 inspection and Cloud IDS mirroring to the same traffic; Layer 7 inspection wins and mirroring stops.
+
+@ GCP-PSE D4 T4.2 applied troubleshooting
+S: A Cloud IDS endpoint produces many alerts for one signature that the application team has confirmed is a false positive for its legitimate scanner. The security team does not want to lose detection for other threats. What should it do?
+A: Add the signature's threat ID to the endpoint's threat exceptions, found from the threat logs, and keep the default signature set for everything else
+B: Delete the endpoint and recreate it in another region so that the signature database starts without the noisy signature
+C: Remove the packet mirroring policy for the scanner's subnet so no traffic from it is mirrored, including traffic unrelated to the scanner at all
+D: Set the minimum severity of the endpoint to Critical, believing that this filters out only the one noisy signature and nothing else
+K: A
+G: ## Tuning Cloud IDS
+Cloud IDS ships a default set of threat signatures, shown in the console as a Cloud IDS service profile. It detects exploit attempts (vulnerability signatures) and spyware on compromised hosts (anti-spyware signatures). Two tuning controls:
+- **Minimum alert severity** for the whole signature set (Critical, High, Medium, Low, Informational).
+- **Threat exceptions**: disable specific noisy threat IDs on an endpoint; threat IDs come from the threat logs. There is a limit of 99 exceptions per endpoint.
+## Choosing
+A single known false positive is a job for a threat exception. Raising the severity would also silence real High and Medium alerts, and removing mirroring blinds the endpoint for the whole subnet.
+W: Threat exception for that ID: only the confirmed false positive is silenced and the rest of the signature set remains active.
+X: B=Recreating the endpoint: signatures are updated automatically by Palo Alto Networks and are the same in every endpoint; recreating changes nothing.
+C=Removing mirroring for the subnet: it stops inspection of all traffic from that subnet, including real threats.
+D=Raising minimum severity: it hides every alert below Critical, not just one signature.
+T: Silence a confirmed false positive with a threat exception on the endpoint; do not weaken severity or mirroring.
+
+@ GCP-PSE D4 T4.2 advanced use-case
+S: Analysts need to find the top talkers by hour across several months of VPC Flow Logs, using SQL aggregations, without exporting a second copy of the logs to another service. What should the security engineer set up?
+A: Upgrade the flow log bucket to use analytics (Log Analytics, now Observability Analytics) and query it with SQL, optionally via a linked BigQuery dataset
+B: Query the logs in Logs Explorer using aggregate functions, because Logs Explorer supports counting and grouping log entries by the hour and source address
+C: Enable Packet Mirroring so that a collector appliance counts the bytes per source IP address for each hour and stores the totals
+D: Create a log-based counter metric for each source IP address and graph the metric values for each hour across the retention period
+K: A
+G: ## Two interfaces over the same logs
+- **Logs Explorer** is for troubleshooting and exploration. It does not support aggregate operations such as counting entries that match a pattern.
+- **Observability Analytics** (previously called Log Analytics) runs SQL over log buckets that have been upgraded to use analytics. It supports grouping, aggregating and charting, and joining log and trace data.
+- A **linked BigQuery dataset** lets BigQuery query the same data without ingesting a second copy.
+## Restrictions to know
+The bucket must be created at project level and unlocked (unless `_Required`), and logs written before the upgrade need a backfill that can take several days.
+W: Upgrade the bucket to analytics and use SQL: grouping by source and hour is a native aggregation and no extra copy is created.
+X: B=Logs Explorer aggregates: the documentation says Logs Explorer does not support aggregate operations, so analytics on the bucket is needed.
+C=Packet Mirroring collector: it requires a new capture design on VMs and duplicates traffic rather than reading existing flow records.
+D=Counter metric per IP: this creates a metric for each address in advance and cannot answer ad hoc top-talker questions across history.
+T: For SQL aggregation of flow logs in place, upgrade the log bucket to analytics (Observability Analytics) and optionally link BigQuery.
+
+@ GCP-PSE D4 T4.2 advanced troubleshooting
+S: Network logs are stored in a log bucket upgraded to analytics, and the bucket has field-level access controls that hide source IP addresses from a group of junior analysts. The team proposes giving the juniors access to the bucket's linked BigQuery dataset so they can use their BigQuery skills. What is the problem?
+A: BigQuery does not honor the log bucket's field-level access controls, so anyone who can query the linked dataset can read all fields, including the hidden addresses
+B: A linked BigQuery dataset can be created only for buckets that have no field-level access controls, so the proposal cannot even be configured by the team
+C: The linked dataset shows the restricted fields as masked, but the masking is lost whenever the analysts export their query results
+D: Junior analysts cannot run SQL on a linked dataset unless the bucket contents are also exported to a Cloud Storage bucket
+K: A
+G: ## Field-level access and analytics
+A log bucket can have **field-level access controls** that restrict which log fields a principal can read. The analytics page has a restriction:
+- You cannot use the Observability Analytics page to query log views when the bucket has field-level access controls configured. Queries can be made through Logs Explorer, or through a linked BigQuery dataset.
+- **BigQuery does not honor field-level access controls**, so a principal who can query the linked dataset can query all fields in the log entries.
+## Design consequence
+Grant a linked dataset only to people entitled to every field, or give restricted analysts a different path such as Logs Explorer with the field-level restrictions in force.
+W: BigQuery bypasses field-level controls: the linked dataset exposes every field, so the plan defeats the restriction on source IPs.
+X: B=Cannot be configured: the documentation describes querying a linked dataset for such buckets, with the all-fields consequence, so the problem is exposure rather than creation.
+C=Masking lost on export: field-level controls are not applied in BigQuery in the first place; nothing is masked to lose.
+D=Cloud Storage export required: linked datasets query the data in place and need no export.
+T: A linked BigQuery dataset ignores a bucket's field-level access controls; share it only with users entitled to all fields.
+
+@ GCP-PSE D4 T4.2 applied comparison
+S: A team compares Cloud NGFW firewall policy rules logging with VPC Flow Logs for network investigations. Which TWO statements are correct? (Select TWO)
+A: Firewall policy rules logging records a connection and the rule that applied to it, which shows whether a particular rule allowed or denied the traffic
+B: VPC Flow Logs sample packets and aggregate them by IP connection, so they estimate totals and suit monitoring and forensics rather than exact accounting
+C: Firewall policy rules logging records every IP protocol, including ICMP and ESP, for all rules of every firewall policy type in the organization
+D: VPC Flow Logs capture complete packet payloads for each sampled connection, which analysts can replay for forensic review
+E: Firewall policy rules logging writes one separate log entry for every packet of an allowed connection while it lasts
+K: A,B
+G: ## Different telemetry for different questions
+- **Firewall policy rules logging**: a connection record per logged rule; answers which rule matched and whether it allowed or denied; TCP and UDP only; no payload.
+- **VPC Flow Logs**: aggregated flow records per 5-tuple per interval from sampled packets; answers who talked to whom, how much and when; no payload.
+## Remember
+Neither contains payload. For full packet content use Packet Mirroring; for threat detection use Cloud IDS.
+W: A=Rule-level record: firewall logging ties each connection record to the rule that applied, which proves rule behaviour.
+B=Sampled, aggregated flows: VPC Flow Logs estimate total traffic from sampled packets, accounting for missed ones.
+X: C=All protocols: firewall policy rules logging records only TCP and UDP connections; other protocols need other tools such as out-of-band integration.
+D=Payload capture: flow logs contain aggregated metadata about connections, not packet payloads.
+E=Entry per packet: logging is connection-based, so an allowed connection is logged once.
+T: Firewall rule logs prove which rule matched a TCP or UDP connection; flow logs give sampled, aggregated traffic records; only Packet Mirroring gives payloads.
