@@ -1,0 +1,574 @@
+# GCP-PDE D5 T5.2 repeatable scheduling and DAG troubleshooting; T5.3 BigQuery editions, slots, reservations; T5.4 monitoring, logging, quotas, billing, job troubleshooting; T5.5 fault tolerance, failover, data recovery
+# src: https://docs.cloud.google.com/bigquery/docs/slots-autoscaling-intro
+# src: https://docs.cloud.google.com/bigquery/docs/reservations-intro
+# src: https://docs.cloud.google.com/bigquery/docs/reservations-assignments
+# src: https://docs.cloud.google.com/bigquery/docs/editions-intro
+# src: https://docs.cloud.google.com/bigquery/docs/running-queries
+# src: https://docs.cloud.google.com/bigquery/docs/scheduling-queries
+# src: https://docs.cloud.google.com/bigquery/docs/information-schema-jobs
+# src: https://docs.cloud.google.com/bigquery/docs/error-messages
+# src: https://docs.cloud.google.com/bigquery/docs/time-travel
+# src: https://docs.cloud.google.com/bigquery/docs/table-snapshots-intro
+# src: https://docs.cloud.google.com/composer/docs/composer-3/write-dags
+# src: https://docs.cloud.google.com/composer/docs/composer-3/monitor-environments
+# src: https://docs.cloud.google.com/workflows/docs/schedule-workflow
+# src: https://docs.cloud.google.com/dataflow/docs/guides/using-cloud-monitoring
+# src: https://docs.cloud.google.com/dataflow/docs/guides/common-errors
+# src: https://docs.cloud.google.com/dataflow/docs/guides/stopping-a-pipeline
+# src: https://docs.cloud.google.com/dataflow/docs/guides/using-snapshots
+# src: https://docs.cloud.google.com/pubsub/docs/replay-overview
+# src: https://docs.cloud.google.com/logging/docs/alerting/log-based-alerts
+# src: https://docs.cloud.google.com/billing/docs/how-to/export-data-bigquery
+# src: https://docs.cloud.google.com/billing/docs/how-to/budgets
+# src: https://docs.cloud.google.com/dataproc/docs/concepts/jobs/restartable-jobs
+# src: https://docs.cloud.google.com/sql/docs/mysql/high-availability
+# src: https://docs.cloud.google.com/sql/docs/mysql/intro-to-cloud-sql-disaster-recovery
+# src: https://docs.cloud.google.com/sql/docs/mysql/replication/cross-region-replicas
+# src: https://docs.cloud.google.com/memorystore/docs/redis/high-availability
+# src: https://docs.cloud.google.com/storage/docs/soft-delete
+
+@ GCP-PDE D5 T5.2 applied comparison
+S: Every night a data engineer must call a partner REST API, wait for a Cloud Run job to finish, run one BigQuery load and then post a status message. The steps are strictly sequential, need no Python code, and the team wants no environment to size or patch. Which scheduling design fits best?
+A: Cloud Scheduler triggering a Workflows workflow that calls each service in order and waits for the result
+B: A Cloud Composer environment with a DAG for the four steps, kept running around the clock for this one job
+C: A BigQuery scheduled query that tries to call the REST API and the Cloud Run job from inside the SQL text
+D: A cron job on a Compute Engine VM that runs a shell script and is restarted by hand when the VM fails
+K: A
+G: ## Picking an orchestrator for a repeatable job
+Three Google Cloud tools cover most scheduling needs:
+- **Cloud Scheduler** is a managed cron service. It starts something on a schedule but does not model steps or dependencies.
+- **Workflows** is a serverless orchestrator for sequences of service and HTTP calls, with retries, conditions and waiting on long-running operations. A Cloud Scheduler job can trigger a workflow on a schedule.
+- **Cloud Composer** (the managed Apache Airflow service, now named Managed Service for Apache Airflow in the docs) fits data pipelines with many dependent tasks, backfills, sensors and Python-defined DAGs. It is an always-on environment you pay for and operate.
+## Applying it here
+Four ordered calls with no custom code is the textbook Workflows case. Heavy Airflow features (backfill, DAG-to-DAG dependencies, hundreds of tasks) are not needed, so a whole Composer environment is overkill.
+W: A=Cloud Scheduler plus Workflows: the scheduler fires the workflow each night and Workflows sequences the HTTP, Cloud Run and BigQuery calls with built-in waiting and retries. Nothing is provisioned or patched.
+X: B=Always-on Composer environment: it would work, but it carries standing cost and operations for one short linear job and brings Airflow features the team does not need.
+C=Scheduled query as orchestrator: scheduled queries run GoogleSQL statements on a schedule; they cannot call a partner REST API or wait for a Cloud Run job.
+D=Cron on a VM: this puts patching, availability and restarts on the team, the opposite of the stated requirement, and gives no step-level retry or visibility.
+T: For a short, linear, code-free sequence use Cloud Scheduler with Workflows; keep Cloud Composer for dependency-heavy data DAGs.
+
+@ GCP-PDE D5 T5.2 applied troubleshooting
+S: A BigQuery scheduled query appends the previous hour's aggregates to a reporting table with INSERT. It is set to run at exactly the top of every hour. Occasionally the same hour's rows appear twice. What should the data engineer do?
+A: Move the schedule off the exact hour, such as a few minutes past, and make the statement safe to repeat
+B: Keep the schedule and add a larger destination table so duplicate inserts are absorbed without any effect
+C: Change the query to run as a batch priority job so BigQuery guarantees it executes exactly one time
+D: Replace the schedule with a Cloud Monitoring alert that reruns the query whenever a duplicate is detected
+K: A
+G: ## Scheduled queries and repeat runs
+BigQuery scheduled queries are built on BigQuery Data Transfer Service. The documentation warns that a scheduled query configured to run exactly on the hour (for example 09:00) might trigger more than once, which can duplicate rows when the statement is an `INSERT`. The recommended mitigation is an off-the-hour time such as 08:58 or 09:03.
+## Make repeats harmless
+Any scheduled pipeline should be **idempotent**: running it twice for the same time window leaves the same result. For a reporting table this means overwriting the hour's partition or using `MERGE` on a natural key, instead of blind appends.
+## Why other fixes fail
+Capacity or priority settings change when a job runs, not how many times a schedule fires, and monitoring only reports the symptom.
+W: A=Off-the-hour schedule plus idempotent write: it avoids the documented hour-boundary double trigger and, with a partition overwrite or `MERGE`, a rare repeat can no longer duplicate rows.
+X: B=Larger table: table size has nothing to do with duplicate triggers; the extra rows are still inserted and still counted twice.
+C=Batch priority: priority controls queueing behaviour when slots are scarce; it does not give exactly-once scheduling.
+D=Alert-driven rerun: an alert detects a duplicate after the fact, and rerunning an append would add yet another copy.
+T: Schedule queries off the hour and design each run to be idempotent so a repeated trigger cannot duplicate data.
+
+@ GCP-PDE D5 T5.2 advanced use-case
+S: A Cloud Composer DAG loads one day of sales into BigQuery with an append task. Operations often re-run failed days from the Airflow UI, and finance has found doubled revenue on re-run days. The engineer wants the DAG to be safe to re-run for any date. Which change achieves that?
+A: Make the load task write to that run's date partition with overwrite semantics, so a re-run replaces the same data
+B: Set the task retries to zero so a failed day is never attempted a second time by Airflow or by operators
+C: Add a second task that appends the same rows again to a backup table, then compare the two tables every morning
+D: Put the whole extract, transform and load code in a single PythonOperator task so only one task can fail
+K: A
+G: ## Idempotent tasks
+Composer documentation advises that each task be an idempotent unit of work. An idempotent task produces the same end state however many times it runs for the same logical date.
+- Append-only loads are not idempotent: a re-run adds the day again.
+- Loading to the **partition of the run date** with a truncate/overwrite disposition, or using `MERGE` on a key, is idempotent.
+- Using the DAG run's logical date (a templated value) rather than the wall-clock time makes a re-run target the same data.
+## What does not help
+Disabling retries removes resilience without fixing re-runs started by people. Bundling work into one task makes the failure unit larger and partial reruns harder, which the docs advise against.
+W: A=Partition overwrite for the run date: re-running the task for a given day rewrites that day's partition, so the result is the same however often it runs.
+X: B=Zero retries: this removes automatic recovery from transient errors, and manual re-runs would still double the data.
+C=Second append plus comparison: it doubles the duplicate rows and adds a manual reconciliation step instead of preventing duplicates.
+D=Single large task: a multi-step script inside one operator is explicitly discouraged; it still appends on re-run and restarts everything on any failure.
+T: Make every DAG task idempotent, for example by overwriting the run-date partition, so retries and manual re-runs are safe.
+
+@ GCP-PDE D5 T5.2 applied troubleshooting
+S: A team's Cloud Composer DAGs set `email_on_failure` to True, yet nobody has ever received a failure email, and the team also wants to hear at once if the whole environment stops being healthy, not just a single task. Which TWO actions address this? (Select TWO)
+A: Configure the environment to send email through SendGrid so the failure emails can actually be delivered
+B: Create a Cloud Monitoring alerting policy on the environment health metric that is driven by the liveness DAG
+C: Edit the liveness DAG in the dags folder to run every minute so health is reported more often
+D: Raise the default task retries to a large number so failures never surface to the notification path
+E: Grant the DAG authors the Monitoring editor role so each author can see every environment metric
+K: A,B
+G: ## Notifications in Cloud Composer
+- Setting `email_on_failure` makes Airflow send mail when an operator fails, but Composer documents that to send email from an environment you must **configure it to use SendGrid**. Without that, the setting has nowhere to send.
+- Task-level mail does not tell you the platform is unhealthy. Composer runs a liveness DAG named `airflow_monitoring` on a schedule and publishes the result as the `composer.googleapis.com/environment/healthy` metric: True when the run succeeds, False when it fails. Alert on that metric in Cloud Monitoring.
+## Cautions
+The liveness DAG's frequency and contents are immutable, and changes to it do not persist. Retries are valuable for transient errors but are not a monitoring tool.
+W: A=SendGrid email: the documented requirement for `email_on_failure` mails to leave a Composer environment; once configured, task failures reach the recipients.
+B=Environment health alert: an alerting policy on the healthy metric fires when the liveness DAG fails, which covers scheduler or environment trouble that task emails cannot.
+X: C=Editing the liveness DAG: its schedule and code are fixed by the service and any edit is discarded, so health reporting cannot be sped up this way.
+D=Large retries: retries recover from transient faults but hide nothing useful from monitoring; they do not deliver any email or alert.
+E=Monitoring editor for authors: write access to metrics is not what is missing; no alert or mail is created by simply viewing metrics.
+T: Failure emails from Cloud Composer need SendGrid, and environment-level problems are caught by alerting on the health metric.
+
+@ GCP-PDE D5 T5.2 applied troubleshooting
+S: After a team added forty new DAGs, Cloud Composer tasks start late and the scheduler seems busy even when few tasks run. The new DAG files query BigQuery and read a configuration table at the top of the file, outside any task. What is the most likely cause and fix?
+A: The DAG files do heavy work whenever they are parsed, so move the queries inside tasks and keep file-level code light
+B: The workers are too small to run tasks, so add worker nodes without changing how the DAG files are written
+C: The tasks need an Airflow pool of size one for every DAG so the scheduler is never asked to run two at once
+D: BigQuery is rate limiting the environment, so schedule all forty DAGs at the same minute to share one connection
+K: A
+G: ## DAG parse time
+Airflow's scheduler repeatedly parses every file in the `dags/` folder to discover DAGs. Code at the top level of a DAG file runs on every parse, not only when a task executes. Network calls such as BigQuery queries, API requests or database reads at file level therefore run constantly, slow parsing and load the scheduler. The Composer guidance is to verify that new DAGs do not increase parse time too much.
+## Fix
+Keep top-level code to imports and DAG/task definitions, and perform queries and heavy computation in tasks or in templated fields evaluated at run time.
+W: A=Move work into tasks: file-level queries run at every parse; relocating them to task execution removes the constant scheduler load and restores on-time scheduling.
+X: B=More workers: workers run tasks, but the symptom is scheduler load from parsing, so extra worker capacity does not help.
+C=Pool of size one: pools limit concurrent task slots; they would slow work further and do nothing about parse-time queries.
+D=Same-minute schedules: stacking all DAGs at one time makes scheduling contention worse and is unrelated to parse behaviour.
+T: Do not run queries or heavy code at the top level of a DAG file; the scheduler executes it on every parse.
+
+@ GCP-PDE D5 T5.3 applied tradeoff
+S: A media analytics team runs BigQuery on the on-demand model. Monthly cost swings widely because of occasional very large queries, and finance wants predictable spend with some headroom for peaks. Utilisation is fairly steady during working hours. What should the data engineer propose?
+A: Move to a BigQuery Editions reservation with a baseline for steady load and autoscaling for the peaks
+B: Stay on on-demand and ask users to run every query as a batch job so bytes processed stay constant
+C: Buy a very large fixed baseline sized for the worst peak ever seen and leave autoscaling switched off
+D: Create one reservation per analyst project with no baseline and no autoscaling to share costs evenly
+K: A
+G: ## On-demand versus capacity-based pricing
+- **On-demand** bills by TiB processed per query. Usage and bills are variable, so large queries create spikes.
+- **Capacity-based** (BigQuery Editions) bills slot-hours. You create a reservation and choose a **baseline** (always allocated and always billed) and optionally an **autoscaling** maximum (extra slots added when needed, billed while scaled). This gives centralized, predictable billing.
+You can use both models together and switch at any time.
+## Sizing idea
+Cover the steady, predictable load with baseline slots and let autoscaling absorb peaks. Sizing the baseline for the worst peak wastes money all the time; zero capacity leaves jobs without slots.
+W: A=Editions reservation with baseline plus autoscale: the baseline matches steady working-hour usage at a known cost, and autoscaling gives headroom for peaks without paying peak capacity around the clock.
+X: B=Batch priority on on-demand: batch changes queueing priority, not the bytes a query scans or the bill, so the swings remain.
+C=Worst-case baseline, no autoscaling: this makes spend predictable but pays for peak capacity at all times, which wastes budget when utilisation is steady.
+D=Per-project reservations with zero slots: a reservation with no baseline, no autoscaling and no idle sharing gives its projects nothing to run on.
+T: Use a reservation with a baseline for steady load and autoscaling for peaks to make BigQuery spend predictable.
+
+@ GCP-PDE D5 T5.3 applied troubleshooting
+S: A team created a Standard edition reservation, assigned a project to it and later decided the workload needs another edition's capabilities. They try to change the edition on the existing reservation and cannot. What does the documentation say they must do?
+A: Delete the reservation and create a new one in the other edition, then assign the project again
+B: Open a support case so Google changes the edition field on the reservation in place
+C: Move the project to the on-demand model first, because editions can be changed only from there
+D: Edit the capacity commitment, because the commitment alone decides the edition of its reservations
+K: A
+G: ## Editions are fixed per reservation
+BigQuery has three editions (Standard, Enterprise, Enterprise Plus) that differ in capabilities, SLO and compute model. You pick an edition when you create a reservation or a capacity commitment. The Understand BigQuery editions page states that to change the edition associated with a reservation you must **delete and recreate** it.
+## Practical consequences
+- Plan the edition from requirements (features, availability target) before creating reservations.
+- Do not use edition tiers to restrict access to features, because the features per edition can change over time.
+- After recreating, assign projects (or folders and the organization where the edition supports it) to the new reservation.
+W: A=Delete and recreate: this is the documented way to move capacity to another edition, followed by new assignments.
+X: B=Support case: there is no in-place edit of the edition; support would give the same delete and recreate answer.
+C=Go on-demand first: on-demand is a separate billing model and is not a stepping stone for changing editions.
+D=Edit the commitment: a commitment is edition-bound too, but changing it does not alter an existing reservation's edition.
+T: A reservation's edition cannot be edited; delete and recreate the reservation in the target edition.
+
+@ GCP-PDE D5 T5.3 applied troubleshooting
+S: Finance questions a bill. A reservation autoscales, and the data engineer compares the autoscaled slots billed for a day with the slot usage summed from INFORMATION_SCHEMA.JOBS. The billed number is clearly higher. Which explanation is correct?
+A: Autoscaled slots are charged for the slots scaled up, with a minimum scale-down window, not the slots used by jobs
+B: The jobs view is rounded down to the nearest hour, so small jobs are missing from the total that is shown
+C: Only queries that failed are billed at the autoscaling rate, so successful queries never appear on the invoice
+D: Autoscaled slots are charged only while a query is actively reading data, so shuffle stages are billed double
+K: A
+G: ## How autoscaling is billed
+When a reservation autoscales, BigQuery adds slots in multiples of 50 up to the configured maximum. You are charged for the number of **scaled** slots, not the number of slots actually used, and capacity is retained for at least a 60-second scale-down window (by default billing is per second with a one-minute minimum; fluid scaling is an opt-in without the minimum). The charge applies even if the job that caused scaling fails.
+## Consequence
+`INFORMATION_SCHEMA.JOBS` reports per-job slot usage, so summing it will not match the autoscaling bill. The docs say not to use the jobs information schema to reconcile billing and point to the information schema views that monitor autoscaling instead.
+W: A=Scaled slots, not used slots: billing follows scaled capacity and the scale-down window, so job-level usage sums come out lower than the charge.
+X: B=Hourly rounding: the jobs view records slot milliseconds per job; it does not round to hours, and rounding is not the documented reason.
+C=Failed queries only: billing is for scaled slots whether jobs succeed or fail; failures are just one case that still incurs the charge.
+D=Double shuffle billing: slot capacity is billed per scaled slot, not by data-read phases of a query.
+T: Autoscaling bills scaled slots with a scale-down window, so job-level slot usage never reconciles exactly with the bill.
+
+@ GCP-PDE D5 T5.3 advanced use-case
+S: A nightly financial close runs in a reservation that has no baseline and no autoscaling and relies on idle slots borrowed from other reservations. When other teams are busy the close misses its deadline. Which TWO changes make the close dependable? (Select TWO)
+A: Give the close's reservation baseline slots sized to its normal need so some capacity is always allocated
+B: Enable autoscaling on that reservation with a maximum large enough for the close's peak demand
+C: Set the reservation to ignore idle slots, so it stops borrowing and therefore cannot be preempted
+D: Run the close as a batch priority job, because batch jobs are protected from slot preemption
+E: Assign the close project to a folder instead, since folder assignments always bypass slot contention
+K: A,B
+G: ## Idle slots are best effort
+Within a capacity-based setup, slots unused by one reservation are shared by default with others in the same administration project. Documentation warns not to rely solely on idle slots for production workloads with strict time requirements: idle slots can be preempted at any time. Such jobs must use **baseline** or **autoscaled** slots.
+- A reservation with no baseline and no autoscaling that loses its borrowed slots has none, and its queries pause or queue until slots become free.
+- `ignore_idle_slots` only stops a reservation from *borrowing*; it can still lend. Used alone it removes the only capacity this reservation has.
+## Fix
+Provide guaranteed capacity (baseline) for the usual need and autoscaling for the peak.
+W: A=Baseline slots: baseline capacity is always allocated to the reservation, so the close always has slots irrespective of what other teams do.
+B=Autoscaling maximum: autoscaled slots are added when demand rises, which covers peaks above the baseline.
+X: C=Ignore idle slots: this stops the reservation from borrowing, which for a reservation with no baseline or autoscaling leaves it with nothing.
+D=Batch priority: batch jobs are lower priority and more likely to queue when slots are scarce, so this makes the deadline risk worse.
+E=Folder assignment: where a project is assigned decides which reservation it uses, not whether the reservation has capacity.
+T: Strict-deadline jobs need baseline or autoscaled slots; idle slots are only opportunistic.
+
+@ GCP-PDE D5 T5.3 applied troubleshooting
+S: An admin assigns the project of a new ETL team to a reservation named etl. The reservation has zero baseline slots, zero autoscaling slots and is set to ignore idle slots. The console shows the assignment as pending, and the team's queries show no reservation. What is happening?
+A: The reservation has no capacity source, so the assignment stays pending and the project runs as on-demand
+B: The assignment works, but queries are routed to the organization's default reservation automatically
+C: The project is blocked from running any queries until the administrator buys a slot commitment
+D: BigQuery splits the project's jobs across all reservations in the region until the assignment completes
+K: A
+G: ## Requirements for an assignment
+An assignment links a project, folder or organization (folders and organizations are not available to Standard edition reservations) to a reservation. A reservation can take an assignment only if at least one of these holds:
+- it has a non-zero baseline;
+- it has non-zero autoscaling slots; or
+- it is configured to use idle slots and idle slots are available.
+If none is true you see `Assignment is pending, your project will be executed as on-demand.` Jobs of a project with no effective assignment use the on-demand model, so their `reservation_id` in INFORMATION_SCHEMA is empty.
+## Fix
+Add baseline or autoscaling slots, or allow idle slot use, and the assignment becomes effective.
+W: A=Pending, on-demand: with zero baseline, zero autoscaling and no idle use, the reservation cannot back the assignment, so queries run (and are billed) on-demand.
+X: B=Default reservation: BigQuery has no automatic default reservation to catch these jobs; the fallback is on-demand.
+C=Blocked until a commitment: commitments are optional and do not gate assignments; the project keeps running on-demand.
+D=Spread across reservations: a project uses a single most specific reservation, not a shared pool of all of them.
+T: A reservation needs baseline, autoscaling or idle-slot access to accept an assignment; otherwise the project stays on-demand.
+
+@ GCP-PDE D5 T5.3 applied definition
+S: In a reservation shared by dashboards and nightly data-quality scans, the scans are not time critical but sometimes slow dashboard queries when all slots are busy. What should the data engineer do for the scans?
+A: Run them as batch query jobs so they queue behind interactive queries when the reservation is fully used
+B: Run them as interactive jobs so BigQuery always executes them first and dashboards wait their turn
+C: Keep them interactive and disable query result caching for them so they release slots earlier
+D: Create a second project for the scans without assigning it to any reservation to get dedicated slots
+K: A
+G: ## Interactive versus batch query jobs
+- **Interactive** (default) jobs are intended to start executing as soon as possible.
+- **Batch** jobs have lower priority. When a project or reservation is using all of its available compute, batch queries are more likely to be queued and stay queued. Once running, a batch query behaves like an interactive one.
+Choose batch for work with no human waiting (scans, reports, backfills) so it does not compete with interactive dashboards.
+## Related controls
+Reservations can also keep workloads apart entirely: separate reservations per workload, assigned at project level.
+W: A=Batch priority: the scans yield to interactive dashboard queries when slots run out, which matches non-urgent scans in a shared reservation.
+X: B=Interactive priority: this makes the scans start immediately and compete with dashboards, which is the problem described.
+C=Disable result caching: caching is unrelated to slot priority, and disabling it only adds work.
+D=Unassigned project: an unassigned project runs on-demand, which is separate billing, not dedicated slots.
+T: Send non-urgent work as batch queries so interactive queries get slots first in a shared reservation.
+
+@ GCP-PDE D5 T5.3 advanced use-case
+S: A retailer expects a one-off, unusually heavy analytics load during a sales event in three weeks. Its reservation has a modest baseline and an autoscaling maximum that has been enough so far. What does BigQuery guidance recommend?
+A: Raise the baseline well before the event, because autoscaled capacity depends on availability at that moment
+B: Rely on autoscaling alone, because autoscaled slots are reserved in advance exactly like baseline slots
+C: Move the load to batch jobs only, because batch jobs are guaranteed capacity during peak periods
+D: Switch off idle slot sharing for every reservation in the organization on the day of the event
+K: A
+G: ## Baseline versus autoscaled capacity
+- **Baseline** slots are always allocated to the reservation, and you always pay for them.
+- **Autoscaled** slots are not reserved in advance. They are drawn when needed and depend on current system availability, so during periods of high demand capacity constraints might delay scaling up.
+BigQuery documents that baseline and autoscaling are meant to track *recent* workload. For an unusually large event, it recommends increasing baseline capacity well in advance, because raising a baseline also depends on available capacity and needs lead time.
+## Commitments
+Slot commitments (optional) lower the price of capacity that is needed steadily, and cannot be reduced during their term.
+W: A=Raise baseline early: baseline is dedicated capacity; planning ahead gives BigQuery time to provide it, instead of hoping autoscaling finds capacity during peak demand.
+X: B=Autoscaling alone: autoscaled slots are explicitly not reserved ahead and scale-up can be delayed under high demand.
+C=Batch only: batch is lower priority, not guaranteed, and would delay the event's reports.
+D=Disable sharing everywhere: ignore-idle settings affect borrowing, not guaranteed capacity, and would waste idle slots for others.
+T: Plan for a known surge by raising baseline slots in advance; autoscaling is not pre-reserved capacity.
+
+@ GCP-PDE D5 T5.3 applied tradeoff
+S: An enterprise uses about 1,000 slots every hour of every day, with brief peaks to about 1,600. It expects this for years and wants the lowest effective cost with peak coverage. Which design is most appropriate?
+A: A slot commitment covering the steady 1,000 slots, with baseline set to match and autoscaling for the peaks
+B: No commitment and a 1,600-slot baseline, so peaks are covered at the standard pay-as-you-go slot rate
+C: Pure autoscaling with zero baseline, so the steady 1,000 slots are bought minute by minute
+D: Several one-slot reservations, one per user, so cost is split down to the individual analyst
+K: A
+G: ## Commitments, baseline and autoscaling together
+- A **capacity commitment** gives a discounted rate for slots used consistently. It is optional, and a commitment cannot be reduced during its term, so commit only to the steady floor.
+- **Baseline** slots allocate that capacity to a reservation; commitments provide the discount for the baseline.
+- **Autoscaling** covers demand above baseline and is charged at the autoscaling rate for scaled slots.
+For a flat 1,000-slot floor with rare peaks, commit to about the floor, set baseline to it and autoscale for the gap. Autoscaling slots work without commitments, but steady use is cheaper under commitments.
+W: A=Commitment, matching baseline and autoscaling: the discount applies to the constant base, and only the occasional peak is bought at the autoscaling rate.
+X: B=Large baseline without commitment: baseline of 1,600 pays for peak capacity constantly and without the commitment discount.
+C=Pure autoscaling: steady load billed as scaled capacity forgoes the discount that a commitment gives for predictable use.
+D=One-slot reservations: slots are allocated in meaningful capacity units for workloads; fragmenting per user would leave most reservations starved.
+T: Commit to the steady floor, set baseline to it and let autoscaling absorb peaks.
+
+@ GCP-PDE D5 T5.4 applied use-case
+S: A streaming Dataflow job feeds a live dashboard. The on-call team wants a page when the pipeline falls behind by minutes, and a separate alert when any batch Dataflow job finishes in a failed state. Which approach uses Dataflow's Cloud Monitoring integration?
+A: Alerting policies on the system lag metric for the streaming job and on the failed-job metric for batch jobs
+B: Alerting policies on the element count metric of each PCollection, which are available at job level for alerting
+C: A Cloud Logging sink to BigQuery with a nightly SQL query that checks for lag and failures
+D: A Cloud Scheduler job that restarts the pipeline every hour so lag cannot build up
+K: A
+G: ## Dataflow metrics in Cloud Monitoring
+Dataflow publishes job metrics to Cloud Monitoring, so you can chart them and create alerting policies. Among them:
+- **System lag**: the maximum lag across the pipeline for streaming jobs, in seconds; alert on it for slow pipelines.
+- **Failed**: set to 1 when a job exits with a failure; alert on it to detect failed pipelines.
+- **Job status** enum values cannot be charted or used for alerts; use the Failed metric instead.
+- **Element count** and estimated byte count are per-PCollection, not job level, so they are not available for alerting.
+W: A=System lag and Failed metrics: both are job-level metrics that an alerting policy can evaluate, giving a prompt page for a lagging stream and a failure alert for batch.
+X: B=Element count alerts: element count is per PCollection and the docs say it is not yet available for alerting.
+C=Sink and nightly query: a daily check detects problems hours late, not when the pipeline falls behind.
+D=Hourly restart: restarting does not diagnose or fix lag, risks losing state, and gives no failure alert.
+T: Alert on Dataflow's system lag metric for streaming delay and on the Failed metric for failed jobs.
+
+@ GCP-PDE D5 T5.4 applied troubleshooting
+S: A batch Dataflow job processing partner files fails after running for an hour. Worker logs in Cloud Logging show the same exception on a few malformed records, repeated across several attempts, before the pipeline fails. What does this indicate and what is the right fix?
+A: A bundle with a failing element was retried four times in batch mode; handle bad records in code, for example with a dead-letter output
+B: Batch mode retries a failing bundle indefinitely, so the job should have recovered by itself if given more time
+C: Workers ran out of quota, so the job needs a higher compute quota rather than any change to element handling
+D: The job failed because its template version is old, so recreating it from the same template always clears the error
+K: A
+G: ## Retries in Dataflow
+Dataflow processes elements in bundles and retries the whole bundle when an error is thrown for any element in it.
+- In **batch** mode, a bundle with a failing item is retried **four times**; when one bundle fails four times the pipeline fails completely.
+- In **streaming** mode, such a bundle is retried **indefinitely**, which can stall the pipeline instead of failing it.
+A persistent exception on specific records is a data-quality or code-handling problem, not a transient one.
+## Fix
+Catch exceptions in the `DoFn` and route bad elements to a dead-letter output (a side output to Cloud Storage or BigQuery) for inspection, so one malformed record does not fail the job. Worker logs and the job's error view show which step and records are involved.
+W: A=Bundle retried four times: repeated identical exceptions on a few records match the batch retry limit; capturing bad records in a dead-letter output lets valid data finish.
+X: B=Infinite retry in batch: indefinite retry is the streaming behaviour; batch fails after four attempts.
+C=Quota exhaustion: quota problems show distinct quota errors and are not tied to the same exception on malformed records.
+D=Old template: a template version does not cause record-specific exceptions, and a recreated job would hit the same records.
+T: Batch Dataflow fails after four retries of a bundle, so route malformed records to a dead-letter output.
+
+@ GCP-PDE D5 T5.4 applied troubleshooting
+S: A Dataflow job's Cloud Logging output contains the entry "Processing stuck in step ... for at least ..." and throughput has dropped. No quota errors appear. What should the data engineer do first to find the cause?
+A: Expand the log entry to read its stack trace and check whether the DoFn code is stuck or just slow
+B: Cancel the job immediately and restart it with the same code, because stuck steps resolve on restart
+C: Increase the number of Pub/Sub subscriptions, because the message means the topic has too few
+D: Disable Cloud Logging for the job to remove the warning and see whether throughput recovers
+K: A
+G: ## Reading the "stuck" message
+The message means a step has not completed processing for a long time. The common causes are user code that is deadlocked, stuck or extremely slow in a `DoFn`, or an external call that hangs. Dataflow's troubleshooting guidance: expand the log entry to see a stack trace, look for indications that the code is stuck, and if nothing appears, treat it as slow execution and profile with Cloud Profiler or similar tools. For Java pipelines you can take a thread dump of the whole JVM.
+## Why diagnosis first
+Restarting without a cause often repeats the problem; the log is the cheapest evidence.
+W: A=Read the stack trace: it shows where the worker thread is blocked and distinguishes a stuck DoFn from slow code that needs profiling.
+X: B=Cancel and restart: the same code and input would likely get stuck again, and cancelling a streaming job discards buffered data.
+C=More subscriptions: the message concerns processing of a step, not the number of subscriptions on a topic.
+D=Turn off logging: this hides the evidence and does not change the cause of the slowdown.
+T: For a stuck-step message, start from the log's stack trace and then profile the DoFn.
+
+@ GCP-PDE D5 T5.4 applied definition
+S: A platform admin must find which users in one BigQuery project ran the most expensive queries in the past two months, including queries from users who are not the admin. Which source and access are suitable?
+A: The INFORMATION_SCHEMA.JOBS_BY_PROJECT view in the region, with a role that includes jobs.listAll such as BigQuery Resource Viewer
+B: The INFORMATION_SCHEMA.JOBS_BY_USER view, which lists all users' jobs in the project for the viewing admin
+C: The Cloud Billing budget page, which lists each individual query with its text and its user
+D: The table metadata of every dataset, because it records the last query that read the table
+K: A
+G: ## BigQuery admin views for jobs
+`INFORMATION_SCHEMA.JOBS` views expose metadata of every job (queries, loads, exports, copies) in a region, with fields such as `user_email`, `total_bytes_billed`, `total_slot_ms`, `reservation_id` and job statistics.
+- `JOBS_BY_USER`: only the caller's jobs.
+- `JOBS_BY_PROJECT`: all jobs in the project; needs `bigquery.jobs.listAll`, included in BigQuery Resource Viewer (`roles/bigquery.resourceViewer`).
+- Organization-level views cover jobs across projects.
+The view keeps running jobs plus the past **180 days** of history. If `reservation_id` is NULL, the job was not under a reservation.
+## Why this fits
+Sorting by `total_bytes_billed` or `total_slot_ms` and grouping by `user_email` answers a "who ran expensive queries" question within 180 days.
+W: A=JOBS_BY_PROJECT with listAll: it contains all users' jobs in the project for 180 days, so ranking by bytes billed or slot time over two months identifies expensive queries and users.
+X: B=JOBS_BY_USER: it returns the caller's own jobs, not those of others.
+C=Billing budget page: budgets track spend against thresholds, not per-query detail.
+D=Table metadata: table metadata does not record each query or the user who ran it.
+T: Use INFORMATION_SCHEMA.JOBS_BY_PROJECT with jobs.listAll access to analyse all jobs in a project over 180 days.
+
+@ GCP-PDE D5 T5.4 applied troubleshooting
+S: A pipeline application submits hundreds of BigQuery jobs in short bursts, and some fail with a jobRateLimitExceeded error even though the jobs were created successfully. How should the application handle it?
+A: Use exponential backoff to lower the request rate, then retry the job with a new job ID
+B: Retry immediately in a tight loop with the same job ID until the job is accepted
+C: Convert the error to success in the client, since a created job always completes
+D: Move the application to another region, because rate limits apply only in the home region
+K: A
+G: ## Rate limit errors
+BigQuery returns `jobRateLimitExceeded` (HTTP 400) when a job was created but failed with a rate-limit error. The documented handling is to reduce the request rate with **exponential backoff** and retry with a **new job ID**. A related error, `quotaExceeded` (HTTP 403), appears when the project exceeds a BigQuery quota, a custom quota, or exceeds the free tier without billing set up; that one needs the quota or billing fixed, not just retries.
+## Practical pattern
+Cap concurrency of job submission, backoff with jitter, use fresh job IDs for retries and distinguish rate limiting (transient) from quota exhaustion (needs action).
+W: A=Backoff and new job ID: lowering the rate and retrying with a fresh ID is exactly the documented remedy.
+X: B=Tight retry loop: it increases the request rate, which keeps triggering the limit; reusing the failed job ID is wrong.
+C=Treat as success: the job failed, so its work did not complete.
+D=Change region: limits are per project and location configuration; moving regions does not remove the need to pace requests.
+T: For jobRateLimitExceeded, back off exponentially and retry with a new job ID.
+
+@ GCP-PDE D5 T5.4 applied use-case
+S: Costs of a shared data project rose sharply this month. The data engineer needs to see which services, SKUs and labelled workloads drove the increase and wants early warning in future. Which TWO actions fit? (Select TWO)
+A: Enable Cloud Billing export to BigQuery and query the cost data by service, SKU, project and label
+B: Create a Cloud Billing budget with threshold alert rules so owners are emailed as costs approach the plan
+C: Sum slot usage from INFORMATION_SCHEMA.JOBS and treat the total as the exact invoice for autoscaling
+D: Raise the BigQuery custom quota to its maximum so no further spending can ever be incurred
+E: Delete the billing export dataset after the first query to keep the cost data small
+K: A,B
+G: ## Seeing and watching cost
+- **Cloud Billing export to BigQuery** writes detailed billing data automatically through the day to a dataset. The standard usage cost export includes account, invoice date, services, SKUs, projects, labels, locations, cost, usage, credits and currency. You can slice it with SQL to find drivers of a rise.
+- **Budgets** with alert threshold rules email recipients when actual or forecasted cost passes a percentage of the amount. Alerts-only budgets warn; they do not stop usage by themselves.
+## Cautions
+Job-level slot sums do not reconcile with autoscaling charges. Quotas limit usage but a maximum quota does not prevent spend.
+W: A=Billing export to BigQuery: SKU, service, project and label columns let the engineer attribute the increase precisely.
+B=Budget with threshold alerts: threshold rules give early notice as actual or forecasted cost approaches the plan.
+X: C=Slot sums as invoice: the docs say not to use the jobs information schema to match autoscaling billing.
+D=Raising the quota: a higher quota allows more use rather than limiting spend.
+E=Deleting the export: it removes the data needed for analysis and ongoing attribution.
+T: Use billing export to BigQuery to find cost drivers and budget alerts to be warned early.
+
+@ GCP-PDE D5 T5.4 applied use-case
+S: A security team wants an on-call notification whenever a specific error message appears in the logs of a Dataproc job's driver or in any service in the project, without building a custom log parser. Which approach fits?
+A: A log-based alerting policy in Cloud Logging that notifies when a log entry matching the filter appears
+B: A Cloud Scheduler job that exports all logs to Cloud Storage and a person who reads them each morning
+C: A Cloud Monitoring uptime check on the Dataproc cluster that reports whether the master node responds
+D: A BigQuery scheduled query that scans the billing export for the message text once a day
+K: A
+G: ## Log-based alerting policies
+A **log-based alerting policy** notifies you whenever a specified message appears in your included logs, for example a specific error text or an audit log record. You define a Logging query that matches the entries and choose notification channels; no custom parser is needed.
+## Other tools and why they differ
+- Metrics-based alerts use numeric time series, such as a Dataflow system lag.
+- Uptime checks test the reachability of an endpoint, not log content.
+- Billing export holds cost data, not application logs.
+W: A=Log-based alert: it fires when a matching entry appears, matching the requirement for a prompt notification on one message.
+X: B=Manual morning review: reading exported logs by hand is neither automated nor timely, so an on-call engineer would learn about the error hours after it occurred.
+C=Uptime check: it tests availability of an endpoint and cannot see an error message in driver logs.
+D=Scheduled query on billing: billing export has cost records, not log text.
+T: Use a log-based alerting policy to be notified when a particular message appears in Cloud Logging.
+
+@ GCP-PDE D5 T5.4 advanced use-case
+S: An admin wants to know whether the dashboards reservation is well sized: what share of its slots was used over the past week, and which jobs used the most. Which approach gives this evidence?
+A: Query INFORMATION_SCHEMA.JOBS_TIMELINE filtered to the reservation, excluding parent script jobs to avoid double counting
+B: Count the number of rows in the largest table assigned to the reservation, because row counts equal slot demand
+C: Read the query text from the JOBS view and estimate slots from the number of characters in each statement
+D: Compare monthly invoice totals only, since the invoice lists slot use per hour for each reservation
+K: A
+G: ## Measuring reservation use
+`INFORMATION_SCHEMA.JOBS_TIMELINE` splits job activity into time slices with slot usage per period, so you can calculate utilisation against the reservation's capacity over time. You can filter by `reservation_id` to inspect one reservation. For script jobs, a parent job also reports the total slot usage of its children; exclude the parent with `statement_type != "SCRIPT"` to avoid double counting.
+Pair this with the `RESERVATIONS` views for the capacity side. Use the results to decide baseline, autoscaling maximum and whether workloads should be split.
+W: A=JOBS_TIMELINE per reservation: slot usage per time slice divided by capacity shows utilisation, and the same rows show top consumers once parents are excluded.
+X: B=Row counts: slot demand depends on query complexity, not on table row counts.
+C=Query text length: the length of SQL says nothing about slot consumption.
+D=Invoice totals: invoices are monthly summaries and not a per-reservation utilisation report.
+T: Use JOBS_TIMELINE filtered by reservation, excluding parent scripts, to measure slot utilisation.
+
+@ GCP-PDE D5 T5.5 applied use-case
+S: A long-running Spark Structured Streaming job on a Dataproc cluster sometimes dies when a worker VM is rebooted or a task runs out of memory. The job checkpoints its state to Cloud Storage. The team wants it to recover without manual action. What should the data engineer configure?
+A: Submit the job as a restartable job with a limit on failures per hour, keeping the checkpoint location in Cloud Storage
+B: Rely on the default behaviour, because Dataproc jobs restart on failure by default with unlimited retries
+C: Run a second copy of the job on the same cluster and let both write to the same checkpoint directory
+D: Delete the cluster and recreate it after each failure so a clean job always starts from an empty state
+K: A
+G: ## Restartable Dataproc jobs
+By default Dataproc jobs (Managed Service for Apache Spark on clusters in the current docs) do **not** restart automatically on failure. You can opt in to restarts by setting a maximum number of failures per hour (up to 10) and/or a maximum number of total failures (up to 240). This mitigates out-of-memory errors and unexpected VM reboots and suits long-running and streaming jobs.
+- The job is reported failed if the driver exits non-zero more than 4 times in 10 minutes ("thrashing") or exceeds the configured limits.
+- Design jobs to restart gracefully: output directories may already exist, and Spark streaming jobs that checkpoint can resume after a failure.
+W: A=Restartable job plus checkpoints: the failure limit permits automatic restarts after reboots or OOM, and the Cloud Storage checkpoint lets Spark resume where it left off.
+X: B=Default behaviour: jobs do not restart by default; restart must be enabled with limits.
+C=Two copies with one checkpoint: concurrent writers to the same checkpoint corrupt state and do not provide failover.
+D=Recreate the cluster: discarding the cluster loses local state and does not use the checkpoint for resumption.
+T: Enable restartable jobs with failure limits and checkpoint to Cloud Storage so Spark streaming jobs self-heal.
+
+@ GCP-PDE D5 T5.5 applied definition
+S: A team is retiring a streaming Dataflow pipeline that reads from Pub/Sub. It must finish processing the data already read and buffered, stop taking new messages and then end. Which action does that?
+A: Drain the job, so Dataflow completes buffered data while ceasing to ingest new data
+B: Cancel the job, so Dataflow stops immediately but keeps all buffered data safe in the sink
+C: Force cancel the job, which is the normal first step to stop streaming pipelines cleanly
+D: Update the job in place with the same code, which stops the old workers after a final flush
+K: A
+G: ## Stopping a Dataflow job
+- **Drain** applies only to streaming pipelines. The service finishes processing buffered data and in-flight work while stopping the ingestion of new data, then ends. Use it for planned shutdown or before replacing a job in a way that cannot be done by update.
+- **Cancel** applies to streaming and batch; it stops the service from processing any data, including buffered data, immediately. A cancelled job cannot be restarted (you can clone it).
+- **Force cancel** immediately stops a job and is only for jobs stuck in the regular cancelling process; a regular cancel must be tried first.
+## Fault-tolerance link
+Pub/Sub keeps unacknowledged messages, so data not yet read by the drained job stays in the subscription for the next job.
+W: A=Drain: it matches the requirement exactly, finishing buffered work and stopping new ingestion.
+X: B=Cancel: cancel does not process buffered data, so work in flight is dropped.
+C=Force cancel: it is intended only for jobs stuck while cancelling, and also discards buffered data.
+D=In-place update: an update replaces the running job with a compatible new one; it does not retire the pipeline.
+T: Drain a streaming Dataflow job to finish buffered data and stop ingestion; cancel drops it.
+
+@ GCP-PDE D5 T5.5 advanced use-case
+S: A defect in a streaming Dataflow job wrote wrong values to its sink for the last two hours. The engineer has fixed the code. Messages came from a Pub/Sub subscription that had acknowledged-message retention enabled. Which TWO actions restore correct data? (Select TWO)
+A: Deploy the fixed job and use seek on the subscription to replay messages from just before the defect began
+B: Make the sink writes idempotent, for example a keyed upsert or MERGE, so replayed messages overwrite the bad rows
+C: Delete the subscription and create a new one, because new subscriptions replay all history from the topic
+D: Ask Dataflow to roll the job back to the previous hour automatically through the drain command
+E: Increase the acknowledgement deadline so that already acknowledged messages are delivered again
+K: A,B
+G: ## Replay after a bad deployment
+Once a subscriber acknowledges a message it becomes inaccessible. The Pub/Sub **seek** feature lets you alter the acknowledgement state in bulk, so you can replay previously acknowledged messages, by seeking to a timestamp or a snapshot. Replaying acknowledged messages needs the subscription (or topic) to retain them.
+## Safe replays
+A replay processes some messages a second time. If the sink is append-only, the corrected rows pile on top of wrong ones. An idempotent sink (keyed upsert, `MERGE`, or partition overwrite) makes the corrected results replace the bad ones.
+Dataflow snapshots complement this: a snapshot of a streaming job saves its state so you can start a new job without losing state or test and roll back updates.
+W: A=Seek and replay: after deploying the fix, seeking to a time before the defect redelivers the affected messages to be processed correctly.
+B=Idempotent sink: replayed messages replace the wrong rows rather than adding duplicates.
+X: C=New subscription: a new subscription starts at the time of creation and does not replay older messages.
+D=Drain as rollback: drain stops a job gracefully; it does not rewind data.
+E=Longer ack deadline: the deadline governs redelivery of unacknowledged messages; it does not reset those already acknowledged.
+T: Fix the code, replay with Pub/Sub seek, and use idempotent sink writes so replay corrects data instead of duplicating it.
+
+@ GCP-PDE D5 T5.5 applied comparison
+S: A payments platform uses Cloud SQL for PostgreSQL with high availability configured in one region. Leadership now requires service to continue if the whole region becomes unavailable, accepting a small amount of data loss. Which addition meets that requirement?
+A: A cross-region read replica that is promoted to a standalone primary if the region fails
+B: A second standby in another zone of the same region, since zone-level redundancy survives regional outages
+C: More frequent automated backups in the primary region, restored after the region recovers
+D: A larger machine type for the primary, because capacity decides whether a region outage is survived
+K: A
+G: ## Zonal HA versus regional DR in Cloud SQL
+- **High availability (regional instance)**: a primary and a standby in different zones of one region, with automatic failover when the primary becomes unresponsive. It protects against zone or instance failure.
+- **Cross-region disaster recovery**: if the region is unavailable, so is an HA instance in it. Google's DR guidance is a **cross-region read replica** you can promote. Replication is asynchronous, so a small amount of recent data may be lost (RPO is not zero). Failover from export/import or backup/restore is possible but slower.
+## Choose by failure scope
+Zone: HA. Region: cross-region replica promotion. Corruption or a bad delete: backups and point-in-time recovery.
+W: A=Cross-region replica with promotion: a replica in another region continues when the primary's region is down, with minimal downtime and RPO limited by replication lag.
+X: B=Another zone in the same region: extra zones in the same region add zone-level redundancy only, and every zone is unavailable when the whole region is down.
+C=More frequent backups in region: backups in the failed region are not usable until the region recovers.
+D=Bigger machine: a larger machine type improves capacity and performance but does nothing for availability when the region that hosts the instance is unavailable.
+T: HA survives a zone failure; to survive a region failure, promote a cross-region read replica.
+
+@ GCP-PDE D5 T5.5 applied definition
+S: An administrator is documenting what happens when a Cloud SQL instance configured for high availability fails over. Which TWO statements are accurate? (Select TWO)
+A: After failover the standby continues as the primary even after the original zone recovers, unless a failback is performed
+B: Cloud SQL switches to the standby automatically when the primary instance becomes unresponsive
+C: The standby instance serves read queries, so read traffic never needs a read replica
+D: Failover is possible only when an administrator starts it from the console after reading an alert
+E: HA protects the instance from the loss of an entire region by keeping the standby in another region
+K: A,B
+G: ## How Cloud SQL HA behaves
+An HA instance is called a regional instance: a primary and a standby in different zones of one region, with data redundancy.
+- If the instance becomes unresponsive, Cloud SQL automatically switches to the standby (check the operation log's failover history).
+- The instance that received the failover continues as the primary even after the original instance returns. The old primary is recreated and becomes the standby. To return to the original zone, perform a failback.
+- The standby cannot be used for read queries. Use read replicas for that, and place some in a third zone.
+- HA does not cover a regional outage; use cross-region replicas.
+W: A=Standby stays primary: after failover, the new primary stays primary until a failback is run.
+B=Automatic switch: Cloud SQL fails over automatically when the primary stops responding.
+X: C=Standby serves reads: the standby cannot take read traffic; read replicas do that.
+D=Manual only: automatic failover is a core HA feature; manual failover exists for testing.
+E=Cross-region standby: the standby is in a different zone of the same region.
+T: Cloud SQL HA fails over automatically within a region and stays on the promoted instance until you fail back.
+
+@ GCP-PDE D5 T5.5 applied troubleshooting
+S: A fraud service uses Memorystore for Redis Standard Tier as the only store for rolling counters. After a primary failure the instance failed over, and the counters lost the last few seconds of increments. The engineer wants to understand and prevent harm. What is the right understanding?
+A: Replication to the replica is asynchronous, so the newest writes can be lost on failover; keep the system of record in a durable database
+B: Standard Tier replicates synchronously, so this loss means the replica was misconfigured and should be rebuilt
+C: Failover loses data only on Basic Tier, so the problem disappears if the key sizes are reduced
+D: Memorystore keeps every write on disk before acknowledging it, so the loss must come from the client library
+K: A
+G: ## High availability is not durability
+Memorystore for Redis Standard Tier protects against common failures by replicating to one or more replicas and failing over automatically, to the healthy replica with the least replication lag if there are several. Replication uses the **asynchronous** protocol, so writes acknowledged by the primary but not yet replicated can be lost when failover happens. The docs state HA does not guarantee full data durability, and Memorystore for Redis does not support cross-region replication.
+## Design guidance
+Use Memorystore as a cache or fast-access tier. Keep the authoritative data (or the events to rebuild it) in a durable store such as Cloud SQL, Spanner or Bigtable, and enable RDB snapshots for a baseline of persistence.
+W: A=Asynchronous replication: recent writes may not reach the replica before failover, so authoritative data belongs in a durable database.
+X: B=Synchronous replication: the replication protocol is asynchronous, so a small loss window is expected and not a misconfiguration.
+C=Basic Tier only: Basic Tier has no replica at all; Standard Tier loss is possible too and key size is irrelevant.
+D=Disk write before acknowledging: Redis keeps data in memory; persistence is by optional snapshots, not per write.
+T: Memorystore Standard Tier gives fast failover, not zero data loss; keep the system of record in a durable store.
+
+@ GCP-PDE D5 T5.5 applied troubleshooting
+S: Three days ago a faulty UPDATE statement overwrote a column across a BigQuery table in a dataset that uses default settings. Analysts only noticed today. How can the data engineer recover the earlier values?
+A: Query the table as of a time before the UPDATE using time travel, and write the result to a new table
+B: Wait for the fail-safe period to start, since fail-safe is the first window where data can be read
+C: Restore from a table snapshot, which BigQuery created automatically before the UPDATE ran
+D: Re-run the UPDATE with the opposite logic, because BigQuery keeps no earlier version of changed data
+K: A
+G: ## Time travel, fail-safe and snapshots
+- **Time travel**: BigQuery keeps changed or deleted data for the time travel window, seven days by default (configurable from two to seven days). You can query a table as of an earlier time (`FOR SYSTEM_TIME AS OF`), restore a deleted table or dataset, or restore a table to a point in time.
+- **Fail-safe**: an additional, non-configurable seven days after the window, for emergency recovery of deleted data at table level.
+- **Table snapshots**: read-only copies of a table at a time, which you create yourself (also for a point in the past seven days); they persist until you remove them or they expire.
+## Here
+Three days is inside the default seven-day window, so time travel is enough. Copy the earlier version into a new table, then repair the main table.
+W: A=Time travel: the pre-UPDATE state is still within the default seven-day window and can be queried and saved.
+X: B=Waiting for fail-safe: fail-safe starts after time travel and is for emergency recovery; the data is accessible now via time travel.
+C=Automatic snapshot: BigQuery does not create snapshots automatically; they are made on request or schedule.
+D=Inverse UPDATE: the overwritten values can only be guessed; time travel provides exact earlier values.
+T: Within the time travel window, query or restore an earlier table version; use snapshots for longer-term protection.
+
+@ GCP-PDE D5 T5.5 applied troubleshooting
+S: Four days ago a script deleted a folder of source files from a Cloud Storage bucket created recently with default settings. A downstream job now reports missing input. Versioning was never enabled. What is the best recovery option?
+A: Restore the objects from their soft-deleted state, since soft delete is on by default with a seven-day retention
+B: Recover them from the Archive class of the same bucket, where all deleted objects are moved
+C: Ask Cloud Support to rebuild the objects from Google's internal copies, which are kept for a year
+D: Re-ingest through Dataflow, because deleted objects cannot be restored by any other means
+K: A
+G: ## Soft delete in Cloud Storage
+Soft delete is enabled by default for buckets that support it, with a default retention duration of **7 days**, adjustable from 7 to 90 days (0 disables it). Objects and buckets that are deleted or overwritten are kept in a soft-deleted state during that period; they cannot be permanently deleted and can be restored.
+## Other protections
+Object versioning keeps noncurrent versions; backups or replicated copies protect against larger incidents. Check for missing-data causes (deletion, failed upstream job, wrong path) before restoring, and put alerts on unexpected deletions.
+W: A=Restore soft-deleted objects: four days is inside the default seven-day period, so the objects can be restored.
+X: B=Archive class: deleted objects are not moved to a storage class; storage classes are not a recycle bin.
+C=Support rebuild: there is no such year-long internal copy offered; support restores rely on the customer-visible features.
+D=Re-ingest only: re-ingestion may be possible but is unnecessary when soft delete holds the objects.
+T: Soft delete (default seven days) lets you restore recently deleted Cloud Storage objects.
