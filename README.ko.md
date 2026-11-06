@@ -61,6 +61,7 @@ Amazon Web Services, Palantir Technologies, Microsoft, Google과 관련 없는 �
 | | | GCP-GAIL Generative AI Leader | 274 | 15 |
 | | Associate | GCP-ACE Associate Cloud Engineer | 275 | 22 |
 | | Professional | GCP-PCA Professional Cloud Architect | 274 | 26 |
+| | | GCP-PDE Professional Data Engineer | 225 | 22 |
 | Databricks | Associate | DBX-DEA Data Engineer Associate | 225 | 20 |
 | HashiCorp | Associate | TF-TA004 Terraform Associate (004) | 266 | 18 |
 | | | VLT-VA003 Vault Associate (003) | 253 | 15 |
