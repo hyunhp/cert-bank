@@ -1,0 +1,574 @@
+# PLTR-DE batch 52: D4 pipeline operations, D5 data quality, D6 access control, 27 questions
+# src: https://www.palantir.com/docs/foundry/data-integration/schedules/
+# src: https://www.palantir.com/docs/foundry/data-integration/health-checks/
+# src: https://www.palantir.com/docs/foundry/data-integration/branching/
+# src: https://www.palantir.com/docs/foundry/security/markings/
+# src: https://www.palantir.com/docs/foundry/security/restricted-views/
+# src: https://www.palantir.com/docs/foundry/security/access-control-propagation/
+# src: https://www.palantir.com/docs/foundry/object-permissioning/object-security-policies/
+
+@ PLTR-DE D4 T4.1 applied troubleshooting
+S: A schedule builds a dataset every 30 minutes, but the build sometimes takes 50 minutes. An engineer fears that two builds of the same dataset will run at once and write over each other. What actually happens when the schedule's trigger is satisfied again while the previous run is still in progress?
+A: The new trigger stays pending and the schedule runs only after the previous run finishes
+B: The running build is cancelled and restarted immediately so the newest trigger always wins
+C: The new trigger is dropped permanently and the schedule waits for the following 30-minute slot
+D: Both runs start in parallel and the platform merges their transactions when each one completes
+K: A
+G: ## Triggers while a run is active
+A schedule has a trigger that defines when its build should run. When the trigger is satisfied and a build is performed, the schedule has "run".
+## What the docs say
+- If a schedule is triggered while the previous run is still in action, it remains triggered and runs only after the previous run has finished.
+- So overlapping builds of the same schedule do not happen; instead the schedule can fall behind its nominal interval.
+Example: a 30-minute schedule with 50-minute builds effectively runs back to back, and the real fix is to shorten the build or relax the interval.
+W: Pending trigger: the schedule stays triggered and starts its next run after the current one completes, so there is no overlap and no lost trigger.
+X: B=Cancel and restart: the platform does not abort a running build because a new trigger arrived.
+C=Dropped trigger: the trigger is kept, not discarded, so the work is still done once the build ends.
+D=Parallel runs merged: a schedule never runs against itself in parallel, so there are no two transactions to merge.
+T: A trigger that fires during a run stays pending and runs after the previous run finishes.
+V: Schedules
+
+@ PLTR-DE D4 T4.1 applied troubleshooting
+S: In the run history of a schedule, a junior engineer sees many runs marked Ignored on days when the upstream source delivered nothing. They want to open an incident for "failed builds". What do these runs indicate?
+A: The schedule's trigger is misconfigured and must be rebuilt before any further runs can be created
+B: The runs were blocked by a permission problem and the build identity needs the marking added again
+C: The runs were attempted but created no build, usually because everything was already up to date
+D: The runs created builds that failed, so the logs of those builds should be opened for the error
+K: C
+G: ## Reading schedule run history
+Run history records when a schedule ran and what happened. A run can be Succeeded, Ignored or Failed, and the three mean different things.
+## Meanings
+- Succeeded: the run started a build. The build itself may still be running or may fail later.
+- Ignored: the run was attempted but no build was created, which usually means there was no work to do because outputs were not stale.
+- Failed: the schedule itself failed to run.
+Example: an upstream source that delivers nothing leaves the dataset up to date, so the schedule is Ignored, which is the desired outcome.
+W: Ignored means a run was attempted with no build created, typically because inputs had not changed; it is saved compute, not an error.
+X: A=Misconfigured trigger: the trigger clearly fired, otherwise there would be no run record at all.
+B=Permission problem: a permission failure would not be reported as an up-to-date skip.
+D=Failed builds: no build was created, so there are no failed build logs to open.
+T: An Ignored schedule run created no build, typically because nothing was stale.
+V: Schedules
+
+@ PLTR-DE D4 T4.1 applied troubleshooting
+S: A schedule on a reporting dataset fires when two upstream datasets have both updated. It was paused for a holiday week; during the pause both upstream datasets updated several times. After the engineer resumes it, no build starts. What best explains this?
+A: Pausing converts the schedule to a manual one, so it must be recreated as a new schedule
+B: Resuming always replays every missed trigger at once, and these replays are still queued
+C: The schedule is waiting for the holiday period to be marked as a non-business interval
+D: Pausing reset the trigger state and events observed during the pause were forgotten
+K: D
+G: ## What a pause does to trigger state
+A schedule that waits for several events, such as two inputs both updating, remembers which events it has seen. A pause changes that memory.
+## Behaviour
+- While paused, the schedule cannot be triggered and ignores all observed events.
+- Pausing resets the trigger state and the events observed so far are forgotten.
+- After resuming, the trigger needs fresh events, so a one-off manual build of the dataset brings the output up to date straight away.
+Example: after the holiday, run one manual build, then let the trigger work from the next update onwards.
+W: Reset trigger state: events seen during the pause were forgotten, so the schedule waits for new updates and a manual catch-up build is the quick fix.
+X: A=Manual conversion: a paused schedule stays the same schedule and resumes with its original trigger.
+B=Replayed triggers: the docs say observed events are forgotten, not queued, so there is nothing to replay.
+C=Business interval marking: the trigger depends on the upstream updates, not on any holiday flag.
+T: Pausing a schedule discards observed trigger events, so catch up with a manual build after resuming.
+V: Schedules
+
+@ PLTR-DE D4 T4.2 applied troubleshooting
+S: A PySpark transform on a 2 billion row table finishes the early stages quickly but then stalls for an hour in a stage that runs on a single node. The code ends by calling `toPandas()` on the full joined result to reshape it in pandas before writing. What is the best fix?
+A: Request a larger driver profile so the full result fits in one process and keep the pandas step
+B: Wrap the pandas step in a retry loop so that it succeeds once enough memory frees up
+C: Express the reshape with distributed DataFrame operations so the work stays spread across executors
+D: Repartition the input into thousands of tiny partitions before collecting to make the collect faster
+K: C
+G: ## Keep large data distributed
+Spark scales because transformations run in parallel across executors. Collecting a large DataFrame into one process, such as with `toPandas()` or `collect()`, serialises the whole job onto a single machine.
+## Symptoms and fix
+- A late stage that runs on one node while executors sit idle points to a collect.
+- The fix is to express the logic with DataFrame functions, window functions or grouped operations that stay distributed.
+- Collecting is only safe for small results, such as an aggregate of a few thousand rows.
+Example: replacing a pandas pivot on 2 billion rows with a grouped pivot in Spark brings the stage back to minutes.
+W: Distributed operations: keeping the reshape in Spark removes the single-node bottleneck instead of making it bigger or hiding it.
+X: A=Larger driver: a bigger machine postpones the memory error but the work still runs on one node and scales poorly as data grows.
+B=Retry loop: retrying a collect that needs more memory than exists does not make memory appear.
+D=Tiny partitions: more partitions add scheduling overhead, and the result is still collected into one process.
+T: Do not collect large results to one node; use distributed DataFrame operations.
+V: Spark, Code Repositories
+
+@ PLTR-DE D4 T4.2 applied use-case
+S: A join between a 3 billion row fact table and a 4 MB currency lookup table is slow. Spark details show a very large shuffle of the fact table before the join. Which change targets the cause?
+A: Broadcast the small lookup table so the fact table is joined without being shuffled
+B: Sort both tables by the join key in a separate earlier transform so the join runs faster
+C: Convert the lookup table to a much larger table so both sides of the join are balanced
+D: Cache the fact table in memory on every executor before running the join to avoid reading it
+K: A
+G: ## Broadcast joins for small tables
+A regular join shuffles both sides by key across the cluster. When one side is tiny, Spark can send a copy of it to every executor and join each fact partition locally.
+## Reading the evidence
+- A large shuffle read or write on the big table next to a tiny table is the signature.
+- A broadcast hint on the small table removes the big shuffle.
+- Broadcasting only suits tables that fit comfortably in executor memory.
+Example: a 4 MB lookup is trivial to broadcast, while broadcasting a 40 GB table would fail.
+W: Broadcast join: sending the 4 MB table to each executor avoids shuffling 3 billion rows, which is the measured cost.
+X: B=Pre-sorting: ordering both tables in a separate step adds work and the join still shuffles.
+C=Enlarging the lookup: making the small side bigger removes the one property that allows a cheap join.
+D=Caching the fact table: it is too large to cache on every executor and the shuffle would still happen.
+T: Broadcast a tiny table to avoid shuffling the large side of a join.
+V: Spark, Code Repositories
+
+@ PLTR-DE D4 T4.2 applied tradeoff
+S: A transform joins two wide tables (300 columns each) and only afterwards filters to the last 90 days and selects 12 columns. Runs are slow with heavy spill to disk. Which restructuring is the best first step?
+A: Add more executors and keep the logic as it is, since the plan is correct and only the cluster is small
+B: Filter to the date range and select only the needed columns before the join to shrink what is shuffled
+C: Move the filter after a second, identical join so that Spark sees the predicate twice and optimises it
+D: Cast every column to string before the join so that the join key comparison becomes uniform
+K: B
+G: ## Reduce data before wide operations
+Joins and aggregations shuffle data. Every column and row that reaches the shuffle costs network, memory and disk, so shrinking inputs early is usually the cheapest optimisation.
+## Practical rules
+- Apply filters as early as possible, especially on partition-like columns such as dates.
+- Select only the columns needed downstream before joins.
+- Check Spark details for spill; heavy spill signals shuffles larger than executor memory.
+Example: cutting 300 columns to 12 and 3 years to 90 days can shrink the shuffle by a factor of well over 50.
+W: Early filter and column pruning: smaller shuffles mean less spill and shorter runs without needing more hardware.
+X: A=More executors: spending on hardware hides an avoidable inefficiency, and costs grow with the oversized data.
+C=Duplicate join: repeating a join adds cost and does not make the optimiser behave differently.
+D=Casting to strings: string comparisons are typically larger and slower, and could change join semantics.
+T: Filter rows and prune columns before joins to shrink shuffles.
+V: Spark, Code Repositories
+
+@ PLTR-DE D4 T4.4 applied troubleshooting
+S: An engineer builds a dataset B on branch `feature`, which has the fallback chain `feature --> master`. Only the logic for dataset B was changed on the branch. They are surprised that the build reads dataset A, which has no `feature` branch, and still succeeds. What explains this?
+A: The build creates a temporary copy of dataset A on the feature branch using stale cached data
+B: The branch silently copied all upstream datasets on creation, so every dataset has its own feature branch
+C: Dataset A was resolved from the master fallback branch because no feature version existed
+D: The build ignored dataset A entirely and used the previous output of dataset B as its input
+K: C
+G: ## Branch fallbacks
+A build runs on a branch and carries a sequence of fallback branches. For inputs that do not exist on the build branch, the build falls back along the sequence.
+## Behaviour
+- Job specifications and inputs are resolved on the build branch first, then along the fallback chain, for example `feature --> master`.
+- Outputs are written to the build branch, so a feature build never changes master data.
+- Datasets you did not change are therefore read from master, which makes branch testing cheap.
+Example: dataset B builds on `feature` while its input A is read from master.
+W: Master fallback: with no feature branch on dataset A, the fallback chain supplies the master version as the input.
+X: A=Temporary cached copy: builds read real branch data through the fallback chain, not a stale copy.
+B=Copy on creation: creating a branch does not duplicate every upstream dataset; that is why fallbacks exist.
+D=Previous output of B: a build reads declared inputs, not its own earlier output.
+T: Branch builds read missing inputs from the fallback branch and write only to the build branch.
+V: Branching
+
+@ PLTR-DE D4 T4.4 applied tradeoff
+S: A feature branch for a pipeline has lived for four months. Meanwhile master has received dozens of changes, and the team dreads merging. Which working practice reduces this risk going forward?
+A: Keep one long-lived branch per engineer and merge only at the end of each quarter after a freeze
+B: Skip branches for small edits and push them straight to master to avoid ever having to merge
+C: Wait until the branch is completely finished so only one large review is needed for the whole work
+D: Use short-lived branches with small, reviewed changes merged to master frequently, rebasing as needed
+K: D
+G: ## Short branches, small merges
+Branches isolate work and let you test against production-like data before release. The longer a branch lives, the more it diverges and the harder, riskier and less reviewable the merge becomes.
+## Practice
+- Slice the work into small changes, each on a short-lived branch.
+- Merge frequently after review and branch builds.
+- Keep the branch current with master so conflicts are small.
+Example: ten small merges over four months are easier to review than one merge of four months of change.
+W: Short branches and frequent small merges: each change is reviewed and validated against current master, keeping risk low.
+X: A=Quarterly merges: long divergence and a release freeze recreate the original problem on a bigger scale.
+B=Direct pushes: removing branches also removes the test and review gate that protects production.
+C=One big review: reviewers cannot meaningfully check four months of changes at once.
+T: Merge small branch changes often rather than letting branches diverge for months.
+V: Branching
+
+@ PLTR-DE D4 T4.4 applied tradeoff
+S: A shared Python library of cleaning functions is used by 20 pipeline repositories. The maintainers want to change the behaviour of a function that handles dates. What is the safest rollout?
+A: Release the change under a new version and let each pipeline upgrade deliberately after its own branch tests
+B: Edit the function in place and let every pipeline pick up the change at its next build without notice
+C: Ask the 20 teams to stop all builds until every one of them has reviewed the change together
+D: Release it only to the maintainers' own pipelines and never announce it to the other teams
+K: A
+G: ## Versioned change to shared code
+A change in shared code touches every consumer at once. Versioning lets each consumer opt in when it has tested the new behaviour.
+## Rollout
+- Publish the change as a new library version with release notes naming the behavioural change.
+- Each pipeline upgrades on a branch, compares outputs with production and merges when satisfied.
+- Old pipelines keep working on the old version until they upgrade.
+Example: 12 teams upgrade in the first week, the rest at their next maintenance window, with no surprise output changes.
+W: Versioned release with deliberate upgrades: consumers test the new behaviour on a branch before it reaches production data.
+X: B=In-place edit: outputs of 20 pipelines can change silently at their next build.
+C=Global build stop: halting every team for one change is disproportionate and does not test anything.
+D=Maintainers only and silent: leaves other teams without the fix, then surprised later.
+T: Version shared code so consumers adopt changes after testing.
+V: Code Repositories, branches
+
+@ PLTR-DE D5 T5.1 applied comparison
+S: A rounding helper in a transform is suspected of failing on negative half values. Separately, the source may occasionally send an out-of-range quantity. Which pairing of controls is appropriate?
+A: An expectation for the helper's rounding rules and a unit test for out-of-range quantities in real data
+B: Unit tests with hand-written rows for the helper's logic and an expectation on the real quantity values
+C: Unit tests for both, because tests on sample rows are a complete substitute for checks on live data
+D: Expectations for both, since a rule on output data cannot be wrong about how the helper behaves
+K: B
+G: ## Tests check logic, expectations check data
+A unit test runs your code on rows you create, so it can pin down edge cases such as negative half values on every change. An expectation evaluates the real data produced by each build.
+## Division of labour
+- Logic you control: unit tests with crafted cases.
+- Data you do not control: expectations on the actual values.
+- Together they cover wrong code and wrong input.
+Example: a test proves `round(-2.5)` behaves as agreed; an expectation proves quantities in the build are between 1 and 10,000.
+W: Unit test plus expectation: the test locks down the helper's edge cases and the expectation guards the incoming data in every build.
+X: A=Swapped roles: an expectation cannot isolate a helper's edge case and a test on invented rows says nothing about live quantities.
+C=Tests only: crafted rows can never show what the source actually sends tomorrow.
+D=Expectations only: a check on output may not hit the specific edge case, and it fails only after data is wrong.
+T: Test logic with unit tests; guard real data with expectations.
+V: expectations, Code Repositories
+
+@ PLTR-DE D5 T5.1 applied use-case
+S: A line-items dataset is uniquely identified by the combination of `order_id` and `line_number`. A teammate proposes two primary-key expectations: one requiring `order_id` to be unique and one requiring `line_number` to be unique. What is wrong with this proposal?
+A: Nothing is wrong, because checking each column individually is equivalent to checking the combination
+B: Uniqueness checks cannot be written on columns, only on whole rows read from the dataset
+C: Both single-column checks would fail on healthy data; the check should cover the composite key
+D: The checks should be done by a freshness check, because duplicates appear only when data is stale
+K: C
+G: ## Composite keys
+A key can be a single column or a combination. In a line-items table, many lines share an `order_id` and many orders share a `line_number`, but each pair appears once.
+## Implication
+- A uniqueness expectation must use the columns that together identify a row.
+- Single-column uniqueness on parts of a composite key fails every build on valid data, training the team to ignore the check.
+- A not-null condition can still apply to each part separately.
+Example: order 1001 has lines 1, 2 and 3, and order 1002 also has line 1; the pair is unique, each column alone is not.
+W: Composite key check: uniqueness is meaningful over the pair, whereas each column alone legitimately repeats.
+X: A=Equivalent: the pair can be unique while each column repeats, so the checks are not the same.
+B=Whole rows only: expectations can address one or several columns, which is what a primary key needs.
+D=Freshness check: freshness measures update timeliness, not duplicate keys.
+T: Check uniqueness over the full composite key, not each part.
+V: expectations
+
+@ PLTR-DE D5 T5.1 applied tradeoff
+S: A raw sync occasionally delivers files with null customer identifiers. Three teams consume the cleaned dataset further down a long pipeline. Where is a blocking expectation most useful?
+A: On the final report dataset only, because that is where users would notice a problem first
+B: On the raw dataset immediately after the sync, so that failing builds block no downstream work
+C: On the first curated dataset, so bad input is stopped before it spreads to every downstream consumer
+D: On every dataset in the pipeline equally, so that each one repeats the same null check
+K: C
+G: ## Place checks at boundaries
+The earlier a defect is caught, the fewer datasets it contaminates and the easier the cause is to trace. But raw data should be kept as delivered, so the sensible gate is the boundary where data becomes trusted.
+## Placement
+- Keep raw data untouched as a record of what arrived.
+- Gate the first curated dataset with blocking expectations on key rules.
+- Add further checks only for rules that new transforms could break.
+Example: the null check on the curated customer dataset stops all three downstream teams from reading bad rows.
+W: First curated dataset: the gate sits where data turns trusted, so a failure protects every downstream consumer and points to the source.
+X: A=Final report only: the problem would have spread through every earlier stage and be hard to trace.
+B=Raw dataset: raw data should remain a faithful record of delivery, and blocking there stops ingestion rather than protecting consumers.
+D=Same check everywhere: duplicates effort and noise without adding detection.
+T: Gate data with blocking expectations at the boundary where it becomes trusted.
+V: expectations
+
+@ PLTR-DE D5 T5.1 applied troubleshooting
+S: To avoid failing builds, an engineer adds `filter(customer_id is not null)` to a transform. A month later a business user finds 3% of orders missing from reports and nobody knew. What practice should replace the silent filter?
+A: Keep the filter and add a comment in the code stating that null rows are discarded on purpose
+B: Remove all validation so that every row, including bad ones, always reaches the reports
+C: Run the filter twice so that discarded rows are counted by the second pass of the transform
+D: Route the rejected rows to a quarantine dataset, monitor its size, and alert when it grows
+K: D
+G: ## Make rejection visible
+Dropping rows silently turns a data-quality problem into a hidden correctness problem: reports are incomplete and nobody is told.
+## Pattern
+- Send rows that fail validation to a quarantine dataset with the reason.
+- Put a size or content check on the quarantine, so growth triggers an alert.
+- Optionally use a blocking expectation when a defect rate above a threshold makes the build untrustworthy.
+Example: 3% of orders arrive in quarantine, an alert fires on day one, and the source team fixes the identifier mapping.
+W: Quarantine with monitoring: bad rows are kept for repair and their growth is visible, instead of disappearing.
+X: A=Comment only: documents the loss but does not surface it or let anyone recover the rows.
+B=No validation: reports would contain unusable rows with no customer.
+C=Double filtering: a second pass over the same filter does not store, explain or alert on the rejected rows.
+T: Quarantine and monitor rejected rows instead of dropping them silently.
+V: expectations, Data Health
+
+@ PLTR-DE D5 T5.2 applied troubleshooting
+S: A uniqueness expectation passes in production but fails on every development-branch build. The branch builds read a small sampled copy of the orders table in which many customers appear without their matching master rows. What is the most reasonable response?
+A: Remove the expectation from the repository so branch builds pass, then add it back after merging to production
+B: Change the expectation to accept duplicates in all environments so branch and production behave identically
+C: Disable the production expectation permanently, because it is unreliable if it fails in development
+D: Make the branch builds use representative input data, or limit that check to builds on production inputs
+K: D
+G: ## Expectations depend on their input
+An expectation judges the data it sees. A sample that cuts relationships or keys can fail rules that hold for the full dataset, which tells you about the sample rather than the rule.
+## Options
+- Give branch builds representative input, for example a larger or stratified sample that keeps related rows together.
+- Scope selected checks to run only where inputs are complete.
+- Do not weaken the production rule to suit a flawed test input.
+Example: sampling by customer id keeps all of a customer's rows, so key rules hold in the sample.
+W: Representative input or scoped checks: the fix addresses the cause, a biased sample, and keeps the production rule intact.
+X: A=Remove and re-add: leaves branch validation blind and relies on someone remembering to restore the rule.
+B=Accept duplicates everywhere: weakens production protection because of a flaw in test data.
+C=Disable in production: removes a valid control that works on full data.
+T: Fix unrepresentative test input rather than weakening a valid expectation.
+V: expectations, branches
+
+@ PLTR-DE D5 T5.2 applied use-case
+S: The team wants to add a primary-key uniqueness expectation to a customer dataset that currently contains 4,000 historical duplicate keys. Turning on a blocking check would fail every build. What is the right sequence?
+A: Enable the blocking expectation now and let builds fail until the source team removes the duplicates
+B: Enable it with a threshold of 5,000 duplicates, which is permanently accepted from then on
+C: Deduplicate with an agreed rule in the transform or a backfill, verify, then enable the blocking check
+D: Skip the expectation, because a dataset that has had duplicates cannot ever be made unique
+K: C
+G: ## Introduce rules on dirty data safely
+A rule that the existing data already violates cannot simply be turned on as blocking. First make the data comply, then enforce.
+## Steps
+- Agree a deterministic deduplication rule, such as the latest record per key.
+- Apply it in the transform or a one-time backfill and check counts against the old data.
+- Enable the blocking expectation so that new duplicates are caught from now on.
+Example: keeping the newest row per customer id removes 4,000 rows, after which the check passes and guards future runs.
+W: Clean first, then enforce: the dataset becomes unique through an explicit rule, and the expectation protects it afterwards.
+X: A=Block immediately: pipelines stop for all consumers over a known, fixable issue.
+B=Permanent threshold: tolerating 5,000 duplicates defeats uniqueness and hides new ones.
+D=Skip the expectation: a dataset with historical duplicates can be made unique with a deterministic deduplication rule.
+T: Make existing data comply before enforcing a new blocking rule.
+V: expectations
+
+@ PLTR-DE D5 T5.2 applied tradeoff
+S: Six datasets in one repository each contain a hand-copied version of the same email-format check. Two copies have drifted and accept different addresses. Which approach addresses the cause?
+A: Define the shared check once as a function in the repository and reuse it in each transform
+B: Delete the email check from four of the datasets so that only two versions remain to be kept in sync
+C: Document the intended email format in a wiki page and trust each engineer to keep copies aligned
+D: Loosen all six copies to accept any string so that they can no longer disagree
+K: A
+G: ## Define a rule once
+Copy-pasted rules drift. Different datasets then judge the same field differently and nobody knows which behaviour is intended.
+## Fix
+- Put the rule in one shared function or module in the repository.
+- Call it from every transform or expectation that needs it.
+- Test it once with unit tests covering valid and invalid addresses.
+Example: a change to allow longer top-level domains is made in one place and every dataset follows.
+W: One shared definition: all datasets apply the same rule and a fix reaches them together.
+X: B=Delete four: leaves four datasets with no validation at all.
+C=Wiki and trust: documentation does not stop copies from drifting.
+D=Accept anything: removes validation, so malformed addresses reach consumers.
+T: Define each validation rule once and reuse it.
+V: expectations, Code Repositories
+
+@ PLTR-DE D5 T5.2 applied troubleshooting
+S: An expectation asserts that `total_amount` equals the sum of `line_amount` for each order. It fails occasionally with differences like 0.0000001 although the source data is correct. What is the most likely cause and fix?
+A: Floating point rounding; use a decimal type or compare with a small tolerance
+B: Network corruption during the sync; re-run the sync until the numbers match exactly
+C: A stale schedule; trigger the pipeline more often so the sums are fresh
+D: Duplicate orders in the dataset; add a uniqueness check on `order_id` instead
+K: A
+G: ## Exact equality on floating point values
+Binary floating point cannot represent many decimal fractions exactly, and the order in which values are summed can change the last digits. A strict equality test on computed sums therefore fails on correct data.
+## Fixes
+- Store money in a decimal type with a fixed scale.
+- Alternatively compare with a tolerance, such as a difference below half a cent.
+Example: summing 0.1 ten times in floating point gives a value slightly different from 1.0.
+W: Floating point rounding: differences of about 1e-7 are the signature, and decimals or a tolerance remove the false failures.
+X: B=Network corruption: corruption would produce large, random differences, not tiny ones.
+C=Stale schedule: freshness would change values by whole rows, not by 1e-7.
+D=Duplicate orders: duplicates would double amounts, not shift them by a tiny fraction.
+T: Use decimals or tolerances for numeric reconciliation expectations.
+V: expectations
+
+@ PLTR-DE D5 T5.3 applied comparison
+S: A dataset is built successfully every day, and its freshness is within limits, but over the last month the build has gradually slowed from 8 minutes to 55 minutes. Nobody noticed until a downstream deadline was missed. Which health check type catches this early?
+A: A job-level check, since it reports whether the output job completed, which it did each day
+B: A build-level check on duration, which flags builds that exceed an expected time
+C: A freshness check set to a shorter interval, which tracks how long builds take
+D: A schema check, because a slower build implies that the columns must have changed
+K: B
+G: ## Choosing the health check type
+Foundry offers checks at several levels, each answering a different question.
+## Types
+- Job-level: does the job for an output dataset complete successfully?
+- Build-level: do builds complete successfully and within an expected duration?
+- Freshness: is the data being kept up to date?
+Example: a build duration threshold of 20 minutes would have alerted on the first slow week, long before the 55-minute runs missed a deadline.
+W: Build-level duration check: it alerts when a build takes longer than expected, even if it still succeeds and the data is fresh.
+X: A=Job-level: the job succeeded every day, so a success-only check stays green.
+C=Tighter freshness: measures the age of data, not how long the build took to produce it.
+D=Schema check: column changes are not what makes a build slower in this scenario.
+T: Use build-level duration checks to catch builds that slow down but still succeed.
+V: Data Health
+
+@ PLTR-DE D6 T6.1 applied troubleshooting
+S: A dataset owner holds the Owner role on a project and wants to remove the PII marking from a derived dataset that holds only fully anonymised aggregates. The marking cannot be removed. Why?
+A: Removing a marking needs the marking's Expand Access permission, which the Owner role alone does not give
+B: A marking can never be removed once applied, even by platform administrators
+C: Only the person who originally created the dataset may remove its markings, whatever their role today
+D: Markings can be removed only by deleting the dataset and rebuilding it without the marking
+K: A
+G: ## Markings are mandatory controls
+Roles are discretionary: an Owner decides who else gets access. Markings are mandatory: they are managed centrally by people such as data protection officers, so project owners cannot override them.
+## Removing a marking
+- The Expand Access permission on the marking itself is required to remove it.
+- An Owner role on the dataset does not carry this permission.
+- Removing a marking is a sensitive action, and it should follow a review that the data is truly safe.
+Example: the privacy team grants Expand Access to the right person after verifying the aggregates are anonymous.
+W: Expand Access on the marking: the Owner role governs the resource, not the central marking, so the right permission has to come from the marking's managers.
+X: B=Never removable: markings can be removed by someone with the permission.
+C=Creator only: removal depends on the marking permission, not on who built the dataset.
+D=Delete and rebuild: marking inheritance would apply to the rebuild from the same upstream anyway.
+T: Owners cannot remove markings without the marking's Expand Access permission.
+V: markings
+
+@ PLTR-DE D6 T6.1 applied tradeoff
+S: An administrator plans to add a marking to a widely used project of raw data so that only the data-protection team can read it. The project feeds 30 downstream datasets used by other teams. What should be done before applying it?
+A: Apply it immediately, since inheritance only affects datasets inside the same project folder
+B: Review the downstream lineage first, since the marking is inherited immediately by derived datasets
+C: Apply it on a Friday evening to reduce the number of users who notice downstream problems
+D: Apply it only on the 30 downstream datasets and leave the project itself without any marking
+K: B
+G: ## Applying a marking is sensitive
+Markings are inherited along the file hierarchy and along data dependencies, and they take effect immediately.
+## Consequences
+- Everything in the project inherits the marking.
+- Any dataset derived from a marked dataset inherits it too, so users who are not members lose access to data downstream.
+- The marking should be applied with the downstream consumers known, with membership prepared and communication sent.
+Example: lineage shows two executive dashboards depend on the raw data; their owners are told and their users are added to the marking beforehand.
+W: Review lineage first: inheritance is immediate and reaches derived datasets, so impact and membership are planned before the change.
+X: A=Immediately, folder only: inheritance also follows data dependencies outside the folder.
+C=Friday evening: timing hides the impact and does not prevent lockouts.
+D=Only downstream datasets: leaves the raw source unprotected, which is where the requirement started.
+T: Check downstream impact before applying a marking, because it is inherited at once.
+V: markings, lineage
+
+@ PLTR-DE D6 T6.1 applied definition
+S: A derived dataset joins one source carrying a PII marking with another carrying a FINANCE marking. An analyst is a member of the PII marking only and holds Viewer on the project. What access does the analyst have to the derived dataset's data?
+A: Full access, because membership of one marking satisfies the requirement for the other
+B: Read access to the PII columns only, because the platform splits the data by marking
+C: No access to the data, because a user must be a member of all markings on a resource
+D: Access after a delay, because the platform grants the missing marking once a Viewer role exists
+K: C
+G: ## Markings are conjunctive
+A user needs membership of every marking applied to a resource, an AND rather than an OR. Roles do not substitute for a missing marking.
+## In the example
+- The derived dataset inherits both markings along its data dependencies.
+- The analyst satisfies PII but not FINANCE, so the data is closed.
+- Access requires a marking administrator to add the analyst to FINANCE, if appropriate.
+Example: the analyst may still see that the dataset exists and view metadata, but not its contents.
+W: Conjunctive markings: missing FINANCE means no data access, whatever roles the analyst holds.
+X: A=One is enough: markings are combined with AND, never OR, so the PII membership cannot cover the FINANCE requirement.
+B=Column split: markings apply to the whole resource and do not split columns.
+D=Delayed grant: roles never assign marking membership automatically.
+T: A user needs every marking on a resource; one missing marking blocks access.
+V: markings
+
+@ PLTR-DE D6 T6.2 applied use-case
+S: Analysts want to experiment with new aggregations on curated data, and sometimes leave half-finished datasets behind. Production pipelines in the same project have been cluttered and an experiment once overwrote a table. What structure prevents this?
+A: Give analysts the Owner role on the production project so they can tidy up whatever they leave behind
+B: Ask analysts to prefix experiments with their initials and keep the production project as it is
+C: Move the production pipeline to a personal folder of one engineer who guards it from changes
+D: A sandbox project for experiments with read-only curated access, promoted by review
+K: D
+G: ## Separate experimentation from production
+Projects are the main unit of access and organisation. Mixing exploration and production in one project means everyone with write access can alter production resources.
+## Structure
+- Production project: few editors, reviewed changes.
+- Sandbox project: analysts have editor rights and can create freely.
+- Curated datasets are referenced read-only from the sandbox; good results are promoted through review.
+Example: an analyst's new aggregation lives in the sandbox until the engineers adopt it.
+W: Sandbox project with read-only curated access: experiments are free and cannot touch production.
+X: A=Owner on production: widens the risk, since owners can change or delete anything.
+B=Naming prefixes: a convention does not stop an accidental overwrite.
+C=Personal folder: concentrates ownership on one person and breaks team operations.
+T: Give experiments their own project and promote results to production through review.
+V: Projects, roles
+
+@ PLTR-DE D6 T6.2 applied use-case
+S: Ten pipeline engineers have Editor on a project that holds raw synced data and transforms. Only three of them maintain the syncs; seven only write transforms and merely read the raw data. How should access be restructured?
+A: Keep everybody as Editor, since they all work in the same pipeline and trust each other
+B: Make all ten Owners so that nobody is blocked when a raw dataset needs a quick fix
+C: Split raw and transform projects, with Editor on raw for the three and Viewer for the seven
+D: Remove all editing rights and ask a platform administrator to apply each change on request
+K: C
+G: ## Least privilege by stage
+Roles describe what a person may do in a project. People who only read a stage should not be able to change it.
+## Design
+- Raw project: three sync maintainers as Editor, others as Viewer.
+- Transform project: the transform engineers as Editor.
+- Grants given to groups, not to individuals.
+Example: an accidental deletion of a raw dataset is only possible for the three people who maintain syncs.
+W: Separate projects and roles by stage: each engineer holds the rights their job needs and no more.
+X: A=Everyone Editor: any of seven readers can change or delete raw data.
+B=All Owners: maximises rights and the ability to change permissions.
+D=Administrator-only changes: creates a bottleneck and does not match how the team works.
+T: Split projects by stage and give editing rights only to the people who maintain that stage.
+V: Projects, roles
+
+@ PLTR-DE D6 T6.2 applied troubleshooting
+S: A project holds ordinary reference data (country codes) and a salary dataset. The team added a restrictive marking to the whole project to protect the salary data, and now nobody outside HR can use the country codes. What is the best correction?
+A: Keep the marking on the project and copy the country codes into each team's own project too
+B: Remove the marking altogether and rely on Viewer roles to keep salary data safe
+C: Add every employee to the marking so that the project works for everyone again
+D: Move the salary data to its own project carrying the marking and leave the reference data unmarked
+K: D
+G: ## Markings follow the hierarchy
+A marking on a project is inherited by every file inside it, so everything shares one audience. A project should hold resources with the same sensitivity.
+## Fix
+- Create a project for the sensitive data and apply the marking there.
+- Keep the shared reference data in an unmarked project that all teams can read.
+- Pipelines that use both will still carry the marking on derived data, as intended.
+Example: only the HR project is closed; country codes become usable by everybody again.
+W: Separate the salary data: the marking protects only what needs it and the reference data is available to all.
+X: A=Copies of the codes: duplicates data and creates maintenance work without addressing the structure.
+B=Marking removed: relying on roles drops the mandatory control that protected the salary data.
+C=Everyone in the marking: defeats the purpose and exposes salaries to all.
+T: Group resources of equal sensitivity into a project so a marking affects only what needs it.
+V: Projects, markings
+
+@ PLTR-DE D6 T6.3 applied comparison
+S: An Ontology object type holds employees. Managers should see only their own department's employees, and the `salary` property must additionally be visible only to HR. Which design fits the Ontology?
+A: An object security policy for the department rows and a property security policy covering salary
+B: A restricted view on the backing dataset, because it supports both rows and columns in one policy
+C: One property security policy only, since it also decides which rows each manager can see
+D: A separate dataset per department, each with its own copy of the salary column
+K: A
+G: ## Policies on object types
+Object security policies configure which object instances a user can see, giving row-level security independent of the backing dataset's permissions. Property security policies guard selected properties and give column-level security.
+## How they combine
+- By default an object policy applies to all properties.
+- When a property policy covers a property, the user must pass both policies to see its value.
+- Together they give cell-level control.
+The docs recommend these policies over restricted views for most Ontology use cases, partly because restricted views filter rows only.
+Example: a manager passes the department rule but not the HR rule, so the salary cell stays hidden.
+W: Object plus property security policies: rows are filtered by department and the salary property needs an extra HR condition.
+X: B=Restricted view: restricted views filter rows only and offer no column-level policy.
+C=Property policy alone: it guards values of properties, while row visibility comes from the object policy.
+D=Per-department datasets: multiplies copies and still leaves salary visibility unsolved.
+T: Use object security for rows and property security for columns on Ontology object types.
+V: Ontology, object security
+
+@ PLTR-DE D6 T6.3 applied troubleshooting
+S: A team protects a sales table with a restricted view that shows each rep only their region. An engineer with access to the backing dataset builds a pipeline that copies it into a new dataset in a shared project, and the new dataset is visible to the whole team. Why did the row restriction not follow the data?
+A: The restricted view was misconfigured and every restricted view leaks rows into pipelines that it feeds
+B: Granular policies on a restricted view are discretionary and do not propagate to data derived from the backing dataset
+C: The pipeline's build identity bypasses all permissions, so what it writes loses inherited markings
+D: Restricted views stop working as soon as two or more users have access to the same backing dataset
+K: B
+G: ## Which controls travel with data
+Markings are mandatory and propagate through transforms. Granular policies on restricted views are discretionary and do not propagate to derived data.
+## Implication
+- A restricted view controls who sees which rows when reading through the view.
+- A copy made from the backing dataset is a separate dataset governed by its own project roles and markings.
+- To protect the backing data wherever it goes, restrict access to the backing dataset itself, and apply markings when the sensitivity must follow derived data.
+Example: marking the backing dataset means the copy inherits the marking and the broad team loses access.
+W: Discretionary, non-propagating policy: the row filter applies to reads through the view only, so derived data needs its own protection such as markings.
+X: A=Misconfiguration: the view works as designed for reads through it; propagation is simply not part of it.
+C=Identity bypass: markings propagate through transform logic regardless of who builds.
+D=Multiple users: the number of users with backing access does not disable a view.
+T: Row filters on restricted views do not propagate; protect derived data with markings.
+V: restricted views, markings
+
+@ PLTR-DE D6 T6.4 applied troubleshooting
+S: A project-scoped schedule has run reliably for months. The engineer who created an older, user-scoped schedule on a sister pipeline moved to another team and lost access to that project. Since then that schedule's builds fail with permission errors although nothing else changed. What is the best fix?
+A: Give the engineer back access to the project so that the user-scoped schedule can run as before
+B: Recreate the schedule scoped to the project so it no longer depends on any individual's permissions
+C: Add the builds to a daily manual checklist so someone runs them in the engineer's place
+D: Pause the schedule indefinitely, because permission errors in a schedule cannot be solved
+K: B
+G: ## Schedule scope and permissions
+A schedule can be saved in user mode, where it runs as if that user ran the build, or in project-scoped mode, where it depends on the set of projects containing the datasets it builds.
+## Why it matters
+- User mode is prone to unexpected changes when the user's permissions change.
+- Project-scoped mode is more consistent and independent of one user's permissions.
+- Saving a schedule scoped to the project removes the personal dependency.
+Example: when the engineer left, the user-scoped schedule lost the rights it needed; the project-scoped one kept running.
+W: Project-scoped schedule: the schedule is independent of any user's permissions, so staff moves no longer break it.
+X: A=Restoring the old access: keeps a person who left the team tied to the pipeline and repeats the risk.
+C=Manual checklist: replaces automation with a process that can be forgotten.
+D=Pause indefinitely: the cause is fixable, and pausing stops fresh data.
+T: Prefer project-scoped schedules so builds do not depend on one person's access.
+V: Schedules, Projects
