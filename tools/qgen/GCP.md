@@ -78,6 +78,26 @@ Writing rules (in addition to the shared ones below):
 - Streaming facts (windowing, triggers, watermarks, late data, exactly-once) belong to ONE batch (b03); BigQuery capacity and
   reservations to b08; Dataplex and governance to b06.
 
+### GCP-PSE Professional Cloud Security Engineer (added 2026-11-06)
+Sources: https://cloud.google.com/learn/certification/cloud-security-engineer (read 2026-11-06) and the exam guide
+https://services.google.com/fh/files/misc/professional_cloud_security_engineer_exam_guide_english.pdf; product facts on docs.cloud.google.com only.
+
+| Item | Value |
+|---|---|
+| Length | 2 hours |
+| Questions | "50-60 multiple choice questions" (the page says multiple choice only). This bank assumes 55 (mock length only) and still uses about 15-20% "(Select TWO)" as the other Google banks do: re-check when the page changes |
+| Pass mark | Not published. `passMarkUnpublished: true` |
+| Sections | D1 configuring access ~25%, D2 securing communications and boundary protection ~22%, D3 ensuring data protection ~23%, D4 managing operations ~19%, D5 supporting compliance requirements ~11% |
+| Tasks | 14: 1.1-1.5, 2.1-2.3, 3.1-3.3, 4.1-4.2, 5.1 (`data/exam-tasks.json`) |
+| Prerequisites | None; 3+ years industry, 1+ year designing and managing solutions on Google Cloud recommended. Cert valid 2 years |
+
+Writing rules (in addition to the shared ones below):
+- Professional depth: the security design or control that fits the threat and requirement, with its trade-off (blast radius, operational effort, auditability), not command syntax or console paths. No prices, limits or quotas.
+- Use the guide's names (Cloud Identity, Workforce Identity Federation, Workload Identity Federation, Privileged Access Manager, Access Context Manager, Policy Intelligence, Cloud NGFW, Cloud Armor, Secure Web Proxy, VPC Service Controls, Sensitive Data Protection, Secret Manager, Cloud KMS / EKM, Confidential Computing, Binary Authorization, Security Command Center, Assured Workloads, Access Transparency, Access Approval, "Gemini Enterprise Agent Platform"). Check each on docs.cloud.google.com before keying: renames are frequent.
+- Preview, beta and deprecated features stay out of keys (several SCC, Model Armor and AI security features are Preview: check each).
+- Overlap: GCP-PCA D3 (security and compliance), GCP-ACE D4 (access and security) and GCP-PDE b01/b06 (CMEK, Sensitive Data Protection, policy tags, masking) already exist; grep them first and test the security engineer's choice at a deeper level (which control, scoped how, and why not the alternatives).
+- Hot spots, one batch each: Workload Identity Federation b01; IAM conditions/deny and Privileged Access Manager b02; Cloud Armor and Cloud NGFW layer 7 b03; VPC Service Controls b04; EKM and key import/rotation b06; Confidential Computing and AI security b07; Binary Authorization b08; Security Command Center and log sinks b09; Assured Workloads, Access Transparency and Access Approval b10.
+
 ### GCP-GAIL Generative AI Leader (added 2026-10-30)
 Sources: https://cloud.google.com/learn/certification/generative-ai-leader and the exam guide
 https://services.google.com/fh/files/misc/generative_ai_leader_exam_guide_english.pdf (read 2026-10-30; the exam page
