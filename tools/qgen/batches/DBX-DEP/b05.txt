@@ -1,0 +1,587 @@
+# DBX-DEP batch 05: D3 data manipulation: T3.1 advanced transformations 3, T3.2 VARIANT 8, T3.3 AI functions and ai_query 8, T3.4 Lakeflow Pipelines expectations 10 (guide read 2026-11-07)
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-window-functions.html
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/lag.html
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/first_value.html
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/max_by.html
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-groupby.html
+# src: https://docs.databricks.com/aws/en/semi-structured/variant.html
+# src: https://docs.databricks.com/aws/en/semi-structured/variant-json-diff.html
+# src: https://docs.databricks.com/aws/en/delta/variant.html
+# src: https://docs.databricks.com/aws/en/sql/language-manual/data-types/variant-type.html
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/variant_explode.html
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/try_parse_json.html
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/ai_query.html
+# src: https://docs.databricks.com/aws/en/large-language-models/ai-functions.html
+# src: https://docs.databricks.com/aws/en/large-language-models/ai-functions-uc-permissions.html
+# src: https://docs.databricks.com/aws/en/ldp/expectations.html
+# src: https://docs.databricks.com/aws/en/ldp/expectation-patterns.html
+
+@ DBX-DEP D3 T3.1 advanced use-case
+S: A silver job receives one meter reading per row, and the device often sends NULL when a sensor skips a measurement. Analysts need every row to carry the most recent non-NULL `temp` of the same `device_id` at or before its `ts`. Which expression does this without a self-join?
+A: `last(temp, true) OVER (PARTITION BY device_id ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`
+B: `max(temp) OVER (PARTITION BY device_id ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` to carry the highest earlier value
+C: `lag(temp, 1) OVER (PARTITION BY device_id ORDER BY ts)`, which returns the value of the previous row even when it is NULL
+D: `first_value(temp, true) OVER (PARTITION BY device_id ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` to read the earliest non-NULL value
+K: A
+G: ## Forward fill with a window
+A window function computes a value for each row from a frame of related rows, without collapsing the rows as `GROUP BY` does. Three parts define it:
+- `PARTITION BY device_id` keeps each device independent.
+- `ORDER BY ts` gives the rows a sequence.
+- The frame (`ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`) limits the rows to "everything up to now".
+Aggregate-style functions such as `first_value` and `last` take an `ignoreNull` flag (`IGNORE NULLS`). With the flag on, NULL rows are skipped, so `last(temp, true)` over a frame that ends at the current row returns the newest known reading. This is the standard forward-fill pattern and is a single shuffle on `device_id`.
+W: Last non-NULL over a growing frame: with `ignoreNull` set to true and the frame ending at the current row, each row gets the latest measurement that is not NULL, and a row with its own reading simply returns it.
+X: B=Running max: `max` returns the highest value seen so far, not the most recent one, so a drop in temperature would still show the old peak.
+C=lag by one row: `lag` looks only at the immediately preceding row and respects NULLs by default, so two consecutive missing readings still give NULL; it does not search backwards for a value.
+D=first_value: with the same frame it returns the earliest non-NULL reading of the device, which stays constant after the first measurement and is not the latest.
+T: Forward-fill NULLs with `last(col, true)` over a frame from the unbounded preceding row to the current row.
+V: Spark SQL window functions
+
+@ DBX-DEP D3 T3.1 advanced tradeoff
+S: A gold job needs one row per `sensor_id` that holds the three readings with the latest `ts` as an array. The team wants a single `GROUP BY sensor_id` aggregate, with no window function and no self-join. Which expression does this?
+A: `max_by(reading, ts, 3)`, which returns an array with the readings of the three rows with the largest `ts`
+B: `max_by(reading, ts)`, which returns the `reading` values of the three rows with the largest `ts` as an array
+C: `collect_list(reading)`, which returns the readings as an array sorted by `ts` from the newest to the oldest
+D: `first(reading, 3)`, which returns the first three `reading` values of each group in arrival order
+K: A
+G: ## Top-N values inside an aggregate
+`max_by(expr, ordExpr)` returns the `expr` value of the row with the largest `ordExpr` in each group. It has an optional third argument, `limit`:
+- Without `limit` the result has the type of `expr`: one value, taken from one row.
+- With `limit` (an `INT` from 1 to 100,000) the result is an `ARRAY` of up to `limit` values, taken from the rows with the largest `ordExpr` values.
+- Rows whose `ordExpr` is NULL are not included, and ties on the largest values make the result non-deterministic.
+This gives a "latest N per key" array in one aggregation step. When the full rows are needed, or ties must be broken in a repeatable way, a window function such as `row_number()` with a unique tie-breaker is the alternative.
+W: max_by with a limit: the third argument turns the result into an array of the values that belong to the three largest `ts` values per sensor, in one aggregate.
+X: B=max_by without limit: it returns a single value of the type of `reading`, from the one row with the largest `ts`, not an array of three.
+C=collect_list: the order of the elements in the array is non-deterministic, and it collects all readings, so neither the sorting by `ts` nor the limit of three is applied.
+D=first: its second argument is the boolean `ignoreNull`, not a count, so `3` is not a valid argument, and `first` would pick by arrival order rather than by `ts`.
+T: Use `max_by(expr, ordExpr, n)` to collect the n values with the latest ordering key per group in one aggregate.
+V: Spark SQL aggregations
+
+@ DBX-DEP D3 T3.1 advanced troubleshooting
+S: A report uses `GROUP BY ROLLUP(region, channel)` and shows a row with `region = 'EU'` and `channel = NULL`. Some analysts read it as "EU sales with no channel recorded", but the source also contains genuine NULL channels. How should the query tell the subtotal row from real NULL data?
+A: Replace `ROLLUP` with `GROUP BY region, channel` and add the totals later in a separate union with the same two columns
+B: Wrap `channel` in `coalesce(channel, 'ALL')`, which returns the label only for subtotal rows and never for source NULLs
+C: Select `grouping(channel)` next to the columns; it is 1 for rows where `channel` was aggregated away and 0 for real values, including NULL
+D: Add `DISTINCT` to the select list, which removes the subtotal rows that repeat a region and leaves only the genuine NULL channels
+K: C
+G: ## Grouping analytics and the NULL ambiguity
+`ROLLUP`, `CUBE` and `GROUPING SETS` compute several aggregation levels in one pass over the data. In the subtotal rows the column that was rolled up is reported as NULL, so it looks the same as a source NULL.
+- `grouping(col)` returns 1 when the column was aggregated away in that output row and 0 otherwise.
+- `grouping_id(...)` combines several columns into one bit mask that identifies the grouping level.
+Using these flags is the supported way to label subtotals. It avoids replacing NULLs before the grouping, which would merge real "unknown" data with the label.
+W: grouping flag: `grouping(channel)` is computed by the engine from the grouping level, so subtotal rows get 1 and rows with a real NULL channel get 0.
+X: A=Plain GROUP BY: this drops the subtotal and total rows the report needs, and a manual union would recompute them with another scan of the data.
+B=coalesce: it turns both the subtotal NULLs and the source NULLs into the same label, so the ambiguity stays; it only hides it.
+D=DISTINCT: it removes only fully identical rows, so subtotal rows with different aggregated values stay, and it cannot tell why a NULL appears.
+T: Use `grouping()` or `grouping_id()` to separate rollup subtotal NULLs from real NULL values.
+V: Spark SQL aggregations
+
+@ DBX-DEP D3 T3.2 advanced troubleshooting
+S: Events were stored as JSON strings and queried with `payload:Customer_ID`. After the table was migrated to a VARIANT column built with `parse_json`, the same query returns NULL for every row, while the data still contains the key `customer_id`. What explains this?
+A: VARIANT paths are case-sensitive, so `Customer_ID` and `customer_id` are different fields and the exact key is required
+B: `parse_json` renames keys to lower case on conversion, so the query needs the stored key written in upper case instead
+C: The `:` operator works only on STRING columns, so the query needs `get_json_object` over the column
+D: `parse_json` stores keys in alphabetical order and the engine matches by position, so a renamed key cannot be found
+K: A
+G: ## VARIANT is not a JSON string
+Databricks recommends VARIANT over JSON strings for semi-structured data. The query syntax is similar (`col:field`, `.sub`, `[0]`), but some semantics differ, and these differences can break queries when migrating:
+- Path elements are matched **case-sensitively** for VARIANT; JSON string queries are case-insensitive.
+- `[*]` is not supported to unpack all array elements.
+- Null handling differs (variant null versus SQL NULL).
+A path that is not found returns NULL rather than an error, which is why the symptom looks like missing data.
+W: Case sensitivity: the JSON string functions matched `Customer_ID` to `customer_id`, but VARIANT path elements must match the stored case exactly, so the old spelling finds nothing and returns NULL.
+X: B=Key renaming: `parse_json` keeps the key names exactly as they appear in the JSON text; it does not change their case.
+C=Operator on STRING only: the colon operator is documented for VARIANT as the shorthand for `variant_get`, and `get_json_object` is for JSON strings.
+D=Positional matching: keys are looked up by name; the key ordering is arbitrary and plays no role in path lookup.
+T: Migrating JSON strings to VARIANT makes key lookups case-sensitive, so a mismatch returns NULL instead of an error.
+V: VARIANT
+
+@ DBX-DEP D3 T3.2 advanced troubleshooting
+S: A VARIANT column `raw` contains the key `zip.code`. The query `SELECT raw:`zip.code` FROM addresses` returns NULL for every row, although the key is present with values. Which change returns the values?
+A: Write `raw:['zip.code']`, because bracket notation escapes periods and square brackets in field names
+B: Write `raw:zip.code`, because the VARIANT operator takes a dotted name as one field key
+C: Wrap the whole column in `to_json(raw)` and apply the colon operator to the resulting string
+D: Cast the column first with `raw::string`, since VARIANT paths cannot contain periods before a cast
+K: A
+G: ## Special characters in field names
+With VARIANT the `.` operator selects a sub-field, so `raw:zip.code` means "field `zip`, then sub-field `code`". A field whose name contains a period, a colon, a space or square brackets must be escaped.
+- `raw:['zip.code']` is the recommended syntax for every field name with a special character; in `variant_get` the same escape is the path `$['zip.code']`.
+- Backticks escape spaces and colons, but they do **not** escape periods or square brackets, so a name with a period returns NULL when written in backticks.
+A missing path never raises an error, which is why the result is NULL and not a failure.
+W: Bracket escape: `['zip.code']` addresses the single field named `zip.code`, so the lookup finds it instead of searching for `zip` and then `code`.
+X: B=Dotted name: without escaping, the dot starts a nested path, so the engine looks for an object `zip` that does not exist and returns NULL.
+C=to_json first: this serializes the VARIANT to a string and gives up the typed access; the period problem stays in whatever path syntax is used afterwards.
+D=Cast to string: casting the whole value does not help to address a field, and the claim that periods are forbidden in paths is wrong, since bracket notation is the documented answer.
+T: Escape VARIANT field names that contain periods or brackets with `col:['name']`; backticks do not cover them.
+V: VARIANT
+
+@ DBX-DEP D3 T3.2 advanced use-case
+S: A VARIANT column `payload` holds an order with an array `items` of objects such as `{"sku":"A1","qty":2}`. A fact table needs one row per item with `sku` and `qty` as typed columns. Which query builds it?
+A: `SELECT o.id, payload:items[*].sku FROM orders o`, which expands all array elements into separate rows
+B: `SELECT o.id, i.value:sku::string AS sku, i.value:qty::int AS qty FROM orders o, LATERAL variant_explode(o.payload:items) i`
+C: `SELECT o.id, explode(o.payload:items) FROM orders o`, because the generic function is the only one that unpacks arrays
+D: `SELECT o.id, payload:items:sku::string FROM orders o GROUP BY o.id`, which flattens the array while grouping by order
+K: B
+G: ## Flattening VARIANT arrays
+`variant_explode` is the table-valued function for VARIANT. It returns the columns `pos`, `key` and `value`.
+- For an **array**, `key` is NULL and `value` is one array element (still a VARIANT).
+- For an **object**, `key` and `value` are the field names and values.
+- A NULL or non-array/object input yields no rows (use `variant_explode_outer` to keep one NULL row).
+After the explode, extract fields from `value` with `:` and cast with `::` to typed columns. A `LATERAL` join (or a comma join in the FROM clause) correlates the function with each order row.
+Note that `[*]` is not supported for VARIANT, so the element-wise syntax from JSON strings does not carry over.
+W: variant_explode with LATERAL: each item becomes a row, and `value:sku::string` and `value:qty::int` give typed columns for the fact table.
+X: A=Wildcard path: `[*]` is not supported for VARIANT, so this form cannot unpack the array.
+C=Generic explode: `explode` expects an ARRAY or MAP type, and a VARIANT array needs the VARIANT-specific function, which is why the documentation lists `variant_explode` as its counterpart.
+D=Chained fields with GROUP BY: grouping does not flatten anything, and `items:sku` on an array does not return one value per element.
+T: Flatten VARIANT arrays and objects with `variant_explode` in a lateral join, then cast the extracted fields.
+V: VARIANT
+
+@ DBX-DEP D3 T3.2 advanced use-case
+S: A bronze table stores webhook bodies from 30 partners as VARIANT. Before promoting stable fields into typed silver columns, the team wants one summary of the combined structure and types seen across the whole column, including fields that appear only in some rows. Which function fits?
+A: `schema_of_variant(payload)` applied to the first row only, since one row always holds all possible fields
+B: `schema_of_json_agg(payload)`, which accepts VARIANT input and merges the field types of every row
+C: `schema_of_variant_agg(payload)`, which merges the schemas of all rows and falls back to VARIANT for conflicting types
+D: `payload::string` followed by a `DESCRIBE` of the table, because the metadata lists the nested fields of VARIANT columns
+K: C
+G: ## Discovering a VARIANT schema
+A VARIANT column has no declared inner schema, so the structure must be inferred from the data.
+- `schema_of_variant(v)` returns the schema of one value.
+- `schema_of_variant_agg(v)` is an aggregate that combines the schemas of all values in the column or group. Fields that appear in only some rows are included.
+- When types conflict and no common type exists (for example a number in one row and an object in another), the inferred type falls back to VARIANT instead of STRING.
+Using the aggregate before building typed columns shows which fields are stable and which are polymorphic and should stay as VARIANT or be cast with `try_variant_get`.
+W: schema_of_variant_agg: it aggregates over all rows, so optional fields from any partner appear in the result and conflicting types are reported as VARIANT.
+X: A=Single row: one payload shows only its own fields, so optional fields from other partners and different type choices are missed.
+B=schema_of_json_agg: that is the counterpart for JSON strings; the VARIANT function is `schema_of_variant_agg`.
+D=DESCRIBE: table metadata shows the column as VARIANT and does not list inner fields, because they are not part of the schema.
+T: Use `schema_of_variant_agg` to inspect the combined schema of a VARIANT column before extracting typed fields.
+V: VARIANT
+
+@ DBX-DEP D3 T3.2 advanced troubleshooting
+S: A nightly ingest runs `SELECT parse_json(body) AS v FROM bronze_raw`. One partner occasionally sends truncated JSON and the whole job fails. Bad rows must be kept for inspection, and good rows must flow. What is the best design?
+A: Use `try_parse_json(body)`, which returns NULL on invalid JSON, and route NULL results with non-NULL input to a rejects table
+B: Keep `parse_json` and set `failOnError => false` on the call so that the failed rows come back as error messages for review
+C: Cast with `body::variant`, which silently converts malformed JSON text to a VARIANT string value
+D: Wrap the call in `ai_query` to repair broken JSON before parsing, so that no row ever fails
+K: A
+G: ## Tolerant parsing
+`parse_json` raises an error when the input is malformed, exceeds the VARIANT size limit or is otherwise invalid, so a single bad row fails the batch.
+`try_parse_json` is the tolerant variant: it returns NULL when parsing fails. The usual production pattern is:
+1. Parse with `try_parse_json`.
+2. Rows where the result is NULL but the input was not NULL are rejects; write them (with the raw `body`) to a rejects or quarantine table.
+3. The remaining rows continue to the silver table.
+This keeps the pipeline running without losing the evidence for the data provider.
+W: try_parse_json plus a reject path: invalid text turns into NULL instead of an exception, and filtering on NULL result with non-NULL input isolates exactly the broken rows.
+X: B=failOnError: this is an argument of `ai_query`, not of `parse_json`, so it does nothing here.
+C=Cast to variant: a cast of text produces a VARIANT string holding the whole text, it does not parse the JSON structure, so downstream paths find nothing.
+D=Repair with a model: it adds cost and non-deterministic output to a simple parsing step, and a model can still return invalid JSON, so failures remain possible.
+T: Use `try_parse_json` and a reject path so malformed JSON is quarantined instead of failing the job.
+V: VARIANT
+
+@ DBX-DEP D3 T3.2 advanced troubleshooting
+S: A VARIANT column `v` holds events like `{"id":1,"coupon":null}` and `{"id":2}`. A data quality check must count events where the key `coupon` is present with an explicit JSON null, separately from events without the key. Which predicates separate the two cases?
+A: `v:coupon IS NULL` is true for both cases, so the cases cannot be told apart in SQL at all
+B: `is_variant_null(v:coupon)` is true when the key holds an explicit null, while `v:coupon IS NULL` is true when the key is missing
+C: `v:coupon = 'null'` is true for the explicit null, while a missing key returns the string `'missing'`
+D: `try_variant_get(v, '$.coupon', 'string') IS NULL` is true only for the explicit null and false for a key that is missing
+K: B
+G: ## Two kinds of null
+VARIANT distinguishes a SQL NULL from a JSON null stored inside the value.
+- If a path is not found, the extraction returns a SQL `NULL`, so `v:coupon IS NULL` is true.
+- If the key exists with the JSON value `null`, the extraction returns a VARIANT that stores a null; `IS NULL` is false for it, and `is_variant_null(...)` returns true.
+This is different from JSON string functions, which handle nulls differently, and matters for data quality rules that must tell "not sent" from "sent as null".
+W: is_variant_null versus IS NULL: the first detects a stored JSON null and the second detects a missing path, so the two predicates split the cases.
+X: A=Both identical: the documentation describes `is_variant_null` precisely to separate a VARIANT-encoded null from a SQL NULL, so SQL can tell them apart.
+C=String comparison: the extracted value is a VARIANT, not a string, and a missing key returns NULL, not the text `'missing'`.
+D=Typed extraction: a cast of either case to a string yields NULL, so the predicate is true for both cases and cannot separate them.
+T: Use `is_variant_null` for explicit JSON nulls and `IS NULL` for missing keys in VARIANT data.
+V: VARIANT
+
+@ DBX-DEP D3 T3.2 advanced tradeoff
+S: A team wants to enable VARIANT on an existing Delta table that is also read by an external engine using a Delta Lake reader library. What must the team consider before running `ALTER TABLE ... SET TBLPROPERTIES('delta.feature.variantType' = 'supported')`?
+A: The command rewrites all data files into a new layout, so the table is unavailable until the rewrite completes
+B: Enabling it upgrades the table writer protocol, which can break external Delta clients without support for it
+C: The feature can be enabled only when the table is created, so an existing table must be recreated from scratch
+D: VARIANT requires converting the table to Iceberg v2 first, because Delta tables cannot store any kind of semi-structured data type
+K: B
+G: ## Enabling VARIANT on Delta
+For Delta tables VARIANT support must be enabled explicitly: creating a table with a `VARIANT` column enables it, and an existing table can be altered with the table property `delta.feature.variantType`. Apache Iceberg v3 tables include VARIANT support by default.
+- Enabling variant upgrades the **writer protocol** of the Delta table. Clients that do not know the feature (older external readers or writers) might fail to read or write the table.
+- Reading and writing needs a Databricks Runtime that supports it (15.4 LTS or above).
+So in a shared-table setup the check is "do all engines support the table feature?" before the change, as for any protocol upgrade.
+W: Protocol upgrade: the property adds a table feature and raises the writer protocol, so external Delta clients without VARIANT support can break.
+X: A=Rewrite: setting a table property updates the protocol in the transaction log; it does not rewrite the existing data files.
+C=Only at creation: the documentation gives the ALTER TABLE syntax to enable support on an existing table.
+D=Iceberg requirement: Delta tables store VARIANT natively once the table feature is enabled, so no conversion to Iceberg is needed.
+T: Enabling VARIANT on a Delta table upgrades its writer protocol, so check external client compatibility first.
+V: VARIANT; Delta Lake
+
+@ DBX-DEP D3 T3.2 advanced tradeoff
+S: A compliance team must be able to prove the exact text of every webhook body received. The bronze table stores `body` as STRING and a derived column `v = parse_json(body)`. An engineer proposes to drop `body` and keep only `v`, converting back with `to_json(v)` when needed. What is the problem?
+A: `to_json` cannot convert a VARIANT value back to text, so the conversion is not available at all
+B: The conversion only changes the data type, so the proposal is safe and the original text can be rebuilt byte for byte from the stored VARIANT value
+C: `parse_json` is not exactly reversible: whitespace, key order and trailing zeros are not preserved, so keep the raw text
+D: VARIANT values are stored as compressed archives that cannot be read after 30 days, so the raw text must be kept
+K: C
+G: ## VARIANT is a parsed representation
+`parse_json` turns text into the binary VARIANT encoding, and `to_json(variant)` converts it back to a JSON string. The round trip is not exact:
+- whitespace is not preserved,
+- the ordering of keys is arbitrary,
+- trailing zeros in numbers might be truncated.
+For analytics this is irrelevant, so VARIANT is the right type for query access. For evidence and replay, keep the original string in the bronze layer (or the raw files) and treat VARIANT as the derived column, which can also be rebuilt when the parsing logic changes.
+W: Not an exact inverse: the VARIANT keeps the meaning, not the formatting, so the original bytes cannot be rebuilt and the raw column must stay.
+X: A=No conversion: Databricks Runtime 15.3 and above extend `to_json` to cast VARIANT values to JSON strings.
+B=Byte-for-byte rebuild: the documented differences in whitespace, key order and number formatting show that it is not byte for byte.
+D=Archive expiry: no such time-based loss exists; the reason is the representation, not age.
+T: VARIANT preserves content, not formatting, so keep the raw JSON text where exact evidence is required.
+V: VARIANT
+
+@ DBX-DEP D3 T3.3 advanced troubleshooting
+S: A batch enrichment job runs `SELECT id, ai_query('databricks-llama', 'Summarize: ' || text) AS summary FROM tickets` over 8 million rows. A few hundred rows hit endpoint errors, and the entire query fails and discards hours of work. The team wants the other rows to complete and the failures to be retried later. What should change?
+A: Add `failOnError => false`; each result becomes a struct with response and error message, so failed rows can be selected and retried later
+B: Split the table into thousands of small queries run one after another, so that an endpoint error only hits a small part of the data
+C: Wrap the call in `try_cast`, which turns any endpoint error into NULL before it can fail the query
+D: Switch the table to a provisioned throughput endpoint, which never returns row-level errors
+K: A
+G: ## Row-level errors in ai_query
+By default (`failOnError => true`) an endpoint error on a row fails the whole query. With `failOnError => false`, `ai_query` returns a `STRUCT` with two fields: the parsed `response` and an `errorMessage`.
+- Success: `errorMessage` is NULL.
+- Endpoint error for that row: `response` is NULL and `errorMessage` carries the reason.
+- Other kinds of errors still fail the whole query.
+A production pattern stores the struct, writes successful rows downstream and selects `errorMessage IS NOT NULL` rows into a retry set for the next run.
+W: failOnError => false: row-level endpoint errors turn into error messages in the result struct, so the query finishes and the failed rows can be selected and retried.
+X: B=Manual splitting: the documentation advises submitting the full dataset in one query because AI Functions handle parallelism, retries and scaling; many small queries add overhead and still fail on any error.
+C=try_cast: casting works on the returned value, not on the function call, and an endpoint failure is not a cast failure.
+D=Provisioned throughput: dedicated capacity does not remove errors, and the documentation recommends Databricks-hosted foundation model endpoints for batch work.
+T: Use `failOnError => false` in `ai_query` to get per-row errors instead of failing the batch.
+V: ai_query; AI Functions
+
+@ DBX-DEP D3 T3.3 advanced tradeoff
+S: A pipeline runs `ai_query` over 50 million documents once a day. An engineer proposes to chunk the table into 5,000-row slices in a Python loop and call the function per slice, to "protect the endpoint". What is the better design?
+A: Keep the loop, but add a sleep between slices, because AI Functions cannot run in parallel on a cluster
+B: Send the whole dataset in one query to a Databricks-hosted foundation model endpoint and let AI Functions parallelize and retry
+C: Use a provisioned throughput endpoint for the batch, because pay-per-token endpoints cannot serve batch queries from SQL
+D: Collect the documents to the driver and call the model serving REST API with a thread pool for full control
+K: B
+G: ## Batch inference with AI Functions
+AI Functions are built for set-based, large-scale use from SQL, notebooks, Lakeflow pipelines and jobs.
+- They handle parallelization, retries and scaling automatically, so the recommendation is to send the full dataset in a single query rather than splitting it manually. Throughput does not necessarily scale linearly from small tests to large workloads.
+- For `ai_query` use Databricks-hosted foundation models (endpoint names prefixed with `databricks-`), which are fully managed and work best for batch processing; provisioned throughput endpoints are not the recommended choice for it.
+- Progress can be followed in the query profile (completed and failed inferences).
+W: One query on a hosted foundation model endpoint: the engine parallelizes the calls and retries failures, which a manual loop cannot match.
+X: A=Loop with sleep: AI Functions are designed to run in parallel; the loop only serializes the work and slows the batch.
+C=Provisioned throughput: the documentation recommends hosted foundation models for batch processing, not dedicated provisioned endpoints.
+D=Driver-side REST calls: this bypasses the managed parallelism and retries and moves all documents through one machine, which does not scale to this volume.
+T: For batch inference send the whole dataset in one `ai_query` statement to a Databricks-hosted foundation model endpoint.
+V: ai_query; AI Functions
+
+@ DBX-DEP D3 T3.3 advanced use-case
+S: A pipeline uses `ai_query` to extract `vendor`, `total` and `due_date` from invoice text. The current prompt asks for JSON and a downstream `from_json` step fails on about 3% of rows because the model adds explanatory text. Which change makes the output reliably parseable?
+A: Lower the model temperature to zero in `modelParameters`, which guarantees that the model returns valid JSON every time
+B: Pass a `responseFormat` with a JSON schema or DDL schema, so the chat model must return output that follows it
+C: Add a second `ai_query` call that asks the model to check whether its first answer was valid JSON
+D: Apply `regexp_extract` to remove all text before the first brace, which works for any model output
+K: B
+G: ## Structured output
+Chat models given only a prompt may wrap JSON in prose. `ai_query` has a `responseFormat` argument (for chat foundation models) that enforces the output shape.
+- A DDL-style string such as `STRUCT<vendor:STRING, total:DOUBLE, due_date:STRING>`, or
+- A JSON string of type `json_schema` with a schema (optionally `strict`), `json_object` or `text`.
+With a schema the result can be parsed without fragile string handling, and the declared types become the contract for the silver table.
+Temperature (default 0.0 for `ai_query`) reduces variation, but it is not a format guarantee.
+W: responseFormat with a schema: the model output is constrained to the declared structure, so the downstream parse step receives well-formed JSON.
+X: A=Temperature zero: it is already the default for `ai_query` and makes output more repeatable, but it does not force a JSON-only answer.
+C=Self-check call: this doubles the inference volume and the checker is itself a model that can answer incorrectly, so failures only move.
+D=regexp_extract: removing the leading text does not handle trailing text, nested braces or truncated output, and it keeps the contract implicit.
+T: Use `responseFormat` with a schema in `ai_query` for machine-readable output.
+V: ai_query; AI Functions
+
+@ DBX-DEP D3 T3.3 advanced tradeoff
+S: A platform team wants analysts to run ready-made text classification and translation, while data engineers can also run custom prompts against chosen models in pipelines. How do the two kinds of AI Functions differ?
+A: Task-specific functions such as `ai_translate` cover one task; `ai_query` is the general-purpose function for custom prompts and models
+B: Task-specific functions run only on classic SQL warehouses, while `ai_query` runs only on serverless compute and notebooks
+C: `ai_query` is limited to traditional ML endpoints, while task-specific functions are the only route to a large language model
+D: Task-specific functions require the engineer to create a model serving endpoint first, while `ai_query` needs no endpoint
+K: A
+G: ## Task-specific versus general-purpose
+Databricks groups AI Functions into two kinds:
+- **Task-specific** functions (for example translation, summarization, classification, extraction, sentiment) are purpose-built, use Databricks-managed approaches, and need no customization. Databricks recommends them for getting started.
+- **`ai_query`** is the general-purpose function. You give it a prompt and choose any supported foundation model, external model or custom serving endpoint; it also supports structured output, model parameters and multimodal image input.
+Both run from SQL, notebooks, Lakeflow pipelines and jobs, and neither is available on classic SQL warehouses.
+Rule of thumb: use the task-specific function when it covers the task, and `ai_query` when you need a custom prompt, a specific model or a traditional ML endpoint.
+W: Purpose-built versus general-purpose: the task-specific functions encapsulate one task with no setup, while `ai_query` takes any prompt and endpoint, which is what the engineers need.
+X: B=Compute split: AI Functions are not available on classic SQL warehouses at all, and neither kind is tied to notebooks only.
+C=Reversed capabilities: `ai_query` calls foundation models, external models and custom ML endpoints, so it is not limited to traditional ML.
+D=Endpoint creation: Databricks-hosted foundation model endpoints exist already for `ai_query`, and the task-specific functions need no endpoint from the user.
+T: Use task-specific AI Functions for standard tasks and `ai_query` for custom prompts, models and endpoints.
+V: ai_query; AI Functions
+
+@ DBX-DEP D3 T3.3 advanced troubleshooting
+S: A governance team removed `EXECUTE` on the `system.ai` schema from all users and granted it back for only `ai_translate` and `ai_summarize`. Analysts can still run `ai_query` against a hosted foundation model. Why?
+A: The privilege change is cached for 24 hours, so `ai_query` is blocked only after the metastore has refreshed its privileges
+B: `ai_query` is exempt only for users with workspace admin rights, and the analysts are admins
+C: These permissions do not govern `ai_query`, which calls a serving endpoint, so endpoint permissions control it
+D: Revoking `EXECUTE` on a schema affects only SQL warehouses, and analysts use notebooks on classic clusters
+K: C
+G: ## Governing AI Functions
+AI Functions Unity Catalog permissions apply to the task-specific functions in the `system.ai` schema. By default every user has `EXECUTE` on the schema; an admin removes it and grants `EXECUTE` on the approved functions to build an allow-list. Requirements include a recent Databricks Runtime (17.3 LTS or above) and enablement through the account team.
+Limit: these permissions **do not govern `ai_query`**. Because `ai_query` invokes a model serving endpoint directly, access is controlled by permissions on that endpoint (the caller or definer needs `CAN QUERY`) and by foundation model Unity Catalog permissions.
+So an allow-list for task-specific functions is not a control for general model access; both layers must be configured.
+W: ai_query is outside the allow-list: it calls an endpoint directly, so schema privileges on `system.ai` have no effect on it, and the endpoint permission model applies.
+X: A=Delayed refresh: the documentation says calls to AI Functions stop immediately after the `EXECUTE` privilege is removed; the issue is scope, not timing.
+B=Admin exemption: nothing in the permission model exempts `ai_query` for admins; the analysts keep access because the privilege model does not cover it.
+D=Compute type: AI Functions permissions are enforced by the AI Functions service on every request, whatever compute sent the query.
+T: `system.ai` EXECUTE grants govern task-specific AI Functions only; restrict `ai_query` through endpoint and foundation model permissions.
+V: ai_query; Unity Catalog
+
+@ DBX-DEP D3 T3.3 advanced use-case
+S: Finance asks which jobs spend the most on LLM calls made with `ai_query` against Databricks-hosted foundation model endpoints. Where should the data engineer look?
+A: In `system.billing.usage` records with product `MODEL_SERVING` and offering type `BATCH_INFERENCE`, joined to job metadata
+B: Only in the Spark UI of each job, because AI Function costs are not stored in system tables
+C: In `system.billing.usage` records with product `AI_FUNCTIONS`, since `ai_query` is always recorded under that product
+D: In the compute metrics of the job cluster, because the inference runs on the same cluster that submits the query
+K: A
+G: ## Cost attribution for AI Functions
+The compute that runs the query is always billed. Inference adds separate charges, and they are recorded in `system.billing.usage` under two products:
+- `MODEL_SERVING` with offering type `BATCH_INFERENCE`: includes `ai_query` workloads on foundation model endpoints and simpler task-specific functions such as `ai_summarize`, `ai_translate` and `ai_mask`.
+- `AI_FUNCTIONS`: other task-specific functions with separate inference costs, such as `ai_classify`, `ai_extract` and `ai_parse_document`.
+Records carry `usage_metadata` (for example the job id), so they can be joined with job system tables to rank jobs. Total cost per user needs both products.
+W: MODEL_SERVING with BATCH_INFERENCE: this is where `ai_query` batch usage is recorded, and joining on the job id attributes it to jobs.
+X: B=Spark UI only: the query profile shows completed and failed inferences, but cost is in the billing system table.
+C=AI_FUNCTIONS for everything: that product holds specific task-specific functions, while `ai_query` on hosted endpoints is recorded under model serving.
+D=Cluster metrics: the inference runs on Databricks-managed serving infrastructure billed in addition to the cluster, so the cluster view misses it.
+T: `ai_query` batch inference cost is in `system.billing.usage` under MODEL_SERVING with BATCH_INFERENCE.
+V: ai_query; system tables
+
+@ DBX-DEP D3 T3.3 advanced troubleshooting
+S: An engineer wants to give each row its own output limit: `modelParameters => named_struct('max_tokens', t.limit_tokens)`, where `limit_tokens` is a column, and the query is rejected. What is the rule?
+A: Model parameters must be constant values and cannot depend on row data, so use a fixed value or run separate queries per limit
+B: Model parameters are accepted only for custom model endpoints, and a hosted foundation model needs the limit in the prompt text
+C: The struct must be passed through `responseFormat`, which is the only argument that accepts column references
+D: Model parameters are ignored unless `failOnError` is set to false, so the engineer must enable it first
+K: A
+G: ## Model parameters in ai_query
+`modelParameters` is an optional struct for chat, completion and embedding settings of foundation or external models, for example `max_tokens` and `temperature`.
+- The values must be constants, not data dependent.
+- Unspecified or NULL values use the model defaults; `temperature` defaults to 0.0 for `ai_query`, the others follow the Foundation Model API reference.
+Row-dependent behavior must go into the prompt (the `request` expression can be built per row), or the data can be split into groups that each use one constant setting.
+W: Constants only: the documentation requires constant parameters, so a per-row column reference is rejected; the limit goes into the prompt or into separate calls.
+X: B=Endpoint restriction: the argument is meant for foundation and external model endpoints, which is exactly the hosted case here.
+C=responseFormat: that argument defines the output format; it does not make model parameters row dependent.
+D=failOnError coupling: the two arguments are independent, and parameters are applied whatever the error mode is.
+T: `ai_query` `modelParameters` must be constants; put per-row instructions in the prompt.
+V: ai_query
+
+@ DBX-DEP D3 T3.3 advanced use-case
+S: A job must describe product photos stored as files in a Unity Catalog volume with a hosted vision model. The folder contains JPEG, PNG and TIFF files. Which approach fits the multimodal support of `ai_query`?
+A: Read with `read_files` as `binaryFile`, pass `files => content`, and convert TIFF files to JPEG or PNG first
+B: Pass the file path strings in the prompt text, because the endpoint downloads the images from the Unity Catalog volume itself
+C: Base64-encode every file in a UDF and concatenate it into the prompt, which works for all formats
+D: Use `files => path`, because the parameter takes the file location and reads any format
+K: A
+G: ## Multimodal requests
+`ai_query` supports image input for vision models. The images are passed in the `files` argument as binary content, usually from `read_files` with `format => 'binaryFile'`, whose `content` column holds the bytes: `ai_query(model, prompt, files => content)`.
+- Supported image inputs are **JPEG and PNG**.
+- Filters on `_metadata` (file size, name) can restrict the files before the model is called, which also limits cost.
+- The endpoint must be a hosted vision-capable model.
+Other formats such as TIFF must be converted before the call.
+W: binaryFile content with files: the model receives the image bytes in the expected parameter, and unsupported formats are converted so they do not fail.
+X: B=Paths in the prompt: the endpoint has no access to the volume, so the text of a path gives the model nothing to look at.
+C=Base64 in the prompt: images are passed through the `files` parameter, not as text, and long prompts hit model limits.
+D=files => path: the parameter expects the binary content column; format support is also limited to JPEG and PNG.
+T: Send images to `ai_query` as binary `content` through `files`, using JPEG or PNG.
+V: ai_query; Unity Catalog volumes
+
+@ DBX-DEP D3 T3.4 advanced use-case
+S: A streaming table receives trip records. Rows with a NULL pickup or dropoff zip must not reach the gold reports, but compliance requires keeping them for review with the reason. Which design in a Lakeflow pipeline meets both needs?
+A: `expect_or_fail` on the zip rules, so that any invalid trip stops the whole update until someone fixes the source data
+B: `expect_or_drop` on the zip rules; the dropped count in the metrics is enough to review the cases
+C: Add an `is_quarantined` flag in a table with `expect_all`, then expose valid and invalid rows as two views
+D: A plain `expect` on one table, since invalid rows are automatically written to a separate quarantine table
+K: C
+G: ## Quarantine pattern
+The three expectation actions are `warn` (keep rows, record metrics), `drop` (remove rows, log the count) and `fail` (stop the update). None of them stores invalid rows separately.
+The documented quarantine pattern keeps all rows in one table with a boolean flag:
+1. Build a rule set and a quarantine condition `NOT(rule1 AND rule2)`.
+2. A table (often temporary, partitioned by the flag) adds `is_quarantined` and uses `expect_all` so metrics are recorded.
+3. A view for valid rows (`is_quarantined = false`) feeds the gold layer; a view for invalid rows feeds the review process.
+This keeps the bad data available without letting it pollute downstream tables.
+W: Flag plus views: all rows stay in one table with metrics, and the downstream tables read only the valid view while reviewers read the invalid view.
+X: A=Fail: the whole update stops for a few bad trips and nothing is quarantined; it blocks good data too.
+B=Drop: dropped records are gone from the target, and only a count remains in the metrics, so there is nothing to review.
+D=Plain expect: it keeps invalid rows in the target and counts them, but it does not create a quarantine table for them.
+T: Quarantine with an `is_quarantined` flag and `expect_all`, then split into valid and invalid views.
+V: Lakeflow Pipelines; expectations
+
+@ DBX-DEP D3 T3.4 advanced troubleshooting
+S: A triggered pipeline has a validation materialized view with `expect_or_fail("unique_pk", "num_entries = 1")` that checks the primary key of the `report` table. A violation is found, the validation flow fails, yet the downstream `report_export` table updated successfully with the duplicates. What explains this?
+A: Only that flow is rolled back in a triggered pipeline; a validation table does not gate other tables, which update on their own
+B: The failure is retried in the background, and `report_export` read the data before the retry finished
+C: Fail expectations apply only to streaming tables, so the materialized view only warned and recorded the violation metrics instead of failing
+D: The pipeline needs a continuous mode to evaluate expectations, and a triggered update skips them
+K: A
+G: ## What expectations control
+Expectations enforce data quality inside a flow: `warn` keeps invalid rows, `drop` removes them, `fail` stops the offending flow. They are not orchestration.
+- In a **triggered** pipeline a failed expectation fails and rolls back only that flow's update; other flows continue independently.
+- In a **continuous** pipeline it stops the flow and all dependent flows.
+- Reading a validation table from another dataset does not make that dataset wait for the validation, so a failed check does not prevent downstream tables from updating.
+To block downstream work, put the validation and the downstream work in separate pipelines and orchestrate them in a job, so the downstream pipeline task depends on the validation pipeline task and runs only if it succeeds.
+W: No gating in a triggered pipeline: the failure rolls back the validation flow only, and the export flow had no dependency on its result.
+X: B=Background retry: nothing in the described behavior retries the flow; the export simply did not depend on the validation.
+C=Streaming only: expectations are supported on streaming tables, materialized views and views, and `fail` applies to all of them.
+D=Continuous only: expectations are evaluated in triggered updates too; the mode changes how far the failure spreads.
+T: Expectations do not gate other tables; split validation into a separate pipeline task when downstream work must wait.
+V: Lakeflow Pipelines; Lakeflow Jobs
+
+@ DBX-DEP D3 T3.4 advanced tradeoff
+S: A continuous pipeline contains a streaming table `payments_clean` with `expect_or_fail("positive_amount", "amount > 0")`, which feeds three downstream tables. One bad record arrives. What is the result, and what must the team do?
+A: Only the bad record is skipped and the stream continues, and the team reviews the dropped count later
+B: The flow and its dependent flows stop and the pipeline reports why; the code must be fixed before restart
+C: The flow pauses for one minute and then resumes automatically with the bad record written to the target
+D: Only the failing flow stops, while the three downstream tables keep updating from data already in `payments_clean`
+K: B
+G: ## Fail actions in continuous pipelines
+`expect_or_fail` (SQL `ON VIOLATION FAIL UPDATE`) is for cases where invalid records are unacceptable. In a continuous pipeline the failure stops the flow, all dependent flows, and the pipeline emits a message with the reason. The update is rolled back atomically, and manual intervention is needed before reprocessing: the team must fix the pipeline code so it handles the invalid data correctly.
+The error message for a violated expectation names the expectation and, for many queries, shows the input record that caused it. Metrics are not recorded for a `fail` action because the update does not succeed.
+Choose `fail` when a stop is cheaper than wrong data (financial postings); choose `drop` or quarantine when availability matters more.
+W: Stop and repair: a continuous pipeline halts the failing flow and its dependents, and the code must be changed before a restart.
+X: A=Skip and continue: that describes `expect_or_drop`, which removes invalid rows and keeps running.
+C=Auto resume with the record: nothing in the semantics resumes automatically, and the invalid record is not written because the update is rolled back.
+D=Downstream keeps running: in continuous mode dependent flows stop with the failing flow; independent parallel flows are the ones that continue in triggered mode.
+T: In a continuous pipeline a failed expectation stops the flow and its dependents until the code is fixed.
+V: Lakeflow Pipelines; expectations
+
+@ DBX-DEP D3 T3.4 advanced troubleshooting
+S: An `expect_or_fail("temperature_in_valid_range", "temperature BETWEEN -50 AND 60")` stops an update. The engineer must find which input record broke it. Where is that information, and which statement about metrics is true?
+A: The failure message names the expectation and shows the records in many queries; fail actions record no metrics
+B: Only the Data quality tab lists the failing record, and it shows a count of failed records for fail actions
+C: The failing record is written to a quarantine table automatically, and the update is partly committed
+D: The event log never has information for failures, so the engineer must rerun the pipeline with debug logging
+K: A
+G: ## Diagnosing a failed expectation
+Expectations configured to fail modify the Spark query plan so that the violating record can be tracked. When an update fails, Lakeflow Pipelines reports a dedicated message of the form `EXPECTATION_VIOLATION...` that names the violated expectations, includes the input data, the output record and whether input data is missing. That works for many queries, not all.
+Metrics for `warn` and `drop` actions are shown in the pipeline UI and the event log. For `fail` the update does not succeed, so metrics are not recorded. The transaction is rolled back atomically, so no partial data from the failed update is committed.
+After finding the record, fix the cause in code (a filter, a cast or a repaired source), then rerun.
+W: Error message with the record: the failure text identifies the expectation and the offending data, and fail actions record no metrics.
+X: B=Data quality tab: metrics are available for warn and drop only; a fail action makes the update fail before metrics are recorded.
+C=Automatic quarantine and partial commit: a failed update is rolled back atomically and nothing is quarantined unless the pipeline code implements it.
+D=No information: the error message gives the violating record in many cases, so extra debug runs are not needed first.
+T: A failed expectation reports the violating record in its error message; fail actions record no metrics.
+V: Lakeflow Pipelines; expectations
+
+@ DBX-DEP D3 T3.4 advanced use-case
+S: A data platform team maintains the same 8 data quality rules for 25 Python datasets in several pipelines. Rules change monthly, and auditors want rule changes recorded without editing pipeline code. What is the recommended structure?
+A: Copy the rule strings into each dataset decorator, so that every pipeline stays self-contained and reviewable alone
+B: Keep the rules in a tagged Delta table, load them into a dictionary and pass it to `expect_all_or_drop`
+C: Define the rules in a SQL file and read them with a dynamic expectation clause, which SQL expectations support
+D: Set the rules as pipeline configuration parameters and expect the engine to apply them to all datasets automatically
+K: B
+G: ## Portable expectations
+Databricks recommends storing expectation definitions separately from the pipeline logic, tagging them to form groups and applying the same expectations consistently across similar datasets. Benefits: reuse across pipelines, updates and audits without changing source code.
+A common implementation:
+1. A `rules` Delta table with `name`, `constraint` and `tag` columns.
+2. A Python helper such as `get_rules(tag)` that reads the table and returns `{name: constraint}`.
+3. Decorators such as `@dp.expect_all_or_drop(get_rules('validity'))` on each dataset.
+Dynamically loading expectations from a file is not supported in SQL; a Python module with a dictionary is another valid store.
+W: Rules table plus helper: the constraints live in one governed table with tags, change history is in the table, and each dataset reads the same dictionary.
+X: A=Copy and paste: 25 copies drift apart and each rule change needs code edits in every pipeline.
+C=Dynamic SQL clause: loading expectations dynamically from a file is not supported in SQL.
+D=Configuration only: configuration parameters do not create expectations; the pipeline code must still apply the rules to each dataset.
+T: Keep expectations in a table or module and apply them with `expect_all*` decorators for reuse and auditability.
+V: Lakeflow Pipelines; expectations
+
+@ DBX-DEP D3 T3.4 advanced tradeoff
+S: A silver streaming table must keep every record for a new data source while analysts learn how bad the data is. After a month the team wants to start removing the invalid records. How should the actions be sequenced?
+A: Start with `expect_or_fail` so that bad data never lands in the table, then relax to `drop` once the data is clean
+B: Start with plain `expect` to keep rows and collect metrics, then switch stable rules to `expect_or_drop`
+C: Start with `expect_or_drop` and rebuild dropped rows from the event log whenever analysts need them
+D: Start without expectations and add them only at the gold layer, where invalid rows cannot affect metrics
+K: B
+G: ## Choosing the action
+The default `expect` action retains invalid records in the target and records pass/fail counts per expectation. It lets a team measure a rule before it removes data.
+- **warn** (`expect`): learning phase, low risk, metrics only.
+- **drop** (`expect_or_drop`): when invalid rows must not flow on; the count of dropped rows is logged with the dataset metrics, but the rows themselves are gone from the target.
+- **fail** (`expect_or_fail`): when any invalid row makes the output untrustworthy.
+Metrics are available in the pipeline UI and in the event log, which is the place to check the failure share per rule before tightening it.
+W: Measure first, enforce later: plain `expect` loses no data while the metrics show how often each rule fails, and rules that are understood move to drop.
+X: A=Fail first: a new source with unknown quality would stop the pipeline constantly, and relaxing afterwards does not retrieve data from skipped updates.
+C=Drop first: the event log has counts, not the dropped records, so they cannot be rebuilt from it.
+D=Gold-only checks: invalid rows would already have flowed through silver and distorted joins, and the team would learn about problems late.
+T: Start with warn to measure rule failure rates, then move stable rules to drop or fail.
+V: Lakeflow Pipelines; expectations
+
+@ DBX-DEP D3 T3.4 advanced troubleshooting
+S: An engineer defines a streaming table in a standalone pipeline created in Databricks SQL with `CONSTRAINT valid_amount EXPECT (amount > 0) ON VIOLATION DROP ROW`, and looks for the Data quality tab in the pipeline UI. The tab is missing. Where can the expectation metrics be read?
+A: By querying the pipeline event log, since the Data quality tab is unavailable for standalone SQL pipelines
+B: Nowhere, because expectations on Databricks SQL streaming tables do not record any metrics at all
+C: In the query history of the SQL warehouse, which stores the number of dropped rows per statement
+D: Only in the table history of the target table, where the dropped count is shown as an operation metric of each write
+K: A
+G: ## Expectations in Databricks SQL pipelines
+Streaming tables and materialized views created in Databricks SQL are backed by a standalone pipeline. They support expectations through `CONSTRAINT name EXPECT (expr)` with the optional `ON VIOLATION DROP ROW` or `FAIL UPDATE` clauses.
+- The Data quality tab of the pipeline UI is **not** available for these pipelines.
+- The metrics are recorded in the pipeline event log, where `flow_progress` events carry them, so the data quality query on the event log is the way to read them.
+- Metrics may also be missing when no expectations are defined, when there was no update in that run, or when the flow type does not support expectations.
+W: Event log query: expectation metrics are written to the event log even when the UI tab is absent, so a query on it returns passed and failed counts per expectation.
+X: B=No metrics: the metrics are recorded; only the UI tab is missing in this pipeline type.
+C=Warehouse query history: it records query-level information, not expectation results of pipeline flows.
+D=Delta table history: the history lists write operations of the table, and the expectation drop count belongs to pipeline metrics.
+T: For standalone Databricks SQL pipelines read expectation metrics from the event log, not from the missing UI tab.
+V: Lakeflow Pipelines; expectations
+
+@ DBX-DEP D3 T3.4 advanced tradeoff
+S: A pipeline uses an AUTO CDC FROM SNAPSHOT flow to maintain a dimension from periodic snapshots. The team adds an expectation to the flow's target definition and gets no enforcement and no metrics. What is the right way to validate the dimension?
+A: Increase the snapshot frequency, because expectations evaluate only when two snapshots differ by at least one changed row
+B: Convert the flow to a standard append flow, which is the only flow type that can write the dimension
+C: Add the expectation as a SQL comment, which Lakeflow Pipelines read as a data quality rule
+D: Put the expectation on a downstream dataset that reads the dimension, since this flow does not support expectations
+K: D
+G: ## Expectation limits
+Expectations are supported on streaming tables, materialized views and views. The documentation lists cases without metrics or enforcement:
+- Flows that use an operator or flow type that does not support expectations (for example sinks).
+- Datasets with no expectations defined, or runs with no updates.
+- **Expectations are not supported with `AUTO CDC FROM SNAPSHOT`.**
+A practical workaround is to put the checks on a downstream dataset (a materialized view or streaming table that reads the CDC target) so that the validation runs on a supported flow. For change-feed CDC with `AUTO CDC`, validate the incoming change records before the flow.
+W: Downstream validation: the dataset that reads the dimension is a normal supported flow, so its expectations enforce and report metrics.
+X: A=Snapshot frequency: the limitation is unrelated to how often snapshots arrive.
+B=Append flow conversion: this would lose the SCD handling that the CDC flow provides, and the validation can be added without changing the flow type.
+C=Comment rule: comments are documentation only; they never enforce anything.
+T: Expectations do not work with AUTO CDC FROM SNAPSHOT, so validate in a downstream dataset.
+V: Lakeflow Pipelines; AUTO CDC
+
+@ DBX-DEP D3 T3.4 advanced tradeoff
+S: A team writes its pipelines in SQL and wants to apply one shared set of 10 rules with a single drop action to 30 tables, the way Python authors use `expect_all_or_drop` with a dictionary. What is true for SQL datasets?
+A: Grouping rules with a collective action is Python only; in SQL each rule is its own `CONSTRAINT ... EXPECT ... ON VIOLATION DROP ROW` clause
+B: SQL supports only one expectation per dataset, so the 10 rules must be combined into a single boolean expression joined with `AND`
+C: SQL has an `EXPECT ALL` clause that reads a rules table by tag, which is the SQL equivalent of the Python dictionary helper
+D: SQL expectations cannot drop rows, so a shared drop action must be implemented in a Python dataset that reads the SQL output
+K: A
+G: ## Expectations in SQL versus Python
+Both languages allow several expectations on one dataset. In SQL every expectation is a separate clause with a name:
+- `CONSTRAINT valid_amount EXPECT (amount > 0) ON VIOLATION DROP ROW`
+- Without `ON VIOLATION` the action is warn (keep the row, record metrics); `DROP ROW` and `FAIL UPDATE` are the other two.
+Python adds the grouped decorators `expect_all`, `expect_all_or_drop` and `expect_all_or_fail`, which take a dictionary of name and constraint and apply one action to the whole group. The same dictionary can be reused for many datasets, and it can be loaded from a table or module.
+Dynamically loading expectations from a file is not supported in SQL. A team that wants central rule management for many tables therefore either repeats the clauses in SQL or moves those datasets to Python.
+W: Python-only grouping: the collective `expect_all*` actions and dictionaries exist in Python, while SQL expresses each rule as its own constraint clause with its own action.
+X: B=One rule per dataset: SQL allows multiple expectations in a single dataset, each with its own name, so combining them is not required and would hide which rule failed in the metrics.
+C=EXPECT ALL: no such SQL clause exists; the documentation states that only Python can group expectations and set collective actions, and that loading them dynamically from a file is not supported in SQL.
+D=No drop in SQL: `ON VIOLATION DROP ROW` is the SQL way to drop invalid records, so no Python detour is needed for the action itself.
+T: Only Python groups expectations with `expect_all*`; SQL declares each rule as a named CONSTRAINT with its own action.
+V: Lakeflow Pipelines; expectations
+
+@ DBX-DEP D3 T3.4 advanced troubleshooting
+S: A streaming table in a pipeline has `expect_or_drop` rules. An engineer sums the expectation counts from `flow_progress` event log rows whose status is `COMPLETED` and gets no counts for some updates, although rows were dropped. Which change finds the counts?
+A: Also read the `flow_progress` events with status `RUNNING`, because for some flows the metrics are reported per micro-batch there
+B: Switch the rules to `expect_or_fail`, because fail actions record the complete expectation metrics in the final event of every update, even when the update itself fails
+C: Run a full refresh of the table, which rewrites the metrics into the `COMPLETED` event of the update
+D: Query the Delta history of the target table, where each streaming write stores the dropped-row count
+K: A
+G: ## Where expectation metrics are reported
+Expectation metrics for `warn` and `drop` actions are recorded in `flow_progress` events of the pipeline event log, which is also the source for the Data quality tab.
+- For some flows a `COMPLETED` event does not contain the metrics. They are reported in each micro-batch in a `flow_progress` event with status `RUNNING`.
+- Metrics are also missing when no expectations are defined, when the update had no new data for the flow, when the flow type (for example a sink) does not support expectations, or when the pipeline lacks the settings that capture metrics.
+- For `fail` actions no metrics exist, because the update does not succeed.
+A reliable audit query therefore aggregates the expectation details of the `RUNNING` and `COMPLETED` flow_progress events of the flow, not only the final one.
+W: Read the per-micro-batch events: the drop counts of a streaming flow can sit in RUNNING flow_progress rows, so an aggregation that filters on COMPLETED misses them.
+X: B=Fail action: a failing expectation stops the update before metrics are recorded, so it yields no counts at all and would stop the table.
+C=Full refresh: it reprocesses the data but does not change where the metrics are reported, and it is expensive for a reporting problem.
+D=Delta history: the history lists write operations of the table; the expectation drop count belongs to pipeline flow metrics in the event log.
+T: Sum expectation metrics from RUNNING and COMPLETED flow_progress events, since streaming flows report per micro-batch.
+V: Lakeflow Pipelines; expectations

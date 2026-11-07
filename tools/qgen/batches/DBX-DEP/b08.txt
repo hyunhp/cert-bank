@@ -1,0 +1,613 @@
+# DBX-DEP batch 08: T5.4 Change Data Feed (3), T5.5 query profile bottlenecks (8), T5.6 Liquid Clustering vs partitioning/ZORDER (8), T6.1 least-privilege ACLs (5), T6.2 ABAC with governed tags (4) (guide read 2026-11-07)
+# ABAC status (page banners read 2026-11-07): row filter and column mask policies on tables at catalog, schema or table scope are GA. Beta: views as policy targets, metastore-level policies, DENY policies. Keys use only GA parts (tables, catalog/schema scope).
+# src: https://docs.databricks.com/aws/en/delta/delta-change-data-feed
+# src: https://docs.databricks.com/aws/en/sql/user/queries/query-profile
+# src: https://docs.databricks.com/aws/en/sql/user/queries/performance-insights
+# src: https://docs.databricks.com/aws/en/optimizations/aqe
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-hints
+# src: https://docs.databricks.com/aws/en/delta/data-skipping
+# src: https://docs.databricks.com/aws/en/delta/clustering
+# src: https://docs.databricks.com/aws/en/tables/partitions
+# src: https://docs.databricks.com/aws/en/delta/optimize
+# src: https://docs.databricks.com/aws/en/security/auth/access-control/
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/abac/
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/abac/core-concepts
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/abac/policies
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/abac/best-practices
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/abac/performance
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/filters-and-masks
+# src: https://docs.databricks.com/aws/en/admin/governed-tags/
+
+@ DBX-DEP D5 T5.4 advanced use-case
+S: Compliance requires the full row-level change history of `core.accounts` for three years. A data engineer proposes to keep the change data feed enabled and let auditors query `table_changes('core.accounts', 0)` whenever they need it. Which design meets the requirement?
+A: Run a daily `readChangeFeed` stream with the `availableNow` trigger and its own checkpoint that appends the change rows to a separate history table kept for three years
+B: Keep the proposal and raise the table's log and file retention periods to three years, so that the change data feed is retained as the permanent record of every change
+C: Schedule a nightly job that records the current table version number, because any earlier version can later be read with `VERSION AS OF` and compared by auditors
+D: Keep the proposal but start every audit query at `startingVersion` 0, because the change data feed of a managed table is never removed from the transaction log
+K: A
+G: ## The change data feed is transient
+Change data feed (CDF) records row-level changes with `_change_type`, `_commit_version` and `_commit_timestamp`. It is meant for incremental processing, not as an archive.
+- The feed only exists for table versions that still exist. The transaction log removes old versions at regular intervals, and with legacy CDF the change data files follow the table's retention policy, so `VACUUM` deletes them.
+- A version that has been cleaned up can no longer be read through the feed, and a start version that is no longer in the history makes a new stream fail to start.
+## Archiving for permanent history
+When a permanent history is needed, write the changes to a table of their own with incremental logic. A stream over `readChangeFeed` with `trigger(availableNow=True)` processes everything available since the last run and stops, which suits a daily or hourly job.
+```
+(spark.readStream.option("readChangeFeed", "true").table("core.accounts")
+  .writeStream.option("checkpointLocation", cp)
+  .trigger(availableNow=True).toTable("audit.accounts_history"))
+```
+The history table is an ordinary table: its retention is a business decision, and it survives cleanup of the source's log.
+W: Archive with availableNow: the stream copies each change into an append-only history table, so the three-year record no longer depends on how long the source keeps its versions.
+X: B=Longer retention: Databricks states that a change data feed is not intended to serve as a permanent record, and stretching log and file retention for years bloats the source table and slows its metadata instead of creating an audit table.
+C=Version numbers only: time travel needs the old versions to still exist, and the same cleanup that removes feed data also removes those versions, so a stored number does not preserve any history.
+D=Start at version 0: versions are removed from the history at regular intervals, so a start at 0 fails or loses early changes, and managed tables clean up historic versions automatically.
+T: The change data feed is transient, so archive it into its own table with an availableNow stream when a permanent audit history is required.
+V: Delta change data feed, Structured Streaming
+
+@ DBX-DEP D5 T5.4 advanced troubleshooting
+S: Legacy change data feed (`delta.enableChangeDataFeed`) on the managed table `sales.orders` was switched off for two weeks during a migration and then switched on again. Downstream teams now need the row-level changes of exactly that two-week interval, and `table_changes` over those versions does not return them. The table has row tracking enabled and meets the other requirements for automatic change data feed. What is the correct way to get the changes?
+A: Re-enable legacy change data feed and call `table_changes` again over the interval, because the feed is rebuilt from the transaction log for versions that were committed while it was off
+B: Rebuild the interval with `spark.read.option("readChangeFeed", "true")` and a `startingTimestamp` from two weeks ago, because a timestamp bypasses the legacy table property
+C: Unset `delta.enableChangeDataFeed` so that automatic change data feed is used, and then query the interval through `table_changes` or `readChangeFeed`
+D: Run `FSCK REPAIR TABLE` on the table so the missing change data files of the interval are regenerated from the data files that were committed
+K: C
+G: ## Two ways to produce a change data feed
+- **Legacy CDF** materializes the change records at write time and needs `delta.enableChangeDataFeed = true` on each table. Only changes committed while the property was on exist as change data.
+- **Automatic CDF** computes the changes when the table is read, using row tracking on Delta tables (or row lineage on Iceberg v3). It needs no per-table switch, so the question "was it on at that time" does not arise.
+## The gap
+If legacy CDF is turned off for some interval and turned on again, that interval is not queryable through the legacy feed. Databricks recommends moving to automatic CDF, and the documented way to read the changes of such an interval is automatic CDF. The two modes cannot be used together, so the migration step is to unset `delta.enableChangeDataFeed`:
+```
+ALTER TABLE sales.orders UNSET TBLPROPERTIES ('delta.enableChangeDataFeed');
+SELECT * FROM table_changes('sales.orders', 120, 160);
+```
+The reading APIs (`table_changes`, `readChangeFeed`) stay the same, so consumers need no code change.
+W: Switch to automatic CDF: it derives changes from row tracking at read time, so the interval is queryable, and the same `table_changes` and `readChangeFeed` APIs keep working.
+X: A=Re-enable legacy CDF: legacy change data is written at commit time, so turning the property on later cannot create change records for commits made while it was off.
+B=Timestamp start: the start option only selects a range of versions. The legacy feed still has no change data for the interval, and the table property is not bypassed by using a timestamp.
+D=FSCK REPAIR TABLE: it removes transaction log entries that point to files that no longer exist. It does not generate change data files for old commits.
+T: A gap in legacy change data feed is not recoverable through the legacy feed; automatic change data feed derives the changes from row tracking at read time.
+V: Delta change data feed
+
+@ DBX-DEP D5 T5.4 applied troubleshooting
+S: A scheduled SQL task keeps its own `last_version` value and every hour runs `SELECT * FROM table_changes('sales.orders', ${last_version} + 1)` to load new changes. During quiet hours, when no commit has happened since the previous run, the query fails with `timestampGreaterThanLatestCommit`. The task must remain a batch SQL task that manages its own version bookmark. What is the smallest correct fix?
+A: Start the next read at `last_version` instead of `last_version + 1`, so that the start is never beyond the latest commit and an empty hour no longer fails
+B: Set an ending version that equals `last_version`, because a closed range that ends at the latest commit is accepted even when no new commit exists
+C: Run `OPTIMIZE` on the source table before each read so that a new commit exists and moves the latest version beyond the saved bookmark
+D: Enable `spark.databricks.delta.changeDataFeed.timestampOutOfRange.enabled` so that a start version beyond the last commit returns an empty result instead of an error
+K: D
+G: ## Version ranges in batch reads
+`table_changes(name, start[, end])` reads the changes between versions or timestamps. Start and end are **inclusive**, and a batch read must give a start. By default, a version or timestamp that exceeds the last commit raises `timestampGreaterThanLatestCommit`.
+A job that stores the last processed version and asks for `last_version + 1` asks for a version that does not exist yet when nothing was committed, which is the error case.
+## Tolerating out-of-range input
+Setting `spark.databricks.delta.changeDataFeed.timestampOutOfRange.enabled = true` changes the behavior:
+- A start beyond the last commit returns an empty result.
+- An end beyond the last commit returns all changes from the start to the last commit.
+A streaming read with `readChangeFeed` would track versions through its checkpoint, but that changes the design that the task must keep.
+W: Out-of-range tolerance: with the setting on, a start beyond the latest commit returns zero rows, so the quiet hour is an empty load and the bookmark logic stays unchanged.
+X: A=Start at last_version: start versions are inclusive, so the last commit would be read again every hour and its changes applied twice.
+B=Closed range: it does not remove the error, because the start version (`last_version + 1`) still exceeds the last commit, and an end version below the start is not a valid range.
+C=OPTIMIZE: compaction does not change data, so it is not a way to produce changes, and forcing a commit for every run only adds writes to work around a read option.
+T: To keep a batch bookmark design, enable the change data feed out-of-range tolerance so an empty interval returns no rows; remember that start versions are inclusive.
+V: Delta change data feed
+
+@ DBX-DEP D5 T5.5 advanced troubleshooting
+S: The query profile of a dashboard query on a SQL warehouse shows a join that reads 3 million rows from `orders` and 50,000 rows from `customers` and outputs 900 million rows. A performance insight of the type `EXPLODING_JOIN` is attached. The business expects roughly one output row per order. Which action addresses the cause?
+A: Increase the warehouse size so that the large intermediate result of the join fits into memory and the sort stage stops spilling
+B: Check whether the join key is unique on the `customers` side, then deduplicate it or tighten the join condition so each order matches one row
+C: Add a `BROADCAST(customers)` hint to the join, because broadcasting the smaller side prevents the row count of the join output from growing
+D: Raise `spark.sql.shuffle.partitions` so that the 900 million output rows are spread over more tasks and each task finishes sooner
+K: B
+G: ## What an exploding join is
+A join is exploding when it produces many more rows than it reads. The query profile shows the row counts per operator, and the `EXPLODING_JOIN` insight flags this pattern. The result size is a logical problem, not a resource problem.
+Typical causes:
+- A join key that is not unique on the side that should be a lookup (duplicates in a dimension, for example after a slowly changing dimension load that kept all versions).
+- A missing part of a composite key, which turns the join into a many-to-many match.
+## Fix the logic first
+The recommendation is to decide which subset of the result is needed and then change the join condition or reduce the input rows of both relations. In the case above, one order should match one customer, so verify uniqueness of the key and deduplicate (or add the missing key part or filter such as the current-row flag). Resources and join strategy only make a wrong result faster or slower to produce.
+W: Fix the join logic: the output is far above the input because a key matches several rows, so make the lookup side unique or complete the join condition.
+X: A=Bigger warehouse: it adds memory but still computes 900 million rows. The row explosion is a data or logic defect, not a lack of memory.
+C=Broadcast hint: the hint changes the physical join strategy (no shuffle of the small side). The number of matching rows and thus the output size stays the same.
+D=More shuffle partitions: this spreads the same exploding result over more tasks. It does not reduce the output, and it does not remove the duplicate matches.
+T: An EXPLODING_JOIN insight points to duplicate or incomplete join keys; correct the join logic instead of adding compute.
+V: Databricks SQL, query profile
+
+@ DBX-DEP D5 T5.5 advanced troubleshooting
+S: The query profile of a selective query on a wide external Delta table shows a scan that reads nearly all files although the filter `tenant_id = 'T-4471'` should match a small part of the data. A `COVERAGE_STATS_DELTA` insight reports the statistics status of the filter as Unavailable. The table has 140 columns and `tenant_id` is column 97. Which fix lets data skipping work for the existing files?
+A: Add `tenant_id` to `delta.dataSkippingStatsColumns` and run `ANALYZE TABLE ... COMPUTE DELTA STATISTICS` so that statistics are recomputed for the existing files
+B: Run `OPTIMIZE ... ZORDER BY (tenant_id)`, because the sort order alone provides the statistics that data skipping uses for the filter
+C: Move `tenant_id` into the first position of the schema with `ALTER TABLE`, because data skipping statistics are collected for existing files in column order
+D: Set `delta.dataSkippingStatsColumns` to include `tenant_id` only, because changing the property rewrites the statistics of all files that are already in the table
+K: A
+G: ## Where data skipping statistics come from
+Delta collects per-file statistics (minimum and maximum values, null counts and record counts) when data is written. At query time these statistics let the engine skip files that cannot match a filter. For Unity Catalog external tables, statistics are collected by default for the **first 32 columns** of the schema. A filter on a later column has no statistics, so the query falls back to in-file filtering and reads (almost) everything. The `COVERAGE_STATS_DELTA` insight reports exactly this.
+## Fixing it
+- Name the columns that matter with the table property `delta.dataSkippingStatsColumns` (or change `delta.dataSkippingNumIndexedCols`).
+- The property only affects data written afterwards. Recompute statistics for existing files with `ANALYZE TABLE t COMPUTE DELTA STATISTICS`.
+- For Unity Catalog managed tables, predictive optimization also collects statistics for frequently filtered columns, which is one reason managed tables need less manual work.
+`ZORDER` columns need statistics too, so ordering does not replace them.
+W: Property plus ANALYZE: the property makes `tenant_id` a statistics column, and the ANALYZE command computes its statistics for files that were written before the change.
+X: B=ZORDER only: Z-ordering colocates data, but it relies on statistics collected for the column, and `tenant_id` has none, so skipping cannot use the layout.
+C=Reordering the schema: moving a column in a wide table does not recompute statistics of existing files, and a schema change is a disruptive way to tune statistics.
+D=Property alone: setting the property only changes future statistics collection. Files already in the table keep their old statistics until they are recomputed.
+T: Data skipping needs file statistics on the filter column; set the statistics columns and recompute them with ANALYZE for existing files.
+V: Delta Lake data skipping
+
+@ DBX-DEP D5 T5.5 advanced troubleshooting
+S: A SQL warehouse query aggregates `GROUP BY country` over a table in which about 70% of the rows have `country IS NULL`. The query profile shows the aggregation stage dominated by a few tasks, and a `DATA_SKEW` insight is attached. Adaptive query execution is on. A colleague suggests a skew join hint. Which action fits the situation?
+A: Add `/*+ SKEW('events') */` to the query, because adaptive execution splits skewed aggregation partitions only when the hint is present
+B: Raise `spark.sql.shuffle.partitions`, because a larger number of partitions divides the rows of the single hot grouping key among more tasks
+C: Pre-aggregate in two stages: group by `country` and a random salt first, then combine the partial results so several tasks share the hot key
+D: Enlarge the warehouse until the longest task fits, because skew is a lack of parallel capacity and disappears when more cores are available
+K: C
+G: ## Skew in an aggregation
+In a shuffle, all rows with the same grouping key go to the same partition. When one key holds most of the rows, one task receives most of the data, and the stage lasts as long as that task. In the query profile this shows up as a shuffle or aggregate operator with a large share of the time and memory, and the `DATA_SKEW` insight.
+## What helps and what does not
+- AQE splits skewed partitions of **sort merge joins and shuffle hash joins** automatically. It does not split the hot key of a plain aggregation.
+- More shuffle partitions do not help, because one key still hashes to one partition.
+- A larger warehouse adds cores, but the hot partition is still handled by one task.
+- The documented remedies for the insight are **key salting or pre-aggregation**: aggregate partial results by `(key, salt)` first, then aggregate the partials by key. The hot key is spread over several tasks, and the second stage handles only small partial results.
+W: Salting or pre-aggregation: the first stage spreads the hot key over several partitions, and the second stage merges small partial sums.
+X: A=Skew hint: skew join handling applies to joins. An aggregation has no join to optimize, so the hint has nothing to act on.
+B=More shuffle partitions: all rows with the same key still hash to one partition, so the largest task does not become smaller.
+D=Bigger warehouse: more cores let the other tasks finish quickly, but the one task with the hot key still runs the same amount of work.
+T: Skew in a GROUP BY is fixed by salting or pre-aggregation; AQE skew handling covers joins, and more partitions or cores do not split a hot key.
+V: Databricks SQL, adaptive query execution
+
+@ DBX-DEP D5 T5.5 advanced troubleshooting
+S: A report query joins a fact table with a dimension table and sorts the result. Its profile shows a `DATA_SPILL` insight. The warehouse size is fixed by a platform policy and cannot be changed. The intermediate result carries a 4 KB `raw_payload` string per row that the report never displays. Which change addresses the spill without touching the warehouse?
+A: Increase the maximum number of clusters of the warehouse, because additional clusters give each running query a bigger share of memory
+B: Select only the needed columns before the join and sort, so that `raw_payload` is not carried through memory-heavy operators
+C: Enable the query result cache for the report, so that the join and sort operators no longer need memory when the query runs again
+D: Add filters on the clustering keys of the fact table, because clustering keys control how much memory is reserved for sort operators
+K: B
+G: ## Spill in the query profile
+A spill means an operator (sort, aggregate, join) needed more memory than it had and wrote data to disk. The `DATA_SPILL` insight and the memory-peak metric of the operator show it. The recommendations are: increase the warehouse size to add memory, or reduce the rows, columns, or size of large columns (strings, arrays, maps, structs) that the operators hold.
+## Why width matters
+Memory use of a sort or hash operator grows with the size of each row. A 4 KB string that is never displayed is carried through every shuffle, join and sort. Dropping it before those operators (explicit column list instead of `SELECT *`, or selecting from the fact table only what is needed) lowers the memory peak without any compute change. The `WIDE_PROJECTION` insight is the same idea for scans.
+W: Project only needed columns: the large string is not loaded into the join and sort, so the memory peak falls and the operators stay in memory.
+X: A=More clusters: additional clusters absorb more concurrent queries (they address queueing). A single query still runs on one cluster with the same memory.
+C=Result cache: it may skip a repeated query entirely, but the first execution and every cache miss still spill, so the cause remains.
+D=Filtering on clustering keys: filters on clustering keys can reduce the bytes read, but clustering keys do not reserve sort memory, and the row width stays the same.
+T: Spill is addressed by more memory per query or by carrying fewer rows and narrower columns through the memory-heavy operators.
+V: Databricks SQL, query profile
+
+@ DBX-DEP D5 T5.5 applied troubleshooting
+S: At 09:00 dozens of dashboards refresh at the same time on one SQL warehouse. The query profile of a slow dashboard query shows an `EXCESSIVE_QUEUE_TIME` insight. Its execution time is short, and the wall-clock duration is dominated by the time the query waited. Which change targets this bottleneck?
+A: Increase the maximum number of clusters of the warehouse, so that more clusters can start and queries wait less for free capacity
+B: Switch the tables to liquid clustering, because clustering removes the queue that forms in front of the scan operators
+C: Increase the shuffle partitions of the warehouse, because more partitions shorten the time that queries wait for an execution slot
+D: Collect Delta statistics on the dashboard tables, because statistics prevent queries from being queued behind long-running scans
+K: A
+G: ## Reading the time breakdown
+The query details show the wall-clock duration split into scheduling, query optimization and file pruning, and execution. A query can be slow without being expensive: when most of the time is spent waiting, the cost is in the **queue**, not in the operators.
+## Queueing is a capacity problem
+A warehouse cluster runs a limited number of queries at once. If more arrive, they queue until capacity frees up. `EXCESSIVE_QUEUE_TIME` recommends raising the **maximum number of clusters**, so that the warehouse can scale out under concurrent load. This is different from the warehouse **size**, which makes a single query faster but does not add concurrency in the same way.
+Layout fixes (clustering, statistics) reduce the work of a query, which helps a little, but they do not address why the query waited before it started.
+W: More maximum clusters: the warehouse can scale out for the 09:00 burst, so queries start sooner instead of waiting for capacity.
+X: B=Liquid clustering: it improves file skipping inside scans. The query waited before any operator started, so the layout of the table is not the bottleneck.
+C=Shuffle partitions: this setting controls the number of partitions after a shuffle in a running query. It has no influence on admission to the queue.
+D=Delta statistics: statistics improve data skipping and join planning. They do not change how many queries a warehouse admits at once.
+T: EXCESSIVE_QUEUE_TIME is a concurrency problem; raise the maximum number of clusters rather than tuning the query.
+V: Databricks SQL warehouses
+
+@ DBX-DEP D5 T5.5 applied troubleshooting
+S: An engineer runs the same slow report query a second time to capture its profile, but the query history shows the run without a query profile. Nothing was changed between the runs, and the first run had a profile. What is the explanation and the way to get a profile?
+A: The second run was answered from the query cache, which has no profile, so a trivial change such as changing or removing the `LIMIT` forces a real execution
+B: Profiles are created only when the verbose mode of the profile view was switched on before the query started, so it must be switched on and the query re-run
+C: Profiles exist only for queries that ran on a classic SQL warehouse, so the engineer must repeat the query on a classic warehouse
+D: A profile is stored once per user and query text, so the second run of an identical query by the same user overwrites it and leaves nothing to show
+K: A
+G: ## When no profile exists
+A query profile visualizes operator metrics of an executed query. A run that returns its result from the query cache does not execute operators, so there is nothing to profile; Databricks notes that a profile is not available for queries that run from the query cache. To circumvent the cache for analysis, change the statement trivially, for example change or remove the `LIMIT`.
+## Other points about access
+- Viewing a profile requires owning the query or at least `CAN MONITOR` on the warehouse that ran it.
+- Verbose mode only reveals additional operators and metrics in a profile that exists; by default metrics of operations unlikely to be bottlenecks are hidden.
+- Profiles are available for serverless compute and SQL warehouses, and they can be exported as JSON and imported again.
+W: Cached result: the identical rerun was served from the query cache, so no operators ran; altering the statement slightly forces execution and a new profile.
+X: B=Verbose mode: it is a display option of an existing profile that shows hidden operators and metrics. It does not decide whether a profile is created.
+C=Classic only: profiles are shown for SQL warehouses, including serverless, and for serverless notebooks and jobs, so the compute type is not the restriction.
+D=Overwritten profile: runs are separate entries in query history. The missing profile is explained by the cached result, not by storage per user.
+T: A cached result has no query profile; change the statement slightly, for example the LIMIT, to get a real execution to analyze.
+V: Databricks SQL, query profile
+
+@ DBX-DEP D5 T5.5 advanced tradeoff
+S: The profile of a daily BI query shows a broadcast hash join, and the query details list the insight `HISTORY_BASED_JOIN_STRATEGY` with the label Accelerated. The query previously used a sort merge join with a shuffle of the large table. An engineer wants to make the join strategy permanent by adding a `BROADCAST` hint on the small side. What should the engineer conclude?
+A: Add the hint, because the Accelerated label means the optimizer will drop the broadcast again as soon as the hint is missing from the statement
+B: Replace the hint with a `SHUFFLE_HASH` hint, because a broadcast chosen from earlier runs is unstable and a shuffle strategy is safer
+C: Leave the query unchanged, because the optimizer chose broadcast from earlier runs; a hint would force it even if that side grows
+D: Disable adaptive query execution, because only then will the engine keep the join strategy that the history-based optimization selected
+K: C
+G: ## Applied accelerations
+The query profile lists two kinds of insights. Most are recommendations for the user. The **applied accelerations**, shown with an Accelerated label, report optimizations that Databricks has already applied and need no action. `HISTORY_BASED_JOIN_STRATEGY` means the join was optimized with measurements from earlier runs of similar queries, so a broadcast was used instead of a shuffle based on the workload history.
+## Hints versus the optimizer
+- A `BROADCAST(t)` hint forces a broadcast of that side **regardless of the autoBroadcastJoinThreshold**. If the table grows later, a forced broadcast can exhaust memory or slow the query.
+- Without the hint, the optimizer decides again from statistics and history, so the strategy follows the data.
+- Hint priority when sides are hinted differently: `BROADCAST` over `MERGE` over `SHUFFLE_HASH` over `SHUFFLE_REPLICATE_NL`.
+Use a hint when the optimizer is demonstrably wrong and statistics cannot be fixed, not to freeze a good decision.
+W: No change: the Accelerated label reports a decision already taken from measured history, and leaving it out lets the strategy adapt when the table sizes change.
+X: A=Hint as a safeguard: nothing in the insight says the optimization depends on a hint. The optimizer applies the history-based choice by itself on later runs.
+B=SHUFFLE_HASH hint: it also forces a strategy, and it would bring back a shuffle of the large table that the broadcast removed, so the query would get slower.
+D=Disabling AQE: AQE can convert joins at runtime. It is a separate feature, and switching it off would remove adaptive optimizations without any benefit here.
+T: An Accelerated insight needs no action; avoid forcing a broadcast with a hint when the optimizer already picks it from measured history.
+V: Databricks SQL, query profile, join hints
+
+@ DBX-DEP D5 T5.5 advanced comparison
+S: An engineer runs `EXPLAIN` on a slow query and sees a `SortMergeJoin` over a large and a 12 MB table, but the query profile of the real run shows a broadcast hash join. The engineer suspects that the profile is wrong. Which statement explains the difference?
+A: `EXPLAIN` does not run the query, so adaptive execution cannot re-optimize it and shows the initial plan, while the executed query changed the join from actual sizes
+B: The profile is rendered from compile-time estimates, while `EXPLAIN` prints statistics measured during execution, so the explain output is reliable
+C: Adaptive query execution is switched off for queries that are explained, and it switches itself on only for SQL warehouses that are running in serverless mode
+D: A join strategy is fixed when the table statistics are collected, so one of the two outputs belongs to an older run of the query with a different data volume
+K: A
+G: ## Initial plan and final plan
+Before a query runs, the optimizer builds a plan from estimates. Adaptive query execution (AQE) re-optimizes while the query runs, using the real sizes at the end of each shuffle or broadcast exchange. One of its capabilities is to **convert a sort merge join to a broadcast hash join** when one side turns out to be small (a runtime threshold applies), for example after filters made it smaller than estimated.
+## Seeing which plan you look at
+- `SQL EXPLAIN` does not run the query, so AQE cannot change anything. It shows only the **initial plan**.
+- `DataFrame.explain()` shows the initial and the current plan under an `AdaptiveSparkPlan` node; the `isFinalPlan` flag is `true` after the query finished, and statistics show `isRuntime=true` once a stage has run.
+- The query profile and the Spark UI describe what was executed.
+Comparing the initial and final plans shows what AQE did: a different join node means the strategy was changed.
+W: Initial versus executed plan: EXPLAIN stops before execution, so it cannot contain AQE's runtime change, which the query profile of the real run does show.
+X: B=Reversed roles: the profile reflects the execution with measured metrics. EXPLAIN without running contains only compile-time estimates.
+C=AQE switched off for EXPLAIN: AQE is on by default and applies to supported queries. EXPLAIN simply does not execute, so there is nothing to adapt.
+D=Strategy fixed by statistics: statistics only inform the initial plan. AQE can still change the strategy at runtime, so both outputs can come from the same run.
+T: SQL EXPLAIN shows the initial plan; the join changes made by AQE appear only in the executed plan or query profile.
+V: Databricks SQL, adaptive query execution
+
+@ DBX-DEP D5 T5.6 advanced tradeoff
+S: A managed table of about 8 TB receives device telemetry. Most queries filter on `device_id` (several million distinct values) and on a recent range of `event_date`. A team member proposes `PARTITIONED BY (device_id)` plus a nightly `OPTIMIZE ... ZORDER BY (event_date)`. Which design should the lead recommend?
+A: Partition by `event_date` and Z-order by `device_id`, because a partition column has to be low in cardinality and Z-order handles the second filter
+B: Partition by `device_id`, because partition pruning gives the fastest possible filtering on the column that most queries use
+C: Create the table with `CLUSTER BY (event_date, device_id)` and let predictive optimization run `OPTIMIZE`, adding no partitioning and no `ZORDER`
+D: Leave the table without a layout, because an unpartitioned table of this size is already clustered by ingestion time without any tuning
+K: C
+G: ## Choosing a layout for a large table
+Databricks recommends liquid clustering for new tables and gives size guidance for partitioning:
+- Under about 1 TB: do not partition.
+- From 1 TB to 100 TB: use liquid clustering instead of partitioning, since partitioning more often hurts than helps.
+- Above that: partitioning can help, but try liquid clustering first and verify.
+Each partition should hold at least about 1 GB. A column with millions of distinct values creates millions of tiny partitions and tiny files, which is the "over-partitioning" failure.
+## What liquid clustering adds
+It handles **high-cardinality** columns and several filter columns, and the keys can be changed later without rewriting data. `CLUSTER BY` is **not compatible with partitioning or `ZORDER`**, so the layout is chosen once: the keys in the clustering definition replace both. Predictive optimization runs the `OPTIMIZE` that clusters data incrementally on managed tables.
+```
+CREATE TABLE telemetry (device_id BIGINT, event_date DATE, v DOUBLE)
+CLUSTER BY (event_date, device_id);
+```
+W: CLUSTER BY on both filter columns: clustering copes with the high-cardinality device column and the date range, and it replaces partitioning and ZORDER entirely.
+X: A=Partition by date plus ZORDER: at 8 TB partitioning is more likely to hurt than help, and liquid clustering is the recommended replacement for both techniques.
+B=Partition by device_id: millions of distinct values would create millions of tiny partitions and small files, far below the recommended size of a partition.
+D=No layout: ingestion-time clustering helps date-range filters, but it gives nothing for lookups by `device_id`, so those queries would scan a large part of the table.
+T: For a large table with a high-cardinality filter column, use CLUSTER BY on the filter columns instead of partitioning and ZORDER.
+V: Liquid clustering, Delta Lake
+
+@ DBX-DEP D5 T5.6 advanced troubleshooting
+S: A 200 GB Delta table is partitioned by `event_hour` and has about 9,000 partitions of roughly 20 MB. Scans read thousands of small files, and predictive optimization cannot fix them. Queries filter on `event_hour` and sometimes on `site_id`. The table has to stay online during the change. What is the best step?
+A: Run `ALTER TABLE ... REPLACE PARTITIONED BY WITH CLUSTER BY (event_hour)`, then `OPTIMIZE`, keeping clustering columns close to the old partition columns
+B: Change the partitioning to daily partitions with an `INSERT OVERWRITE`, which rewrites the whole table and takes it offline for readers for the duration
+C: Keep the hourly partitions and enable predictive optimization, because it compacts small files across all partitions of a table
+D: Add `ZORDER BY (site_id)` inside each partition, since Z-ordering merges the small files of different partitions into larger ones
+K: A
+G: ## Over-partitioning
+Databricks advises not to partition tables below about 1 TB, and each partition should have at least about 1 GB. Here 200 GB are cut into 9,000 partitions of about 20 MB. Files cannot span partitions, so compaction can only combine files inside one partition, which is why `DATA_FILE_SIZE` recommends **switching to liquid clustering** for partitioned tables: predictive optimization cannot compact small files across partitions.
+## Converting in place
+`ALTER TABLE t REPLACE PARTITIONED BY WITH CLUSTER BY (cols)` converts a partitioned Delta table with minimal reader and writer downtime. Guidance:
+- Keep the new clustering columns similar to the old partition columns. Very different columns trigger a large reclustering on the first `OPTIMIZE`.
+- Run `OPTIMIZE` to cluster the data; the keys can later be changed without rewriting.
+- `CLUSTER BY AUTO` is an option on Unity Catalog managed tables.
+W: In-place conversion: the table loses its partition boundaries, small files can be compacted across the whole table, and readers and writers stay online.
+X: B=Daily partitions: still partitioned (200 GB over about 400 days is roughly 500 MB each, below the recommended size), and a full overwrite rewrites everything instead of converting the layout in place.
+C=Predictive optimization alone: it cannot compact small files across partitions, so the 20 MB partitions stay fragmented.
+D=ZORDER inside partitions: `OPTIMIZE ... ZORDER BY` also works within each partition and never merges files of different partitions.
+T: A table that is over-partitioned is converted with REPLACE PARTITIONED BY WITH CLUSTER BY, keeping similar columns, followed by OPTIMIZE.
+V: Liquid clustering, Delta Lake
+
+@ DBX-DEP D5 T5.6 advanced tradeoff
+S: A 15 TB external Delta table, partitioned by `ingest_date` and Z-ordered by `customer_id`, is read nightly by a third-party engine with an older Delta reader that cannot be upgraded this quarter. The platform team is tempted to enable liquid clustering. What is the right decision for now?
+A: Enable liquid clustering and run the conversion, because an older reader ignores the table features it does not know and reads the data files as before
+B: Keep partitioning and Z-ordering until the reader is upgraded, because a liquid clustered table needs a newer Delta protocol than that reader can open
+C: Replace the partitioning with a generated column on `ingest_date`, which gives the old reader a layout like clustering without a protocol change
+D: Enable liquid clustering only on the Databricks side by turning off the table features, because the clustering keys are stored separately from the protocol
+K: B
+G: ## Liquid clustering and compatibility
+Delta tables with liquid clustering use a higher writer protocol (writer version 7) and reader version 3, with table features such as domain metadata. Clients that do not support these protocols cannot read the table. Databricks warns that the protocol cannot be downgraded, so enabling the feature is hard to undo.
+## The decision
+Liquid clustering is recommended for new tables and for tables that struggle with partitioning, but compatibility is a hard constraint. If a consumer outside Databricks cannot read the new protocol, either upgrade that consumer first, or keep the proven layout (partitioning plus `ZORDER`) and plan the conversion as part of the reader upgrade. Note that clustering is not compatible with partitioning or `ZORDER`, so the two layouts cannot be mixed to get both.
+W: Defer the conversion: a reader without support for the clustering protocol cannot read the table, so the layout stays until the reader is upgraded.
+X: A=Reader ignores features: a reader must support the reader features a table uses, and unsupported ones make the table unreadable instead of being skipped.
+C=Generated column: a generated column replaces nothing here. It is a partitioning aid, not a clustering mechanism, and it does not change the protocol question.
+D=Turn off the features: clustering depends on the protocol features for its metadata. They cannot be disabled while keeping clustering.
+T: Liquid clustering needs a newer Delta protocol, so confirm that every reader supports it before converting a shared table.
+V: Liquid clustering, Delta Lake
+
+@ DBX-DEP D5 T5.6 advanced troubleshooting
+S: A managed Apache Iceberg table in Unity Catalog was created with `PARTITIONED BY (event_date)`. An engineer wants to move it to liquid clustering and runs `ALTER TABLE ... REPLACE PARTITIONED BY WITH CLUSTER BY`, but the statement raises an error. What explains the error?
+A: Managed Iceberg tables already use their partition definition as liquid clustering keys, so no conversion exists for them and the command is rejected
+B: The conversion command is accepted only for external tables, so the managed table must first be registered as an external table
+C: Iceberg tables cannot be liquid clustered at all, so the table has to be rewritten as a Delta table before any clustering is possible
+D: The statement needs the `AUTO` option for Iceberg tables, because explicit clustering columns are rejected on a table in that format
+K: A
+G: ## Partitioning on managed Iceberg tables
+For managed Apache Iceberg tables Unity Catalog supports only liquid clustering. A `PARTITIONED BY` clause on such a table is interpreted as a list of clustering keys, so the table is liquid clustered from the start.
+- `ALTER TABLE ... REPLACE PARTITIONED BY WITH CLUSTER BY` is the conversion path for partitioned **Delta** tables (external and managed).
+- On a managed Iceberg table the conversion is not necessary, and running the command raises an error.
+- To change the keys of such a table later, use `ALTER TABLE ... CLUSTER BY (...)` like on any liquid clustered table.
+## Why this matters for the layout decision
+The Delta advice (do not partition below about 1 TB, prefer clustering to partitioning above) does not need a migration step here: the partition columns already behave as clustering keys, and `OPTIMIZE` or predictive optimization maintains the layout incrementally.
+W: Already clustered: the partition definition of a managed Iceberg table is stored as clustering keys, so the conversion command has nothing to convert and is rejected.
+X: B=External only: the conversion supports both external and managed Delta tables, and the error here comes from the Iceberg format, not from the table type.
+C=Delta only: liquid clustering is generally available for managed Iceberg tables, which is why their partition definition becomes clustering keys.
+D=AUTO required: the `AUTO` option is a choice for Unity Catalog managed Delta tables, and adding it does not change that the command is rejected for managed Iceberg tables.
+T: A managed Iceberg table treats PARTITIONED BY as clustering keys, so REPLACE PARTITIONED BY WITH CLUSTER BY is neither needed nor accepted.
+V: Liquid clustering, Apache Iceberg
+
+@ DBX-DEP D5 T5.6 advanced troubleshooting
+S: A streaming table defined in a Lakeflow Spark Declarative Pipeline uses `PARTITIONED BY (event_hour)` and suffers from many small files. The engineer runs `ALTER TABLE ... REPLACE PARTITIONED BY WITH CLUSTER BY` on it, and the command is not supported. What is the supported way to move this table to liquid clustering?
+A: Change the table definition in the pipeline source to use `CLUSTER BY` instead of `PARTITIONED BY`, then run an update so the pipeline applies the new layout
+B: Run the same conversion statement on a SQL warehouse instead of the pipeline compute, because the restriction applies only to pipeline clusters
+C: Turn on predictive optimization for the schema, because it compacts the small files across all hourly partitions of a streaming table
+D: Schedule `OPTIMIZE ... ZORDER BY` on the table after every update, because Z-ordering merges files across partitions into larger ones
+K: A
+G: ## Conversion limits
+`REPLACE PARTITIONED BY WITH CLUSTER BY` converts a partitioned Delta table in place, but it does not support streaming tables and materialized views created in Lakeflow pipelines. For these objects the pipeline definition is the source of truth, so the layout is changed there.
+- Replace `PARTITIONED BY` with `CLUSTER BY` in the table definition of the pipeline.
+- Run an update so the pipeline applies it.
+- Tables that use OpenSharing with partition filtering are the other documented exception.
+## Why the other tools do not help
+Files cannot span partitions: compaction by predictive optimization or `OPTIMIZE` works within one partition, and `ZORDER` also works inside partitions. The `DATA_FILE_SIZE` query insight therefore recommends switching to liquid clustering for partitioned tables.
+W: Change the pipeline definition: for pipeline-created streaming tables, `CLUSTER BY` replaces `PARTITIONED BY` in the definition, and the next update applies it.
+X: B=Other compute: the limitation belongs to the table type (streaming tables and materialized views of pipelines), not to the compute that runs the statement.
+C=Predictive optimization: it cannot compact small files across partitions, so the hourly partitions stay fragmented.
+D=ZORDER: it works inside each partition and never merges files of different partitions, so the small-file problem remains.
+T: Pipeline streaming tables cannot be converted in place; replace PARTITIONED BY with CLUSTER BY in the pipeline definition.
+V: Liquid clustering, Lakeflow Spark Declarative Pipelines
+
+@ DBX-DEP D5 T5.6 advanced use-case
+S: Events carry a struct column `device` with the field `device.model`. A managed table is queried almost always with `WHERE device.model = 'X200'`, and the team must choose a layout. They found that `PARTITIONED BY (device.model)` does not behave like a normal partition column. Which statement identifies the right approach?
+A: Use `CLUSTER BY (device.model)`, because clustering keys accept struct fields in dot notation without extracting a column
+B: Use `ZORDER BY (device.model)` on a partitioned table, because Z-ordering accepts nested fields as ordering columns
+C: Extract `device.model` into a top-level column and then cluster by the struct itself, because clustering supports complex types
+D: Use `PARTITIONED BY (device)` on the whole struct column, because partitioning supports struct columns as long as they are top-level columns of the table
+K: A
+G: ## Struct fields and layouts
+- **Partitioning**: partition columns must be top-level columns of a simple type. Complex types (`STRUCT`, `MAP`, `ARRAY`, `VARIANT`) cannot be partition columns, and Delta treats a struct field in `PARTITIONED BY` as an expression, not as a column reference.
+- **Liquid clustering**: a clustering key may be a struct field in dot notation, for example `CLUSTER BY (device.model)`, nested to any depth, if the field type is a supported simple type (string, numeric, date, timestamp). Complex types themselves, and map or array elements, cannot be keys.
+Databricks states that liquid clustering is the only way to data-skip on a struct field without first extracting it into a top-level column.
+```
+CREATE TABLE events (id BIGINT, device STRUCT<model: STRING, os: STRING>)
+CLUSTER BY (device.model);
+```
+W: Dot-notation clustering key: the nested string field is a supported key type, so the table is organized for the filter without schema changes.
+X: B=ZORDER on the field: Z-ordering needs columns with statistics, and it is the older technique that liquid clustering replaces. Docs name clustering as the way to data-skip on a struct field.
+C=Cluster by the struct: complex types cannot be clustering keys. Only the simple-typed field inside the struct can.
+D=Partition by the struct: partitioning does not support complex types, whether or not the column is top-level.
+T: A struct field can be a liquid clustering key in dot notation; partitioning and ZORDER cannot do that directly.
+V: Liquid clustering, Delta Lake
+
+@ DBX-DEP D5 T5.6 advanced troubleshooting
+S: Four jobs run `MERGE` and `UPDATE` statements against the same 3 TB table, which is partitioned by `event_date`. Each job owns a share of the customers, spread over all regions, but all of them touch the current day's partition, and concurrent commits often fail with conflict errors. The table is a Unity Catalog managed table. Which change reduces the conflicts most directly?
+A: Switch the table to liquid clustering, which allows row-level concurrency, so concurrent writers that change different rows no longer conflict
+B: Partition the table additionally by `region`, so that the jobs write into different folders and conflicts are only possible within a partition
+C: Run `OPTIMIZE ... ZORDER BY (customer_id)` after every job, because a Z-ordered layout makes concurrent writers modify disjoint files
+D: Add retries with a longer back-off to the jobs, which removes the root cause because the conflicts only come from commits that overlap in time
+K: A
+G: ## Why partitioned tables conflict
+Delta uses optimistic concurrency. Two writers conflict when they change the same files or the same partition (with partition-level isolation), even when they touch different rows. When all jobs work on the current day's partition, they collide.
+## Row-level concurrency
+Tables with liquid clustering use row-level concurrency (supported with deletion vectors and row tracking, which managed tables use by default): writers conflict only if they modify the **same rows**, not merely the same files. Databricks lists reduced write conflicts as one of the benefits of converting a partitioned table to liquid clustering, and "tables with concurrent write requirements" as a use case.
+Retries and adding partition columns reduce the symptom or shift it, but a layout without row-level concurrency stays exposed.
+W: Liquid clustering with row-level concurrency: the jobs change disjoint rows, so their commits no longer conflict even in the same day's data.
+X: B=Extra partition column: it creates many small partitions on a 3 TB table, the jobs still overlap with any shared partition, and a repartition is a heavy rewrite.
+C=ZORDER after each job: it does not make files disjoint between writers, and it cannot be combined with liquid clustering.
+D=Retries only: they hide the failures but the root cause is the coarse conflict granularity, and many retries waste compute.
+T: Liquid clustering brings row-level concurrency, so writers on different rows of the same data no longer conflict.
+V: Liquid clustering, Delta Lake
+
+@ DBX-DEP D5 T5.6 advanced tradeoff
+S: A 400 GB managed table has no partitioning, no clustering and no tuning. Queries mostly filter on the ingestion date, and they are fast. Over months, heavy `UPDATE` and `MERGE` jobs rewrite scattered rows, and date filters scan more and more files. An engineer wants to restore the date-based behavior with the least ongoing effort. What is the best choice?
+A: Add `PARTITIONED BY (ingest_date)` through a full rewrite, because partition pruning is the only way to keep date filters fast after updates
+B: Run `OPTIMIZE ... ZORDER BY (ingest_date)` every night, because Z-order restores the order of ingestion that updates disturbed
+C: Do nothing, because unpartitioned Delta tables are always clustered by ingestion time, even after updates and merges rewrite their rows
+D: Use liquid clustering on a column that matches the ingestion order, such as an event or creation date, so the layout is maintained after modifications
+K: D
+G: ## Ingestion time clustering
+Unpartitioned Delta tables are automatically clustered by ingestion time, because new files arrive in time order. For tables under about 1 TB this gives partitioning-like performance without tuning, and partitioning is not recommended.
+## What updates do
+`UPDATE` and `MERGE` rewrite files and move rows into new files, so the time ordering of the files erodes. Databricks recommends, for a table with a large number of such modifications, **liquid clustering on a column that matches the ingestion order**, for example an event timestamp or a creation date, to maintain the date-based skipping. Partitioning a 400 GB table would be against the size guidance, and `ZORDER` is the legacy technique that liquid clustering replaces.
+W: Cluster by the date-like column: the clustering keeps date locality through updates, and incremental OPTIMIZE (or predictive optimization) maintains it.
+X: A=Partition by date: at 400 GB the partitions would be small, below the recommended 1 GB and 1 TB limits, and a full rewrite is a heavy step for the same goal.
+B=Nightly ZORDER: it requires a manual job, rewrites more data than needed each run, and is the technique that liquid clustering replaces.
+C=Do nothing: ingestion-time clustering depends on files arriving in order, and the point of the scenario is that updates and merges break this order.
+T: Under heavy UPDATE/MERGE, an unpartitioned table loses its ingestion-time order; liquid clustering on the date-like column keeps it.
+V: Liquid clustering, Delta Lake
+
+@ DBX-DEP D6 T6.1 applied use-case
+S: A group of on-call engineers must be able to open the Spark UI and logs of runs of the job `nightly_load`, start the job with different parameters, and cancel runs. They must not be able to edit the job's settings or delete the job. Which job permission is the least privilege that fits?
+A: CAN VIEW, because it shows the job settings and the results of runs, and runs can then be repeated from the Runs page
+B: CAN MANAGE, because it is the permission that grants running the job with other parameters, and editing is only enforced for the owner
+C: CAN MANAGE RUN, which allows run now (also with other parameters), cancel run, and the Spark UI and logs, but no editing of settings
+D: IS OWNER, because the owner permission is needed to cancel a run that another user started, even though it also allows editing and deleting
+K: C
+G: ## Job ACLs
+Job permissions form a ladder:
+- **CAN VIEW**: view job details, settings and results of runs. No Spark UI or logs, and no running.
+- **CAN MANAGE RUN**: everything in CAN VIEW plus view the Spark UI and logs of a run, run now, run now with different parameters, and cancel a run. It cannot edit the settings or delete the job.
+- **CAN MANAGE** and **IS OWNER**: additionally edit settings, delete the job and modify permissions.
+Least privilege means choosing the lowest rung that covers every duty. The duties here (logs, run with different parameters, cancel) are exactly CAN MANAGE RUN, and the forbidden actions (edit, delete) start one rung higher.
+W: CAN MANAGE RUN: it covers logs, runs with other parameters and cancellations and stops short of edit and delete rights.
+X: A=CAN VIEW: it allows viewing settings and results only. Spark UI, logs and run actions are not included.
+B=CAN MANAGE: it includes editing settings, deleting the job and changing permissions, which the group must not have. Editing is not limited to the owner.
+D=IS OWNER: a job has a single owner identity, and the permission includes editing and deleting, so it is more than needed.
+T: For operators who rerun and cancel jobs and read logs but never edit them, grant CAN MANAGE RUN.
+V: Lakeflow Jobs, access control lists
+
+@ DBX-DEP D6 T6.1 applied use-case
+S: Release operators must start and stop updates of the Lakeflow Spark Declarative Pipeline `orders_pipeline` and look at its driver logs. They must not change the pipeline's source code, settings or permissions. Which pipeline permission follows least privilege?
+A: CAN RUN, which lets the group start and stop pipeline updates and view logs, while editing settings requires CAN MANAGE
+B: CAN VIEW, which lets the group see the pipeline and its Spark UI and logs, and start updates through the Jobs that trigger it
+C: CAN MANAGE, because starting an update changes the pipeline's state and therefore needs the right to edit its settings
+D: Run the pipeline with a service principal as owner of the group, because stopping updates is possible only for the pipeline's owner
+K: A
+G: ## Pipeline ACLs
+Lakeflow pipelines have these permission levels:
+- **CAN VIEW**: see the pipeline and its list entry, view the Spark UI and driver logs.
+- **CAN RUN**: CAN VIEW plus start and stop pipeline updates and stop the pipeline's clusters directly.
+- **CAN MANAGE** and **IS OWNER**: additionally edit pipeline settings, delete the pipeline and modify permissions.
+Starting an update does not require the right to change the definition, so operations teams can be given CAN RUN while developers keep CAN MANAGE. This separation also helps in code review flows where the pipeline source is changed only through deployments.
+W: CAN RUN: it adds starting and stopping updates to the viewing rights, with no right to edit settings or change permissions.
+X: B=CAN VIEW: it is read-only for the pipeline. Starting and stopping an update needs CAN RUN.
+C=CAN MANAGE: it allows edits, deletion and permission changes. Starting an update does not need these rights.
+D=Owner-only stopping: stopping updates is part of CAN RUN, so no ownership is needed and a service principal owner is not required.
+T: Pipeline operators who only start and stop updates need CAN RUN, not CAN MANAGE.
+V: Lakeflow Spark Declarative Pipelines, access control lists
+
+@ DBX-DEP D6 T6.1 applied use-case
+S: A performance team must open the query profiles of queries that other users ran on the shared SQL warehouse `bi_wh`, to find bottlenecks. They must not edit the warehouse and must not gain wider rights than necessary. Which warehouse permission fits?
+A: Workspace admin membership, because profiles of queries run by other users are visible only to workspace admins and nobody else
+B: CAN MANAGE, because query profiles of other users can only be seen by a user who is allowed to change the warehouse
+C: CAN USE, because it is the lowest permission that lets a user work with the warehouse and therefore see profiles of its queries
+D: CAN MONITOR, which is the lowest warehouse permission that opens the query profile of queries of other users, short of editing rights
+K: D
+G: ## Who can see a query profile
+A query profile is visible to the **owner of the query** or to users with **at least CAN MONITOR** on the SQL warehouse that ran the query. Warehouse permissions on existing warehouses are CAN VIEW, CAN MONITOR, CAN USE, IS OWNER and CAN MANAGE. Editing the warehouse, deleting it and modifying its permissions belong to the owner and to CAN MANAGE.
+For a team that analyzes performance but should not operate the warehouse, CAN MONITOR is the specific rung for the monitoring need. CAN MANAGE would also work but grants editing and deletion.
+W: CAN MONITOR: the Databricks requirement for opening other users' profiles is at least this permission, and it carries no edit rights.
+X: A=Workspace admin: the documented requirement is query ownership or at least CAN MONITOR on the warehouse, so admin membership is not needed and it is a far wider right.
+B=CAN MANAGE: it opens profiles but also allows editing the warehouse, deleting it and changing permissions, which is more than needed.
+C=CAN USE: it is intended for running queries on the warehouse, and it is not the monitoring role named by the documentation for viewing profiles.
+T: Use CAN MONITOR on the warehouse for people who analyze other users' query profiles.
+V: Databricks SQL, access control lists
+
+@ DBX-DEP D6 T6.1 advanced use-case
+S: An internal auditor must be able to review, across the catalog `prod`, which privileges are granted, which tables have row filters or column masks, and which ABAC policies apply. The auditor must neither read any table data nor be able to change grants. Which Unity Catalog privilege on `prod` fits?
+A: `READ METADATA`, which shows grants, row filters, column masks and policies of the objects below, without reading data or modifying anything
+B: `BROWSE`, which lets the auditor discover objects below the catalog and also lists the grants, masks and policies applied to them
+C: `MANAGE`, which allows the auditor to view all metadata, and it is not a risk because the auditor will only use it for reading
+D: `SELECT` together with `USE CATALOG` and `USE SCHEMA`, because reading the tables is needed to see which masks and filters protect them
+K: A
+G: ## Metadata privileges in Unity Catalog
+- `BROWSE` lets a user discover objects, view their metadata and request access, without `USE CATALOG` or `USE SCHEMA`. Grants, row filters, column masks and ABAC policies are what `READ METADATA` adds.
+- `READ METADATA` gives read-only visibility into the same metadata as the owner or a user with `MANAGE`: privilege grants, row filters and column masks, ABAC policies and similar details, without the ability to modify the object or read its data. It is a child of `MANAGE`.
+- `MANAGE` can grant and revoke privileges, transfer ownership, rename and drop. A reviewer should not hold it.
+- `ALL PRIVILEGES` excludes `MANAGE`, `READ METADATA`, `EXTERNAL USE SCHEMA` and `EXTERNAL USE LOCATION`, so even broad data access does not bring audit visibility.
+Granting `READ METADATA` on the catalog is inherited by the schemas and tables in it.
+W: READ METADATA: it is the privilege for read-only audit visibility, covering grants, masks, filters and policies while data and changes stay out of reach.
+X: B=BROWSE: it is meant for discovering objects and requesting access, while viewing grants, masks, filters and policies is what READ METADATA adds.
+C=MANAGE: it permits changing grants, ownership and dropping objects, which breaks the requirement that the auditor cannot change grants.
+D=SELECT: it reads table data, which is forbidden, and `SELECT` does not by itself show the grants and policies of tables.
+T: Use READ METADATA for auditors who need to see grants, masks and policies without data access or change rights.
+V: Unity Catalog privileges
+
+@ DBX-DEP D6 T6.1 advanced use-case
+S: A service principal runs a job whose only duty is to refresh the materialized view `prod.gold.daily_revenue` created by another team. The principal must not read other objects in the schema or change the view. Which grant on the view follows least privilege?
+A: `ALL PRIVILEGES` on the schema `prod.gold`, so that the refresh keeps working when new materialized views are added to it
+B: Make the principal the owner of `prod.gold.daily_revenue`, because only the owner of a materialized view can start its refresh
+C: `SELECT` and `MODIFY` on `prod.gold.daily_revenue`, because a refresh writes new rows into the view's storage
+D: `REFRESH` on `prod.gold.daily_revenue`, with `USE SCHEMA` on `prod.gold` and `USE CATALOG` on `prod`
+K: D
+G: ## The REFRESH privilege
+`REFRESH` applies to materialized views and allows a user to refresh one. The user also needs `USE SCHEMA` on the parent schema and `USE CATALOG` on the parent catalog, because every access path in Unity Catalog needs these usage privileges.
+- Privileges are inherited: `REFRESH` on a schema or catalog covers all current and future materialized views in it. For least privilege, grant it on the single view.
+- `MODIFY` and `SELECT` apply to tables; they are not what a refresh needs, and a materialized view is changed only by its refresh.
+- Ownership grants far more, including `MANAGE`-like rights to change grants and drop the object.
+```
+GRANT USE CATALOG ON CATALOG prod TO `sp-refresh`;
+GRANT USE SCHEMA ON SCHEMA prod.gold TO `sp-refresh`;
+GRANT REFRESH ON MATERIALIZED VIEW prod.gold.daily_revenue TO `sp-refresh`;
+```
+W: REFRESH on the one view plus the usage privileges: it allows exactly the refresh and nothing else in the schema.
+X: A=ALL PRIVILEGES on the schema: it covers every object in the schema, which breaks the requirement to keep the principal away from other objects.
+B=Ownership: the `REFRESH` privilege exists so that refresh can be delegated. Ownership also allows dropping the view and changing its grants.
+C=SELECT and MODIFY: a materialized view is not written by clients, and these privileges give read access to the result and are not the refresh right.
+T: Delegate a materialized view refresh with REFRESH on that view plus USE CATALOG and USE SCHEMA.
+V: Unity Catalog privileges, materialized views
+
+@ DBX-DEP D6 T6.2 advanced tradeoff
+S: An ABAC row filter policy at catalog level uses `MATCH COLUMNS has_tag('store_id')`. Its SQL function looks up the querying user in `sec.store_entitlements`, a table with about 90 million rows of (user, store) pairs. Queries on protected tables became slow. Which redesign follows the guidance for ABAC performance?
+A: Map the entitlements to account groups and use simple SQL logic with `is_account_group_member()`, with privileged groups in the policy's `EXCEPT` clause
+B: Rewrite the function as a Python UDF that caches the entitlement table in memory, because Python UDFs are optimized better than SQL functions
+C: Move the same function to a table-level row filter on each table, because table-level filters do not evaluate the lookup for every row
+D: Keep the lookup table and increase the warehouse size, since the optimizer broadcasts the 90-million-row table once the cluster has more memory
+K: A
+G: ## Cost model of ABAC row filters
+A row filter policy runs its function for every row (and a column mask for every matched value) at query time. Databricks gives these rules:
+- Keep functions simple: basic `CASE` and boolean expressions, only columns of the target table where possible (this keeps predicate pushdown possible).
+- Prefer **SQL functions** to Python UDFs, which the optimizer cannot inline.
+- Avoid subqueries and joins against large tables, which prevent broadcast joins; any referenced table must be small enough to broadcast.
+- Identity functions such as `is_account_group_member()` are resolved **once during query analysis**, not per row, and several calls result in a single Unity Catalog call.
+- Use `TO` and `EXCEPT` to decide who is subject to the policy. Excepted principals skip the function completely.
+Therefore a 90-million-row user-by-store lookup is the wrong design. Model the entitlement as groups (for example one group per region), keep the function a simple CASE on group membership and the tagged column, and leave administrators out through `EXCEPT`.
+W: Groups and identity functions: membership is resolved once per query, the function is a cheap CASE, and exempt principals do not run it.
+X: B=Python UDF: Databricks recommends SQL functions, since a Python UDF cannot be inlined or optimized, and caching in it does not solve a per-row lookup.
+C=Table-level filters: the same function would run per row on every table, and moving it removes the consistency of tag-based policies.
+D=Bigger warehouse: a table of this size is not broadcast by adding memory, and a large lookup prevents the broadcast join the guidance relies on.
+T: Keep ABAC functions simple SQL, avoid large lookup tables, use group membership and TO/EXCEPT for principals.
+V: Unity Catalog ABAC
+
+@ DBX-DEP D6 T6.2 advanced use-case
+S: Ingestion teams create new tables in the schema `landing` every week, and some are not classified by a steward for days. During that time unclassified columns holding personal data are readable. The governance lead wants a design under which untagged new data is protected by default. Which approach follows the ABAC best practices?
+A: Rely on a weekly audit of tag changes in the audit log and revoke access for any table found without classification
+B: Create a column mask policy on the catalog for columns tagged `pii`, since every new column holding personal data will carry that tag once teams follow the tagging standard
+C: Tag the schema `classification = unverified`, which new tables inherit, and add a policy restricting tables with that value until a steward changes it
+D: Add a table-level column mask to each new table through a trigger, because table-level masks apply earlier than ABAC policies
+K: C
+G: ## Fallback rules for unclassified data
+ABAC policies only protect what their tags describe, so missing tags leave data unprotected. The best-practice answer is a **default restrictive tag**:
+- Apply a default governed tag such as `classification = unverified` where new objects appear. Tables inherit governed tags from their parent catalog or schema (column tags do not inherit from the table).
+- Create a policy whose condition matches the default value, for example a row filter that returns no rows to everyone except the stewards in `EXCEPT`.
+- A steward reviews the table and changes the tag to its real value, which lifts the restriction and activates the specific policies.
+```
+CREATE POLICY quarantine_unverified ON SCHEMA landing
+ROW FILTER sec.deny_all TO `account users` EXCEPT `data_stewards`
+FOR TABLES WHEN has_tag_value('classification', 'unverified');
+```
+Audits find the gap after the fact. A policy keyed on the personal-data tag fails exactly in the unclassified case, because the tag is the thing that is missing.
+W: Default unverified tag with a restrictive policy: new tables are closed automatically, and classification by a steward opens them.
+X: A=Weekly audit: it detects exposure after it happened and relies on people to revoke, so the unprotected window remains.
+B=PII mask on the tag: the policy matches only columns that already carry the tag, so the unclassified columns are the ones it does not cover.
+D=Trigger-created masks: table-level masks are per-table configuration, which is the sprawl ABAC is meant to avoid, and they are not applied earlier than policies.
+T: Protect unclassified data by default with a restrictive governed tag value and a policy that matches it.
+V: Unity Catalog ABAC, governed tags
+
+@ DBX-DEP D6 T6.2 advanced use-case
+S: A governance team wants the `data_stewards` group to classify columns in the schema `crm` with the governed tag `pii`. Stewards must not read table data, change policies, or become table owners. Which privileges give them exactly this ability?
+A: `ASSIGN` on the governed tag `pii` alone, because the tag policy is the only control that decides who may set the tag on objects
+B: `MANAGE` on the schema `crm`, because managing a schema includes assigning every governed tag to the objects in it
+C: Ownership of every table in `crm`, because tags can only be set by the owner of the object, and policies stay with the catalog owner and the metastore admins
+D: `APPLY TAG` on `crm` (inherited by its tables) and `ASSIGN` on the governed tag, plus the usage privileges to reach the objects
+K: D
+G: ## Two permissions for a governed tag
+Tagging is a security boundary in ABAC: whoever sets a tag decides which policies apply. For that reason applying a governed tag needs two things:
+- `APPLY TAG` on the securable object (applicable to tables, views, volumes and others, and grantable on a schema or catalog to be inherited), and
+- `ASSIGN` on the governed tag itself, which the tag policy manages and which can restrict the allowed values.
+Neither implies the other. `APPLY TAG` is not `SELECT`, so stewards can classify without reading data, and it is not `MANAGE`, so they cannot create or change policies (that needs `MANAGE` on the securable and `EXECUTE` on the function). Usage privileges (`USE CATALOG`, `USE SCHEMA`) are still needed to reach objects.
+```
+GRANT APPLY TAG ON SCHEMA crm TO `data_stewards`;
+-- plus ASSIGN on the governed tag `pii`, managed in the tag's permissions
+```
+W: APPLY TAG plus ASSIGN: the first allows tagging objects without data or policy rights, the second allows using the governed tag.
+X: A=ASSIGN alone: it allows using the tag, but setting a tag on an object also needs `APPLY TAG` on that object.
+B=MANAGE on the schema: it includes the right to create policies and change grants, which stewards must not have, and it does not replace ASSIGN on the governed tag.
+C=Ownership: owning tables would let stewards change grants and drop tables, which far exceeds tagging, and tags do not require ownership.
+T: Setting a governed tag needs APPLY TAG on the object and ASSIGN on the tag, so stewards can classify without data or policy rights.
+V: Unity Catalog governed tags, ABAC
+
+@ DBX-DEP D6 T6.2 advanced troubleshooting
+S: A nightly Spark job read `prod.hr.employees` as files with `spark.read.format("delta").load("s3://acme-hr/employees")`. After a platform team attached ABAC column mask policies to the catalog (the table now has tagged columns), the job fails. The job must keep processing the same data, and the masks must stay in force for the job's identity. What is the correct change?
+A: Add the job's service principal to the `EXCEPT` clause of the policies, because exempt principals can read the files of a table directly
+B: Grant the service principal `READ FILES` on the external location, because file access to the table path is then allowed and masked by the policy engine for that principal
+C: Remove the governed tag from the columns during the job's run window and apply it again afterwards, so that the path is accessible
+D: Read the table by its name `prod.hr.employees` so the engine enforces the masks; path-based access to tables with policies is not supported
+K: D
+G: ## Why path access is blocked
+Row filters and column masks are enforced by the engine when a table is queried through Unity Catalog. Reading the underlying files directly would bypass them, so Databricks lists **path-based access to files of tables with policies as not supported**. That applies to table-level filters and masks and to ABAC policies alike.
+## The fix
+Move the job to name-based access:
+```
+df = spark.table("prod.hr.employees")
+```
+The job then needs the table privileges (`SELECT`, `USE CATALOG`, `USE SCHEMA`) and sees masked values unless the policy lists the principal in `EXCEPT` for a legitimate reason. Exempting a principal is a governance decision about data exposure, not a way to restore a file path. Changing tags during a run window would expose the data to everyone else for that time.
+W: Name-based access: the engine applies the policies, which is the only supported way to read a table that has row filters or column masks.
+X: A=EXCEPT: it changes who sees masked values. It does not make a path-based read of a policy-protected table supported.
+B=READ FILES: it is a storage privilege on the external location, and it would be the very bypass that policies are meant to prevent.
+C=Remove the tag: this turns the protection off for every user during the window, and it still leaves the path-based design in place.
+T: Tables with ABAC policies must be read by name; path-based file access to them is not supported.
+V: Unity Catalog ABAC

@@ -1,0 +1,589 @@
+# DBX-DEP batch 06: D4 Monitoring and Alerting, T4.1 system tables 7, T4.2 REST/CLI/SDK 5, T4.3 pipeline event logs 7, T4.4 SQL alerts 6, T4.5 Jobs run monitoring 3 (guide read 2026-11-07)
+# src: https://docs.databricks.com/aws/en/admin/system-tables/
+# src: https://docs.databricks.com/aws/en/admin/system-tables/billing
+# src: https://docs.databricks.com/aws/en/admin/system-tables/jobs
+# src: https://docs.databricks.com/aws/en/admin/system-tables/jobs-cost
+# src: https://docs.databricks.com/aws/en/admin/system-tables/compute
+# src: https://docs.databricks.com/aws/en/admin/system-tables/lineage
+# src: https://docs.databricks.com/aws/en/admin/system-tables/alerts
+# src: https://docs.databricks.com/aws/en/admin/usage/system-tables
+# src: https://docs.databricks.com/aws/en/dev-tools/cli/reference/jobs-commands.html
+# src: https://docs.databricks.com/aws/en/dev-tools/cli/reference/pipelines-commands
+# src: https://docs.databricks.com/api/workspace/pipelines/listpipelineevents
+# src: https://docs.databricks.com/api/workspace/jobs/getrun
+# src: https://docs.databricks.com/aws/en/dev-tools/sdk-python
+# src: https://docs.databricks.com/aws/en/ldp/monitor-event-logs
+# src: https://docs.databricks.com/aws/en/ldp/monitor-event-log-schema
+# src: https://docs.databricks.com/aws/en/ldp/expectations
+# src: https://docs.databricks.com/aws/en/delta-live-tables/observability
+# src: https://docs.databricks.com/aws/en/sql/user/alerts
+# src: https://docs.databricks.com/aws/en/sql/user/alerts/create
+# src: https://docs.databricks.com/aws/en/sql/user/alerts/manage
+# src: https://docs.databricks.com/aws/en/jobs/alert
+# src: https://docs.databricks.com/aws/en/jobs/monitor
+
+@ DBX-DEP D4 T4.1 advanced troubleshooting
+S: A finance analyst totals `system.billing.usage` by `usage_metadata.job_id` to chart the cost of the job `daily_agg`. Last month the job was moved from its own job compute to a shared all-purpose cluster. Runs still succeed, but since the move the job shows no billed usage at all. What explains this, and how can the cost still be attributed?
+A: Records of the job are delayed for several weeks after a compute change, so the analyst should wait until the usage is back-filled under the same job ID
+B: The usage is now billed as ALL_PURPOSE and has no job ID, so the analyst attributes it through `usage_metadata.cluster_id` and the cluster's tags or owner
+C: Jobs that run on all-purpose compute are not billed at all, because the cluster already carries the cost and only job compute creates billable records
+D: The job ID is populated only in the first hourly record of a run, so the analyst should group by `usage_start_time` to find the remaining rows
+K: B
+G: ## What the usage table can tell you
+`system.billing.usage` has one row per product, SKU and hour. The `usage_metadata` struct names the objects behind the row, but only some fields are filled for each compute type.
+- `job_id` and `job_run_id` are populated for serverless jobs and for jobs that run on job compute. They are not populated for jobs run on all-purpose compute.
+- `cluster_id` is populated for non-serverless usage, and `billing_origin_product` tells you whether the row is `JOBS`, `ALL_PURPOSE`, `DLT` and so on.
+## Consequence for cost attribution
+When a task runs on a shared all-purpose cluster, the bill is for the cluster, not for the job. Per-job cost is lost, and the cost can only be split by cluster, by `custom_tags` on the cluster, or by the cluster owner (join `system.compute.clusters.owned_by` on `cluster_id`). This is one reason production jobs are moved to job compute or serverless: the billing record then carries the job and run IDs.
+W: ALL_PURPOSE without job ID: the job ID is not filled for all-purpose usage, so the rows exist under the cluster; attribution has to use the cluster ID, its tags or its owner.
+X: A=Back-fill delay: billable usage normally appears within about half a day, not weeks, and a delayed record would still carry the same field values once it arrives.
+C=Not billed: all-purpose compute is billed, and it appears in the usage table under its own product; it is only the job link that is missing.
+D=First hourly record: the job ID is filled on every row that has it; grouping by start time does not recover a field that is null on all-purpose rows.
+T: Job and run IDs in billing rows exist only for jobs compute and serverless jobs; all-purpose usage is attributed by cluster, tag or owner.
+V: system.billing.usage
+
+@ DBX-DEP D4 T4.1 advanced troubleshooting
+S: A monthly cost report sums `usage_quantity` for the account with the filter `WHERE record_type = 'ORIGINAL'`, chosen to avoid negative numbers. The finance team notes that the report no longer matches the invoice for a month in which Databricks corrected some earlier records. Which change makes the report correct?
+A: Keep only `RESTATEMENT` rows, because they contain the corrected values and the other record types are duplicates of them
+B: Remove the filter on `record_type` and sum every row, so each retraction cancels its original and the restatement adds the corrected amount
+C: Sum only `ORIGINAL` and `RETRACTION` rows, because together they remove every incorrect record and leave the invoice total
+D: Keep `ORIGINAL` rows and add 12 hours of lag to the report window, because corrections are written into the original rows after they arrive
+K: B
+G: ## Corrections in the usage table
+Billable usage rows are append-only. When Databricks corrects a record, it adds two rows rather than editing the old one:
+- a `RETRACTION` row, identical to the original except that `usage_quantity` is negative and cancels it;
+- a `RESTATEMENT` row with the corrected fields and quantity.
+Both carry the same time window as the original. A correction that removes a record entirely may add only the retraction.
+## Why the filter is wrong
+Summing everything yields the right total, because original plus retraction is zero and the restatement remains. Filtering to `ORIGINAL` keeps the incorrect values and drops the correction; filtering to `RESTATEMENT` drops every record that was never corrected. The negative numbers are not an error, they are the mechanism.
+```sql
+SELECT usage_metadata.job_id, SUM(usage_quantity) AS dbus
+FROM system.billing.usage
+WHERE usage_date >= date_trunc('month', current_date())
+GROUP BY ALL
+```
+W: Sum all record types: each retraction negates its original and the restatement carries the corrected value, so a plain sum over all rows matches the invoice.
+X: A=Only restatements: most records are never corrected, so they exist only as original rows and would vanish from the total.
+C=Original plus retraction: the pair sums to zero for every corrected record, but the corrected values sit in the restatement rows, so the corrected amounts are missing from the total.
+D=Original plus lag: records are not edited after they arrive and the availability lag does not apply to corrections, so waiting never repairs the figure.
+T: Never filter billing usage to ORIGINAL; sum all record types so retractions cancel originals.
+V: system.billing.usage
+
+@ DBX-DEP D4 T4.1 advanced troubleshooting
+S: A report joins usage to job names and gets totals above the billed amount for jobs that were renamed or had their schedule edited.
+```sql
+SELECT j.name, SUM(u.usage_quantity) AS dbus
+FROM system.billing.usage u
+JOIN system.lakeflow.jobs j
+  ON u.workspace_id = j.workspace_id AND u.usage_metadata.job_id = j.job_id
+GROUP BY j.name
+```
+Which correction fixes the inflated totals and also keeps the cost of jobs that have since been deleted?
+A: Replace the inner join with a join on job name and apply `SELECT DISTINCT` to the usage rows before summing them
+B: Add `WHERE j.delete_time IS NULL` to the same query, so that only rows without a deletion time are joined to the usage rows of each job
+C: Keep only the latest row per workspace and job (`ROW_NUMBER()` by `change_time` descending), then LEFT JOIN usage to it
+D: Group by `j.change_time` as well, so that every historical version of a job reports its own total next to the others
+K: C
+G: ## `jobs` is a history table
+`system.lakeflow.jobs` (like `job_tasks` and `pipelines`) is a slowly changing dimension. Every change to a job emits a new row with a new `change_time`, and a deletion emits a row with `delete_time` set. A job edited three times therefore has four rows.
+Joining usage to all of those rows repeats each usage row once per version, so sums inflate.
+## The pattern
+First reduce the dimension to one row per entity: `ROW_NUMBER() OVER (PARTITION BY workspace_id, job_id ORDER BY change_time DESC)` and keep row number 1. Then join. Use a LEFT JOIN from usage if deleted jobs must stay in the cost report. Filtering `delete_time IS NULL` in the same query that reads the table does not remove deleted jobs; it only removes the deletion rows and returns the last state before deletion. A filter on `delete_time` belongs after the latest row is chosen, and only when you want live jobs.
+W: Latest row, then LEFT JOIN: one row per job removes the fan-out, and the LEFT JOIN keeps usage of jobs whose latest row records a deletion.
+X: A=Join on name with DISTINCT: names are not unique across jobs or workspaces, and DISTINCT on usage rows would also collapse legitimately identical hourly rows.
+B=delete_time filter in the same query: it only drops the deletion rows, so every older version of every job is still joined and the totals stay inflated, while deleted jobs appear with their last state before deletion.
+D=Group by change_time: this leaves every version as a separate line, so totals per job are split across versions instead of being correct.
+T: Collapse SCD2 system tables to the latest row per key before joining them to fact tables.
+V: system.lakeflow.jobs
+
+@ DBX-DEP D4 T4.1 advanced use-case
+S: An account runs workspaces in two cloud regions. An analyst in a us workspace runs the "most expensive jobs" cost query that joins `system.billing.usage` with `system.lakeflow.jobs` through a LEFT JOIN. Costs of the eu workspaces appear, but their job names are NULL. What is the cause, and what is the fix?
+A: Usage covers all regions but the jobs table only the current region, so the name lookup must run in an eu workspace
+B: The analyst lacks `SELECT` on the eu catalogs, so the account admin must grant read access to every eu job to make the names visible
+C: The eu jobs run on serverless compute, which writes no rows to `system.lakeflow.jobs`, so their names exist only in billing tags and custom tags
+D: The LEFT JOIN drops rows from other regions, so switching to an INNER JOIN returns the names and keeps the costs of both regions
+K: A
+G: ## Global versus regional system tables
+System tables are shared with your metastore's region, and the overview lists each table as regional or global.
+- `system.billing.usage` is global: usage from every workspace of the account appears, whichever region the querying workspace is in.
+- The `system.lakeflow` tables (jobs, job_tasks, job_run_timeline, pipelines and so on) are regional: they hold only the workspaces deployed in the same cloud region as the workspace where you run the query.
+So a cost query that joins a global table to a regional dimension shows costs for all regions but names only for the local one. The documented remedy is to run the query in a workspace of the other region (or run it once per region and combine the results).
+W: Global usage, regional jobs table: eu usage is visible everywhere, but eu job definitions are only in eu-region system tables, so the name lookup must run there.
+X: B=Missing grants: a permission problem would block the whole table rather than return costs for one region and no names; the grant on system tables also covers the entire table.
+C=Serverless exclusion: serverless jobs are recorded in the jobs tables, and the cost rows of serverless jobs carry the same job ID as other jobs.
+D=INNER JOIN: an INNER JOIN would remove the eu rows whose names are missing, which loses the costs the analyst can currently see.
+T: Billing usage is account-global but the lakeflow system tables are regional; enrich names in the region that owns the jobs.
+V: system.billing.usage, system.lakeflow.jobs
+
+@ DBX-DEP D4 T4.1 advanced use-case
+S: A nightly job on classic job compute with one driver and eight workers has become slow. The team suspects the driver (large collects) rather than the workers, and the cluster is already terminated when the issue is reported. Which system-table source lets them compare driver and worker pressure for the last run?
+A: `system.compute.node_timeline`, with minute-level CPU, memory and network metrics per node and a driver flag
+B: `system.billing.usage`, whose `node_type` field reports the instance type of the driver and each worker for every hour of the run
+C: `system.lakeflow.job_run_timeline`, which stores the peak memory and CPU of the driver for each run next to the result state
+D: `system.query.history`, which records resource metrics for every Spark task that classic job compute runs, including the node it ran on and its memory use
+K: A
+G: ## Utilization lives in the compute schema
+`system.compute.node_timeline` records one row per node per minute for all-purpose and jobs compute (and Lakeflow pipeline compute). Useful columns are `cluster_id`, `instance_id`, a `driver` boolean, `cpu_user_percent`, `cpu_wait_percent`, `mem_used_percent`, `mem_swap_percent`, network bytes and disk free space. Because the data is kept after the cluster is terminated, it supports after-the-fact right-sizing.
+## Comparing driver and workers
+Filter on the `cluster_id` of the run and the minute range, then aggregate per `driver` value: a driver with high memory use and swap while workers are idle points to collects or driver-side Python, whereas busy workers with an idle driver point to shuffle or data volume.
+## Why the other tables do not help
+`billing.usage` shows cost and `node_type`, which does not distinguish driver from worker. `job_run_timeline` has states and durations, not utilization. `query.history` records queries run on SQL warehouses and serverless compute for notebooks and jobs, not Spark tasks of classic job compute.
+W: node_timeline: minute-level utilization per node with a driver flag survives cluster termination, so driver and worker memory and CPU can be compared for the exact run window.
+X: B=billing.usage node_type: this is a cost record whose node type does not tell driver from worker and has no utilization values at all.
+C=job_run_timeline: it keeps one row per run slice with states and termination codes; it has no CPU or memory columns.
+D=query.history: it captures queries run on SQL warehouses and serverless compute for notebooks and jobs; it does not log Spark tasks of a classic jobs cluster.
+T: Use system.compute.node_timeline for after-the-fact driver versus worker utilization.
+V: system.compute.node_timeline
+
+@ DBX-DEP D4 T4.1 advanced tradeoff
+S: Before dropping a legacy table, a steward queries `system.access.table_lineage` for the last year and finds no reader other than the nightly pipeline that writes it. A colleague proposes dropping the table immediately since no consumer was recorded. What is the most accurate guidance?
+A: Drop it, because lineage records every read and write of a Unity Catalog table, so an empty reader list proves that there is no consumer
+B: Drop it only after querying `system.lakeflow.jobs`, since lineage is generated from job definitions and the jobs table lists every reader
+C: Do not rely on it alone, because the tables hold only events whose lineage could be inferred; confirm with a staged deprecation
+D: Wait for the retention window to roll over, because lineage tables keep a rolling window and older entries would then appear again in the table
+K: C
+G: ## What the lineage tables guarantee
+`system.access.table_lineage` and `column_lineage` hold a record for each read or write event on a Unity Catalog table or path, from job runs, notebooks, dashboards and queries. The documentation states that they represent a subset of all read/write events: records are only emitted when lineage can be inferred, and the general lineage limitations also apply.
+## Consequence
+Absence of a row is evidence, not proof. Readers using unsupported paths, access outside Unity Catalog or events older than the rolling window can be missing. Safe decommissioning combines lineage with a visible deprecation period (for example revoking access or renaming the table first and waiting), and the usage signals available to the team, such as query history or audit events (the audit log table is in Public Preview).
+W: Lineage is a subset: the tables record only events whose lineage could be inferred, so no recorded reader is not a guarantee and a staged deprecation covers the gap.
+X: A=Complete record: the docs state that lineage tables are a subset of read and write events, so an empty result cannot prove that nothing reads the table.
+B=Jobs table: system.lakeflow.jobs stores job definitions and settings; it neither generates lineage nor lists tables that jobs read.
+D=Waiting for the window: events that left the rolling window do not return later, so waiting makes the history shorter instead of more complete.
+T: Lineage system tables are a subset of access events; treat an empty result as evidence and decommission in stages.
+V: system.access.table_lineage
+
+@ DBX-DEP D4 T4.1 advanced use-case
+S: Platform administrators want each regional team lead to query `system.billing.usage` for the lead's own workspaces only. By default only users who are both account admin and metastore admin can read system tables, and the tables are read-only. Which design gives the leads the narrower view?
+A: Grant `SELECT` on `system.billing` to the leads and attach a row filter to `usage` that checks the workspace IDs of each lead
+B: Make every team lead a metastore admin, because metastore admins automatically see only the system rows of their own workspaces
+C: Create a view in a governed schema that filters `usage` by workspace and group membership, and grant `SELECT` on the view only
+D: Copy `system.billing.usage` into each team's catalog once a month with a different filter, and grant read access on those copies
+K: C
+G: ## Sharing system tables safely
+System tables are owned by Databricks, governed by Unity Catalog and read-only. Granting access means `USE CATALOG` on `system`, `USE SCHEMA` on the schema and `SELECT` on it, and that gives the reader every row from all workspaces of the account (for tables in the account's region or global). To share only a subset with a user or group, expose it through a Unity Catalog view instead of granting the system schema.
+## Dynamic view
+A view in a normal catalog can use `is_account_group_member()` and a mapping of workspace IDs to groups to return only the allowed rows. Readers get `SELECT` on the view; the view owner needs access to the system table. Because system tables cannot be modified, a row filter or column mask cannot be attached to them directly.
+W: View with group-based filter: the view returns only the rows each team may see and the leads never receive access to the underlying system table.
+X: A=Grant plus row filter: system tables are read-only and cannot be altered, so a row filter cannot be attached, and the grant alone would expose the whole account.
+B=Metastore admin role: this role gives broad rights over the metastore and does not restrict system-table rows to the leads' own workspaces.
+D=Monthly copies: copies go stale within a month, multiply the data and require a separate pipeline per team, while a view is always current.
+T: Share a slice of a system table through a dynamic view, never by granting the table itself.
+V: system.billing.usage, Unity Catalog
+
+@ DBX-DEP D4 T4.2 advanced troubleshooting
+S: A monitoring script calls `GET /api/2.2/jobs/runs/list?completed_only=true&expand_tasks=true` once every night with a time window and counts failed runs from the response. After the number of runs per day grew, the counts stopped matching the Jobs UI, and the missing runs are always the oldest ones in the window. What is the likely cause and fix?
+A: The call returns one page of at most 25 runs, so the script must follow `next_page_token` with `page_token` until none is returned
+B: Completed runs older than a day are removed from the API, so the script must read the older runs from the system tables only
+C: The `expand_tasks` option caps the response to the newest runs only, so the script should drop it and count job-level states instead
+D: List calls return runs in ascending order by start time, so the script should reverse the output to see the newest runs first
+K: A
+G: ## Paged list APIs
+The `runs/list` endpoint returns runs in pages (the `limit` parameter accepts 1 to 25), newest first (descending start time). A response contains `next_page_token` when more results exist; the next call passes it as `page_token`. The CLI command `databricks jobs list-runs` exposes the same `--limit` and `--page-token` options. A script that reads only the first response sees the newest runs and silently loses the rest, which is why the oldest runs of the window are the ones missing.
+## Making the script robust
+- Loop until no `next_page_token` is returned.
+- Bound the query with `start_time_from` and `start_time_to` (epoch milliseconds) so each night reads a defined window.
+- Use `completed_only` or `active_only` to cut the volume, and `expand_tasks` only if you need task details.
+SDK clients wrap the same API as iterators that fetch pages for you, which is easier than hand-written loops.
+W: Follow the page token: the list call returns at most 25 runs a page, newest first, so a script that never requests the next page drops the oldest runs of the window.
+X: B=API removal after a day: run history is kept for 60 days, so a one-day-old run is still returned.
+C=expand_tasks cap: this option only adds task and cluster details to each run; it does not change how many runs are returned.
+D=Ascending order: the documented order is descending by start time, so the newest are first and the missing ones are at the end.
+T: Always follow next_page_token (and bound the time window) when counting runs through the Jobs API.
+V: Jobs API, Databricks CLI
+
+@ DBX-DEP D4 T4.2 advanced troubleshooting
+S: A job has three notebook tasks. The last task exits with `dbutils.notebook.exit(json_result)`. An engineer calls `databricks jobs get-run-output` with the job run ID returned by `run-now` and gets no usable notebook result. How should the result of the last task be retrieved?
+A: Call `get-run` for the job run, read the `run_id` of the task in `tasks`, and pass that task run ID to `get-run-output`
+B: Call `get-run-output` with the job ID instead, because outputs are stored per job and the newest value is returned
+C: Run `list-runs --expand-tasks`, whose result already contains the exit value of each notebook task as a field
+D: Repeat the call every minute until the job finishes, because the output is available only once the whole run has terminated
+K: A
+G: ## Runs and task runs
+A multi-task job run has its own `run_id`, and every task in it has another `run_id`. `get-run-output` returns the output and metadata of a single task run, including the value passed to `dbutils.notebook.exit()`. The run ID of a job run with several tasks is therefore not the identifier to use.
+## The sequence
+- `databricks jobs get-run <job_run_id>` returns the run with its `tasks` array (paged when it is long); each element has a task `run_id` and `task_key`.
+- `databricks jobs get-run-output <task_run_id>` returns the notebook result, an error message and trace for a failed task, or logs.
+The notebook output is limited to the first part of the value; larger results should be written to cloud storage and only the path returned. Run history is kept for a limited time, so results needed later must be saved by the caller.
+W: Task run ID from get-run: the task has its own run_id in the tasks array, and get-run-output is defined for a single task run.
+X: B=Job ID: the output belongs to a run, not to a job definition, and the API does not return a latest value by job.
+C=list-runs expansion: expand-tasks adds task and cluster details, not the notebook exit value, which is only returned by the run output call.
+D=Polling until termination: a finished task run returns its output while other tasks are still running, so waiting for the whole run is not required.
+T: get-run-output takes the run ID of a task, found in the tasks array returned by get-run.
+V: Jobs API, Databricks CLI
+
+@ DBX-DEP D4 T4.2 advanced troubleshooting
+S: A Python service pages through pipeline events with the REST endpoint `GET /api/2.0/pipelines/{id}/events`. The first call sends `filter=level='ERROR'` and `max_results=100`. For the following pages it sends `filter`, `max_results` and the returned `page_token` again, and every second call fails with an error. What is the correct way to page?
+A: Send only `page_token` for later pages, with at most `max_results`, because the token already encodes the filter and other query fields
+B: Send the filter on every page but remove `max_results`, because the token and the page size cannot be combined
+C: Reduce `max_results` to a smaller value, because the endpoint rejects tokens when the page is larger than the number of matching events
+D: Send `order_by` instead of the token, because the events are paged by their timestamp and the token is only a fallback
+K: A
+G: ## Event retrieval through the Pipelines API
+`list-pipeline-events` (CLI: `databricks pipelines list-pipeline-events <pipeline_id>`) returns events from a pipeline's event log. Options are `filter` (SQL-like: `level='ERROR'`, `level in ('INFO','WARN')`, `timestamp > '...'`, combinable with AND), `order_by` (by timestamp, newest first by default), `max_results` and `page_token`.
+## Paging rule
+`page_token` is mutually exclusive with every other request field except `max_results`; the API returns an error if the token is combined with a filter or order. The first call defines the query, and later calls pass only the token (and optionally the page size).
+This endpoint is the choice for an external service that has no SQL warehouse access, whereas analysis across many updates is easier by querying the event log table with SQL.
+W: Token plus page size only: the token already carries the original filter and order, and the API rejects any other field together with it.
+X: B=Filter without page size: the filter cannot be sent with the token at all, and max_results is the only field that may be combined with it.
+C=Smaller page size: the error comes from the extra fields, not from the page size, which may be changed between calls.
+D=Order instead of token: order_by only sets the sort order of one query; it does not continue a previous result.
+T: Pass only page_token (and max_results) when continuing a list-pipeline-events call.
+V: Pipelines API, Databricks CLI
+
+@ DBX-DEP D4 T4.2 advanced use-case
+S: A notebook collects the status of 300 pipelines. To go faster, the code calls the Databricks SDK from a `mapInPandas` function: `WorkspaceClient()` is created inside the function and fetches one pipeline per row. On the cluster the calls fail with authentication errors, but the same code works when it runs on the driver. What is the correct design?
+A: Install a newer SDK on the workers, because notebook authentication works on every executor once versions match
+B: Switch to a personal access token of the engineer in the notebook, because that is the only type that executors can use
+C: Create the client on the driver (a thread pool suffices) or pass explicit credentials such as OAuth M2M of a service principal
+D: Use `dbutils.notebook.run` for every pipeline, because each child notebook receives its own authentication on the executors
+K: C
+G: ## Where default authentication works
+`WorkspaceClient()` uses the unified authentication standard. In a notebook it falls back to default notebook authentication, a temporary token generated for the notebook session. The documentation states that this works only on the driver node, not on workers or executors, and not with Databricks Container Services or configuration profiles.
+## Design consequences
+Monitoring calls are small and I/O bound, so Spark parallelism is not needed: collect the IDs on the driver and call the API there, using a thread pool if latency matters. If code must run on executors, or outside Databricks, pass explicit credentials, preferably OAuth machine-to-machine of a service principal, with the secret read from a secret scope (the worker needs access to the value). The SDK for Python is documented as Beta, and pinning its version is recommended.
+W: Driver-side client or explicit credentials: notebook authentication exists only on the driver, so parallel calls either run there or carry their own service-principal credentials.
+X: A=Newer SDK on workers: the limitation is that notebook authentication is driver-only, not a version mismatch, so upgrading libraries changes nothing.
+B=Personal token: a user token shares one person's identity, expires with the person and is not the only type usable on executors; OAuth M2M works too.
+D=Child notebooks: each child run is still a notebook on the driver side of its own cluster; this adds cost and does not give executors credentials.
+T: Default notebook authentication works on the driver only; use driver-side calls or service-principal credentials on executors.
+V: Databricks SDK for Python
+
+@ DBX-DEP D4 T4.2 advanced use-case
+S: A job run shows Succeeded in the CLI output of `databricks jobs get-run`, but the on-call engineer suspects that tasks of this run had been repaired after a first failure and wants to see which repairs happened and when. Which call returns this information?
+A: `databricks jobs get-run <run_id> --include-history`, which adds the repair history to the run object
+B: `databricks jobs list-runs --run-type WORKFLOW_RUN`, which lists every repair as an extra run of the same job
+C: `databricks jobs get-run-output <run_id>`, whose result contains the repair attempts of the whole job run
+D: `databricks jobs get-run <run_id> --include-resolved-values`, which adds the resolved parameter and task values of each repair that ran
+K: A
+G: ## Retries and repairs are different records
+- A **retry** (task retry policy) creates a new attempt of the task inside the same run; `attempt_number` starts at 0 and attempts after the first carry `original_attempt_run_id`.
+- A **repair** reruns failed tasks (and their dependents) of a finished run. The run keeps its ID and gains an entry in `repair_history`, with the start time, state and the tasks repaired.
+## API access
+`get-run` returns the run with `repair_history` only if asked: the CLI flag is `--include-history` (REST `include_history`). Large arrays such as `tasks` and `repair_history` are paged, so follow `next_page_token`. `--include-resolved-values` returns parameter values that were resolved at run time; it is unrelated to repairs.
+W: --include-history on get-run: the run object then contains repair_history with each repair of the run, which is what the engineer needs.
+X: B=WORKFLOW_RUN list: run types such as JOB_RUN, SUBMIT_RUN and WORKFLOW_RUN distinguish how a run was created; a repair is not a separate run in the list.
+C=get-run-output: this call returns the result of one task run and does not describe repairs of the job run.
+D=Resolved values: this option resolves parameter references such as task values; it has no connection to repair records.
+T: Use get-run with the include-history option to read the repair history of a job run.
+V: Jobs API, Databricks CLI
+
+@ DBX-DEP D4 T4.3 advanced use-case
+S: An SRE team needs read access to the event log of a production pipeline, which was created with default settings. The pipeline owner (the run-as user) can query `event_log(<pipeline_id>)`, but nobody else can, and the team lead worries about exposing more than the event data. Which approach follows the recommended practice?
+A: Publish the event log to a chosen catalog and schema, create a view over the event log table, and grant `SELECT` on the view to the SRE team
+B: Make the SRE team members owners of the pipeline, since event log access always follows pipeline ownership and cannot be shared otherwise
+C: Grant `SELECT` on the hidden event log table to the SRE group directly in the pipeline's default schema, which shows it in Catalog Explorer
+D: Export the event log to a JSON file after each update and share the files, since the event log table cannot be read by anyone but the owner
+K: A
+G: ## Where the event log lives
+By default each Unity Catalog pipeline writes its event log to a hidden Delta table named `event_log_<pipeline_id>` (dashes replaced by underscores) in the pipeline's default catalog and schema. It is not shown in Catalog Explorer and is read through the `event_log(<pipeline_id>)` function; by default only the run-as user can query it.
+## Sharing it
+You can publish the event log to a table of your choice through the pipeline's event log setting (catalog, schema and name). Databricks recommends creating a view over the published table before changing privileges, because with some compute settings sharing the table directly can expose schema metadata (the event log location also serves as the schema location for Auto Loader in the pipeline). The view is then the object granted to other teams.
+Never delete the event log or its parent catalog or schema: a missing event log can make later updates fail.
+## Note on the system table
+A `pipeline_events` system table that aggregates all pipelines of a region exists, but it is in Beta, so this question uses the published event log instead.
+W: Publish and share a view: the published table has a stable name, and a view over it lets the team read events without receiving direct privileges on the table or schema metadata.
+X: B=Pipeline ownership: access to the log is a Unity Catalog privilege on the published table or view, and ownership of the pipeline is not required to read it.
+C=Direct grant on hidden table: the hidden default table is accessed through a function and is not designed for grants; the recommendation is to publish and use a view.
+D=JSON export: the event log can be read by others once published and shared, and a file export adds a delay and a copy to maintain.
+T: Publish the pipeline event log and grant a view over it to other teams.
+V: Lakeflow Spark Declarative Pipelines, Unity Catalog
+
+@ DBX-DEP D4 T4.3 advanced use-case
+S: A dashboard must show, for each update of a triggered pipeline, its final state and duration. The query reads the event log view `event_log_raw`. Which event type and approach give the final state of each update?
+A: Use `flow_progress` events, because the last flow event of an update always holds the state of the whole update and its end time
+B: Use `create_update` events, whose `details` field contains the state in which the update finished
+C: Use `user_action` events, which are written with the final state when an update finishes or is cancelled
+D: Use `update_progress` events, take the latest per `origin.update_id`, and read the state from `details`
+K: D
+G: ## Update lifecycle in the event log
+Each event has `event_type`, `timestamp`, `origin` (pipeline, update and flow identifiers) and a JSON `details` string.
+- `create_update` marks the start of an update, which is why it gives the start time.
+- `update_progress` carries the state of the update as it moves through its life cycle, ending in `COMPLETED`, `FAILED` or `CANCELED`.
+- `flow_progress` describes a single flow (a table), with its metrics and data quality results.
+- `user_action` records what a user did, such as creating the pipeline or starting or cancelling an update.
+## Pattern
+Take the newest `update_progress` per `origin.update_id` (`ROW_NUMBER() OVER (PARTITION BY origin.update_id ORDER BY timestamp DESC)`), parse the state with `FROM_JSON(details, 'struct<update_progress: struct<state: string>>')` and compute duration from the `create_update` timestamp to the terminal event. For a continuous pipeline there is no terminal event while it runs, so duration is measured up to the current time.
+W: Latest update_progress per update: this event type carries the lifecycle state of the update, so its newest row per update ID gives the final state and end time.
+X: A=flow_progress: these events are per flow and their last event describes one table, which can finish before the update itself ends or fails.
+B=create_update: it is written when the update starts and therefore cannot contain the final state.
+C=user_action: it records who did what, such as starting or cancelling, but the state progress of the update is not its purpose.
+T: Read update outcomes from the newest update_progress event per update_id.
+V: Lakeflow Spark Declarative Pipelines
+
+@ DBX-DEP D4 T4.3 advanced use-case
+S: A streaming table reads files with Auto Loader and must meet a freshness target. Operations wants an early warning that an update is falling behind the source while it is still running, without waiting for it to end. Which event log signal supports this?
+A: The `num_output_rows` of the `COMPLETED` flow event, which shows after the update how many rows were written to the target table
+B: The `backlog_bytes` metric in `flow_progress` events, reported during the run for sources that provide it
+C: The `cluster_resources` event, whose executor count tells how far the stream is behind the source
+D: The `user_action` event, which is written when a stream is paused because it cannot keep up
+K: B
+G: ## Backlog metrics
+While a streaming flow runs, the pipeline reports `flow_progress` events with metrics under `details:flow_progress.metrics`. `backlog_bytes` (and the related backlog record and file counts, where available) shows how much data is waiting to be processed. A rising backlog during an update is the earliest sign that processing is slower than arrival, so it can drive an alert or the decision to change compute.
+```sql
+SELECT timestamp,
+  double(details:flow_progress.metrics.backlog_bytes) AS backlog
+FROM event_log_raw
+WHERE event_type = 'flow_progress'
+ORDER BY timestamp DESC
+```
+The metric may be missing depending on the source type and the runtime version, so confirm it exists for your source before building alerts on it.
+W: backlog_bytes in flow_progress: it is reported during the run for supported sources, so a growing value signals lag while the update is still running.
+X: A=num_output_rows at completion: this is known only after the flow finishes and says what was written, not what is still waiting.
+C=cluster_resources executors: this describes classic compute capacity and says nothing about how much input is unprocessed; serverless pipelines have no such event.
+D=user_action pause: user_action records manual actions such as starting or cancelling, and no automatic pause event exists for lag.
+T: Track backlog_bytes in flow_progress events to detect streaming lag during an update.
+V: Lakeflow Spark Declarative Pipelines
+
+@ DBX-DEP D4 T4.3 advanced troubleshooting
+S: A materialized view in a pipeline is expected to refresh incrementally, but its refresh time equals a full recompute after a code change. The engineer wants the reason. Which event log information explains how the refresh was planned?
+A: The `flow_progress` event of the flow, whose `status` field is `FULL_REFRESH` whenever the planner chose full recomputation
+B: The `update_progress` event of the update, which lists the refresh technique used for every dataset in its state field
+C: The `planning_information` event of the flow, which lists the candidate techniques, the chosen one and any incrementalization issues
+D: The `cluster_resources` event of the update, whose resource usage shows whether Photon chose the full recompute path
+K: C
+G: ## Incremental refresh planning
+A materialized view is refreshed with the cheapest technique that is correct. A refresh can be incremental or a complete recompute, and an operator or expression in the query can block incremental processing (for example a non-deterministic function).
+## Evidence in the event log
+For materialized views (and REPLACE WHERE flows) the pipeline writes a `planning_information` event. Its `details:planning_information` contains `technique_information`, an array of the techniques considered with `maintenance_type`, `is_applicable`, `is_chosen` and `incrementalization_issues` (issue type, operator or expression name, and whether it prevents incrementalization). Filtering `is_chosen = true` shows the technique that ran; the issue list shows what to change in the query.
+W: planning_information: it records every technique that was considered, which was chosen and the issues that blocked incrementalization.
+X: A=flow_progress status: statuses describe whether a flow is running or finished, and a refresh technique is not one of them.
+B=update_progress state: this event covers the lifecycle of the whole update and carries no per-dataset technique.
+D=cluster_resources: it reports compute capacity for classic pipelines and does not describe refresh planning.
+T: Debug full recomputes of materialized views with the planning_information events.
+V: Lakeflow Spark Declarative Pipelines
+
+@ DBX-DEP D4 T4.3 advanced troubleshooting
+S: A table has three `expect_or_drop` rules. For one update, the event log shows `dropped_records = 100` for the flow, while the sum of `failed_records` across the three rules is 170. The analyst suspects a counting error. What explains the difference?
+A: The failed counts include records dropped in the previous update, because the metrics are cumulative across updates of the same flow
+B: Only the first failing rule drops a record, so the other rules count the same record again after it is already removed
+C: The dropped counter ignores records that fail rules a second time during a retry, while the rule counters include every retried record
+D: A record can fail several rules at once and is then counted once in the dropped total but once in each rule it failed
+K: D
+G: ## Two kinds of data quality counters
+Event log `flow_progress` events contain `details:flow_progress.data_quality` with two levels of metrics:
+- `dropped_records`: the number of records removed from the flow because they failed one or more expectations. Each record counts once.
+- `expectations`: an array, one entry per rule, with `name`, `dataset`, `passed_records` and `failed_records`. A record that violates three rules adds one to each of the three `failed_records`.
+## Consequences
+Per-rule failure counts must not be added up to get the number of bad records: use `dropped_records` (for drop rules) as the record count and the per-rule list to see which rules are noisy. For a warn-only `expect` rule, `failed_records` counts rows that are kept, and they do not appear in `dropped_records`. The metrics are also limited to streaming tables, materialized views and temporary views, and are not available when no expectations are defined.
+W: Overlapping failures: a row that fails several rules is one dropped record but increments the failed counter of every rule it violates, so per-rule sums can exceed the dropped total.
+X: A=Cumulative metrics: the counters belong to a single update of the flow and do not carry numbers from earlier updates.
+B=First rule wins: rules are all evaluated on the row, so each failing rule reports it; evaluation does not stop at the first rule.
+C=Retry exclusion: the dropped counter is not defined by retries, and nothing in the metrics treats retried records differently.
+T: dropped_records counts rows once; failed_records counts each rule violation, so per-rule counts can add up to more.
+V: Lakeflow Spark Declarative Pipelines
+
+@ DBX-DEP D4 T4.3 advanced troubleshooting
+S: A pipeline ingests a cloud folder with Auto Loader in directory listing mode. Updates have become slow before any data is processed, and the engineer wants evidence from the event log that listing is the cause. What does the event log offer?
+A: `operation_progress` events of type `AUTO_LOADER_LISTING`, with `duration_ms` and `num_files_listed` per source path
+B: `flow_progress` events with a `listing` status, which show the seconds the flow waited for the storage API
+C: `planning_information` events, whose `incrementalization_issues` list the slow directory scans of the source path and the files in it
+D: `autoscale` events, which show the number of file listing requests sent from the cluster
+K: A
+G: ## Auto Loader events in the event log
+When Auto Loader runs inside a pipeline, the pipeline emits `operation_progress` events. In `details:operation_progress`, `type` is `AUTO_LOADER_LISTING` (time to list the directory for new files) or `AUTO_LOADER_BACKFILL` (the periodic backfill). They include `status`, `duration_ms` and `auto_loader_details` with `source_path` and `num_files_listed`.
+## Using them
+A long `duration_ms` with a large `num_files_listed` for a few paths shows that listing dominates the update. The usual remedy is to move to file notification or file events mode so that the listing of the whole directory is avoided, or to restructure the folder. Checking this first avoids tuning the cluster for the wrong problem.
+W: operation_progress with AUTO_LOADER_LISTING: these events include the duration and number of files listed per source path, which is direct evidence of listing cost.
+X: B=flow_progress listing status: flow statuses describe the state of a flow, and no listing wait time is reported there.
+C=planning_information: this event type concerns refresh planning of materialized views, not file source scans.
+D=autoscale events: they report cluster resize requests for classic compute, not storage listing requests.
+T: Look for operation_progress events of type AUTO_LOADER_LISTING to measure Auto Loader listing time.
+V: Auto Loader, Lakeflow Spark Declarative Pipelines
+
+@ DBX-DEP D4 T4.3 advanced troubleshooting
+S: A team moved a classic-compute pipeline to serverless. Their cost dashboard queried `autoscale` events (enhanced autoscaling resize requests) to tune the cluster, and it now returns nothing for the new updates. What is the explanation?
+A: Serverless pipelines write events only to the system tables, so the published event log table stays empty for serverless updates and for their flows
+B: Autoscale events exist for classic compute, so serverless updates, which have no user-managed cluster, do not generate them
+C: The event log keeps only events of the last classic update when the compute type changes, so the history was cut off by the move
+D: Event delivery is best effort, so autoscale events are lost whenever the pipeline runs with a short trigger interval
+K: B
+G: ## Compute events depend on compute type
+For pipelines on classic compute with enhanced autoscaling, the event log contains `autoscale` events (details of the resize request) and `cluster_resources` events (executors, task slots, utilization). Those describe a cluster that you configure and pay for by instance time.
+With serverless pipelines there is no cluster to size: Databricks manages compute and scaling, so these events do not apply, and cost is analysed from `system.billing.usage` (use `usage_metadata.dlt_pipeline_id` and `dlt_update_id`). Other event types, such as `update_progress` and `flow_progress`, are still written.
+## Delivery
+The docs note that events reach the event log on a best-effort basis, so a missing single event is possible, but a whole class disappearing after a compute change has a structural cause.
+W: Classic-only events: autoscale and cluster_resources describe a managed cluster, which serverless updates do not have, so the query has no rows to find.
+X: A=System table only: serverless pipelines still write the normal event log; it is the compute-specific event types that are missing.
+C=Cut-off history: the event log is a table that keeps its earlier events; the earlier classic updates remain queryable.
+D=Short trigger interval: best-effort delivery can lose individual events but does not remove one event type consistently.
+T: autoscale and cluster_resources events exist only for classic pipeline compute; analyse serverless cost in billing usage.
+V: Lakeflow Spark Declarative Pipelines
+
+@ DBX-DEP D4 T4.4 advanced troubleshooting
+S: An alert runs `SELECT max(load_time) FROM loads WHERE load_date = current_date() GROUP BY region` and triggers when the value is older than a limit. The nightly load failed, so the query returned no rows at all, and the alert stayed OK. The team wants a missing result to count as a problem. What should they configure?
+A: Set the Empty result state of the alert to TRIGGERED so that a query that returns no rows raises the alert
+B: Lower the threshold to a negative number so that an empty result is compared as a value smaller than the limit
+C: Add a Notify on OK option, so that the subscribers hear when the result becomes empty
+D: Wrap the alert in a job with retries, because an empty result is retried until it returns rows
+K: A
+G: ## Empty results in alerts
+A Databricks SQL alert evaluates a condition on a value from the result of its query: either the first value of a column or an aggregation (for example SUM or AVERAGE) over all rows of one column. If the query returns no rows, there is no value to compare, so the evaluation needs a defined outcome.
+The Advanced settings include **Empty result state**: the alert reports `OK`, `TRIGGERED` or `ERROR` when the result is empty. For a freshness or completeness check (data should exist) `TRIGGERED` or `ERROR` is the safe choice; for a check that lists problems (no rows means no problem) `OK` is right.
+## Related behavior
+Alert states are `OK`, `TRIGGERED` and `ERROR` (the legacy `UNKNOWN` state was removed). Writing the query so that it returns a count of zero instead of no rows is also a reliable pattern.
+W: Empty result state TRIGGERED: the setting defines the outcome when no rows come back, so a failed load that yields no rows now raises the alert.
+X: B=Negative threshold: with no rows there is no value to compare, so no threshold decides the outcome.
+C=Notify on OK: this sends a message when the alert returns to OK; it does not change how an empty result is evaluated.
+D=Job with retries: retries re-run a failing task and do nothing for an alert that evaluates successfully as OK.
+T: Use the Empty result state setting to decide what an alert query with no rows means.
+V: Databricks SQL alerts
+
+@ DBX-DEP D4 T4.4 advanced troubleshooting
+S: Sixty alerts are all scheduled at 01:30. Some mornings several of them show no evaluation at all in their history, no error, no notification. A manual Run now of the same alerts works at once. Which cause fits, and what is the fix?
+A: Alert queries run on a SQL warehouse that auto-stops, so a stopped warehouse silently cancels the evaluation; assign a larger warehouse to all alerts
+B: Notifications are throttled when many alerts fire together, so the evaluation is stored but the message is dropped; add a notification destination
+C: The workspace has a limit on simultaneous active alert runs, so scheduled runs that find no slot are skipped; stagger the schedules by a few minutes
+D: Alerts that share a schedule are merged into one run, so only the alert with the lowest ID is evaluated; give each alert its own owner
+K: C
+G: ## Active-run limit for alerts
+Each workspace has a default limit on simultaneous active alert runs. When all slots are in use at the moment a scheduled alert fires, the run is skipped and the alert does not evaluate, so there is a gap in the evaluation history and no error. A manual Run now works because it runs outside the spike. The symptom pattern is therefore: gaps at the same scheduled time for alerts that share a schedule.
+## Remedies
+- Stagger schedules (01:30, 01:32, 01:34) so runs do not start together.
+- If the workspace regularly hits the limit even so, ask Databricks Support for a higher quota, giving workspace ID, time window and number of alerts.
+You can find the gaps with the alert evaluation history. The choice of warehouse affects run time, not whether a run is started.
+W: Active-run limit: at the shared time all slots are in use, so the scheduled runs are skipped without an error; spreading the schedules removes the spike.
+X: A=Warehouse stop: a stopped warehouse is started for an alert run and, even so, the evaluation would be recorded as an error, not as a gap.
+B=Throttled notifications: the missing item is the evaluation itself, not the message, and no throttling rule hides evaluations.
+D=Merged schedules: each alert runs on its own; schedules are never merged and owners play no part.
+T: Stagger alert schedules, because runs that start above the active-run limit are skipped without an error.
+V: Databricks SQL alerts
+
+@ DBX-DEP D4 T4.4 advanced use-case
+S: A job contains a SQL alert task that checks the daily revenue alert. One morning the alert condition was met, but the job run shows the alert task as Succeeded. The engineer expected the run to be marked Failed so that the standard job failure notification would fire. How does the SQL alert task report status?
+A: The task fails whenever the condition is TRIGGERED, so a Succeeded task means the alert returned OK and nothing was triggered
+B: The task succeeds when the alert was evaluated, triggered or not, and fails only if the evaluation itself errors
+C: The task reports Succeeded only if the alert has no subscribers, since subscribers turn a triggered result into a failure of the task
+D: The task takes the status of the last evaluation made by the alert's own schedule, so the job result can lag by one scheduled run
+K: B
+G: ## Alert task semantics
+A SQL alert task evaluates a Databricks SQL alert as one step of a job: the alert query runs on the chosen serverless or pro SQL warehouse, the condition is checked, and the subscribers configured on the task are notified based on the outcome.
+- **Succeeded**: the alert was evaluated, whether or not the condition was triggered.
+- **Failed**: the evaluation errored, for example a SQL warehouse connectivity problem or a query error.
+So a job failure notification means that the monitoring itself broke, while a business signal must reach people through the alert's subscribers (or by branching downstream tasks on the result). The task evaluates independently of any schedule on the alert, which is not changed by the job run. Only Databricks SQL alerts are supported, not legacy alerts.
+W: Evaluated means Succeeded: the task fails only when the evaluation errors, so a triggered condition is delivered through subscribers instead of a failed task.
+X: A=Fails on TRIGGERED: a triggered condition is a valid evaluation result, so the task succeeds, and no notification setting turns it into a failure.
+C=Subscribers turn it into failure: subscribers only receive the notification; they have no effect on the task status.
+D=Last scheduled evaluation: the task runs the alert itself, independently of its own schedule, so there is no lag from another run.
+T: A SQL alert task succeeds when it evaluates, triggered or not; it fails only if evaluation fails.
+V: Databricks SQL alerts, Lakeflow Jobs
+
+@ DBX-DEP D4 T4.4 advanced troubleshooting
+S: A query returns the percentage change of revenue per region, one row per region, ordered by region name. The alert condition is set to "first value of column pct_change < -20". Sales drops by 35% in a region that is not first in the list, and no alert is raised. How should the alert be corrected?
+A: Create one alert per region, because an alert can evaluate only one row of a result and has no aggregation settings at all
+B: Increase the alert frequency, so that the next evaluation reads the other rows of the result in turn
+C: Set Empty result state to TRIGGERED, which makes the alert evaluate every row of a result that has more than one row
+D: Use an aggregation such as MIN on pct_change in the condition, or return one summarizing row, so all rows count
+K: D
+G: ## What an alert condition reads
+An alert condition does not scan the result table row by row. It compares one value: the first value of a chosen column, or an aggregation across all rows of that single column (the editor offers SUM, AVERAGE and others, including minimum and maximum). A threshold can be a static value or another column.
+## Design
+For "any region dropped more than 20%" make the condition about the minimum of `pct_change`, or let SQL do the reduction (`SELECT min(pct_change) ...`, or a `count_if` of regions below the limit). If the notification must say which region triggered, include the details in the result and use the `QUERY_RESULT_TABLE` template variable (the HTML table is rendered only by email destinations). Multi-condition cases follow the same idea: reduce them to one value in SQL.
+W: Aggregate over the column: MIN of pct_change (or one summarizing row) puts every region into the compared value, so a drop in any region is seen.
+X: A=One alert per region: this multiplies alerts without need, because an aggregation across the column covers all regions in a single alert.
+B=More frequent evaluation: a repeated evaluation reads the same first row each time, so the other rows are never examined.
+C=Empty result state: this setting applies only when the query returns no rows; it does not change how many rows are read.
+T: Alert conditions compare one value, so reduce multi-row results with an aggregation or in SQL.
+V: Databricks SQL alerts
+
+@ DBX-DEP D4 T4.4 advanced troubleshooting
+S: Alerts are developed in a dev workspace, stored in a Databricks Git folder and pulled into a production Git folder by the release process. After the first release, no production alert has produced a notification, although the queries are valid. What should the team know about alerts deployed from Git?
+A: Newly cloned alerts appear only after a user interacts with them, and their schedules are paused until someone resumes each one
+B: Alerts from Git folders are evaluated only when a workspace admin approves every notification destination again in the release
+C: Cloned alerts keep the owner of the dev workspace, so production runs under the dev user and is rejected until ownership is changed
+D: Alert definitions in Git folders hold only the query text, so the condition and subscribers must be recreated by hand in production
+K: A
+G: ## Alerts and Git folders
+Alerts can be tracked with Databricks Git folders by placing them in a Git folder, which gives versioning and review. The documentation lists two behaviors that matter for releases:
+- Newly cloned alerts show up in the alerts list and the API only after a user interacts with them.
+- Their schedules are paused, and a user must explicitly resume them.
+A release process therefore needs a resume step (UI or API) for each alert, or an automation that sets the schedule state after deployment.
+## Ownership
+When you save an alert you become its owner. If the owner leaves the workspace, the alert has no owner until a workspace admin transfers ownership (UI or Permissions API), which is worth planning for production alerts by using a stable account.
+W: Paused after clone: schedules of newly cloned alerts are paused until someone resumes them, so no evaluation and no notification occurs.
+X: B=Re-approval of destinations: the documentation names no such approval step; notification destinations are workspace objects set up by admins.
+C=Dev owner rejection: ownership is a property that can be transferred, but it is not the documented reason alerts stay silent after a clone.
+D=Only query text: an alert definition holds its query, condition, schedule and notification settings, so these are not rebuilt by hand.
+T: Alerts deployed through Git folders start with paused schedules and must be resumed.
+V: Databricks SQL alerts, Git folders
+
+@ DBX-DEP D4 T4.4 advanced use-case
+S: The operations lead wants a weekly view of all alerts in the workspace whose evaluations ended in an error state, to find monitors that are silently broken. Which source supports this analysis in SQL?
+A: `system.lakeflow.job_run_timeline`, because each scheduled alert evaluation is recorded there as a run with a result state and a code
+B: `system.query.history`, whose `status` column reports the alert state of the query that an alert ran
+C: The Alerts list page, which keeps the full state history of each alert and can export it as a table
+D: `system.alert.alert_evaluation_history`, with one row per evaluation, its evaluated state and error details
+K: D
+G: ## Alert system tables
+The `system.alert` schema has two tables:
+- `system.alert.alerts`: a slowly changing dimension with the configuration of every alert: query, schedule, thresholds, empty result state, retrigger interval and subscribers.
+- `system.alert.alert_evaluation_history`: one row per alert evaluation, with the evaluated state (`OK`, `TRIGGERED`, `ERROR`), result values, notification delivery information and error code and message.
+## Use
+```sql
+SELECT alert_id, count(*) AS errors
+FROM system.alert.alert_evaluation_history
+WHERE evaluated_state = 'ERROR'
+GROUP BY alert_id
+```
+Join with the latest row of `alerts` for names and owners (collapse the SCD2 table first). By default only users who are both account admin and metastore admin can read these tables; share a slice through a dynamic view. The list page shows only the current status of each alert, not its history.
+W: alert_evaluation_history: it records every evaluation with its state and error details, so filtering on ERROR finds broken monitors.
+X: A=job_run_timeline: it records Lakeflow Jobs runs, and an alert evaluated by its own schedule is not a job run (only a SQL alert task creates a job run).
+B=query.history status: that column reports how a query ended, which says nothing about whether the alert condition was OK, TRIGGERED or ERROR.
+C=Alerts list page: the list shows the latest status only, and the history of evaluations is read in each alert or in the system table.
+T: Analyze alert health with system.alert.alert_evaluation_history and join the latest alerts row for names.
+V: system.alert, Databricks SQL alerts
+
+@ DBX-DEP D4 T4.5 advanced troubleshooting
+S: An Airflow DAG triggers Databricks work with the `DatabricksSubmitRunOperator`. An engineer wants to find yesterday's run in the Runs tab of the Jobs UI by typing the name of the DAG's job but finds nothing, while runs started by `run-now` show up. What explains this and what should the team change?
+A: Runs from external schedulers are hidden in the Runs tab, so the engineer must open each run from the Airflow UI
+B: One-time runs of `runs/submit` have no saved job, so find them by run ID, run-as user or start time, or create a job
+C: The name filter works only for runs from the last hour, so the engineer should widen the time window to find the run
+D: Submit runs are written only to the system tables, so the engineer must query the timeline table
+K: B
+G: ## Two ways to start work through the API
+- `jobs/run-now` runs an existing job. The run is linked to the job, so it appears under the job, can be found by the job name, supports the job's settings, and can be repaired.
+- `jobs/runs/submit` creates a **one-time run** that is not backed by a saved job. Airflow's `DatabricksSubmitRunOperator` uses it.
+The Runs tab lists runs from external orchestrators as well, including submitted ones, but a run without a job cannot be found by a job name. The documented filters are run ID, run-as user and start time (also status, error code and so on). For durable names, retries and a normal run history, create a job and trigger it (for Airflow, `DatabricksRunNowOperator`).
+W: One-time runs have no job: the submit endpoint creates runs not backed by a saved job, so the name search cannot match them; filter by other fields or move to run-now.
+X: A=Hidden external runs: the Runs tab does include runs started by external orchestrators such as Airflow.
+C=Time window of one hour: the name filter has no such restriction, and the run list covers the retained history.
+D=System tables only: submitted runs also appear in the Jobs UI and API; the UI list is simply not searchable by a job name for them.
+T: runs/submit one-time runs have no job, so search them by run ID, run as or start time; use run-now for durable jobs.
+V: Lakeflow Jobs
+
+@ DBX-DEP D4 T4.5 advanced troubleshooting
+S: A multi-task job has become slower over the last month, but every run still succeeds and the slowdown is gradual. The engineer wants to see which task's duration has grown across the last 30 runs of this job. Which part of the Jobs UI answers this directly?
+A: The matrix view in the Runs tab of the job, which shows the total duration and one bar per task for each run, with bar height as duration
+B: The Timeline view of the latest run, which plots the durations of the same task for each of the previous 30 runs of the job
+C: The Graph view of the latest run, because the node of a slow task is colored by how much its duration has grown over time
+D: The Top 5 error types table of the Runs tab, which ranks the tasks whose duration exceeds their average, even if they succeed
+K: A
+G: ## Within one run and across runs
+The Jobs UI has two levels of run history.
+- On the job's **Runs** tab, the **matrix view** lists the job's runs, each with a **Run total duration** bar and one cell per task. The height of a bar shows the duration, and the colors show status. Hovering gives start time, duration, cluster and status of a task run.
+- On the **Job run details** page of a single run, the Graph, Timeline and List views describe only that run.
+A regression across runs, such as a task that gets slower every week, is a matrix question, because the same task can be compared in many runs side by side. A regression inside one run (which branch is critical, where a task waits) is a Timeline question. Run history is kept for 60 days; for longer baselines use `system.lakeflow.job_task_run_timeline`.
+W: Matrix view: it shows each run with a bar per task, so the task whose bar keeps growing across the last runs is visible at a glance.
+X: B=Timeline view: it shows the tasks of one run on a time axis, not the same task over several runs.
+C=Graph view: node colors show the status of a task in one run and not how its duration changed over time.
+D=Top 5 error types: it ranks error codes of failed runs, and a slow successful task produces no error entry.
+T: Use the matrix view of the job's Runs tab to compare task durations across runs.
+V: Lakeflow Jobs
+
+@ DBX-DEP D4 T4.5 advanced use-case
+S: A platform team wants to list every job whose tasks run on interactive (all-purpose) clusters, so that they can move them to job compute and get job-level billing records. Which source combination finds them in SQL?
+A: `system.billing.usage` filtered on `billing_origin_product = 'JOBS'`, because every job that uses all-purpose compute is billed under that product
+B: `system.lakeflow.job_run_timeline`, using its `compute_ids` column, which lists the clusters of every task run of the job
+C: `system.lakeflow.job_task_run_timeline` with its `compute_ids`, joined to the latest `system.compute.clusters` row, keeping `cluster_source` of `UI` or `API`
+D: `system.compute.node_timeline`, which stores the job ID of the run next to the utilization of each node and its cluster
+K: C
+G: ## Which compute did a task use
+`system.lakeflow.job_task_run_timeline` has one row per task run (sliced hourly) and its `compute_ids` array holds the IDs of the job clusters, interactive clusters and SQL warehouses that the task used. `system.compute.clusters` is a slowly changing dimension of cluster configurations; its `cluster_source` is `UI` or `API` for all-purpose compute, `JOB` for all job compute and `PIPELINE` or `PIPELINE_MAINTENANCE` for pipelines.
+## The pattern
+Explode `compute_ids`, join to the latest row per `cluster_id` of `clusters` (collapse the history first, as with `jobs`), and keep `cluster_source IN ('UI', 'API')`. The result names the jobs and tasks that still run on shared clusters, which is also where `system.billing.usage` has no `job_id` (see the billing table: the job ID is not populated for jobs run on all-purpose compute).
+W: Task timeline plus clusters: the task table names the compute of each task run and the cluster table says whether that compute is all-purpose, so the join lists the jobs to migrate.
+X: A=Billing origin JOBS: usage of a job on all-purpose compute is billed under the all-purpose product and carries no job ID, so this filter finds the jobs that already run on job compute.
+B=job_run_timeline compute_ids: this column holds the job compute of the parent run, mainly for WORKFLOW_RUN run types; task compute is in the task timeline table.
+D=node_timeline: it records utilization per node and cluster and has no job or task identifiers.
+T: Join job_task_run_timeline.compute_ids to system.compute.clusters.cluster_source to find tasks on all-purpose clusters.
+V: system.lakeflow.job_task_run_timeline, system.compute.clusters
