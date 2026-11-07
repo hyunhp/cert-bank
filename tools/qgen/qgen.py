@@ -203,7 +203,7 @@ def plan(code, quiet=False):
 
 
 # ---------------------------------------------------------------- parse
-HEAD = re.compile(r"^@\s*(\S+)\s+(D\d)\s+(T\d\.\d)\s+(\S+)\s+(\S+)\s*(.*)$")
+HEAD = re.compile(r"^@\s*(\S+)\s+(D\d)\s+(T\d\.\d+)\s+(\S+)\s+(\S+)\s*(.*)$")
 EXPL_HEAD = re.compile(r"^@\s*(Q\d{6})\s+explain\s*$")
 MULTILINE = {"G", "W", "X"}                       # continuation lines keep their line break
 RICH = "## "                                      # detailed explanations start with a heading

@@ -13,6 +13,7 @@
 # src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/file-events-explained.html
 # src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/production.html
 # src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/options.html
+# src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/schema.html
 # src: https://docs.databricks.com/aws/en/ldp/updates.html
 # src: https://docs.databricks.com/aws/en/ldp/pipeline-mode.html
 # src: https://docs.databricks.com/aws/en/ldp/streaming-tables.html
@@ -108,7 +109,7 @@ V: Lakeflow Pipelines, Declarative Automation Bundles
 @ DBX-DEP D1 T1.1 applied tradeoff
 S: A security review finds that the team stores `.whl` files used by production jobs in the DBFS root, where any workspace user can overwrite them. The jobs are defined in a bundle and must keep installing the same internal packages. Which target location fits the recommendation?
 A: A folder on the DBFS root with a cluster policy that blocks library installs by ordinary users
-B: A public PyPI project with the same name, so the jobs no longer depend on workspace storage at all
+B: A public PyPI project with the same name, so the jobs no longer depend on any workspace storage for the package
 C: A Unity Catalog volume writable only by the release service principal, referenced as a `/Volumes/...` path
 D: The notebook-scoped `%pip` cache of each job cluster, which is rebuilt from nothing on every run
 K: C
@@ -146,7 +147,7 @@ V: Declarative Automation Bundles
 S: A serverless job task installs an internal data-quality package from a volume. The package declares `pyspark==3.5.1` as a dependency. The task now fails during setup, and the session ends before any notebook code runs. What should the engineer do?
 A: Remove the library that brings in PySpark from the task environment, since the serverless environment already provides Spark
 B: Pin the package to the exact PySpark version of the runtime so that the installed copies are identical
-C: Switch the install to `%uv pip`, which skips the check against preinstalled libraries and so resolves the conflict in the task
+C: Reinstall PySpark in the first notebook cell with `%pip install --force-reinstall`, so the pinned copy replaces the preinstalled one
 D: Increase the memory of the task, because the extra PySpark download exhausts the environment
 K: A
 G: ## Serverless supplies Spark
@@ -155,7 +156,7 @@ On serverless compute, Spark is part of the managed environment. The documentati
 Libraries that run on Databricks should list PySpark as a development or optional dependency, not a hard runtime requirement. The same package then installs on serverless, on classic clusters (which also bring their own PySpark), and in tests that install PySpark locally.
 W: Remove the PySpark-pulling library: the managed environment already contains Spark, and a second PySpark install breaks the session, so the dependency must not be installed.
 X: B=Pinning to the runtime version: the problem is a second installation of PySpark, not a version mismatch; an identical version is still installed over the managed one.
-C=%uv pip: this command does not check dependency conflicts against preinstalled libraries, but it would still install PySpark, and it is a notebook command, not a fix for a task setup failure.
+C=Forced reinstall in a cell: installing PySpark at all is what stops the session on serverless, and task dependencies are resolved before any cell runs, so a cell cannot repair the setup failure.
 D=More memory: the failure is a policy-style restriction on installing PySpark, not a resource shortage, so memory changes nothing.
 T: Never install PySpark (or a package that pulls it in) on serverless; Spark is provided by the environment.
 V: Serverless compute
@@ -185,7 +186,7 @@ S: A team's serverless notebook job must install packages from an internal PyPI 
 A: Set the proxy and index variables in the first cell and restart the Python process
 B: Specify `index-url` or `extra-index-url` in the dependency definition, or let an admin configure default repositories
 C: Add a cluster policy that sets `PIP_INDEX_URL` as a compute-scoped environment variable for the job
-D: Install the packages from the notebook with `%sh pip download` and copy them manually into every task
+D: Install the packages from the notebook with `%sh pip download` and copy the files manually into every task environment
 K: B
 G: ## Dependencies are resolved before code runs
 For serverless notebooks and jobs, Databricks resolves and installs the declared dependencies before the notebook or task code starts. Code in a cell cannot change how dependencies are fetched. Serverless also does not support compute-scoped environment variables or compute policies, so proxy settings applied at runtime have no effect on installation.
@@ -407,26 +408,27 @@ D=cleanSource DELETE: it removes files after processing and so would not reveal 
 T: Use `cloudFiles.backfillInterval` for a periodic listing safety net in directory-listing or classic notification modes.
 V: Auto Loader
 
-@ DBX-DEP D1 T1.4 advanced tradeoff
-S: A landing folder in an external location has accumulated millions of processed files, and directory-listing discovery is slow. File events cannot be enabled. The compliance team requires that processed files be retained for 14 days and then archived, not deleted. Which Auto Loader configuration matches?
-A: `cloudFiles.cleanSource` set to `MOVE` with a `moveDestination` in the same external location and a retention duration of 14 days
-B: `cloudFiles.cleanSource` set to `DELETE` with bucket versioning disabled, because deletion is the only mode with a retention setting
-C: `cloudFiles.cleanSource` set to `MOVE` with a destination in a different bucket, which spreads the archive across storage accounts
-D: `cloudFiles.maxFileAge` set to 14 days, which archives files older than that to a cold tier
-K: A
-G: ## Cleaning the source directory
-As files accumulate, storage costs rise and discovery slows, especially in directory listing mode. Databricks recommends file events first. If they cannot be used, `cloudFiles.cleanSource` can archive or delete files after processing, so fewer files must be listed.
-- `MOVE` archives to `cloudFiles.cleanSource.moveDestination`; source and destination must be in the same external location, volume or mount (cross-bucket and cross-container moves fail), and sibling directories with managed storage should be avoided.
-- `DELETE` removes files; Databricks recommends bucket versioning plus lifecycle policies so deletes are recoverable.
-- `cloudFiles.cleanSource.retentionDuration` (default 30 days) sets how long to wait before processed files become candidates.
-## Cold storage
-After moving, apply a cloud lifecycle policy on the archive path to move data into cheaper tiers.
-W: MOVE in the same location with retention: it archives instead of deleting, respects the same-location rule, and uses the retention duration to wait 14 days.
-X: B=DELETE without versioning: it removes the files, which breaks the archive requirement, and the retention setting exists for MOVE as well as DELETE.
-C=Cross-bucket destination: cross-bucket and cross-container moves are not supported and cause an error.
-D=maxFileAge: it is a file-state retention control for cost, not an archive mechanism, and tuning it aggressively risks duplicates or missed files.
-T: Use `cleanSource` MOVE inside one external location to archive processed files and speed up directory-listing discovery.
-V: Auto Loader
+@ DBX-DEP D1 T1.4 advanced troubleshooting
+S: A Structured Streaming job reads JSON with Auto Loader, keeps the default `cloudFiles.schemaEvolutionMode`, and has no explicit schema. When a producer adds a `coupon` column, the run fails with an `UnknownFieldException`. Rerunning it by hand succeeds, and the table then contains `coupon`. The team wants this to happen without an operator and without losing the new column. What fits?
+A: Set the mode to `failOnNewColumns` so that the stream stops cleanly and restarts on its own after the schema is merged
+B: Set the mode to `none` so that new columns are ignored and the stream never fails on schema changes
+C: Keep the default mode and run the task in Lakeflow Jobs with retries, so the restart resumes with the updated schema
+D: Set the mode to `rescue` so that new fields are added as real columns to the table when the stream restarts
+K: C
+G: ## What the default mode does
+With `addNewColumns` (the default when no schema is provided), Auto Loader detects a new column, infers the schema of the latest micro-batch and merges the new column into the schema location. It then deliberately stops the stream with an `UnknownFieldException`. Restarting the stream resumes with the updated schema, so the second run succeeds. Existing columns do not change their data types.
+## Automating the restart
+Databricks recommends running such streams in Lakeflow Jobs so they restart automatically after a schema change, for example with task retries. In Lakeflow Pipelines the schema location and checkpoints are managed for you.
+## The other modes
+- `rescue`: the schema never evolves and the stream does not fail; new columns are written to the rescued data column.
+- `failOnNewColumns`: the stream fails and does not restart until you update the provided schema or remove the offending file.
+- `none`: new columns are ignored and not rescued unless `rescuedDataColumn` is set.
+W: Default mode plus automatic restart: the failure is the intended signal that the schema was updated, so a job retry resumes on the new schema and the column reaches the table without manual work.
+X: A=failOnNewColumns: the schema is not updated automatically and the stream does not restart until someone changes the schema or removes the file, so it increases manual work.
+B=none: the schema never evolves and the new column is ignored, so the values are not kept in the table (they are not rescued unless a rescued data column is set).
+D=rescue: it never evolves the schema; new columns go into the rescued data column as JSON, not into real table columns.
+T: The default addNewColumns mode fails once to merge the schema; restart it automatically with Lakeflow Jobs retries instead of changing the mode.
+V: Auto Loader, Lakeflow Jobs
 
 @ DBX-DEP D1 T1.4 advanced use-case
 S: A silver streaming table in a pipeline reads from a bronze Delta table with `spark.readStream.table`. After a GDPR purge, a job runs `DELETE FROM bronze` for one customer, and the next silver update fails because the source had deleted rows. Silver is append-only, and a separate purge task removes the same customer from silver. How should the silver read be changed?
@@ -514,7 +516,7 @@ V: Lakeflow Jobs, Databricks CLI
 S: An external scheduler calls the Jobs API `run-now` for a nightly load. Its HTTP client retries on network timeouts, and occasionally two runs of the same load start, writing duplicates. The scheduler cannot tell whether a timed-out first call reached Databricks. Which request setting prevents double runs?
 A: Set `max_concurrent_runs` to 1, so any second request is rejected as a duplicate of the first
 B: Send the same `idempotency_token` on each retry of the request, so that Databricks launches exactly one run for it
-C: Add a unique `run_name` to every request, because Databricks drops requests that repeat a name
+C: Add a unique `run_name` to every request, because Databricks silently drops any request whose run name repeats
 D: Switch the call to `jobs submit`, which deduplicates one-time runs by their JSON content
 K: B
 G: ## Idempotent run requests
