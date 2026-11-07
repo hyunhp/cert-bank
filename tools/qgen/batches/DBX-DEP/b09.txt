@@ -1,0 +1,630 @@
+# DBX-DEP batch 09: D6 T6.2 (1), T6.3 (4), T6.4 (5), T6.5 (5), D7 T7.1 (7), T7.2 (6) (guide and docs read 2026-11-07)
+# ABAC row filter and column mask policies on tables are GA; ABAC DENY, metastore-level policies, identity attributes, views and time travel with ABAC are Beta (not keyed). Data Classification page has no Preview banner except view scanning and detection exclusions (Beta, not keyed). VACUUM LITE and EXTERNAL USE SCHEMA are Preview (distractors only).
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/abac/index.html
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/abac/core-concepts
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/abac/common-patterns.html
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/abac/best-practices.html
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/filters-and-masks/index.html
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification.html
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/tags.html
+# src: https://docs.databricks.com/aws/en/comments/index.html
+# src: https://docs.databricks.com/aws/en/views/create-views.html
+# src: https://docs.databricks.com/aws/en/views/index.html
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-information-schema.html
+# src: https://docs.databricks.com/aws/en/sql/language-manual/information-schema/column_tags.html
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/access-control/permissions-concepts.html
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges.html
+# src: https://docs.databricks.com/aws/en/security/privacy/gdpr-delta.html
+# src: https://docs.databricks.com/aws/en/delta/vacuum.html
+# src: https://docs.databricks.com/aws/en/delta/history.html
+# src: https://docs.databricks.com/aws/en/delta/delta-change-data-feed.html
+# src: https://docs.databricks.com/aws/en/delta/column-mapping.html
+# src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/schema.html
+# src: https://docs.databricks.com/aws/en/ldp/expectations.html
+# src: https://docs.databricks.com/aws/en/ldp/expectation-patterns.html
+
+@ DBX-DEP D6 T6.2 advanced troubleshooting
+S: A column mask ABAC policy on the catalog `fin` matches every column tagged `sensitivity` and calls `mask_all(v STRING) RETURNS STRING`, which returns `'REDACTED'`. Stewards then tag a `DOUBLE` column `salary` and a `DATE` column `birth_date`. Queries on those tables now fail for users the policy applies to, while masked `STRING` columns work. The team wants to keep a single policy. What is the right fix?
+A: Re-create the function as a Python UDF in Unity Catalog, because the engine does not cast the return value of Python UDFs and so accepts `'REDACTED'` for any type
+B: Add the affected users to the policy's `EXCEPT` clause for tables that contain numeric or date columns, so the mask function is not evaluated for them at all
+C: Replace it with a `VARIANT` based function that branches on `schema_of_variant()` and returns a value castable to the column type, such as `0.0` or a fixed date
+D: Mark `mask_all` as `DETERMINISTIC`, because a function that is not declared deterministic cannot be cast to the type of the column it masks
+K: C
+G: ## Mask output must fit the column type
+A column mask function takes the column value and returns a value that Databricks casts back to the column's data type. The return type must match or be castable to the column type, in every branch of the function.
+- `'REDACTED'` is castable to `STRING` but not to `DOUBLE` or `DATE`, so every query that evaluates the mask on those columns fails at runtime.
+- Wide-to-narrow overflow is the same failure: a mask that adds 1000 to a `TINYINT` column returns a value the column type cannot hold.
+## One policy for many types
+A single mask function that accepts and returns `VARIANT` can serve columns of many types. The engine casts the column value to `VARIANT`, runs the function, and casts the result back following ANSI rules. Inside, `schema_of_variant()` lets you branch on the type (integers widen to `BIGINT`), and each branch returns something castable to the target.
+```
+CREATE FUNCTION flexible_mask(data VARIANT) RETURNS VARIANT
+RETURN CASE WHEN schema_of_variant(data) = 'BIGINT' THEN 0::VARIANT
+WHEN schema_of_variant(data) = 'DATE' THEN DATE'1970-01-01'::VARIANT
+WHEN schema_of_variant(data) = 'DOUBLE' THEN 0.00::VARIANT
+ELSE NULL::VARIANT END;
+```
+Test with `SELECT CAST(mask(col) AS <type>)` for every type the tag can reach before attaching the policy to a catalog.
+W: VARIANT mask with type branches: one function and one policy cover string, numeric and date columns because every branch returns a value the column type accepts.
+X: A=Python UDF: Python UDFs registered in Unity Catalog are supported but are not exempt from the cast to the column type, and the optimizer cannot inline them as it can SQL UDFs.
+B=EXCEPT clause: it removes the protection for exactly the users the mask exists for, and it hides the defect instead of fixing the function.
+D=DETERMINISTIC: the keyword only tells the engine the function returns the same result for the same input, which helps optimization; it has no effect on type casting.
+T: A column mask must return a value castable to each column type it can reach; use a VARIANT function to cover several types with one policy.
+V: Unity Catalog ABAC, column masks
+
+@ DBX-DEP D6 T6.3 advanced tradeoff
+S: An analytics team pseudonymizes the 10-digit `phone_number` column with `sha2(phone_number, 256)` and states in its documentation that the data is anonymized. A reviewer shows that the original numbers can be recovered by hashing every possible number and comparing. Tables from several systems must still be joinable on the pseudonym. Which change addresses the weakness?
+A: Switch the digest to `sha2(phone_number, 512)`, because a longer digest cannot be reversed by trying all candidate phone numbers one after another
+B: Hash the number together with a secret key kept outside the data and a version number, so the output stays deterministic for joins but cannot be recomputed from candidates
+C: Replace the hash with `uuid()` generated per row, since a random value cannot be recomputed from the phone number by anyone who holds the original
+D: Keep the plain hash and add a column mask that shows the hash only to members of the analytics group, hiding it from everyone else
+K: B
+G: ## Why a bare hash is weak
+Hashing is deterministic and one-way, but the input space matters. A phone number has only about ten billion possibilities, so an attacker (or an insider) can hash all of them and look up the match. This is a dictionary or rainbow-style attack, and a longer digest does not change the size of the input space.
+## Keyed, versioned pseudonymization
+Add a secret that the attacker does not have, such as a key read from a secret scope, and concatenate it with the value before hashing. Include a version number so the key can rotate: new data uses version 2, and the policy or function parameter controls which version a pipeline uses.
+```
+CREATE FUNCTION pseudonymize(val STRING, version INT) RETURNS STRING
+DETERMINISTIC
+RETURN SHA2(CONCAT(val, CAST(version AS STRING)), 256);
+```
+The Databricks pattern for consistent hashing uses a `version` parameter; the secret part should be added on top of it so the digest cannot be recomputed from candidates.
+## Pseudonymized is not anonymous
+Whoever holds the key can still link records to people, so this data remains personal data. Complete deletion is the safest option when re-identification risk must be eliminated.
+W: Keyed, versioned hash: the same input and key give the same pseudonym in every table, so joins work, while an outsider without the key cannot confirm a guess.
+X: A=Longer digest: SHA-512 has the same small input space, so trying all ten billion numbers still works; only the secret changes the outcome.
+C=Random UUID per row: it cannot be recomputed, but the same number gets different values in each row and table, so the joins that the team needs stop working.
+D=Mask over the hash: a mask controls who reads the stored value at query time; the weak hash is still in storage and in any copy, export or time travel version.
+T: Make a pseudonym deterministic but keyed (secret plus version); a bare hash of a small input space can be reversed by enumeration.
+V: Unity Catalog functions, column masks
+
+@ DBX-DEP D6 T6.3 applied use-case
+S: Analysts study the age distribution and regional sales of customers. The `customers` table has the exact `birth_date` and a full postal code. Privacy counsel wants a lower re-identification risk, and nobody in the analytics group needs exact values. Which method fits the need?
+A: Replace `birth_date` and the postal code with salted hashes, because a hashed value hides the original and the analysts can still group by it
+B: Suppress both columns by returning `NULL` in a mask for the analytics group, since the group does not need individual attributes
+C: Tokenize both columns with random tokens held in a restricted mapping table, so that analysts can look up the original values when needed
+D: Generalize the values: expose an age band computed from `birth_date` and only the first digits of the postal code, so each group has many people
+K: D
+G: ## Choosing the technique by the analytic need
+- **Suppression** removes a value (NULL or dropped column). It is safe but destroys any analysis that needs the attribute.
+- **Generalization** replaces a value by a coarser one: a date by an age band, a postal code by its first digits. The attribute still supports distributions and group-by, and many people share each value, which lowers re-identification risk.
+- **Hashing and tokenization** replace a value by a stable stand-in. Each person still has a unique value, so records stay linkable, but ranges and distributions are lost and the stand-in does not reduce the uniqueness of the person.
+## Where to apply it
+Use a column mask (or an ABAC mask policy on the tagged columns) when the same table serves privileged and unprivileged readers. Materialize a generalized column in a curated table when no reader needs the exact value.
+```
+CASE WHEN age < 30 THEN '<30' WHEN age < 50 THEN '30-49' ELSE '50+' END
+```
+W: Generalization: age bands and short postal prefixes keep the distributions the analysts need while many customers share each value.
+X: A=Salted hash: each birth date or postal code maps to a stable but meaningless value, so the analysts lose the ranges and regions they want to analyze.
+B=Suppression: the requirement is to analyze age and region, and removing the columns outright makes that analysis impossible.
+C=Tokenization: random tokens are reversible by design and do nothing for distributions; they suit cases where authorized users must re-identify, which nobody needs here.
+T: Pick the technique by the analytic need: generalize when distributions matter, suppress when the attribute is not needed, hash or tokenize to keep linkability.
+V: Unity Catalog column masks
+
+@ DBX-DEP D6 T6.3 advanced use-case
+S: A product events table with billions of rows carries `email`. Support agents must occasionally re-identify a customer, analytics must join events across systems, and a right-to-erasure request must make a customer's events non-attributable without rewriting the large events table. Which design meets all three?
+A: Replace the email with a random token at ingestion, keep the token-to-email mapping in a tightly restricted table, and on an erasure request delete the mapping row
+B: Replace the email with `sha2(email, 256)` at ingestion, and on an erasure request delete the customer from the source system so the hash can no longer be matched
+C: Keep the plain email and attach a column mask that returns `'***'` for analysts, then run `DELETE` on the events table for each erasure request
+D: Replace the email with a generalized domain value such as the part after `@`, which groups customers and needs no mapping table for erasure
+K: A
+G: ## Tokenization as a vault
+Tokenization replaces a value by a random token and keeps the mapping in a separate, tightly governed table (the vault). The events keep the token, so they join across systems; only holders of access to the vault can reverse it.
+- Re-identification: authorized support looks up the token in the vault.
+- Erasure: deleting the vault row severs the link. Remaining events carry a token that points to nobody, so no rewrite of the large table is needed. A small `DELETE` on the vault is cheap.
+## Why a hash does not get there
+A hash is recomputable by anyone who still has the email, so linking events to a person stays possible. Deleting the source record does not help if the email exists elsewhere, in backups or another system. Keyed hashes need the key destroyed to get the same effect.
+Remember that the vault's history is also retained by Delta time travel: run `VACUUM` after the delete so deleted vault rows leave storage, and restrict the vault with Unity Catalog privileges.
+W: Token plus restricted mapping: events stay joinable, support can re-identify through the vault, and deleting one mapping row makes the customer's events non-attributable.
+X: B=Plain hash: support cannot reverse it, and anyone with the email can recompute the hash and relink the events, so deleting the source row does not sever attribution.
+C=Mask plus DELETE: a mask only hides the value at query time, and per-customer deletes on billions of rows rewrite many files, which the design wanted to avoid.
+D=Email domain: it is a generalization that cannot identify an individual at all, so support cannot re-identify and events cannot be joined per customer.
+T: Tokenization with a governed vault supports re-identification and erasure by deleting the mapping, without rewriting the fact table.
+V: Delta Lake, Unity Catalog
+
+@ DBX-DEP D6 T6.3 advanced troubleshooting
+S: A team runs `CREATE TABLE dev.crm.customers DEEP CLONE prod.crm.customers` to give developers realistic data. The prod table has column masks from ABAC policies on its PII columns, and the statement fails for regular users. The developers must not see raw PII in dev. Which approach achieves this?
+A: Run the deep clone as the owner of the prod table and attach the same ABAC policies in dev, so developers see masked values in the clone
+B: Add the developers to the `EXCEPT` clause of the policy so they can clone the table, then mask the columns again in the dev catalog
+C: Build the dev table with a job that reads prod as a principal exempt from the policy and writes anonymized values (hashed, generalized or suppressed) into dev
+D: Point a dev external table at the Delta files of the prod table, so developers read the same files but through their own governed catalog
+K: C
+G: ## Masks apply at read time, not in the files
+Row filters and column masks are enforced when a user queries. The stored files still contain the real values. Therefore a copy that is meant to leave the protected zone must be **materialized with anonymized values**, not copied and masked later.
+- Deep and shallow clones are not supported on tables that have row filters or column masks. With ABAC, a user who is excluded from a policy can still clone, which would put raw PII into the clone.
+- Path-based access to the files of a table that has policies is not supported either.
+- A scheduled job running as a principal exempt from the policy can read raw values and write only the anonymized form (keyed hash, generalized bands, suppressed columns). Grant developers access to the output only.
+Because the dev table is created from anonymized values, there is nothing to mask later and no raw data in its history.
+W: Anonymizing job: an exempt principal reads prod and writes only de-identified values, so dev holds no raw PII in its files or history.
+X: A=Clone as owner: clones are not supported on tables with column masks, and where an exempt user can clone, the copy contains the raw values that the dev policy would then have to hide.
+B=Exempting developers: it gives them the right to read raw values and to clone them, the opposite of the requirement.
+D=External table on prod files: path-based access to tables that have policies is not supported, and the files hold the unmasked data in any case.
+T: Masks protect reads, not files: create non-production copies by materializing anonymized values with an exempt principal.
+V: Unity Catalog column masks, Delta Lake
+
+@ DBX-DEP D6 T6.4 advanced troubleshooting
+S: Partners drop JSON events in cloud storage. Bronze is loaded with Auto Loader using `cloudFiles.schemaEvolutionMode = rescue`; silver selects named columns and masks `email` and `phone`. One partner starts sending a new field `national_id`. Compliance asks where the field lands and whether silver is still compliant. What is the correct assessment?
+A: The stream fails with `UnknownFieldException` until it is restarted, after which `national_id` becomes a new bronze column that silver ignores
+B: The new field is dropped silently because it is not in the schema, so no unmasked identifier is stored anywhere in the lakehouse
+C: Auto Loader adds `national_id` to the schema automatically and a masking policy already covers it because policies apply to new columns
+D: The stream keeps running and the value is stored in bronze inside the `_rescued_data` JSON, unmasked, so the column needs the same protection as other identifiers
+K: D
+G: ## What the rescued data column holds
+With `rescue` evolution Auto Loader never evolves the schema and the stream does not fail. Any column that is not in the schema, or that mismatches in type or case, is stored in `_rescued_data` as a JSON blob together with the source file path.
+- A pipeline that masks named columns does not see inside the blob, so a new sensitive field passes through bronze in clear text.
+- Other modes behave differently: the default `addNewColumns` stops the stream with `UnknownFieldException` and adds the column after a restart; `none` ignores new columns unless a rescued column is configured.
+## What a compliant pipeline does
+- Treat `_rescued_data` as potentially sensitive: restrict it to the ingestion principal, mask it or exclude it from silver.
+- Add a check that alerts or fails when `_rescued_data` is non-null for fields not on an approved list, so stewards review a new field, tag it and extend masking before it spreads.
+W: Rescued data blob: in rescue mode the new field lands unmasked inside `_rescued_data`, so it must be governed like any identifier and monitored for new keys.
+X: A=Failure on a new column: that is the default `addNewColumns` behavior; in `rescue` mode the stream does not fail on schema changes.
+B=Silent drop: the `none` mode ignores new columns, but in `rescue` mode Auto Loader records them in the rescued column, so the identifier is stored.
+C=Automatic coverage: policies match tagged columns; a new field is unclassified until a steward tags it, and it is not a column in this mode.
+T: In rescue mode unknown fields live in `_rescued_data`; protect and monitor that column or new PII slips through unmasked.
+V: Auto Loader, Lakeflow Pipelines
+
+@ DBX-DEP D6 T6.4 advanced tradeoff
+S: A pipeline masks `ssn` before writing the silver table. Compliance requires that no record with an unmasked value (a nine-digit pattern) ever reaches silver, that other records continue to flow, and that offending records are kept for investigation by a small group. Which approach meets all three?
+A: Define expectations with a pattern check for the masked column, split offending rows into a restricted quarantine table, and feed silver only from rows that pass
+B: Use the default `expect` on the pattern check, which flags violating rows in the metrics and keeps them out of the target table
+C: Use `expect_or_drop` on the pattern check, because dropped rows are logged and the offending records can be read back from the event log
+D: Use `expect_or_fail` on the pattern check, so the update stops and rolls back whenever any violating row appears, protecting silver completely
+K: A
+G: ## Expectation actions
+- **warn** (the default `expect`): violating records are written to the target and counted in metrics. They are retained, so PII would reach silver.
+- **drop** (`expect_or_drop`): violating records are removed before the write and only counted, not stored.
+- **fail** (`expect_or_fail`): the update fails and rolls back atomically. Nothing bad is committed, but all processing stops until someone fixes the data or the code.
+- **Quarantine pattern**: combine expectations with a temporary view that tags each row valid or invalid, then write invalid rows to a separate table and valid rows to the target. This keeps the invalid data for review without blocking the flow.
+## Matching the requirements
+Compliance needs a hard barrier (nothing invalid in silver), continuity (the rest keeps flowing) and retention for investigation. Only the quarantine pattern gives all three; the quarantine table itself holds raw sensitive values, so grant it only to the review group.
+W: Quarantine pattern: invalid rows are diverted to a restricted table, silver reads only passing rows, and the pipeline keeps running.
+X: B=Default expect: it retains violating rows in the target and only counts them, so unmasked values would reach silver.
+C=expect_or_drop: the barrier works, but dropped records are only counted in metrics; their content is not stored, so there is nothing to investigate.
+D=expect_or_fail: nothing invalid is committed, but one bad record halts the whole pipeline, which breaks the requirement that other records continue to flow.
+T: Use the quarantine pattern when invalid PII must be kept out of the target and kept for review while the pipeline continues.
+V: Lakeflow Pipelines expectations
+
+@ DBX-DEP D6 T6.4 advanced use-case
+S: A catalog-level ABAC policy masks `email` for `account users`. A Lakeflow job runs as the service principal `sp_etl`, which is not exempt, and writes `silver.customers` with `email_token = sha2(email, 256)` read from bronze. After the policy was added every `email_token` in silver is identical, and joins on it collapse. How should the pipeline be fixed?
+A: Remove the policy from bronze so the job sees real emails, and rely on the hashed token in silver for protection of the email values
+B: Add `sp_etl` to the policy's `EXCEPT` clause, keep bronze restricted to engineers, compute the token in the job, and protect silver with its own tags and policy
+C: Run the job as a user in the compliance group, because their identity is already exempt from the masking policy on bronze
+D: Hash the email inside the policy's masking function and have the job read the hashed value instead of the original
+K: B
+G: ## Masks apply to whoever reads, including pipelines
+An ABAC mask is evaluated for the principal that runs the query. A job principal that is not exempt reads `'***'` (or whatever the function returns) and then computes its transformation on that constant, so a hash or join key built from it is the same for every row.
+## Patterns for compliant pipelines
+- Bronze holds raw values, so restrict who can read it. Exempt the pipeline's service principal in the policy's `EXCEPT` clause (or give the policy `TO` only the human groups), so the job sees real values while ordinary users stay masked.
+- The job produces the protected form (keyed hash, generalization) as a stored column in silver, and silver is covered by its own tags and policies.
+- Keep the exemption narrow: a named service principal, not broad groups, and audit tag and policy changes.
+Running as a person's identity makes lineage and audits unreliable and breaks when the person changes team.
+W: Exempt service principal: the job reads real emails from restricted bronze, derives the token itself, and silver carries its own protection.
+X: A=Removing the policy: every user could then read raw emails in bronze, so the hashing in silver would protect nothing.
+C=Compliance user identity: it works technically but ties a production pipeline to a person, hides who accesses PII, and fails when the person leaves.
+D=Hashing inside the mask: the hashed value would be what every non-exempt reader sees, which changes the semantics of masking for analysts and ties the token to the policy function.
+T: Pipelines read through masks like any user; exempt the service principal on restricted bronze and create the protected form inside the job.
+V: Unity Catalog ABAC, Lakeflow Jobs
+
+@ DBX-DEP D6 T6.4 applied use-case
+S: Data Classification is enabled on a catalog and detects email addresses and phone numbers in new tables. A steward wants to review the sample values behind detections, but the platform admin proposes granting `SELECT` on `system.data_classification.results` to the whole data-engineering department so everyone can browse detections. What is the appropriate decision?
+A: Grant it, because classification results contain only column names and counts, which carry no sensitive information
+B: Grant it, because the table is filtered by privilege so each engineer sees only detections in catalogs they can already read
+C: Share it only with the stewards who may see metastore-wide results, because it includes sample values from tables in every catalog
+D: Copy it into each catalog, because then engineers read only the samples for the catalog they work in
+K: C
+G: ## Classification results contain real values
+Data Classification scans tables incrementally and writes results to the system table `system.data_classification.results`. By default only the account admin can read it, and it needs serverless compute. The table holds detections for the whole metastore **including sample values** of the detected columns.
+- Anyone with `SELECT` on it sees sample values from every catalog, not only the ones they are allowed to read. So share it only with people who are privileged to see metastore-wide results.
+- Automatic tagging needs `APPLY TAG` on the catalog plus `ASSIGN` on the governed tag being applied; by default only account admins hold `ASSIGN` on the classification system tags.
+- Tags from classification are the input of ABAC policies, which do the protecting; the detection review itself exposes sensitive data and must be governed.
+W: Limit to stewards: the table contains sample values across the whole metastore, so access has to be narrow, not department-wide.
+X: A=Names and counts only: the results include sample values from the detected columns, which is exactly the sensitive part.
+B=Privilege-filtered table: this table is not filtered by the catalog privileges of the reader; `SELECT` on it exposes samples metastore-wide.
+D=Per-catalog copies: copying spreads sample values into more places and still exposes values to people without access to the source tables.
+T: The data classification results table holds metastore-wide sample values; grant it only to stewards entitled to see them.
+V: Unity Catalog Data Classification
+
+@ DBX-DEP D6 T6.4 advanced troubleshooting
+S: A streaming job deduplicates events with `withWatermark("event_time", "1 day").dropDuplicates(["email", "event_id"])` and writes to a Delta table that has masking. A privacy review finds raw emails in the checkpoint directory in cloud storage, outside the reach of table masks and of the erasure `DELETE`. How should the job be changed?
+A: Add a column mask on the sink table, because masks also apply to the state that the stream stores in its checkpoint
+B: Run `VACUUM` on the sink table after each erasure, since vacuum also removes files under the checkpoint folder
+C: Reduce the watermark to one hour, which makes the raw emails leave the stream state after a shorter time
+D: Replace `email` by a keyed token in a projection before `dropDuplicates`, so the state holds only tokens
+K: D
+G: ## Stateful operators store their keys
+Operators such as `dropDuplicates`, stream-stream joins and aggregations keep state for the grouping keys in the checkpoint location. That state is written before the data reaches the sink, so anything used as a key lands in storage in clear text.
+- Column masks and table-level privileges protect reads of tables, not files in a checkpoint directory.
+- `DELETE` and `VACUUM` act on the Delta sink; a checkpoint is not part of a table's data files.
+- A shorter watermark shrinks how long state is kept, but while it is kept the raw value is still stored.
+## Design rule
+Pseudonymize sensitive keys before the stateful operator (keyed hash or token from a vault) and deduplicate or join on the token. The state then holds no raw identifier, and an erasure request can be satisfied by deleting the vault mapping as well as the table rows.
+W: Tokenize before the operator: the stream state contains only tokens, so the checkpoint holds no raw email.
+X: A=Sink mask: masks are enforced when users query the table, not on the state files in the checkpoint.
+B=VACUUM on the sink: vacuum cleans unreferenced data files of the Delta table; the checkpoint is a separate location and has no relation to the table history.
+C=Shorter watermark: it limits retention time of state, but the raw email is still written to the checkpoint while the state lives, so the exposure remains.
+T: Keys of stateful streaming operators are stored in the checkpoint; pseudonymize them before the operator.
+V: Structured Streaming, Delta Lake
+
+@ DBX-DEP D6 T6.5 advanced troubleshooting
+S: A managed table has deletion vectors enabled. For an erasure request the team ran `DELETE FROM customers WHERE id = 42` and, in the same hour, `VACUUM customers`. A later audit still finds the customer's row in the Parquet files in storage. What explains this, and what completes the erasure?
+A: The delete only recorded a deletion vector, so the current file still holds the row; run `REORG TABLE ... APPLY (PURGE)` and then `VACUUM` once the replaced files have aged past the retention threshold
+B: The `VACUUM` ran too early in the day; running it again after 24 hours always removes every file that contained the deleted row, whatever the retention
+C: Deletion vectors must be disabled with `ALTER TABLE ... SET TBLPROPERTIES`, which rewrites all files at once and removes the row from storage
+D: Run `VACUUM customers LITE`, which reads the transaction log and deletes data files that still contain rows marked as deleted
+K: A
+G: ## Soft deletes need a purge
+With deletion vectors enabled, `DELETE`, `UPDATE` and `MERGE` do not rewrite data files; a small metadata file marks rows as removed. Readers hide the rows, but they are still in the Parquet file. `VACUUM` only deletes files that the current table version no longer references, so it has nothing to remove for such a file.
+## Physical removal sequence
+1. `DELETE` the rows (logical removal).
+2. `REORG TABLE customers APPLY (PURGE)`: rewrites the files so the current version no longer holds the data, and creates a new version. The old files still exist for time travel.
+3. `VACUUM customers`: removes those old files, but only when they are older than the retention threshold (7 days by default). Run it with a delay after the reorg, or shorten the retention with the understanding that it reduces history.
+This applies equally to materialized views and streaming tables with deletion vectors.
+W: Purge then vacuum after retention: the reorg rewrites the file without the row, and a later vacuum deletes the old file once it has expired.
+X: B=Waiting a day: the file with the row is still referenced by the current version, so no later vacuum removes it, and retention governs old versions, not the current file.
+C=Disabling the feature: turning deletion vectors off for future writes does not rewrite existing files, so the row stays in storage until a purge.
+D=VACUUM LITE: it is a Public Preview mode that skips directory listing; it still deletes only files the table no longer references, which excludes the current file.
+T: With deletion vectors, erasure means DELETE, then REORG ... APPLY (PURGE), then VACUUM after the retention period.
+V: Delta Lake deletion vectors, VACUUM
+
+@ DBX-DEP D6 T6.5 advanced use-case
+S: A bronze table has Change Data Feed enabled and keeps the default history. After `DELETE FROM bronze.orders WHERE customer_id = 7`, a privacy officer asks where the customer's values can still be found in storage and when they leave. Which statement is correct?
+A: Only older table versions are affected, because the change feed stores row keys rather than values, so nothing in the feed needs separate cleanup
+B: Older versions reachable by time travel still hold them, and the delete is also recorded in `_change_data` files with the row values; `VACUUM` removes both once they are past retention
+C: Only the `_change_data` files hold them, and these are never removed by `VACUUM`, so the feed must be deleted by hand after each erasure
+D: Nothing remains, because Delta blocks time travel and change feed reads for any version that contains a deleted row once the delete commits
+K: B
+G: ## Where deleted values survive
+A `DELETE` creates a new table version; it does not remove data from storage.
+- **Older versions**: the previous data files stay referenced by earlier versions for time travel until `VACUUM` removes them past the retention threshold (default 7 days of data files, 30 days of log history).
+- **Change data feed**: each change record carries the row data plus `_change_type` (`insert`, `update_preimage`, `update_postimage`, `delete`). A delete is therefore recorded with the values of the removed row. Change data is stored in the `_change_data` directory, which `VACUUM` removes along with other expired files.
+- **Deletion vectors**: if enabled, the current file still holds the row until `REORG ... APPLY (PURGE)`.
+## Consequences for a compliant design
+Downstream consumers use the feed's `delete` records to remove the customer from silver and gold; the pre-image values exist in storage until `VACUUM`. Plan the erasure deadline as DELETE time plus the retention period, and run `VACUUM` regularly.
+W: Time travel versions and `_change_data`: both keep the row values until `VACUUM` deletes the expired files, which is when the erasure becomes physical.
+X: A=Keys only: change records contain the full row data, including values of deleted rows, so they must be considered in the erasure plan.
+C=Manual cleanup: `VACUUM` manages the `_change_data` directory and removes its expired files together with the other data files.
+D=Blocked reads: older versions stay readable until their files are vacuumed; nothing blocks time travel or the feed when a delete commits.
+T: After a delete, time travel versions and change feed files keep the values until VACUUM removes them past retention.
+V: Delta Lake, Change Data Feed
+
+@ DBX-DEP D6 T6.5 advanced tradeoff
+S: Legal requires that erased personal data leaves cloud storage within 14 days. A weekly backfill job writes to the table for up to three days. An engineer proposes `SET spark.databricks.delta.retentionDurationCheck.enabled = false` followed by `VACUUM events RETAIN 0 HOURS` after every erasure. Which design meets the deadline with the least risk?
+A: The proposal itself, because it removes files immediately and time travel is not needed for erasure
+B: Raise `deletedFileRetentionDuration` to 30 days to protect rollbacks and rely on the log retention to meet the deadline
+C: Keep the retention at 7 days, above the longest writer, and run delete, any needed purge and a scheduled `VACUUM`, so files are gone after about a week
+D: Set `logRetentionDuration` to 1 day, since removing the transaction log entries makes the old data files unreachable and deletes them
+K: C
+G: ## Two retention settings
+- `deletedFileRetentionDuration` (default 7 days) is the threshold `VACUUM` uses before removing data files that are no longer referenced by the current version.
+- `logRetentionDuration` (default 30 days) controls how long history is kept. Log files are removed automatically after checkpoints; they are not governed by `VACUUM` and removing log entries does not delete data files. In current runtimes the log retention must be at least the deleted-file retention.
+## Why not retain zero hours
+Databricks recommends a retention of at least 7 days. Long-running jobs may have written files that are not committed yet; a very short retention lets `VACUUM` delete them before the job commits, which corrupts or fails the job. The safety check exists for that reason.
+## Deadline arithmetic
+Physical removal happens at the first `VACUUM` run after the files pass the retention threshold. With 7 days and a daily or weekly vacuum, the erased data is gone within roughly 7 plus the schedule interval, which fits a 14 day limit and leaves headroom above the 3 day backfill. If deletion vectors are on, add the purge step before the vacuum. Predictive optimization can run `VACUUM` for managed tables, but the schedule and the deadline must still be verified.
+W: 7-day retention with scheduled vacuum: it stays above the longest writer and still removes files well inside the legal deadline.
+X: A=Retain 0 hours: it disables the safety check and can delete files of an in-flight three-day backfill that are not yet committed, risking job failure and corruption.
+B=30-day data retention: files of deleted rows would stay in storage 30 days, missing the 14 day deadline.
+D=Short log retention: log files are not governed by vacuum and dropping history does not remove data files; they stay in storage until vacuumed.
+T: Choose a retention that exceeds the longest writer and fits the legal deadline; never retain zero hours on live tables.
+V: Delta Lake VACUUM, table properties
+
+@ DBX-DEP D6 T6.5 advanced troubleshooting
+S: The streaming table `silver_events` reads a Kafka topic with seven days of retention and holds two years of history. An erasure request names one subject. An engineer plans to delete the subject at the source and then fully refresh `silver_events` to rebuild it without the subject. What should the team do instead?
+A: Run a full refresh of the streaming table, because it clears the state and reprocesses everything from the topic including the older history
+B: Add `skipChangeCommits` to the Kafka read, so the stream skips the deleted rows and continues without failing
+C: Drop and re-create the table from the topic, since a new table is built only from the data that still exists upstream
+D: Delete the subject's rows from the streaming table with DML, keep the stream running, and also remove the subject upstream where the platform allows it
+K: D
+G: ## Full refresh is a replay
+A full refresh of a streaming table clears its state and reprocesses all data from the source. If the source has aged data out, as a Kafka topic with seven days of retention does, that history cannot be replayed, so the refresh would **lose two years of data**. Databricks recommends the option only when historical data is available and processing it again is not costly.
+## The documented approach
+- The source (Kafka) is append-only, so the stream itself needs no change; `skipChangeCommits` is for streaming reads of **Delta** tables whose upstream rows were updated or deleted.
+- Delete the subject's rows from the streaming table with DML.
+- Data protection law covers sources too: remove the subject from queues, topics and landing storage where possible (for example through the topic's retention, compaction or the producing system).
+- Then run `VACUUM` (and `REORG ... APPLY (PURGE)` if deletion vectors are used) so files leave storage.
+W: DML delete without refresh: the history stays intact, the stream continues, and the upstream copy is handled separately.
+X: A=Full refresh: Kafka no longer has events older than its retention, so the rebuilt table would lack most of its history.
+B=skipChangeCommits: the option applies to Delta sources with updates or deletes; a Kafka source never produces such commits, so it solves nothing here.
+C=Drop and re-create: it has the same replay problem as a refresh, and it also discards the table's data older than the topic retention.
+T: Do not full-refresh a streaming table whose source has aged out; delete with DML and clean upstream copies.
+V: Lakeflow Pipelines streaming tables, Kafka
+
+@ DBX-DEP D6 T6.5 advanced tradeoff
+S: About 400 erasure requests arrive daily. The current job runs `DELETE FROM events WHERE user_id = <id>` once per request against a very large `events` table. Each statement rewrites many files, the job runs for hours, and concurrent runs conflict. Which redesign is the most efficient?
+A: Collect requests in a control table and run one `MERGE ... WHEN MATCHED THEN DELETE` per cycle, on a table clustered by `user_id`, then mark requests as processed
+B: Add an `is_deleted` flag set by a single `UPDATE` for all requested users and filter flagged rows out in a view for readers
+C: Run the 400 `DELETE` statements in parallel threads from one notebook, so that every request finishes in the same few minutes
+D: Run `VACUUM` after each request with a retention of zero hours, so that the old files holding the rows never accumulate
+K: A
+G: ## Batch deletes
+Each `DELETE` locates the affected files and rewrites them (or writes deletion vectors). Many small deletes touch the same large files again and again. Delta documents a bulk pattern: record every request in a control table and delete in one `MERGE`, then update the control table to confirm completion.
+```
+MERGE INTO events t
+USING (SELECT user_id FROM gdpr_control_table WHERE done = false) s
+ON t.user_id = s.user_id
+WHEN MATCHED THEN DELETE
+```
+- One pass rewrites each affected file once, however many users it holds.
+- Clustering (or another layout) on `user_id` lets data skipping locate the files so that fewer are read and rewritten.
+- Run the merge on a schedule that fits the legal deadline, then `REORG ... APPLY (PURGE)` if deletion vectors are on, and `VACUUM`.
+W: Control table with one MERGE: all requested users are removed in one pass over the affected files, and the control table records completion.
+X: B=Soft-delete flag: the personal data stays in the table and in storage, so the erasure obligation is not fulfilled.
+C=Parallel deletes: they compete for the same files, so concurrent commits conflict and retry, and the total rewrite work does not shrink.
+D=Vacuum after each request: vacuum removes only unreferenced old files; it does not delete rows, and a zero-hour retention can destroy files of running writers.
+T: Batch erasure requests into one MERGE driven by a control table, on a layout that lets file skipping find the rows.
+V: Delta Lake MERGE, Liquid Clustering
+
+@ DBX-DEP D7 T7.1 applied troubleshooting
+S: A data steward holds `MANAGE` on the catalog `prod`. Setting a description with `COMMENT ON TABLE prod.sales.orders IS '...'` works, but `COMMENT ON VIEW prod.sales.v_orders IS '...'` fails with a permission error. What is the reason?
+A: Comments on views need `MODIFY` and `SELECT` on the view, the same privileges that are used for tables
+B: Editing the comment of a view requires being the owner of the view, and `MANAGE` is not enough
+C: Views cannot carry comments in Unity Catalog, so descriptions must be placed in tags instead
+D: Only the catalog owner can comment on views, because views are created at the catalog level
+K: B
+G: ## Who may comment on what
+Comments are a metadata field on any Unity Catalog securable and on table columns. Anyone with `BROWSE` on the catalog can read them, which improves discovery.
+- For catalogs, schemas, volumes and similar objects: the owner or a user with `MANAGE`.
+- For a table or a column: the owner, or `MODIFY` and `SELECT` on the table plus `USE CATALOG` and `USE SCHEMA`.
+- For a view or materialized view: only the **owner** of the view. `MANAGE` is insufficient.
+When ownership is the obstacle, the owner of the view (or a user who can transfer ownership) hands it to a team group or service principal, so documentation does not depend on one person. Saving a comment issues an `ALTER`, which can disrupt running pipelines and jobs, so schedule bulk documentation changes.
+W: View owner only: the steward's `MANAGE` allows table comments through the table rules but not edits of a view's comment.
+X: A=MODIFY and SELECT: those privileges are the table and column rule; for views the owner rule applies and these grants do not help.
+C=No comments on views: views are securable objects that support comments; they simply have a stricter permission rule.
+D=Catalog owner only: ownership of the parent catalog is not what the rule checks; the owner of the view itself is required.
+T: Table comments need MODIFY and SELECT, but comments on views and materialized views need ownership of the view.
+V: Unity Catalog comments
+
+@ DBX-DEP D7 T7.1 applied use-case
+S: Analysts report they cannot find the tables of the catalog `corp` in search. The data office wants every employee to see names, comments and tags of all tables there and request access, without granting data access and without having to maintain `USE CATALOG` and `USE SCHEMA` for everyone. Which grant achieves this?
+A: `SELECT` on the catalog `corp` to `account users`, since users need read access before an object appears in search
+B: `BROWSE` on each schema of `corp` to `account users`, repeated whenever a schema is created, so every table is discoverable
+C: `BROWSE` on the catalog `corp` to `account users`, which makes all its objects discoverable and keeps their data unreadable
+D: `READ METADATA` on the metastore to `account users`, which exposes names, comments and tags of everything without usage privileges
+K: C
+G: ## BROWSE: discoverability without access
+`BROWSE` lets a user see that an object exists, read its name, description (comment) and tags, and request access. It does not allow reading data, and no `USE CATALOG` or `USE SCHEMA` is required to use it.
+- For tables, views, volumes, functions and secrets, `BROWSE` is granted at the **catalog** level only, and applies to all objects in the catalog (it does not even show as an inherited privilege on schemas).
+- Databricks recommends granting `BROWSE` on catalogs to `All account users` to make data discoverable across the organization.
+## Why other grants miss
+`SELECT` exposes data. `READ METADATA` exposes much more than discovery information (it is the audit-style visibility into grants, masks and policies) and is a child of `MANAGE`. Comments and tags are what make the search results useful, so keep them complete.
+W: BROWSE on the catalog: it gives every employee search visibility of names, comments and tags for all current and future objects, with no data access.
+X: A=SELECT on the catalog: it would let everyone read all the data, which the office does not want.
+B=BROWSE on schemas: for data objects `BROWSE` can only be granted at catalog level, so schema-level grants are not the mechanism.
+D=READ METADATA on the metastore: it shows more than discovery needs, including security configuration of every object, and it is meant for audit roles.
+T: Grant BROWSE on a catalog to account users for discoverability without data access.
+V: Unity Catalog privileges, discovery
+
+@ DBX-DEP D7 T7.1 applied comparison
+S: Teams tag tables with `Domain = Sales`, `domain = sales` and `domain = Sales` (a different key spelling and case each time). A search for the tag returns only part of the tables and a policy keyed on one spelling misses the rest. Which statement explains the behavior and the right remedy?
+A: Tag keys are case-insensitive, but values are case sensitive, so search the values in lowercase and the results become complete
+B: Tag search is eventually consistent, so the missing tables will appear in results after a day without any change
+C: Tags on tables cannot be searched at all, only tags on columns, so the team should move the tags to the columns
+D: Keys are case sensitive and search needs an exact term, so `Domain` and `domain` are different tags; agree on one key (ideally a governed tag with defined values)
+K: D
+G: ## Tag rules that matter for discoverability
+- Tag keys are case sensitive: `Sales` and `sales` are two distinct tags.
+- Tag search requires exact term matching.
+- Keys must not contain `. , - = / :` and may not have leading or trailing spaces.
+- A securable can have at most 50 tags, and a table at most 1,000 column tags.
+## A taxonomy fixes it
+Ordinary tags allow anyone with `APPLY TAG` to write any spelling. A **governed tag** is defined at the account level with allowed values and controlled assignment, so teams cannot invent variants. If a governed tag is created with the same key as existing assignments, those assignments become governed.
+Tags are also what ABAC policies match on, so an inconsistent taxonomy leaves data unprotected. Standardize the key, define the values, re-tag the existing objects and use the information schema to find stragglers.
+W: Case-sensitive exact keys: different spellings are different tags, so a single governed key with defined values is the remedy.
+X: A=Case-insensitive keys: keys are case sensitive; the problem is exactly that the spellings differ.
+B=Eventual consistency: nothing in the behavior is a delay; the missing tables carry a different key and will never match.
+C=Column-only search: tables, views, schemas and catalogs can be tagged and searched; moving tags would not fix spelling differences.
+T: Tag keys are case sensitive and search is exact; standardize with one governed tag and defined values.
+V: Unity Catalog tags
+
+@ DBX-DEP D7 T7.1 applied troubleshooting
+S: To track a deletion request, a steward sets the table tag `dsr_ticket = jane.doe@example.com` so that the privacy team can search for affected tables. The security reviewer asks to remove it. What is the reasoning?
+A: Tag values are plain text and may be replicated globally, so personal data must stay out of tags; use an opaque ticket id and keep details in a restricted table
+B: Tags are encrypted with the key of the table, but the e-mail address would be visible to any user who has been granted BROWSE on the catalog
+C: Only governed tags are stored as plain text; an ordinary tag like this one is protected as table data, so the reviewer is mistaken
+D: Tags are visible only to users with SELECT on the table, so the value is acceptable provided that the table is restricted
+K: A
+G: ## Tags are metadata, not data
+Unity Catalog documents that tag data is stored as plain text and may be replicated globally. Names, values and descriptors must not contain personal or sensitive information, whether the tag is governed or not.
+- Tags are visible through search and the information schema, and users with `BROWSE` can see tags of objects they cannot read.
+- Put a reference in the tag (a ticket id or a classification label) and keep the personal details in a table protected by privileges, masks and retention rules.
+- For erasure, a tag containing the subject's identity would itself have to be removed and would remain in history and caches, which complicates compliance.
+W: Plain-text metadata: tags can be replicated and are discoverable, so a personal identifier does not belong in them; an opaque reference does.
+X: B=Encrypted with the table key: tags are not data of the table and carry no such protection; the claim about BROWSE is right but the encryption claim is not.
+C=Only governed tags: the warning applies to all tags; tag data is metadata for every kind of tag.
+D=Visible only with SELECT: tags are intentionally discoverable by users with `BROWSE`, who do not need data access.
+T: Never put personal data into tag names or values; tags are plain-text metadata.
+V: Unity Catalog tags
+
+@ DBX-DEP D7 T7.1 advanced comparison
+S: The catalog `prod` is tagged `retention = 7y`. The table `prod.hr.payroll` is tagged `retention = 10y`, and its column `ssn` has no tag of its own. Which statement about how these tags behave is correct?
+A: Tags apply only to the object they were set on, so a search for the catalog's tag lists the catalog alone and ignores the tables in it
+B: A search returns the catalog and objects that inherit its tag, `payroll` uses its more specific value `10y`, and the `ssn` column does not inherit tags from the table
+C: Both values apply to `payroll` at the same time, and the column `ssn` inherits both from the table, so each value can match a policy condition
+D: Tags are inherited only by objects of the same type, so schemas inherit from catalogs and columns inherit from tables, but not tables from schemas
+K: B
+G: ## Implicit tag inheritance
+Tags set on a container apply to the objects below it. Securables inherit tags from their parent catalog or schema, and the search results include both directly tagged objects and those that inherit from a parent.
+- When the same key is assigned at several levels, the **most specific assignment applies**, so the table value `10y` overrides the inherited `7y`.
+- Column tags are an exception: they do not inherit from the parent table and must be applied directly to the column.
+- ABAC conditions (`has_tag`, `has_tag_value`) evaluate with this inheritance, so a table-level tag does not automatically protect or classify its columns.
+## Practical rule
+Classify at the highest sensible level for tables, but tag sensitive columns explicitly, and verify through `INFORMATION_SCHEMA.COLUMN_TAGS`.
+W: Inheritance with override and column exception: the search covers inheriting objects, the table value wins, and columns need their own tags.
+X: A=Direct tags only: search results include the objects that inherit a tag from a parent catalog or schema.
+C=Both values apply: one key has one effective value at an object; the most specific assignment wins, and columns do not inherit.
+D=Same-type inheritance: tables inherit from schemas and catalogs; the only level without inheritance is the column level.
+T: Tags inherit down the hierarchy with the most specific winning, except at the column level.
+V: Unity Catalog tags
+
+@ DBX-DEP D7 T7.1 advanced troubleshooting
+S: A compliance analyst runs `SELECT * FROM system.information_schema.column_tags WHERE tag_name = 'pii'` to inventory tagged columns. It returns about 340 columns, while stewards know there are about 900 across the metastore. No query error occurs. What is the most likely cause and the right fix?
+A: Column tags exist only in each catalog's own information schema, so the system catalog view is incomplete and must be replaced by a UNION over all catalogs
+B: Governed tags are excluded from the information schema and can only be exported from the account console, so the 560 missing rows are governed tags
+C: Information schema results are filtered by the privileges of the caller, so run the inventory as a principal with access to all catalogs, for example a governance service principal
+D: Tag rows older than the retention of the transaction log are removed from the table, so the analyst needs to widen the log retention setting
+K: C
+G: ## The information schema is privilege-aware
+`system.information_schema` provides metadata about objects across all catalogs in the metastore, and each catalog has its own `information_schema` for that catalog. Both **filter results to the objects the caller has privileges for**. This differs from other system tables, and the result changes when privileges change.
+- `COLUMN_TAGS` contains the tags of columns the user is allowed to interact with; `SYSTEM` holds the columns of all catalogs.
+- An inventory for audits should therefore run as a principal that has sufficient privileges everywhere, usually a governance service principal, and its job output should be stored in a governed table.
+- Compare coverage with `TABLE_TAGS`, `SCHEMA_TAGS` and `CATALOG_TAGS` to see which columns are protected only by inheritance (columns do not inherit).
+W: Privilege filtering: the query is correct but only shows what the analyst may see, so run it as a principal with the necessary access.
+X: A=Per-catalog only: the system catalog's information schema covers objects across all catalogs; the missing rows are caused by filtering.
+B=Governed tags excluded: governed tags are tags and appear like others; nothing removes them from the information schema.
+D=Log retention: tag metadata is not a time-limited history table, so log retention has no effect on it.
+T: Information schema views show only objects the caller can access; run inventories as a principal with the right privileges.
+V: Unity Catalog information schema, tags
+
+@ DBX-DEP D7 T7.1 advanced troubleshooting
+S: A column `phone` carries a governed tag `pii`. A developer runs `ALTER TABLE crm.customers DROP COLUMN phone` and the statement fails. After the tag is removed the column is dropped, but the privacy officer wants assurance that the phone numbers are really gone. What is the correct handling?
+A: Drop the column with `CASCADE` so the governed tag is removed automatically, which also rewrites the files without the column
+B: Keep the governed tag on the column to document the former PII, and set a retention policy on the tag so it expires with the data
+C: Unset the tag after dropping the column, because dropped columns cannot be altered and the tag is deleted with the metadata
+D: Unset the tag, drop the column, then run `REORG TABLE ... APPLY (PURGE)` and `VACUUM`, otherwise older versions and files can still expose the data through time travel
+K: D
+G: ## Dropping a governed-tag column
+A column that has governed tags cannot be dropped until the governed tags are removed, to prevent a leak of sensitive data without classification:
+```
+UNSET TAG ON COLUMN crm.customers.phone pii;
+ALTER TABLE crm.customers DROP COLUMN phone;
+```
+## Dropping is a metadata change
+With column mapping, `DROP COLUMN` is metadata-only: the data files are not rewritten and the values remain in them. It is a soft delete, like a deletion vector.
+- `REORG TABLE ... APPLY (PURGE)` rewrites the current files without the column.
+- Older versions and files remain until `VACUUM` removes them after retention; before that, time travel can still return the data.
+For compliance, treat dropping a sensitive column as a purge operation, and verify afterwards.
+W: Unset, drop, purge, vacuum: the tag rule is respected and the physical data of the dropped column is removed from current and old files.
+X: A=CASCADE: no such option removes governed tags, and a metadata-only drop does not rewrite files.
+B=Keeping the tag: the drop fails while governed tags are present, and tags have no data-driven expiry.
+C=Unset after drop: the operation fails first, so the tag must be removed before the column can be dropped.
+T: Remove governed tags first, then drop, then purge and vacuum to physically delete a sensitive column.
+V: Unity Catalog governed tags, Delta Lake
+
+@ DBX-DEP D7 T7.2 applied troubleshooting
+S: Maria owns the catalog `prod`. Alex created `prod.sales.orders`, owns it, and nobody has granted Maria anything. `SELECT * FROM prod.sales.orders` fails for Maria with a permission error. What explains this and what is the remedy?
+A: Owning a catalog does not give data access to child tables; Maria can manage them, so she can grant herself `SELECT`, `USE SCHEMA` and so on
+B: Catalog owners inherit `SELECT` on all tables, so the failure must come from the compute and Maria should switch to a SQL warehouse
+C: Maria owns the table through inheritance, but ownership becomes active only after a metastore admin transfers it to her
+D: Only the owner of the table can read it, so Maria needs Alex to run `GRANT SELECT` for her
+K: A
+G: ## Ownership does not inherit
+Every securable has one owner, the principal that created it by default. An owner has all capabilities on that object and the ability to manage all child objects, but **ownership does not inherit downward**. Maria owns the catalog, not the schemas and tables below it.
+- Owners get capabilities on the object itself (functionally like `ALL PRIVILEGES` without it being listed) and effectively `MANAGE` on children.
+- `MANAGE` lets a user grant and revoke privileges, transfer ownership and drop, but it does not by itself read data. A manager can, however, grant themselves data privileges such as `SELECT`.
+- Reading also needs `USE CATALOG` (implied for the owner of the catalog) and `USE SCHEMA` on the schema.
+```
+GRANT USE SCHEMA ON SCHEMA prod.sales TO `maria@corp.com`;
+GRANT SELECT ON TABLE prod.sales.orders TO `maria@corp.com`;
+```
+Self-granting is audited, so it fits access reviews better than sharing the owner's identity.
+W: Manage, not own: the catalog owner manages children, so she can grant herself the privileges she needs, which is traceable.
+X: B=Implicit SELECT: owning a container does not give read access to its children; the error is a missing grant, not a compute issue.
+C=Inherited ownership: ownership never inherits, so Maria is not the table's owner and no transfer is pending.
+D=Only the table owner: owners of parent containers and holders of `MANAGE` can grant privileges on the table as well.
+T: Owning a container gives management of its children, not their data; grant yourself SELECT explicitly.
+V: Unity Catalog ownership and privileges
+
+@ DBX-DEP D7 T7.2 advanced use-case
+S: The platform team wants a team lead to administer privileges for everything in the schema `prod.sales`, including tables that will be created later, without becoming its owner. Besides `MANAGE` on the schema, what is the smallest additional grant needed to exercise it?
+A: `USE CATALOG` and `USE SCHEMA` on the schema, because management is impossible without access to the schema itself
+B: `USE CATALOG` on the catalog `prod` only, because `MANAGE` on a schema needs no usage privilege on that schema
+C: `ALL PRIVILEGES` on the schema, which includes `MANAGE` and lets the lead pass grants to the other users
+D: Nothing more, because `MANAGE` is a metastore-wide privilege and overrides the usage privileges of every catalog
+K: B
+G: ## Usage privileges around MANAGE
+Normally each access path needs `USE CATALOG` on the catalog and `USE SCHEMA` on the schema. `MANAGE` is an exception for the **metadata capabilities** it provides.
+- `MANAGE` on a catalog needs no usage privilege at all.
+- `MANAGE` on a schema needs `USE CATALOG` on the parent catalog (or ownership or `MANAGE` on it) but not `USE SCHEMA` on the schema.
+- `MANAGE` on a table needs `USE CATALOG` and `USE SCHEMA` on the parents.
+- `MANAGE` granted on a container also applies to all current and future children by inheritance.
+Data privileges (`SELECT`, `MODIFY`) still require both usage privileges, even for a manager.
+`ALL PRIVILEGES` does not include `MANAGE`, to avoid accidental privilege escalation.
+W: USE CATALOG plus MANAGE on the schema: that pair is enough to grant, revoke and transfer ownership for the schema and its tables, now and later.
+X: A=USE SCHEMA as well: the schema-level usage privilege is not needed to exercise `MANAGE` on that schema, so it exceeds least privilege.
+C=ALL PRIVILEGES: it excludes `MANAGE`, so it does not give the lead the ability to administer grants and it adds data access.
+D=Metastore-wide: `MANAGE` is granted per securable and does not remove the need for `USE CATALOG` on the parent.
+T: MANAGE on a schema works with USE CATALOG on the parent; it applies to current and future children.
+V: Unity Catalog privileges
+
+@ DBX-DEP D7 T7.2 advanced tradeoff
+S: The group `analysts` holds `USE CATALOG`, `USE SCHEMA` and `SELECT` on the catalog `corp`, so that future tables in any schema become readable. A new schema `corp.hr_private` must not be readable by `analysts`, and the team looks for a design that works with Unity Catalog inheritance. Which one does?
+A: Run `DENY SELECT ON SCHEMA corp.hr_private TO analysts`, since a deny on the child overrides the inherited grant
+B: Make a different user the owner of `corp.hr_private`, because ownership of a child cancels privileges inherited from the catalog
+C: Move the grants to the individual allowed schemas, or place `hr_private` in a separate catalog, because an inherited `SELECT` cannot be excluded for one child
+D: Tag the schema `private = true`, since a tag by itself blocks access for groups that were granted privileges on the parent
+K: C
+G: ## Inheritance is additive
+A privilege granted on a catalog applies to all current and future schemas and the tables and views in them. In Unity Catalog the effective privileges are the union of grants at all levels; there is no way to carve out one child from a grant on its parent.
+- SQL `DENY` exists only for the legacy `hive_metastore`; ABAC DENY policies are in Beta and apply to `MANAGE ACCESS CONTROL`, not to reading data.
+- Ownership does not inherit, and an owner's rights do not cancel grants given to others.
+- A tag has no effect without an ABAC policy that uses it.
+## Design consequences
+- Grant at the lowest level that fits: per schema when exceptions exist.
+- Put sensitive domains in their own catalog so catalog-level grants stay safe, and combine with row filters or column masks (for example an ABAC policy on a `classification` tag) for data inside a shared schema.
+Keep the number of grants small by granting to groups.
+W: Narrow the grant or separate the catalog: inheritance cannot exclude a child, so the structure of grants or of catalogs has to carry the boundary.
+X: A=DENY: SQL deny applies to the legacy Hive metastore; Unity Catalog grants cannot be denied for one child.
+B=Different owner: owning an object does not remove access given to others on the parent, and it adds powers to the new owner.
+D=Tag only: tags describe objects; they restrict access only if an ABAC policy uses them.
+T: Inherited grants cannot be excluded for one child; scope grants to schemas or isolate sensitive data in another catalog.
+V: Unity Catalog privilege inheritance
+
+@ DBX-DEP D7 T7.2 applied troubleshooting
+S: A new platform team received `CREATE CATALOG` and `CREATE EXTERNAL LOCATION` on the metastore and assumed they could also read the tables in existing catalogs. Queries on those tables fail with permission errors. Why?
+A: They must also be made metastore admins, because privileges granted on a metastore are only active for admins of the workspace
+B: The grants need a workspace re-assignment, after which metastore privileges propagate to the catalogs within an hour
+C: Metastore privileges inherit to catalogs but stop there, so they would also need `USE SCHEMA` on every schema to read a table
+D: Metastore-level grants control metastore operations such as creating catalogs and do not inherit to data objects, so catalog or schema grants are needed
+K: D
+G: ## Where inheritance starts
+The hierarchy is metastore, catalog, schema, then tables, views, volumes and functions. Privileges granted on a container inherit to current and future children, but **privileges granted on the metastore do not inherit** to its catalogs. They govern metastore-scoped operations such as `CREATE CATALOG`, `CREATE EXTERNAL LOCATION`, `CREATE STORAGE CREDENTIAL` or `CREATE SHARE`.
+- The exception is `READ METADATA`: granted on the metastore it inherits to all objects and needs no usage privileges, giving metadata visibility, not data access.
+- Reading a table requires `USE CATALOG`, `USE SCHEMA` and `SELECT` (granted on the table or inherited from the schema or catalog).
+- A principal who creates a catalog becomes its owner and so has full rights there, but that does not extend to catalogs made by others.
+W: Metastore grants do not inherit: creating catalogs and locations says nothing about reading existing data, which needs catalog-level or lower grants.
+X: A=Admin only: metastore privileges are ordinary grants that work for non-admins; they simply cover different operations.
+B=Propagation delay: there is no propagation to wait for, because the privileges never apply to data objects.
+C=Inherit to catalogs only: metastore-level grants do not inherit at all, with `READ METADATA` as the one exception.
+T: Metastore-level privileges do not inherit to data objects (READ METADATA aside); grant access at catalog or below.
+V: Unity Catalog privilege model
+
+@ DBX-DEP D7 T7.2 advanced troubleshooting
+S: `prod.gold.v_revenue` is a view over `prod.silver.orders`. Analysts have `SELECT` on the view and query it on a SQL warehouse. The view was created by Dana, who has since changed teams and lost `SELECT` on `prod.silver.orders`. Analysts now get permission errors on the view. What is the proper fix?
+A: Transfer ownership of the view to a group or service principal that keeps `SELECT` on the base table, so permission checks on the underlying data succeed
+B: Grant the analysts `SELECT` on `prod.silver.orders` so that their own permissions are checked on the base table
+C: Grant the analysts `USE CATALOG` on `prod` again, because losing the base table grant removes the usage privilege of the view
+D: Recreate the view in a notebook on a dedicated cluster, where the permissions of the view user instead of the owner are checked
+K: A
+G: ## Whose permissions are checked
+To read a view, a user needs `SELECT` on the view, `USE CATALOG` on its catalog and `USE SCHEMA` on its schema. Unity Catalog also checks the permissions on the underlying tables and views. On SQL warehouses (and standard compute, and recent dedicated compute with fine-grained access control) the check on the base data is made for the **view owner**, not for the reader. So the view owner must keep access to everything the view uses.
+- This design lets you expose a restricted slice (filtered rows, selected columns) without granting analysts the base table.
+- If the owner loses the base privilege, every reader fails.
+- Make a group or service principal the owner of production views so they do not depend on a person's team membership. Only the view owner (not `MANAGE`) can edit the definition and comment.
+W: Change the owner: a durable owner with SELECT on the base table restores the checks that run as the owner, while analysts keep seeing only the view.
+X: B=Grant on the base table: it removes the protective purpose of the view and the readers' own rights are not what is checked on this compute.
+C=USE CATALOG: the readers' usage privileges are unaffected; the failing check is the owner's access to the underlying table.
+D=Dedicated cluster rebuild: a different compute does not move the check to the reader on modern runtimes, and it would hide the ownership problem.
+T: View readers are checked against the view; the base-table check runs as the view owner, so give views a durable owner.
+V: Unity Catalog views
+
+@ DBX-DEP D7 T7.2 advanced troubleshooting
+S: Alex, a data engineer who left the company, owns about 200 tables in `prod.etl` that pipelines created while running under his identity. Ownership is shown as a deactivated user, and the schema owner wants to fix the situation. What is the correct way?
+A: Only a metastore admin can change ownership of tables, so the request must go to the account team and cannot be done by the schema owner
+B: The schema owner can transfer ownership of each table to a group or service principal, as owners manage child objects, and ownership does not move with the schema
+C: Transfer ownership of the schema to a group, which automatically makes that group the owner of all 200 tables under it
+D: The tables become ownerless after Alex is deactivated, so any user with `SELECT` can claim them by running `ALTER TABLE ... OWNER TO`
+K: B
+G: ## Ownership rules
+- An object has exactly one owner (user, service principal or group), initially its creator.
+- Owners can grant and revoke, transfer ownership and drop. Owning a container also gives the ability to manage every child, because owners effectively hold `MANAGE` on them, so a schema owner can transfer table ownership.
+- Ownership does **not** inherit: changing the schema's owner leaves the tables with their current owners.
+## Operational practice
+Make a group or service principal the owner of production objects, run pipelines as a service principal so new tables get a stable owner, and review owners from the information schema. For 200 tables use a scripted loop:
+```
+ALTER TABLE prod.etl.t1 OWNER TO `etl_admins`;
+```
+W: Schema owner transfers each table: manage rights on children allow it, and a group or service principal avoids repeating the issue.
+X: A=Metastore admin only: owners and holders of `MANAGE` can transfer ownership of the objects they manage.
+C=Schema transfer: ownership never inherits, so the tables keep their old owner after the schema changes hands.
+D=Ownerless tables: every object always has an owner, and a user cannot claim ownership just because of `SELECT`.
+T: Ownership does not inherit; a schema owner can reassign each child to a group or service principal.
+V: Unity Catalog ownership
