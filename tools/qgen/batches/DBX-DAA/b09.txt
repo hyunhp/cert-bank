@@ -1,0 +1,372 @@
+# DBX-DAA batch 09: D9 securing data (T9.1 8, T9.2 4, T9.3 6), docs read 2026-11-07
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/access-control/permissions-concepts
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/ownership
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/admin-privileges
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/best-practices
+# src: https://docs.databricks.com/aws/en/views/dynamic
+# src: https://docs.databricks.com/aws/en/views/
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/filters-and-masks/manually-apply
+# src: https://docs.databricks.com/aws/en/delta-sharing/
+# src: https://docs.databricks.com/aws/en/delta-sharing/create-share
+# src: https://docs.databricks.com/aws/en/catalogs/
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-names
+# src: https://docs.databricks.com/aws/en/database-objects/tags
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/
+
+@ DBX-DAA D9 T9.1 applied troubleshooting
+S: The account group `retail_analysts` was granted `SELECT` on the table `retail.sales.orders`. Members of the group still get a permission error when they run `SELECT * FROM retail.sales.orders` on a SQL warehouse. Which additional grants fix this?
+A: `MODIFY` on the table, because `SELECT` alone only works for people who created the table themselves
+B: `BROWSE` on the catalog `retail`, because `BROWSE` is the privilege that lets a query read data once `SELECT` exists
+C: `USE CATALOG` on `retail` and `USE SCHEMA` on `retail.sales`, the usage privileges a table read needs
+D: `EXECUTE` on the schema, because Unity Catalog treats each table read as a function call inside the schema
+K: C
+G: ## Three privileges to read one table
+Unity Catalog checks the whole path of a securable object. To read a table or view you need all three of these:
+- `USE CATALOG` on the parent catalog
+- `USE SCHEMA` on the parent schema
+- `SELECT` on the table or view
+Having only `SELECT` is not enough. The usage privileges are deliberate: only catalog and schema owners (or holders of `MANAGE`) can grant them, so a table owner cannot open a table to people outside the boundary the catalog owner approved.
+## How an analyst diagnoses it
+A permission error although `SELECT` is granted usually means a missing `USE CATALOG` or `USE SCHEMA`. Granting on the schema or catalog also covers current and future tables because privileges inherit downward.
+W: Usage privileges: `USE CATALOG` on the catalog and `USE SCHEMA` on the schema complete the three-part requirement, so the existing `SELECT` on the table becomes effective.
+X: A=MODIFY: it allows writing to a table and has nothing to do with whether reads succeed; `SELECT` already works for any granted principal, not only the creator.
+B=BROWSE: it lets people discover an object and see its metadata but never gives access to data, so it cannot complete the read path.
+D=EXECUTE: it applies to functions, not to tables, and reading a table is not modeled as a function call.
+T: Reading a table needs USE CATALOG, USE SCHEMA and SELECT; a missing usage privilege is the classic cause of a denied query.
+V: Unity Catalog privileges
+
+@ DBX-DAA D9 T9.1 applied use-case
+S: A data office wants every employee to be able to find the tables in the catalog `corp`, read their descriptions and tags, and request access, but nobody should be able to read rows before access is approved. Which grant fits?
+A: `BROWSE` on the catalog `corp` for the All account users group, with access request destinations configured
+B: `SELECT` on the catalog `corp` for the All account users group, then revoke it on each sensitive table afterwards
+C: `USE CATALOG` and `USE SCHEMA` on every schema of `corp` for all account users, which exposes metadata only
+D: Membership of the workspace admins group for every employee, so that Catalog Explorer lists all assets
+K: A
+G: ## Discovery without access
+Finding data and reading data are different permissions.
+- `BROWSE` is granted on a catalog and lets a user see object names, comments and tags in Catalog Explorer, search, lineage and `information_schema`, and request access, without `USE CATALOG`, `USE SCHEMA` or any data privilege.
+- Databricks recommends granting `BROWSE` on catalogs to the All account users group so data is discoverable organization-wide.
+- Requests need a destination (email, Slack, Teams, webhook and so on); without a configured destination, users can see an object but cannot request it.
+W: BROWSE plus request destinations: employees can discover every table and ask the owner for access, while rows stay unreadable until a real data privilege such as `SELECT` is granted.
+X: B=SELECT on the catalog: it inherits to every current and future table, so everyone could read the rows immediately; revoking it table by table is error-prone and fails the requirement.
+C=Usage privileges: they are only prerequisites for reading data and do not make tables discoverable without access; they have to be granted per schema and matter once `SELECT` exists.
+D=Workspace admin: it hands out broad administrative rights to every employee, which is far more than discovery needs and violates least privilege.
+T: BROWSE on a catalog gives metadata discovery and access requests without any data access.
+V: Unity Catalog BROWSE
+
+@ DBX-DAA D9 T9.1 applied use-case
+S: The table `retail.sales.orders` has a `region` column. Managers in the account groups `emea_mgrs` and `na_mgrs` may see only the rows of their own region, and everyone queries through a SQL warehouse. A view will enforce this. Which design is correct?
+A: A view whose `WHERE` clause tests `is_member()` for each of the two manager groups, with `SELECT` on the view for both groups
+B: Grant `SELECT` on the base table to both groups and ask each manager to add `WHERE region = '...'` to every query
+C: Nightly jobs that copy each region into its own table, with managers granted `SELECT` on the copy of their region only
+D: A view testing `is_account_group_member()` per group in its `WHERE` clause, with `SELECT` only on the view and none on the base table
+K: D
+G: ## Dynamic views
+A **dynamic view** applies row or column security inside the view definition by checking who is querying.
+- `is_account_group_member('group')` returns true for members of an account-level group. It is the function Databricks recommends for Unity Catalog data.
+- `is_member('group')` checks workspace-level groups only (kept for the legacy Hive metastore) and does not see account groups, so a filter built on it silently returns no rows for account-group members.
+- Databricks recommends not granting users direct access to the tables the view reads. The view owner's access to the base table is what lets the view run, so users see only what the view returns.
+## Alternatives
+Filtering by convention (a `WHERE` the user types) is not security, and nightly copies multiply data and delay changes.
+W: Dynamic view with `is_account_group_member`: each manager's group membership is evaluated at query time, rows are filtered by region, and the base table stays unreadable to them.
+X: A=is_member(): it evaluates workspace-local groups, not account groups, so members of the account groups would not match and the view would show no rows for them.
+B=Filter by convention: managers with `SELECT` on the base table can drop the `WHERE` and read every region, so nothing is enforced.
+C=Per-region copies: they do restrict visibility but duplicate data, go stale between runs and need new jobs for every new group, where one view needs none.
+T: Use is_account_group_member in a dynamic view, grant SELECT on the view only, and keep the base table closed.
+V: Dynamic views
+
+@ DBX-DAA D9 T9.1 advanced troubleshooting
+S: An analyst owns the table `retail.sales.q3_targets` (created in a schema the analyst does not own). The analyst runs `GRANT SELECT ON TABLE retail.sales.q3_targets TO finance_team` but the finance team still cannot query it. What is the missing step?
+A: The analyst must also run `GRANT ALL PRIVILEGES` on the table, because that privilege includes access to the parents
+B: A catalog or schema owner (or a user with `MANAGE` on them) must grant the group `USE CATALOG` and `USE SCHEMA` on the parents
+C: Table ownership must be transferred to the finance team group, because only an owner can query the table
+D: The finance team must be added to the workspace admins group, because only admins can read tables owned by other people
+K: B
+G: ## What a table owner can and cannot grant
+A table owner has all capabilities on that table and can grant privileges on it. Ownership does not inherit upward: the owner has no power over the catalog or schema that contains the table.
+- Reading needs `USE CATALOG` on the catalog and `USE SCHEMA` on the schema as well as `SELECT` on the table.
+- Only the owners of the catalog and schema, holders of `MANAGE` on them, or a metastore admin can grant those usage privileges.
+This split keeps a table owner from opening data to people outside the area an administrator approved.
+W: Usage privileges from a container owner: the table owner already did the part inside their control, and the groups still lack `USE CATALOG` and `USE SCHEMA` that only the catalog or schema owner (or `MANAGE` holder) can give.
+X: A=ALL PRIVILEGES on the table: it covers privileges of that table only and says nothing about parents, so the usage requirement still fails.
+C=Transfer ownership: an owner is one principal, ownership of a table does not replace the usage privileges on the parents, and the analyst would lose control for no gain.
+D=Workspace admins: this role is far broader than needed and is not a requirement for reading other people's tables; privileges, not admin membership, decide table access.
+T: A table owner can grant on the table, but usage privileges on the catalog and schema come from their owners or MANAGE holders.
+V: Unity Catalog ownership
+
+@ DBX-DAA D9 T9.1 applied use-case
+S: A company must give a partner organization daily read-only access to a gold table. The partner does not use Databricks and analyzes data in pandas on its own servers. Which approach fits?
+A: Create a share with the table and a recipient for the partner on the open sharing protocol, read with an open-source connector
+B: Add the partner staff as users of the company's Databricks account and grant them `SELECT` so they can open the SQL editor daily
+C: Grant `SELECT` on the table to All account users and email the partner the SQL warehouse connection details
+D: Export the table to CSV every night into a publicly readable cloud bucket and send the partner the bucket link
+K: A
+G: ## Sharing outside the organization
+OpenSharing (the open protocol formerly named Delta Sharing) lets a provider share governed data with recipients on any platform.
+- A **share** is a Unity Catalog object that collects tables, views, volumes and other assets; a **recipient** represents the partner. Read-only access is granted to the recipient, and the provider can add or remove assets at any time.
+- For recipients without a Unity Catalog workspace, the Databricks-to-Open protocol serves tabular data to open-source clients such as pandas. Databricks-to-Databricks sharing is for recipients who also have a Unity Catalog workspace.
+- Views can be shared, including dynamic views that restrict rows and columns.
+W: Share and recipient with the open protocol: the partner gets read-only governed access from pandas without any Databricks account, and the provider keeps control of what is shared.
+X: B=Account users: that makes outsiders members of the company's own Databricks account, mixes internal and external identities and requires them to use Databricks, which the partner does not.
+C=All account users: that group contains only your own account's users, so it does not reach the partner, and giving out warehouse connection details does not grant access.
+D=Public CSV bucket: files readable by anyone cannot be restricted to the partner or audited, which defeats governance of the shared table.
+T: Share outside the company with a share plus recipient on OpenSharing; use Databricks-to-Open when the partner has no Databricks.
+V: OpenSharing, Unity Catalog shares
+
+@ DBX-DAA D9 T9.1 applied tradeoff
+S: Forty analysts move between three product teams every month, and each team needs `SELECT` on its own schemas only. The data office wants access changes to need the fewest administrative actions. What is the best approach?
+A: Run a script that grants and revokes `SELECT` on each schema for each of the forty analysts as they move
+B: Create groups only inside one workspace's admin console and grant the privileges to those workspace-local groups
+C: Make every analyst the owner of the schemas of the team they work for and transfer ownership on each move
+D: Grant the privileges to account-level groups synced from the identity provider, and change group membership there
+K: D
+G: ## Grant to groups, not people
+Unity Catalog principals must exist at the account level to receive privileges. Databricks best practices:
+- Define groups in the identity provider and sync them to the account; manage membership there.
+- Grant privileges to groups, and avoid direct grants to individual users.
+- Use groups to own objects, too.
+With group grants, moving an analyst is a single membership change and all inherited privileges follow, with no `GRANT` or `REVOKE` statements and no stale access left behind.
+W: Account-level groups from the identity provider: access follows membership, so a move is one change in one place and every grant stays unchanged.
+X: A=Scripted per-user grants: it works but creates a long list of direct grants that must be revoked precisely on each move and easily drifts, which the best practice avoids.
+B=Workspace-local groups: privileges are assigned to account-level principals, and local groups are not synchronized to the account, so they are a legacy pattern that Databricks recommends migrating away from.
+C=Ownership per analyst: ownership gives full control including granting and dropping, far more than `SELECT`, and a schema has one owner, so this breaks least privilege.
+T: Grant privileges to account-level groups managed in the identity provider so that role changes are membership changes.
+V: Unity Catalog groups
+
+@ DBX-DAA D9 T9.1 advanced comparison
+S: The table `retail.gold.margin` is owned by one analyst. A three-person stewardship team must be able to grant and revoke access on it and transfer its ownership, without being able to query it automatically. Which choice fits?
+A: Transfer ownership to each steward in turn, because a table can have several owners at once
+B: Grant `MANAGE` on the table to the steward group, which delegates grant, revoke and transfer without data access
+C: Grant `ALL PRIVILEGES` on the table to the steward group, which covers `MANAGE` along with all other table privileges
+D: Grant `BROWSE` and `USE SCHEMA` to the steward group, because those two let people change grants on tables
+K: B
+G: ## Ownership versus MANAGE
+Every securable object has exactly one owner (a user, service principal or group). The owner has all capabilities on the object, can grant and revoke, transfer ownership and drop it.
+`MANAGE` lets other principals grant and revoke privileges, transfer ownership and drop the object. Differences:
+- `MANAGE` can be given to many principals; ownership belongs to one.
+- `MANAGE` does not give data access by itself, although a holder could grant themselves `SELECT`, so it must be given sparingly (an audit trail exists).
+- `ALL PRIVILEGES` does not include `MANAGE`.
+Databricks recommends making a group responsible for administering grants, via ownership or `MANAGE`.
+W: MANAGE on the table: the whole steward group can run grants, revokes and ownership transfers while the table's data privileges remain separate grants.
+X: A=Several owners: an object has a single owner, so ownership cannot be shared between three people and each transfer would remove the previous one.
+C=ALL PRIVILEGES: it covers data privileges such as `SELECT` and `MODIFY` but explicitly does not include `MANAGE`, and it would give the stewards data access they should not automatically have.
+D=BROWSE and USE SCHEMA: these provide discovery and a usage prerequisite and cannot change grants on a table.
+T: MANAGE delegates administration of grants to a group; ALL PRIVILEGES does not include it, and an object has one owner.
+V: Unity Catalog MANAGE
+
+@ DBX-DAA D9 T9.1 advanced troubleshooting
+S: Analysts query the view `retail.reporting.v_margin` on a SQL warehouse. They have `SELECT` on the view and the usage privileges, but no privileges on the base tables, and it worked for months. Today every query fails with a permission error on a base table. The view's owner, an engineer, was removed from the group that held `SELECT` on those tables. What should be done?
+A: Grant each analyst `SELECT` on the base tables so that the view no longer depends on its owner
+B: Move the dashboards to a classic SQL warehouse, which checks the analysts' own permissions on the base tables
+C: Have a metastore admin transfer the view's ownership to a group that holds `SELECT` on the base tables
+D: Grant the analysts `MANAGE` on the view, so that Unity Catalog uses their permissions instead of the owner's
+K: C
+G: ## Whose permissions does a view use?
+For views read on SQL warehouses, Unity Catalog checks the **view owner's** permissions on the underlying tables. Readers need `SELECT` on the view plus the usage privileges, but not rights on the base tables. This is what lets a view expose a safe slice of a table.
+The flip side: if the owner loses access to the sources, the view breaks for every reader. Best practices:
+- Make a group the owner of production views, and give that group access to the source tables.
+- Only a metastore admin can transfer a view to an arbitrary principal; owners and `MANAGE` holders are limited to themselves or groups they belong to.
+W: Group ownership with source access: the view again runs with the owner's permissions, readers keep seeing only the view, and the dependency no longer rests on one engineer.
+X: A=Direct base-table grants: analysts would see everything in the base tables, which the view was meant to prevent, and it does not fix the ownership problem.
+B=Classic warehouse: SQL warehouses of every type use the view owner's permissions for the base tables, so the compute type does not change the outcome.
+D=MANAGE on the view: it delegates grant and ownership operations, not the identity used for the base-table check, so the view still fails.
+T: A view reads base tables with its owner's permissions, so a group should own production views and keep access to their sources.
+V: Unity Catalog views
+
+@ DBX-DAA D9 T9.2 applied troubleshooting
+S: In the SQL editor an analyst runs `SELECT * FROM orders` and gets a table-not-found error, although the table is shown in Catalog Explorer as `retail.sales.orders`. What fixes the query?
+A: Use `retail.sales.orders`, or first run `USE CATALOG retail` and `USE SCHEMA sales`
+B: Rename the table to `orders_retail_sales`, because names must be unique across the whole metastore
+C: Convert the table to an external table, because only external tables can be referenced by a short name in the editor
+D: Ask a workspace admin to add the analyst to the workspace admins group so that short names resolve
+K: A
+G: ## Qualified and unqualified names
+Unity Catalog uses a three-level namespace: `catalog.schema.table`.
+- A name with fewer parts is resolved against the **current catalog** and **current schema**. If you do not set them, the workspace's default catalog is used (a workspace admin can change it) and the default schema.
+- `USE CATALOG retail` and `USE SCHEMA sales` change the current ones for the session, so the short name `orders` resolves to `retail.sales.orders`.
+- A fully qualified name works regardless of session settings and is the safest form in saved queries, views and dashboards.
+W: Fully qualify or set the current catalog and schema: the short name `orders` was looked up in a different catalog and schema than the one holding the table.
+X: B=Rename the table: names need to be unique only within a schema, which is why the same table name can exist in many schemas and catalogs.
+C=External table: managed and external tables are both resolved the same way, and the table type has no effect on name resolution.
+D=Workspace admin: admin role changes privileges, not how a partially qualified name is resolved, so the lookup would still point at the same default location.
+T: Names resolve against the current catalog and schema; qualify them or set USE CATALOG and USE SCHEMA.
+V: Unity Catalog namespace
+
+@ DBX-DAA D9 T9.2 applied use-case
+S: The catalogs `dev` and `prod` both contain a schema `crm` with a table `customers`. An analyst with access to both wants to compare their row counts in a single query on one SQL warehouse. Which statement describes what is possible?
+A: It needs two warehouses, one per catalog, and the results must be joined in a spreadsheet afterwards
+B: It is only possible after copying one table into the other catalog, because a query reads from one catalog at a time
+C: It is possible with `crm.customers` written twice, if `USE CATALOG` is executed between the two subqueries of the same statement
+D: It is possible by naming `dev.crm.customers` and `prod.crm.customers` in the same statement, since both live in one metastore
+K: D
+G: ## One metastore, many catalogs
+Catalogs are the top containers of a metastore, and all catalogs of a metastore are visible to a query that has privileges on them. Three-part names make each reference unambiguous, so one statement can mix tables from several catalogs:
+```
+SELECT 'dev', count(*) FROM dev.crm.customers
+UNION ALL
+SELECT 'prod', count(*) FROM prod.crm.customers
+```
+The same table name in different schemas or catalogs is normal and is the reason qualification matters. Privileges still apply to each object, so the analyst needs access on both.
+W: Three-part names in one statement: both catalogs belong to the same metastore, so the query can reference both objects directly.
+X: A=Two warehouses: a warehouse is compute and is not tied to a catalog, so one warehouse can read all catalogs the user may access.
+B=Copy first: a single query can read several catalogs, so no copy is needed, and copying would add cost and staleness.
+C=USE CATALOG between subqueries: the session catalog is fixed for the duration of a statement and cannot be switched within it, so both subqueries would resolve to the same catalog.
+T: Fully qualified catalog.schema.table names let one query combine objects from several catalogs of the same metastore.
+V: Unity Catalog namespace
+
+@ DBX-DAA D9 T9.2 applied definition
+S: Which description of the Unity Catalog object hierarchy is correct?
+A: A workspace contains databases, databases contain tables, and views and volumes live in the top-level catalog
+B: A metastore contains catalogs, catalogs contain schemas, and schemas contain tables, views, volumes and functions
+C: A catalog contains tables, tables contain schemas, and each metastore is created separately for every workspace
+D: A schema contains catalogs, catalogs contain tables, and views sit in a separate namespace outside the metastore
+K: B
+G: ## The object model
+Unity Catalog stores data and metadata in a **metastore** (one per cloud region, shared by the workspaces in that region). Inside it, objects follow the three-level namespace `catalog.schema.object`:
+- **Catalogs** are the top level and the typical unit of data isolation.
+- **Schemas** (databases) organize objects inside a catalog.
+- **Tables, views, volumes, functions and models** are the objects in a schema.
+Catalogs and schemas are container objects: privileges granted on them inherit to current and future children.
+W: Metastore, catalog, schema, object: each level contains the next, which is why a table is addressed as `catalog.schema.table`.
+X: A=Workspace > database: a workspace is not a level in the object model, and views and volumes sit in schemas, not directly in a catalog.
+C=Tables contain schemas: containers are the other way around, and workspaces in a region share a metastore instead of each having one.
+D=Schemas contain catalogs: the nesting is reversed, and views are objects in schemas that follow the same namespace and governance as tables.
+T: Metastore contains catalogs, catalogs contain schemas, schemas contain tables, views, volumes and functions.
+V: Unity Catalog object model
+
+@ DBX-DAA D9 T9.2 applied use-case
+S: Old reports still read `sales_2019`, a table that was never migrated and sits in the legacy Hive metastore of the workspace. An analyst wants to join it with a Unity Catalog table in one query. How is the legacy table referenced?
+A: `CREATE CATALOG hive_metastore` must be run first, after which the short name `sales_2019` works
+B: Only two-level names are allowed for it, and such tables can never be combined with Unity Catalog tables
+C: As `hive_metastore.default.sales_2019`, since the legacy metastore appears as the catalog `hive_metastore`
+D: As `workspace_catalog.hive_metastore.sales_2019`, because `hive_metastore` is a schema in it
+K: C
+G: ## The hive_metastore catalog
+In a workspace enabled for Unity Catalog, objects registered in the legacy Hive metastore are surfaced as a catalog named `hive_metastore`. They are addressed with the same three parts, for example `hive_metastore.default.sales_2019`, and can be joined with Unity Catalog tables.
+- It exists automatically; it is not created with `CREATE CATALOG`.
+- Unity Catalog features such as the full privilege model apply to Unity Catalog objects; Databricks recommends migrating legacy tables.
+Setting a default catalog for the workspace changes what short names resolve to, but a qualified name is always unambiguous.
+W: hive_metastore as a catalog: the legacy objects are reachable through the same catalog.schema.table pattern, so one query can combine them with Unity Catalog tables.
+X: A=CREATE CATALOG hive_metastore: the catalog is provisioned automatically, and a short name would still resolve against the current catalog.
+B=Two-level only: the legacy tables take part in the three-level namespace and can be joined with Unity Catalog tables.
+D=Schema in the workspace catalog: `hive_metastore` is a top-level catalog next to the workspace catalog, not a schema inside it.
+T: Legacy Hive tables are addressed as hive_metastore.schema.table in the three-level namespace.
+V: Unity Catalog, hive_metastore
+
+@ DBX-DAA D9 T9.3 applied use-case
+S: An analyst builds the production table `retail.gold.kpi_daily` that feeds several dashboards and is therefore its owner. The team wants to avoid broken refreshes and unmanaged access when staff leave. What is the best practice?
+A: Keep the analyst as owner, because Unity Catalog moves the ownership automatically when a user leaves
+B: Grant the analyst `ALL PRIVILEGES` and keep ownership with them so that the grants can be audited
+C: Transfer ownership to the metastore admin, so that all production tables are owned by one administrator
+D: Transfer ownership to a group that represents the team, so that people can change without changing the owner
+K: D
+G: ## Who should own a table
+The creator of an object is its first owner. Owners can grant and revoke access, transfer ownership and drop the object, and a refresh or a dashboard run under an owner's identity can break when that person leaves.
+Databricks best practices:
+- Assign ownership of production objects to groups, not to individuals; creators should reassign ownership.
+- Be sparing with metastore admins, `MANAGE` and `ALL PRIVILEGES`.
+A group owner means that team changes are group membership changes, and the owner stays valid.
+W: Group ownership: the owner is a stable principal, so grants, refreshes and administration continue after any individual leaves.
+X: A=Automatic transfer: Unity Catalog does not reassign objects when a user is removed, so a person-owned table is left with an orphaned owner.
+B=ALL PRIVILEGES for the analyst: this still ties the table to one person, and `ALL PRIVILEGES` is not even the same as ownership, since it excludes `MANAGE`.
+C=Metastore admin as owner: that concentrates control in one broad role, which the guidance says to assign sparingly, and it makes day-to-day administration slower.
+T: Give production tables to a group as owner so staff changes never orphan them.
+V: Unity Catalog ownership
+
+@ DBX-DAA D9 T9.3 applied use-case
+S: The table `hr.people.employees` has an `ssn` column. HR staff (the account group `hr_team`) must see real values and every other analyst must see only a masked value, in all dashboards and queries that use the same table. What is the best approach?
+A: A column mask function applied to `ssn` that returns the value only for members of `hr_team` and a masked string for all others
+B: A second copy of the table without the `ssn` column, which every non-HR analyst is told to use in place of the original
+C: A dashboard setting that hides the `ssn` widget column from viewers outside HR
+D: A tag `pii` on the `ssn` column, which blocks reads for everybody except the table owner
+K: A
+G: ## Column masks
+A **column mask** is a SQL function registered in Unity Catalog and attached to a column. When the column is read, the function runs for the querying user and returns either the real or a masked value, so the same table serves everyone.
+- The function can test `is_account_group_member('hr_team')`.
+- The table owner (or a user with `MANAGE` and `SELECT`) sets it, with `EXECUTE` on the function.
+- It applies to queries from SQL warehouses and dashboards alike, so there is nothing to repeat per consumer.
+Tags describe data; they do not enforce access by themselves. Hiding a chart column hides nothing from someone who queries the table.
+W: Column mask by group: the policy lives with the column, so HR sees real values and everyone else sees the masked form wherever the table is read.
+X: B=Table copy without ssn: it duplicates data, can drift from the source and relies on users picking the right table rather than on enforcement.
+C=Hiding a widget column: this is presentation only; users with access can still run a query against the column, so the PII is not protected.
+D=Tag only: a tag classifies the column and helps discovery, but no read is blocked unless a mask or policy uses it, and tags do not restrict owners or anyone else.
+T: Protect a PII column with a column mask so the table serves HR and non-HR users alike.
+V: Column masks
+
+@ DBX-DAA D9 T9.3 applied troubleshooting
+S: The `email` column of `retail.crm.customers` has a column mask for everyone outside `crm_admins`. An analyst outside that group runs `SELECT count(DISTINCT email) FROM retail.crm.customers` and gets 1, although the table has millions of customers. What is the best explanation and remedy?
+A: Masks are skipped on serverless SQL warehouses, so a classic warehouse will return the correct count
+B: Ask for `ALL PRIVILEGES` on the table, which lets the query read the unmasked values
+C: The mask returns the same constant for this user, so count a non-sensitive key such as `customer_id`
+D: The query result cache is stale, so clearing it and re-running the query will give the unmasked count
+K: C
+G: ## Masked values are what the analyst really sees
+A column mask replaces the value before the query engine uses it. Every function applied afterwards, including `count(DISTINCT ...)`, `GROUP BY` and joins, works on the masked value.
+- If the mask returns a constant such as `'***'`, all rows look identical, so distinct counts, grouping and joins on that column collapse.
+- This is the mask working as designed, not a bug.
+- Analysts should use a non-sensitive key (for example `customer_id`) for counting and joining, or ask the table owner for a mask that keeps analytic value (such as a hash) when policy permits.
+Privileges such as `ALL PRIVILEGES` do not bypass a mask, since the mask applies to whoever is not in the exempt group.
+W: Constant mask value: the 1 is correct for masked data, and counting `customer_id` answers the business question without touching PII.
+X: A=Serverless versus classic: masks are enforced on SQL warehouses of every type, so switching type cannot reveal the values.
+B=ALL PRIVILEGES: it governs what actions you can perform, not whether the mask runs; the mask still applies to users outside the exempt group.
+D=Stale cache: the result is not stale, it is correct for masked data, and the cache respects the user's permissions anyway.
+T: Aggregations see masked values; count a non-sensitive key instead of the masked PII column.
+V: Column masks
+
+@ DBX-DAA D9 T9.3 applied use-case
+S: An engineer proposes giving analysts read access to the cloud storage path of the managed tables in `retail` so that other tools can read the files directly. What is the governance consequence?
+A: Nothing changes, because Unity Catalog re-applies column masks and row filters when files are read by path
+B: Reads by path bypass Unity Catalog, so grants, masks and auditing on the managed tables no longer protect the data
+C: Only external tables are affected, because managed table files are encrypted with a key that other tools cannot use
+D: Access would be allowed but logged, because storage requests are always recorded in the Unity Catalog audit log
+K: B
+G: ## Keep access inside Unity Catalog
+Managed tables and volumes live in managed storage that Unity Catalog controls. Their governance (privileges, row filters and column masks, lineage, audit) holds only while access goes through Unity Catalog.
+- If another service or principal reads the managed storage location directly, it bypasses those controls, and access control and auditability for the managed tables are compromised.
+- Best practice: do not use a bucket that can be reached from outside Unity Catalog, and give people access with grants rather than with storage credentials.
+- Databricks recommends managed tables for most uses because they get the full set of governance features.
+W: Bypass: with direct storage access, Unity Catalog is no longer in the path, so privileges, masks and audit trails no longer apply to those files.
+X: A=Masks by path: row filters and column masks are applied by Unity Catalog when it serves the data, and a plain storage read never reaches them.
+C=Only external tables: external tables have the same exposure when their location is accessible, and nothing in managed storage makes the files unreadable to a principal with storage permissions.
+D=Logged anyway: cloud storage access outside Unity Catalog is not part of the Unity Catalog audit trail, so you lose the lineage and audit coverage.
+T: Direct storage access to managed table files bypasses Unity Catalog permissions, masks and auditing.
+V: Unity Catalog managed storage
+
+@ DBX-DAA D9 T9.3 applied use-case
+S: A privacy team must be able to find all columns holding personal data across many schemas and report them. The analysts also need to see which columns are sensitive when browsing. Which practice supports both?
+A: Write the word PII in each column comment and search the comments with a `LIKE` filter on `information_schema.columns`
+B: Rename every sensitive column with a `pii_` prefix, so that the names reveal the classification during browsing
+C: Rely on the lineage graph, which marks columns that carry personal data automatically after the first query
+D: Apply a tag such as `pii` to the sensitive columns and find them through catalog search or the information schema tag views
+K: D
+G: ## Classify with tags
+Unity Catalog **tags** are key-value pairs you attach to catalogs, schemas, tables, columns, views and other securables. They make classification searchable and visible in Catalog Explorer, and stewards can query tag metadata through the `information_schema` tag views.
+- Tags describe the data; they do not enforce access by themselves. Access is enforced by privileges, masks, filters or policies.
+- Governed tags add controlled keys and allowed values so teams stop inventing variants like `pii`, `PII` and `personal`.
+- Tag data is stored as plain text and may be replicated globally, so tag names and values must never contain personal or sensitive information.
+Lineage shows where data came from and goes, not what it contains.
+W: Tags on columns: they are structured, searchable and visible while browsing, so privacy reporting and analyst awareness share one source.
+X: A=Comments with LIKE: free text is inconsistent (spelling, language), not structured metadata, and has no controlled values.
+B=Renaming columns: it breaks existing queries, dashboards and downstream code, and is applied manually per table instead of being searchable metadata.
+C=Lineage graph: lineage tracks upstream and downstream dependencies and does not classify column content, so it never marks personal data on its own.
+T: Tag sensitive columns and search by tag; keep personal data out of tag names and values.
+V: Unity Catalog tags
+
+@ DBX-DAA D9 T9.3 applied comparison
+S: Compliance requires that when an analyst drops a staging table that holds personal data, Databricks removes the underlying data files too, and does not leave a copy in a bucket nobody tracks. Which table type should the analyst create?
+A: A managed table, because Unity Catalog manages both the metadata and the lifecycle of its data files
+B: An external table, because dropping it deletes the files at its registered storage location
+C: A view over the source files, because dropping a view removes the data it reads
+D: An external table with `MANAGE` granted to the analyst, because that privilege deletes files on drop
+K: A
+G: ## Managed versus external
+- **Managed tables**: Unity Catalog controls the data files as well as governance. Dropping one lets Unity Catalog delete the data (after its recovery window). Databricks recommends managed tables for most use cases because they get full governance and optimization features.
+- **External tables**: Unity Catalog governs access, but the file layout and lifecycle belong to you and your cloud provider. Dropping the table removes only the registration; the files stay in storage until someone deletes them.
+For personal data that must disappear on drop, the lifecycle must belong to the platform, not to a separate storage process.
+W: Managed table: because the lifecycle of the files is owned by Unity Catalog, dropping the table also takes care of the data, not only the metadata.
+X: B=External table: dropping an external table leaves the files at their location, which is exactly the untracked copy that compliance wants to avoid.
+C=View: a view stores no data, so dropping it removes only the definition and the source files remain.
+D=External with MANAGE: `MANAGE` controls privileges and ownership operations and does not change what a drop does to external files.
+T: Managed tables get their data lifecycle handled by Unity Catalog; dropping an external table leaves the files.
+V: Managed and external tables
