@@ -46,7 +46,7 @@ V: system.billing.usage
 S: A monthly cost report sums `usage_quantity` for the account with the filter `WHERE record_type = 'ORIGINAL'`, chosen to avoid negative numbers. The finance team notes that the report no longer matches the invoice for a month in which Databricks corrected some earlier records. Which change makes the report correct?
 A: Keep only `RESTATEMENT` rows, because they contain the corrected values and the other record types are duplicates of them
 B: Remove the filter on `record_type` and sum every row, so each retraction cancels its original and the restatement adds the corrected amount
-C: Group by `record_id` and take the row with the latest `ingestion_date`, which always holds the final quantity for that record
+C: Sum only `ORIGINAL` and `RETRACTION` rows, because together they remove every incorrect record and leave the invoice total
 D: Keep `ORIGINAL` rows and add 12 hours of lag to the report window, because corrections are written into the original rows after they arrive
 K: B
 G: ## Corrections in the usage table
@@ -64,7 +64,7 @@ GROUP BY ALL
 ```
 W: Sum all record types: each retraction negates its original and the restatement carries the corrected value, so a plain sum over all rows matches the invoice.
 X: A=Only restatements: most records are never corrected, so they exist only as original rows and would vanish from the total.
-C=Latest ingestion per record_id: retraction and restatement rows are new rows with their own IDs, so this picks neither the corrected total nor a consistent set of rows.
+C=Original plus retraction: the pair sums to zero for every corrected record, but the corrected values sit in the restatement rows, so the corrected amounts are missing from the total.
 D=Original plus lag: records are not edited after they arrive and the availability lag does not apply to corrections, so waiting never repairs the figure.
 T: Never filter billing usage to ORIGINAL; sum all record types so retractions cancel originals.
 V: system.billing.usage
@@ -91,7 +91,7 @@ Joining usage to all of those rows repeats each usage row once per version, so s
 First reduce the dimension to one row per entity: `ROW_NUMBER() OVER (PARTITION BY workspace_id, job_id ORDER BY change_time DESC)` and keep row number 1. Then join. Use a LEFT JOIN from usage if deleted jobs must stay in the cost report. Filtering `delete_time IS NULL` in the same query that reads the table does not remove deleted jobs; it only removes the deletion rows and returns the last state before deletion. A filter on `delete_time` belongs after the latest row is chosen, and only when you want live jobs.
 W: Latest row, then LEFT JOIN: one row per job removes the fan-out, and the LEFT JOIN keeps usage of jobs whose latest row records a deletion.
 X: A=Join on name with DISTINCT: names are not unique across jobs or workspaces, and DISTINCT on usage rows would also collapse legitimately identical hourly rows.
-B=delete_time filter in the same query: the history rows of live jobs are still multiplied, and deleted jobs lose their cost from the report.
+B=delete_time filter in the same query: it only drops the deletion rows, so every older version of every job is still joined and the totals stay inflated, while deleted jobs appear with their last state before deletion.
 D=Group by change_time: this leaves every version as a separate line, so totals per job are split across versions instead of being correct.
 T: Collapse SCD2 system tables to the latest row per key before joining them to fact tables.
 V: system.lakeflow.jobs
@@ -127,11 +127,11 @@ G: ## Utilization lives in the compute schema
 ## Comparing driver and workers
 Filter on the `cluster_id` of the run and the minute range, then aggregate per `driver` value: a driver with high memory use and swap while workers are idle points to collects or driver-side Python, whereas busy workers with an idle driver point to shuffle or data volume.
 ## Why the other tables do not help
-`billing.usage` shows cost and `node_type`, which does not distinguish driver from worker. `job_run_timeline` has states and durations, not utilization. `query.history` covers SQL warehouses, serverless compute and pipelines, not Spark tasks of classic jobs.
+`billing.usage` shows cost and `node_type`, which does not distinguish driver from worker. `job_run_timeline` has states and durations, not utilization. `query.history` records queries run on SQL warehouses and serverless compute for notebooks and jobs, not Spark tasks of classic job compute.
 W: node_timeline: minute-level utilization per node with a driver flag survives cluster termination, so driver and worker memory and CPU can be compared for the exact run window.
 X: B=billing.usage node_type: this is a cost record whose node type does not tell driver from worker and has no utilization values at all.
 C=job_run_timeline: it keeps one row per run slice with states and termination codes; it has no CPU or memory columns.
-D=query.history: it captures queries of SQL warehouses, serverless compute and pipelines; it does not log Spark tasks of a classic jobs cluster.
+D=query.history: it captures queries run on SQL warehouses and serverless compute for notebooks and jobs; it does not log Spark tasks of a classic jobs cluster.
 T: Use system.compute.node_timeline for after-the-fact driver versus worker utilization.
 V: system.compute.node_timeline
 
@@ -161,7 +161,7 @@ C: Create a view in a governed schema that filters `usage` by workspace and grou
 D: Copy `system.billing.usage` into each team's catalog once a month with a different filter, and grant read access on those copies
 K: C
 G: ## Sharing system tables safely
-System tables are owned by Databricks, governed by Unity Catalog and read-only. Granting access means `USE CATALOG` on `system`, `USE SCHEMA` on the schema and `SELECT` on it, and that gives the reader every row from all workspaces of the account (for tables in the account's region or global). The docs recommend a dynamic view for sharing a subset with a user or group.
+System tables are owned by Databricks, governed by Unity Catalog and read-only. Granting access means `USE CATALOG` on `system`, `USE SCHEMA` on the schema and `SELECT` on it, and that gives the reader every row from all workspaces of the account (for tables in the account's region or global). To share only a subset with a user or group, expose it through a Unity Catalog view instead of granting the system schema.
 ## Dynamic view
 A view in a normal catalog can use `is_account_group_member()` and a mapping of workspace IDs to groups to return only the allowed rows. Readers get `SELECT` on the view; the view owner needs access to the system table. Because system tables cannot be modified, a row filter or column mask cannot be attached to them directly.
 W: View with group-based filter: the view returns only the rows each team may see and the leads never receive access to the underlying system table.
@@ -172,24 +172,24 @@ T: Share a slice of a system table through a dynamic view, never by granting the
 V: system.billing.usage, Unity Catalog
 
 @ DBX-DEP D4 T4.2 advanced troubleshooting
-S: A monitoring script runs `databricks jobs list-runs --completed-only --expand-tasks` every night and counts failed runs. After the number of runs per day grew, the counts stopped matching the Jobs UI, and the missing runs are always the oldest ones in the window. What is the likely cause and fix?
-A: The command returns one page of results, so the script must follow `next_page_token` with `--page-token` and bound the window
-B: Completed runs older than a day are removed from the API, so the script must read the older ones from the system tables only
-C: The `--expand-tasks` option caps the response to the newest runs only, so the script should drop it and count job-level states instead
+S: A monitoring script calls `GET /api/2.2/jobs/runs/list?completed_only=true&expand_tasks=true` once every night with a time window and counts failed runs from the response. After the number of runs per day grew, the counts stopped matching the Jobs UI, and the missing runs are always the oldest ones in the window. What is the likely cause and fix?
+A: The call returns one page of at most 25 runs, so the script must follow `next_page_token` with `page_token` until none is returned
+B: Completed runs older than a day are removed from the API, so the script must read the older runs from the system tables only
+C: The `expand_tasks` option caps the response to the newest runs only, so the script should drop it and count job-level states instead
 D: List calls return runs in ascending order by start time, so the script should reverse the output to see the newest runs first
 K: A
 G: ## Paged list APIs
-The Jobs API and the CLI commands built on it return runs in pages, newest first (descending start time). A response contains `next_page_token` when more results exist; the next call passes it as `--page-token` (REST `page_token`). A script that reads only the first response sees the newest runs and silently loses the rest, which is why the oldest runs of the window are the ones missing.
+The `runs/list` endpoint returns runs in pages (the `limit` parameter accepts 1 to 25), newest first (descending start time). A response contains `next_page_token` when more results exist; the next call passes it as `page_token`. The CLI command `databricks jobs list-runs` exposes the same `--limit` and `--page-token` options. A script that reads only the first response sees the newest runs and silently loses the rest, which is why the oldest runs of the window are the ones missing.
 ## Making the script robust
 - Loop until no `next_page_token` is returned.
-- Bound the query with `--start-time-from` and `--start-time-to` (epoch milliseconds) so each night reads a defined window.
-- Use `--completed-only` or `--active-only` to cut the volume, and `--expand-tasks` only if you need task details.
+- Bound the query with `start_time_from` and `start_time_to` (epoch milliseconds) so each night reads a defined window.
+- Use `completed_only` or `active_only` to cut the volume, and `expand_tasks` only if you need task details.
 SDK clients wrap the same API as iterators that fetch pages for you, which is easier than hand-written loops.
-W: Follow the page token: the list call returns a page at a time, newest first, so a script that never requests the next page drops the oldest runs of the window.
-X: B=API removal after a day: run history is kept for about two months in the Jobs UI and API, so a one-day-old run is still returned.
-C=expand-tasks cap: this option only adds task and cluster details to each run; it does not change how many runs are returned.
+W: Follow the page token: the list call returns at most 25 runs a page, newest first, so a script that never requests the next page drops the oldest runs of the window.
+X: B=API removal after a day: run history is kept for 60 days, so a one-day-old run is still returned.
+C=expand_tasks cap: this option only adds task and cluster details to each run; it does not change how many runs are returned.
 D=Ascending order: the documented order is descending by start time, so the newest are first and the missing ones are at the end.
-T: Always follow next_page_token (and bound the time window) when counting runs through the Jobs API or CLI.
+T: Always follow next_page_token (and bound the time window) when counting runs through the Jobs API.
 V: Jobs API, Databricks CLI
 
 @ DBX-DEP D4 T4.2 advanced troubleshooting
@@ -345,7 +345,7 @@ K: C
 G: ## Incremental refresh planning
 A materialized view is refreshed with the cheapest technique that is correct. A refresh can be incremental or a complete recompute, and an operator or expression in the query can block incremental processing (for example a non-deterministic function).
 ## Evidence in the event log
-For materialized views (and REPLACE WHERE flows) the pipeline writes a `planning_information` event. Its `details:planning_information` contains `technique_information`, an array of the techniques considered with `maintenance_type`, `is_applicable`, `is_chosen`, a `cost` and `incrementalization_issues` (issue type, operator or expression name, and whether it prevents incrementalization). Filtering `is_chosen = true` shows the technique that ran; the issue list shows what to change in the query.
+For materialized views (and REPLACE WHERE flows) the pipeline writes a `planning_information` event. Its `details:planning_information` contains `technique_information`, an array of the techniques considered with `maintenance_type`, `is_applicable`, `is_chosen` and `incrementalization_issues` (issue type, operator or expression name, and whether it prevents incrementalization). Filtering `is_chosen = true` shows the technique that ran; the issue list shows what to change in the query.
 W: planning_information: it records every technique that was considered, which was chosen and the issues that blocked incrementalization.
 X: A=flow_progress status: statuses describe whether a flow is running or finished, and a refresh technique is not one of them.
 B=update_progress state: this event covers the lifecycle of the whole update and carries no per-dataset technique.
@@ -411,7 +411,7 @@ T: autoscale and cluster_resources events exist only for classic pipeline comput
 V: Lakeflow Spark Declarative Pipelines
 
 @ DBX-DEP D4 T4.4 advanced troubleshooting
-S: An alert checks the number of orders loaded today with `SELECT count(*) ... WHERE load_date = current_date()`, filtered to a region list that sometimes has no rows yet. The nightly load failed, the query returned zero rows after a join, and the alert stayed OK. The team wants a missing result to count as a problem. What should they configure?
+S: An alert runs `SELECT max(load_time) FROM loads WHERE load_date = current_date() GROUP BY region` and triggers when the value is older than a limit. The nightly load failed, so the query returned no rows at all, and the alert stayed OK. The team wants a missing result to count as a problem. What should they configure?
 A: Set the Empty result state of the alert to TRIGGERED so that a query that returns no rows raises the alert
 B: Lower the threshold to a negative number so that an empty result is compared as a value smaller than the limit
 C: Add a Notify on OK option, so that the subscribers hear when the result becomes empty
@@ -552,44 +552,38 @@ T: runs/submit one-time runs have no job, so search them by run ID, run as or st
 V: Lakeflow Jobs
 
 @ DBX-DEP D4 T4.5 advanced troubleshooting
-S: A data engineer who is not a workspace admin opens the Runs tab of Jobs & Pipelines to check the recent failures and top error types, but no Finished runs count graph or Top 5 error types table is displayed. Which condition explains this?
-A: The graph is limited to runs of the last hour, so no graph is displayed when no run finished in that hour
-B: The Runs tab shows the graph only with the All filter, so the engineer has to remove the Jobs filter to see it
-C: The graph needs the type filter set to Jobs or Pipelines, and non-admins must also set Run as to themselves
-D: The graph is an admin-only feature, so the engineer must ask an admin for the numbers of the failed runs
-K: C
-G: ## Runs tab: graph and list
-The Runs tab of Jobs & Pipelines lists recent runs of jobs and pipelines of the workspace, including runs started by external tools. It has a **Finished runs count graph** of recently finished runs, by default failed, skipped and succeeded, and a **Top 5 error types** table that shows the most frequent errors in the selected range. Filters at the top (name, type, run as, time range, status, run ID, error code) apply to the graph and the list.
-## When the graph is visible
-- It appears only when the type filter is **Jobs** or **Pipelines**; with **All** it is not shown.
-- It is shown for admins for all runs; non-admins must set **Run as** to themselves to see their own runs in it.
-- Dragging over the graph selects a time range and updates the list.
-The list itself keeps run history for a limited time (60 days), and a run's results should be exported if they are needed longer.
-W: Type and run-as filters: the graph needs the Jobs or Pipelines filter and, for non-admins, the Run as filter set to the user, so the engineer must set both.
-X: A=One-hour window: the graph covers a longer recent period and can be zoomed by selecting a range.
-B=Jobs filter blocks it: the graph is shown for Jobs or Pipelines filters and hidden for All, which is the opposite of this option.
-D=Admin-only feature: non-admins can see the graph for their own runs once they filter on Run as themselves.
-T: The Finished runs count graph appears only when filtered to Jobs or Pipelines (non-admins also filter Run as to themselves).
+S: A multi-task job has become slower over the last month, but every run still succeeds and the slowdown is gradual. The engineer wants to see which task's duration has grown across the last 30 runs of this job. Which part of the Jobs UI answers this directly?
+A: The matrix view in the Runs tab of the job, which shows the total duration and one bar per task for each run, with bar height as duration
+B: The Timeline view of the latest run, which plots the durations of the same task for each of the previous 30 runs of the job
+C: The Graph view of the latest run, because the node of a slow task is colored by how much its duration has grown over time
+D: The Top 5 error types table of the Runs tab, which ranks the tasks whose duration exceeds their average, even if they succeed
+K: A
+G: ## Within one run and across runs
+The Jobs UI has two levels of run history.
+- On the job's **Runs** tab, the **matrix view** lists the job's runs, each with a **Run total duration** bar and one cell per task. The height of a bar shows the duration, and the colors show status. Hovering gives start time, duration, cluster and status of a task run.
+- On the **Job run details** page of a single run, the Graph, Timeline and List views describe only that run.
+A regression across runs, such as a task that gets slower every week, is a matrix question, because the same task can be compared in many runs side by side. A regression inside one run (which branch is critical, where a task waits) is a Timeline question. Run history is kept for 60 days; for longer baselines use `system.lakeflow.job_task_run_timeline`.
+W: Matrix view: it shows each run with a bar per task, so the task whose bar keeps growing across the last runs is visible at a glance.
+X: B=Timeline view: it shows the tasks of one run on a time axis, not the same task over several runs.
+C=Graph view: node colors show the status of a task in one run and not how its duration changed over time.
+D=Top 5 error types: it ranks error codes of failed runs, and a slow successful task produces no error entry.
+T: Use the matrix view of the job's Runs tab to compare task durations across runs.
 V: Lakeflow Jobs
 
 @ DBX-DEP D4 T4.5 advanced use-case
-S: A multi-task job that used to finish in 40 minutes now takes 70, although every task succeeds. The engineer needs to see which tasks take the time, which ones overlap in parallel branches, and where a task waited for its dependencies. Which view of the job run details shows this best?
-A: The Timeline view of the run, which shows when each task ran and for how long, with dependencies and overlap
-B: The Graph view, because the colors of the task nodes show the duration of each task and the waiting time between them
-C: The Finished runs count graph, because the height of each bar is the duration of the task that ran last
-D: The Top 5 error types table, because slow tasks appear there as soft errors with the time they exceeded
-K: A
-G: ## Views of a job run
-The Job run details page has Graph, Timeline and List views.
-- **Graph**: the DAG with each task's status; clicking a node opens its details (run as, start and end times, cluster, source code, metrics).
-- **Timeline**: tasks along a time axis, intended to find tasks that take long and to understand dependencies and overlap when debugging or optimizing. For serverless jobs the queries of a task and their profiles are integrated, and tasks with performance insights show a lightbulb.
-- **List**: status, name, type, resource, duration and dependencies, with search, filters and sorting by duration.
-Across runs, the matrix view of the job's Runs tab compares total duration and per-task bars, and an expected completion time adds a warning when the run exceeds it.
-## Choosing
-A regression within a run (which branch is critical, where waiting occurs) is a Timeline question; a regression across runs is a matrix question; counts of failures and top errors belong to the Runs tab graph.
-W: Timeline view: tasks are placed on a time axis, so the critical path, parallel overlap and waiting for dependencies can be read at a glance.
-X: B=Graph view: node colors show status and details are one click away, but the graph does not lay tasks out in time, so overlap and waiting are not visible.
-C=Finished runs count graph: it counts finished runs by status over recent hours and has no per-task durations.
-D=Top 5 error types: it ranks error codes of failed runs, and a slow successful task produces no error entry.
-T: Use the run's Timeline view to locate slow tasks, overlap and dependency waits.
-V: Lakeflow Jobs
+S: A platform team wants to list every job whose tasks run on interactive (all-purpose) clusters, so that they can move them to job compute and get job-level billing records. Which source combination finds them in SQL?
+A: `system.billing.usage` filtered on `billing_origin_product = 'JOBS'`, because every job that uses all-purpose compute is billed under that product
+B: `system.lakeflow.job_run_timeline`, using its `compute_ids` column, which lists the clusters of every task run of the job
+C: `system.lakeflow.job_task_run_timeline` with its `compute_ids`, joined to the latest `system.compute.clusters` row, keeping `cluster_source` of `UI` or `API`
+D: `system.compute.node_timeline`, which stores the job ID of the run next to the utilization of each node and its cluster
+K: C
+G: ## Which compute did a task use
+`system.lakeflow.job_task_run_timeline` has one row per task run (sliced hourly) and its `compute_ids` array holds the IDs of the job clusters, interactive clusters and SQL warehouses that the task used. `system.compute.clusters` is a slowly changing dimension of cluster configurations; its `cluster_source` is `UI` or `API` for all-purpose compute, `JOB` for all job compute and `PIPELINE` or `PIPELINE_MAINTENANCE` for pipelines.
+## The pattern
+Explode `compute_ids`, join to the latest row per `cluster_id` of `clusters` (collapse the history first, as with `jobs`), and keep `cluster_source IN ('UI', 'API')`. The result names the jobs and tasks that still run on shared clusters, which is also where `system.billing.usage` has no `job_id` (see the billing table: the job ID is not populated for jobs run on all-purpose compute).
+W: Task timeline plus clusters: the task table names the compute of each task run and the cluster table says whether that compute is all-purpose, so the join lists the jobs to migrate.
+X: A=Billing origin JOBS: usage of a job on all-purpose compute is billed under the all-purpose product and carries no job ID, so this filter finds the jobs that already run on job compute.
+B=job_run_timeline compute_ids: this column holds the job compute of the parent run, mainly for WORKFLOW_RUN run types; task compute is in the task timeline table.
+D=node_timeline: it records utilization per node and cluster and has no job or task identifiers.
+T: Join job_task_run_timeline.compute_ids to system.compute.clusters.cluster_source to find tasks on all-purpose clusters.
+V: system.lakeflow.job_task_run_timeline, system.compute.clusters
