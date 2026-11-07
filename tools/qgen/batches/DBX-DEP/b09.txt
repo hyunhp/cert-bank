@@ -45,7 +45,7 @@ ELSE NULL::VARIANT END;
 ```
 Test with `SELECT CAST(mask(col) AS <type>)` for every type the tag can reach before attaching the policy to a catalog.
 W: VARIANT mask with type branches: one function and one policy cover string, numeric and date columns because every branch returns a value the column type accepts.
-X: A=Python UDF: Python UDFs registered in Unity Catalog are supported but are not exempt from the cast to the column type, and the optimizer cannot inline them as it can SQL UDFs.
+X: A=Python UDF: the return value is cast back to the column type whatever language the function uses, and policies recommend SQL UDFs because Python UDFs must be wrapped in a SQL UDF and cannot be inlined by the optimizer.
 B=EXCEPT clause: it removes the protection for exactly the users the mask exists for, and it hides the defect instead of fixing the function.
 D=DETERMINISTIC: the keyword only tells the engine the function returns the same result for the same input, which helps optimization; it has no effect on type casting.
 T: A column mask must return a value castable to each column type it can reach; use a VARIANT function to cover several types with one policy.
@@ -146,7 +146,7 @@ S: Partners drop JSON events in cloud storage. Bronze is loaded with Auto Loader
 A: The stream fails with `UnknownFieldException` until restarted, after which `national_id` becomes a bronze column that silver then ignores
 B: The new field is dropped silently because it is not in the schema, so no unmasked identifier is stored anywhere in the lakehouse
 C: Auto Loader adds `national_id` to the schema automatically and a masking policy already covers it because policies apply to new columns
-D: The stream keeps running and the value sits unmasked in bronze inside the `_rescued_data` JSON, so that column needs the protection other identifiers get
+D: The stream keeps running and `national_id` sits unmasked in bronze inside `_rescued_data`, so that column needs the same protection as other identifiers
 K: D
 G: ## What the rescued data column holds
 With `rescue` evolution Auto Loader never evolves the schema and the stream does not fail. Any column that is not in the schema, or that mismatches in type or case, is stored in `_rescued_data` as a JSON blob together with the source file path.
@@ -185,8 +185,8 @@ V: Lakeflow Pipelines expectations
 
 @ DBX-DEP D6 T6.4 advanced use-case
 S: A catalog-level ABAC policy masks `email` for `account users`. A Lakeflow job runs as the service principal `sp_etl`, which is not exempt, and writes `silver.customers` with `email_token = sha2(email, 256)` read from bronze. After the policy was added every `email_token` in silver is identical, and joins on it collapse. How should the pipeline be fixed?
-A: Remove the policy from bronze so the job sees real emails, and rely on the hashed token in silver to protect the email values everywhere
-B: Add `sp_etl` to the policy's `EXCEPT` clause, keep bronze restricted, compute the token in the job, and protect silver with its own tags and policy
+A: Remove the policy from bronze so the job sees real emails, and rely on the hashed token in silver to protect the email values everywhere in the lakehouse
+B: Add `sp_etl` to the policy's `EXCEPT` clause, keep bronze restricted, compute the token in the job, and tag silver for its own policy
 C: Run the job as a user in the compliance group, because their identity is already exempt from the masking policy on bronze
 D: Hash the email inside the policy's masking function and have the job read the hashed value instead of the original
 K: B
@@ -330,9 +330,9 @@ V: Lakeflow Pipelines streaming tables, Kafka
 
 @ DBX-DEP D6 T6.5 advanced tradeoff
 S: About 400 erasure requests arrive daily. The current job runs `DELETE FROM events WHERE user_id = <id>` once per request against a very large `events` table. Each statement rewrites many files, the job runs for hours, and concurrent runs conflict. Which redesign is the most efficient?
-A: Collect requests in a control table, run one `MERGE ... WHEN MATCHED THEN DELETE` per cycle on a table clustered by `user_id`, then mark them done
+A: Collect requests in a control table, run one `MERGE ... WHEN MATCHED THEN DELETE` per cycle on a table clustered by `user_id`, then mark done
 B: Add an `is_deleted` flag set by a single `UPDATE` for all requested users and filter flagged rows out in a view for readers
-C: Run the 400 `DELETE` statements in parallel threads from one notebook, so that all the requests finish at the same time within minutes
+C: Run the 400 `DELETE` statements in parallel threads from one notebook, so that every request finishes together within a few minutes
 D: Run `VACUUM` after each request with a retention of zero hours, so that the old files holding the rows never accumulate
 K: A
 G: ## Batch deletes
@@ -354,27 +354,27 @@ T: Batch erasure requests into one MERGE driven by a control table, on a layout 
 V: Delta Lake MERGE, Liquid Clustering
 
 @ DBX-DEP D7 T7.1 applied troubleshooting
-S: A data steward holds `MANAGE` on the catalog `prod`. Setting a description with `COMMENT ON TABLE prod.sales.orders IS '...'` works, but `COMMENT ON VIEW prod.sales.v_orders IS '...'` fails with a permission error. What is the reason?
-A: Comments on views need `MODIFY` and `SELECT` on the view, the same privileges that are used for tables
-B: Editing the comment of a view requires being the owner of the view, and `MANAGE` is not enough
+S: A data steward holds `SELECT`, `MODIFY`, `USE CATALOG` and `USE SCHEMA` on the catalog `prod` through grants, and owns none of its objects. Setting a description with `COMMENT ON TABLE prod.sales.orders IS '...'` works, but `COMMENT ON VIEW prod.sales.v_orders IS '...'` fails with a permission error. What is the reason?
+A: Comments on views need `MANAGE` on the view's schema in addition to the table privileges, and the steward holds no `MANAGE` anywhere
+B: Editing the comment of a view requires being the owner of the view; table privileges and even `MANAGE` do not replace ownership
 C: Views cannot carry comments in Unity Catalog, so descriptions must be placed in tags instead
 D: Only the catalog owner can comment on views, because views are created at the catalog level
 K: B
 G: ## Who may comment on what
 Comments are a metadata field on any Unity Catalog securable and on table columns. Anyone with `BROWSE` on the catalog can read them, which improves discovery.
 - For catalogs, schemas, volumes and similar objects: the owner or a user with `MANAGE`.
-- For a table or a column: the owner, or `MODIFY` and `SELECT` on the table plus `USE CATALOG` and `USE SCHEMA`.
-- For a view or materialized view: only the **owner** of the view. `MANAGE` is insufficient.
+- For a table or a column: the owner, or `MODIFY` and `SELECT` on the table plus `USE CATALOG` and `USE SCHEMA`. Inherited grants count, which is why the table comment works.
+- For a view or materialized view: only the **owner** of the view. `MANAGE` is insufficient, and so are `SELECT` and `MODIFY` from a catalog grant.
 When ownership is the obstacle, the owner of the view (or a user who can transfer ownership) hands it to a team group or service principal, so documentation does not depend on one person. Saving a comment issues an `ALTER`, which can disrupt running pipelines and jobs, so schedule bulk documentation changes.
-W: View owner only: the steward's `MANAGE` allows table comments through the table rules but not edits of a view's comment.
-X: A=MODIFY and SELECT: those privileges are the table and column rule; for views the owner rule applies and these grants do not help.
+W: View owner only: the steward's inherited `SELECT` and `MODIFY` satisfy the table rule, but comments on a view can be edited only by the view's owner.
+X: A=MANAGE on the schema: the docs state that `MANAGE` is insufficient for views; only the owner of the view may edit its comment.
 C=No comments on views: views are securable objects that support comments; they simply have a stricter permission rule.
 D=Catalog owner only: ownership of the parent catalog is not what the rule checks; the owner of the view itself is required.
 T: Table comments need MODIFY and SELECT, but comments on views and materialized views need ownership of the view.
 V: Unity Catalog comments
 
 @ DBX-DEP D7 T7.1 applied use-case
-S: Analysts report they cannot find the tables of the catalog `corp` in search. The data office wants every employee to see names, comments and tags of all tables there and request access, without granting data access and without having to maintain `USE CATALOG` and `USE SCHEMA` for everyone. Which grant achieves this?
+S: Analysts report they cannot find the tables of the catalog `corp` in search. The data office wants every employee to see names, comments and tags of all tables in that catalog only and request access, without granting data access and without having to maintain `USE CATALOG` and `USE SCHEMA` for everyone. Which grant achieves this?
 A: `SELECT` on the catalog `corp` to `account users`, since users need read access before an object appears in search
 B: `BROWSE` on each schema of `corp` to `account users`, repeated whenever a schema is created, so every table is discoverable
 C: `BROWSE` on the catalog `corp` to `account users`, which makes all its objects discoverable and keeps their data unreadable
@@ -394,26 +394,25 @@ T: Grant BROWSE on a catalog to account users for discoverability without data a
 V: Unity Catalog privileges, discovery
 
 @ DBX-DEP D7 T7.1 applied comparison
-S: Teams tag tables with `Domain = Sales`, `domain = sales` and `domain = Sales` (a different key spelling and case each time). A search for the tag returns only part of the tables and a policy keyed on one spelling misses the rest. Which statement explains the behavior and the right remedy?
-A: Tag keys are case-insensitive, but values are case sensitive, so searching the values in lowercase makes the search results become complete
-B: Tag search is eventually consistent, so the missing tables will appear in results after a day without any change
-C: Tags on tables cannot be searched at all, only tags on columns, so the team should move the tags to the columns
-D: Keys are case sensitive and search needs an exact term, so `Domain` and `domain` differ; agree on one key, ideally a governed tag with defined values
-K: D
-G: ## Tag rules that matter for discoverability
-- Tag keys are case sensitive: `Sales` and `sales` are two distinct tags.
-- Tag search requires exact term matching.
-- Keys must not contain `. , - = / :` and may not have leading or trailing spaces.
-- A securable can have at most 50 tags, and a table at most 1,000 column tags.
-## A taxonomy fixes it
-Ordinary tags allow anyone with `APPLY TAG` to write any spelling. A **governed tag** is defined at the account level with allowed values and controlled assignment, so teams cannot invent variants. If a governed tag is created with the same key as existing assignments, those assignments become governed.
-Tags are also what ABAC policies match on, so an inconsistent taxonomy leaves data unprotected. Standardize the key, define the values, re-tag the existing objects and use the information schema to find stragglers.
-W: Case-sensitive exact keys: different spellings are different tags, so a single governed key with defined values is the remedy.
-X: A=Case-insensitive keys: keys are case sensitive; the problem is exactly that the spellings differ.
-B=Eventual consistency: nothing in the behavior is a delay; the missing tables carry a different key and will never match.
-C=Column-only search: tables, views, schemas and catalogs can be tagged and searched; moving tags would not fix spelling differences.
-T: Tag keys are case sensitive and search is exact; standardize with one governed tag and defined values.
-V: Unity Catalog tags
+S: A governance lead, who holds every privilege needed to edit comments, wants Databricks AI-generated comments for the tables, their columns and the schemas of the catalog `corp`. AI-assistive features are enabled in the workspace. Which statement is accurate?
+A: Suggestions exist for tables and table columns; schema descriptions must be written manually, for example with `COMMENT ON SCHEMA`
+B: Suggestions exist for every securable, but a metastore admin must approve each one in Governance Hub before it becomes visible to users
+C: Suggestions exist only for schemas and catalogs, so table descriptions have to be maintained as tags instead
+D: Suggestions are applied automatically to tables, columns and schemas, so no reviewer has to accept or edit them
+K: A
+G: ## AI-generated comments and manual comments
+Comments can be added to any Unity Catalog securable and to table columns. AI-generated comments (AI-generated documentation) are available for **tables and table columns**; Databricks shows a suggested comment that a person accepts as-is or edits and saves.
+- For objects without that support, such as schemas, catalogs and volumes, the owner or a user with `MANAGE` writes the comment (`COMMENT ON SCHEMA corp.sales IS '...'`).
+- A suggestion is not applied until someone accepts it, so review stays with the steward.
+- Users with `BROWSE` can read saved comments, so good comments make search results more useful.
+- Saved table comments appear in table history as a `SET TBLPROPERTIES` operation.
+Plan documentation as a mix: use suggestions as a draft for tables and columns, and write container descriptions by hand.
+W: Tables and columns only: AI suggestions are drafts for those objects, and a schema description is a manual comment.
+X: B=Admin approval: a person with edit rights on the table accepts or edits the suggestion; no metastore-admin approval step exists.
+C=Schemas only: it is the reverse; suggestions cover tables and their columns, and tags do not replace comments.
+D=Automatic application: suggestions are shown for review and take effect only after they are accepted or edited and saved.
+T: AI-generated comments cover tables and columns as reviewed drafts; schemas and catalogs need manual comments.
+V: Unity Catalog comments
 
 @ DBX-DEP D7 T7.1 applied troubleshooting
 S: To track a deletion request, a steward sets the table tag `dsr_ticket = jane.doe@example.com` so that the privacy team can search for affected tables. The security reviewer asks to remove it. What is the reasoning?
@@ -464,7 +463,7 @@ D: Tag rows older than the retention of the transaction log are removed from the
 K: C
 G: ## The information schema is privilege-aware
 `system.information_schema` provides metadata about objects across all catalogs in the metastore, and each catalog has its own `information_schema` for that catalog. Both **filter results to the objects the caller has privileges for**. This differs from other system tables, and the result changes when privileges change.
-- `COLUMN_TAGS` contains the tags of columns the user is allowed to interact with; `SYSTEM` holds the columns of all catalogs.
+- `COLUMN_TAGS` contains the tags of columns the user is allowed to interact with. The one in the `SYSTEM` catalog spans all catalogs, but only those the caller can access.
 - An inventory for audits should therefore run as a principal that has sufficient privileges everywhere, usually a governance service principal, and its job output should be stored in a governed table.
 - Compare coverage with `TABLE_TAGS`, `SCHEMA_TAGS` and `CATALOG_TAGS` to see which columns are protected only by inheritance (columns do not inherit).
 W: Privilege filtering: the query is correct but only shows what the analyst may see, so run it as a principal with the necessary access.
@@ -499,35 +498,34 @@ C=Unset after drop: the operation fails first, so the tag must be removed before
 T: Remove governed tags first, then drop, then purge and vacuum to physically delete a sensitive column.
 V: Unity Catalog governed tags, Delta Lake
 
-@ DBX-DEP D7 T7.2 applied troubleshooting
-S: Maria owns the catalog `prod`. Alex created `prod.sales.orders`, owns it, and nobody has granted Maria anything. `SELECT * FROM prod.sales.orders` fails for Maria with a permission error. What explains this and what is the remedy?
-A: Owning a catalog does not give data access to child tables; Maria can manage them, so she can grant herself `SELECT`, `USE SCHEMA` and so on
-B: Catalog owners inherit `SELECT` on all tables, so the failure must come from the compute and Maria should switch to a SQL warehouse
-C: Maria owns the table through inheritance, but ownership becomes active only after a metastore admin transfers it to her
-D: Only the owner of the table can read it, so Maria needs Alex to run `GRANT SELECT` for her
+@ DBX-DEP D7 T7.2 applied use-case
+S: The group `etl_devs` must read and create tables in every current and future schema of the catalog `dev`, and nowhere else. Admins want the fewest grants to maintain and no ownership transfers. Which grants meet this?
+A: `USE CATALOG`, `USE SCHEMA`, `SELECT` and `CREATE TABLE` on the catalog `dev`, which inherit to all current and future schemas and tables
+B: The same four privileges on the metastore, because a metastore grant inherits to every catalog, schema and table that lies below it
+C: The four privileges on each existing schema of `dev`, repeated by a scheduled job whenever a new schema appears
+D: `ALL PRIVILEGES` on the catalog `dev`, since it is the narrowest grant that covers reading and creating tables
 K: A
-G: ## Ownership does not inherit
-Every securable has one owner, the principal that created it by default. An owner has all capabilities on that object and the ability to manage all child objects, but **ownership does not inherit downward**. Maria owns the catalog, not the schemas and tables below it.
-- Owners get capabilities on the object itself (functionally like `ALL PRIVILEGES` without it being listed) and effectively `MANAGE` on children.
-- `MANAGE` lets a user grant and revoke privileges, transfer ownership and drop, but it does not by itself read data. A manager can, however, grant themselves data privileges such as `SELECT`.
-- Reading also needs `USE CATALOG` (implied for the owner of the catalog) and `USE SCHEMA` on the schema.
+G: ## Grant once at the container
+A privilege granted on a container applies to all current and future children. Reading tables in a schema needs `USE CATALOG`, `USE SCHEMA` and `SELECT`; creating one needs `USE CATALOG`, `USE SCHEMA` and `CREATE TABLE` on the schema. When these are granted on the catalog, they inherit to every schema, including schemas created later.
 ```
-GRANT USE SCHEMA ON SCHEMA prod.sales TO `maria@corp.com`;
-GRANT SELECT ON TABLE prod.sales.orders TO `maria@corp.com`;
+GRANT USE CATALOG, USE SCHEMA, SELECT, CREATE TABLE ON CATALOG dev TO `etl_devs`;
 ```
-Self-granting is audited, so it fits access reviews better than sharing the owner's identity.
-W: Manage, not own: the catalog owner manages children, so she can grant herself the privileges she needs, which is traceable.
-X: B=Implicit SELECT: owning a container does not give read access to its children; the error is a missing grant, not a compute issue.
-C=Inherited ownership: ownership never inherits, so Maria is not the table's owner and no transfer is pending.
-D=Only the table owner: owners of parent containers and holders of `MANAGE` can grant privileges on the table as well.
-T: Owning a container gives management of its children, not their data; grant yourself SELECT explicitly.
-V: Unity Catalog ownership and privileges
+- Metastore-level grants do not inherit to catalogs (except `READ METADATA`); they cover operations such as `CREATE CATALOG`.
+- `ALL PRIVILEGES` implies every privilege applicable to the catalog, such as `CREATE SCHEMA` and `APPLY TAG`, so it grants far more than reading and creating tables.
+- A user who creates a table becomes its owner; ownership of the new tables does not pass to anyone else, and the group is not made owner by the catalog grant.
+Use groups as grantees so membership changes need no new grants.
+W: Catalog-level grants: four privileges on `dev` inherit to all current and future schemas and tables, so the group has exactly the access needed with one grant.
+X: B=Metastore grant: privileges granted on the metastore do not inherit to catalogs, and these four are not metastore-level privileges.
+C=Per-schema grants: they work today but need constant upkeep, which is exactly what inheritance from the catalog avoids.
+D=ALL PRIVILEGES: it includes every privilege that applies to a catalog (for example creating schemas), which exceeds the requirement.
+T: Grant reading and creating privileges once on the catalog so they inherit to current and future schemas and tables.
+V: Unity Catalog privilege inheritance
 
 @ DBX-DEP D7 T7.2 advanced use-case
 S: The platform team wants a team lead to administer privileges for everything in the schema `prod.sales`, including tables that will be created later, without becoming its owner. Besides `MANAGE` on the schema, what is the smallest additional grant needed to exercise it?
 A: `USE CATALOG` and `USE SCHEMA` on the schema, because management is impossible without access to the schema itself
 B: `USE CATALOG` on the catalog `prod` only, because `MANAGE` on a schema needs no usage privilege on that schema
-C: `ALL PRIVILEGES` on the schema, which includes `MANAGE` and lets the lead pass grants to the other users
+C: `SELECT` on the schema, because the lead has to be able to read the tables before granting access to them
 D: Nothing more, because `MANAGE` is a metastore-wide privilege and overrides the usage privileges of every catalog
 K: B
 G: ## Usage privileges around MANAGE
@@ -537,36 +535,34 @@ Normally each access path needs `USE CATALOG` on the catalog and `USE SCHEMA` on
 - `MANAGE` on a table needs `USE CATALOG` and `USE SCHEMA` on the parents.
 - `MANAGE` granted on a container also applies to all current and future children by inheritance.
 Data privileges (`SELECT`, `MODIFY`) still require both usage privileges, even for a manager.
-`ALL PRIVILEGES` does not include `MANAGE`, to avoid accidental privilege escalation.
 W: USE CATALOG plus MANAGE on the schema: that pair is enough to grant, revoke and transfer ownership for the schema and its tables, now and later.
 X: A=USE SCHEMA as well: the schema-level usage privilege is not needed to exercise `MANAGE` on that schema, so it exceeds least privilege.
-C=ALL PRIVILEGES: it excludes `MANAGE`, so it does not give the lead the ability to administer grants and it adds data access.
+C=SELECT on the schema: `MANAGE` lets the lead grant and revoke without reading data, so this adds data access that is not needed.
 D=Metastore-wide: `MANAGE` is granted per securable and does not remove the need for `USE CATALOG` on the parent.
 T: MANAGE on a schema works with USE CATALOG on the parent; it applies to current and future children.
 V: Unity Catalog privileges
 
-@ DBX-DEP D7 T7.2 advanced tradeoff
-S: The group `analysts` holds `USE CATALOG`, `USE SCHEMA` and `SELECT` on the catalog `corp`, so that future tables in any schema become readable. A new schema `corp.hr_private` must not be readable by `analysts`, and the team looks for a design that works with Unity Catalog inheritance. Which one does?
-A: Run `DENY SELECT ON SCHEMA corp.hr_private TO analysts`, since a deny on the child overrides the inherited grant
-B: Make a different user the owner of `corp.hr_private`, because ownership of a child object cancels the privileges inherited from the catalog above
-C: Move the grants to the allowed schemas, or place `hr_private` in a separate catalog, as an inherited `SELECT` cannot be excluded for one child
-D: Tag the schema `private = true`, since a tag by itself blocks access for groups that were granted privileges on the parent
-K: C
-G: ## Inheritance is additive
-A privilege granted on a catalog applies to all current and future schemas and the tables and views in them. In Unity Catalog the effective privileges are the union of grants at all levels; there is no way to carve out one child from a grant on its parent.
-- SQL `DENY` exists only for the legacy `hive_metastore`; ABAC DENY policies are in Beta and apply to `MANAGE ACCESS CONTROL`, not to reading data.
-- Ownership does not inherit, and an owner's rights do not cancel grants given to others.
-- A tag has no effect without an ABAC policy that uses it.
-## Design consequences
-- Grant at the lowest level that fits: per schema when exceptions exist.
-- Put sensitive domains in their own catalog so catalog-level grants stay safe, and combine with row filters or column masks (for example an ABAC policy on a `classification` tag) for data inside a shared schema.
-Keep the number of grants small by granting to groups.
-W: Narrow the grant or separate the catalog: inheritance cannot exclude a child, so the structure of grants or of catalogs has to carry the boundary.
-X: A=DENY: SQL deny applies to the legacy Hive metastore; Unity Catalog grants cannot be denied for one child.
-B=Different owner: owning an object does not remove access given to others on the parent, and it adds powers to the new owner.
-D=Tag only: tags describe objects; they restrict access only if an ABAC policy uses them.
-T: Inherited grants cannot be excluded for one child; scope grants to schemas or isolate sensitive data in another catalog.
-V: Unity Catalog privilege inheritance
+@ DBX-DEP D7 T7.2 advanced troubleshooting
+S: A team lead was granted `ALL PRIVILEGES` on the catalog `prod` by a metastore admin and owns nothing in it. The lead runs `GRANT SELECT ON TABLE prod.sales.orders TO `analysts`` and gets a permission error. Which statement explains it and gives the fix?
+A: `ALL PRIVILEGES` leaves out `MANAGE`; granting `MANAGE` on the catalog lets the lead grant on current and future children
+B: `ALL PRIVILEGES` on a catalog does not inherit to tables, so the lead must be granted `ALL PRIVILEGES` on `orders` itself
+C: Only the owner of `orders` can grant on it, so ownership of the table must be transferred to the lead first
+D: The lead must also be a member of the group `analysts`, because grants can be given only to groups one belongs to
+K: A
+G: ## ALL PRIVILEGES is not management
+`ALL PRIVILEGES` implies the data and object privileges that apply to the object type, and it inherits like any other privilege. It does **not** include `MANAGE` (or `READ METADATA`, `EXTERNAL USE SCHEMA`, `EXTERNAL USE LOCATION`), to avoid accidental privilege escalation.
+- Granting privileges on an object requires being its owner or holding `MANAGE` on it (or on a parent: `MANAGE` on a container applies to all current and future children).
+- The lead can read and write the data through `ALL PRIVILEGES`, but cannot pass access on to others.
+```
+GRANT MANAGE ON CATALOG prod TO `team_lead`;
+```
+Hand out `MANAGE` deliberately and to few principals, because a manager can also grant themselves data privileges.
+W: Missing MANAGE: `ALL PRIVILEGES` leaves out `MANAGE`, so the lead needs it granted on the catalog to administer grants on the tables below.
+X: B=No inheritance: privileges granted on a catalog apply to its current and future tables; the failure is about grant authority, not data access.
+C=Table owner only: owners and holders of `MANAGE`, including on a parent container, can grant privileges on the table.
+D=Group membership: nothing requires a grantor to belong to the grantee group.
+T: ALL PRIVILEGES excludes MANAGE; to administer grants, hold ownership or MANAGE.
+V: Unity Catalog privileges
 
 @ DBX-DEP D7 T7.2 applied troubleshooting
 S: A new platform team received `CREATE CATALOG` and `CREATE EXTERNAL LOCATION` on the metastore and assumed they could also read the tables in existing catalogs. Queries on those tables fail with permission errors. Why?
@@ -611,7 +607,7 @@ S: Alex, a data engineer who left the company, owns about 200 tables in `prod.et
 A: Only a metastore admin can change ownership of tables, so the request goes to the account team and the schema owner cannot do it
 B: The schema owner can transfer each table to a group or service principal, because owners manage child objects; ownership does not move with the schema
 C: Transfer ownership of the schema to a group, which automatically makes that group the owner of all 200 tables under it
-D: The tables become ownerless after Alex is deactivated, so any user with `SELECT` can claim them by running `ALTER TABLE ... OWNER TO`
+D: The tables become ownerless after Alex is deactivated, so any user with `SELECT` can claim each of them with `ALTER TABLE ... OWNER TO`
 K: B
 G: ## Ownership rules
 - An object has exactly one owner (user, service principal or group), initially its creator.
