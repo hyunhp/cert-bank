@@ -1,0 +1,381 @@
+# DBX-DAA b04: T4.5 aggregates, T4.6 joins and set operations, T4.7 sort/filter, T4.8 managed/external tables, T4.9 time travel and VACUUM, T5.1 Photon
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/approx_count_distinct
+# src: https://docs.databricks.com/aws/en/tables/managed
+# src: https://docs.databricks.com/aws/en/tables/external
+# src: https://docs.databricks.com/aws/en/delta/history
+# src: https://docs.databricks.com/aws/en/delta/vacuum
+# src: https://docs.databricks.com/aws/en/compute/photon
+
+@ DBX-DAA D4 T4.5 applied use-case
+S: An analyst needs the number of distinct visitor IDs in a web events table with several billion rows for a trend dashboard. A figure within a few percent of the exact value is acceptable, and the query should finish faster and use less memory. Which expression fits?
+A: count(DISTINCT visitor_id), because it is the only form that supports a distinct count over very large tables
+B: count(visitor_id), because it ignores duplicate values automatically when the column is not NULL
+C: approx_count_distinct(visitor_id), which estimates the distinct count with the HyperLogLog++ algorithm
+D: avg(DISTINCT visitor_id), because averaging unique values gives a rough size of the visitor population
+K: C
+G: ## Exact versus approximate distinct counts
+An exact distinct count has to remember every distinct value it has seen, which costs memory and shuffle work on large inputs. `approx_count_distinct(expr[, relativeSD])` returns a BIGINT estimate using the HyperLogLog++ algorithm. The default maximum relative standard deviation is 5%, and the optional `relativeSD` argument tightens or loosens it. Use the approximate form for dashboards and exploration; keep `count(DISTINCT ...)` when the exact number is required, for example for billing or audit.
+W: approx_count_distinct: it trades a small, bounded error for lower memory and faster execution, which matches a trend dashboard that tolerates a few percent of error.
+X: A=count(DISTINCT): it works on any size and returns the exact value, but it is the more expensive form. The claim that it is the only option is false.
+B=count(column): it counts non-NULL rows including duplicates, so it returns the number of events and not the number of visitors.
+D=avg(DISTINCT): it averages the distinct ID values, which is a meaningless number for an identifier and says nothing about how many visitors exist.
+T: Large table, tolerance for small error: approx_count_distinct; exact figure needed: count(DISTINCT).
+
+@ DBX-DAA D4 T4.5 applied definition
+S: A table has 1,000 order rows. The column discount has a value in 700 rows and is NULL in 300 rows. What do count(*) and count(discount) return?
+A: count(*) returns 1000 and count(discount) returns 700, because column counts skip NULL values
+B: count(*) returns 700 and count(discount) returns 700, because NULL rows are removed from every count
+C: count(*) returns 1000 and count(discount) returns 1000, because NULL is counted as an empty value
+D: count(*) returns 700 and count(discount) returns 1000, because the star form skips rows with any NULL
+K: A
+G: ## How aggregate functions treat NULL
+In SQL, `count(*)` counts rows, whatever their contents. `count(expr)` counts only rows where `expr` is not NULL. The same rule applies to `sum`, `avg`, `min` and `max`: they ignore NULL inputs. This matters for averages. `avg(discount)` divides by the 700 non-NULL rows, not by 1000. If NULL should mean zero, write `avg(coalesce(discount, 0))`.
+W: count(*) = 1000 and count(discount) = 700: the star form counts every row, while the column form leaves out the 300 rows where discount is NULL.
+X: B=Both 700: count(*) is not affected by NULL values in a column, so it still counts all rows.
+C=Both 1000: NULL is not a value that count(column) counts, so the 300 NULL rows are excluded.
+D=700 and 1000: this reverses the behavior. The star form never skips rows, and the column form never counts NULL.
+T: count(*) counts rows; count(column) counts non-NULL values.
+
+@ DBX-DAA D4 T4.5 applied use-case
+S: An analyst wants one result row per region with the number of orders, the average order amount and the largest order. Which query produces this?
+A: SELECT region, count(*), avg(amount), max(amount) FROM orders
+B: SELECT region, count(*), avg(amount), max(amount) FROM orders GROUP BY region
+C: SELECT DISTINCT region, count(*), avg(amount), max(amount) FROM orders ORDER BY region
+D: SELECT region, count(*), avg(amount), max(amount) FROM orders WHERE region = GROUP BY amount
+K: B
+G: ## GROUP BY with aggregates
+An aggregate function collapses many rows into one value. Add `GROUP BY` to compute it once per group. Every column in the SELECT list that is not inside an aggregate must appear in the `GROUP BY` clause. Here `region` is the grouping key, and `count(*)`, `avg(amount)` and `max(amount)` are computed for each region. Add an alias such as `count(*) AS orders` to make the result easier to read in a dashboard.
+W: GROUP BY region: the three aggregates are computed per region, and the ungrouped column region is the grouping key, so the query returns one row per region.
+X: A=No GROUP BY: mixing a plain column with aggregates and no grouping is invalid, because region is neither grouped nor aggregated.
+C=DISTINCT and ORDER BY: neither one defines groups. DISTINCT only removes duplicate output rows, so the aggregates still lack a grouping and the query fails.
+D=Broken filter: the WHERE clause is incomplete, and grouping by amount would give one row per amount instead of one per region.
+T: Plain columns next to aggregates must be listed in GROUP BY.
+
+@ DBX-DAA D4 T4.5 applied comparison
+S: An analyst wants the share of orders that carry a coupon. The column coupon_code is NULL when no coupon was used. Which expression returns the ratio of coupon orders to all orders?
+A: count(coupon_code) / count(*), as the numerator skips NULL codes and the denominator counts all rows
+B: count(*) / count(coupon_code), because the larger count must always be placed in the numerator
+C: sum(coupon_code) / count(*), because summing the codes gives the number of coupon orders
+D: avg(coupon_code) * count(*), because the average of a text column is the share of rows that have a value
+K: A
+G: ## Using NULL-skipping to build ratios
+Because `count(column)` skips NULL, the pair `count(coupon_code)` and `count(*)` gives the number of orders with a coupon and the number of all orders. Dividing the first by the second gives the share. The same idea works with `count_if(condition)` or `sum(CASE WHEN condition THEN 1 ELSE 0 END)` when no NULL marker exists. Spark SQL division with `/` returns a decimal or double value, so the share is not truncated to zero.
+W: count(coupon_code) / count(*): the numerator is the number of orders with a non-NULL coupon code and the denominator is every order, which is the share of coupon orders.
+X: B=Inverted ratio: it returns all orders divided by coupon orders, a number of at least 1, which is not a share.
+C=sum on codes: sum works on numbers, and summing code strings is either an error or meaningless; it never counts rows.
+D=avg on text: an average of a text column is not a share of rows, and multiplying it by the row count gives no meaningful figure.
+T: count(column) / count(*) gives the fraction of rows where the column is present.
+
+@ DBX-DAA D4 T4.5 applied use-case
+S: A data analyst wants a quick profile of a numeric column fare in table trips: row count, mean, standard deviation, minimum, quartiles and maximum, without writing each aggregate. Which approach gives this summary?
+A: Run DESCRIBE HISTORY trips, which returns statistical figures such as mean and quartiles for every column of the table
+B: Run SELECT fare FROM trips LIMIT 10 and compute the statistics by hand from the sample
+C: Run VACUUM trips DRY RUN to list the descriptive statistics of the data files
+D: Use the notebook data profile, or call SQL aggregates such as avg, stddev, min, percentile and max
+K: D
+G: ## Getting summary statistics
+Databricks notebooks can show a data profile for a result or DataFrame, with count, mean, standard deviation, min, quartiles and max for numeric columns. In pure SQL you get the same numbers with aggregates: `count(fare)`, `avg(fare)`, `stddev(fare)`, `min(fare)`, `percentile(fare, 0.5)` and `max(fare)`. For large tables, `approx_percentile` is a cheaper estimate of quartiles. The aggregates run on the full table, unlike a hand calculation on a sample.
+W: Data profile or SQL aggregates: both compute the requested statistics across all rows, and the notebook profile does so without manual coding.
+X: A=DESCRIBE HISTORY: it lists table operations such as writes and merges for audit. It holds no column statistics.
+B=Sample by hand: ten rows are not representative, and calculating by hand is slower and less accurate than aggregates over the whole column.
+C=VACUUM DRY RUN: it lists files that would be deleted, which is a maintenance preview and not a data summary.
+T: Summary statistics come from a data profile or from aggregates such as avg, stddev, min, percentile and max.
+
+@ DBX-DAA D4 T4.6 applied use-case
+S: A report must list every customer with their total spend, including customers who have never placed an order (spend shown as NULL). Tables: customers(id, name) and orders(customer_id, amount). Which join type is needed?
+A: INNER JOIN, which keeps all customers because every customer id appears in the orders table
+B: LEFT JOIN from customers to orders, which keeps every customer and fills order columns with NULL
+C: RIGHT JOIN from customers to orders, which keeps all orders and drops customers without any orders
+D: CROSS JOIN, which pairs each customer with each order and keeps only customers who have placed orders at all
+K: B
+G: ## Join types and which rows they keep
+- `INNER JOIN` returns only rows with a match on both sides.
+- `LEFT JOIN` keeps every row from the left table and fills the right-side columns with NULL when there is no match.
+- `RIGHT JOIN` is the mirror image.
+- `FULL JOIN` keeps unmatched rows from both sides.
+- `CROSS JOIN` returns every combination of rows with no condition.
+To report on customers with no orders, the customers table must be the preserved side. Group by customer after the join: `SELECT c.name, sum(o.amount) FROM customers c LEFT JOIN orders o ON o.customer_id = c.id GROUP BY c.name`.
+W: LEFT JOIN: customers is the preserved side, so customers without orders still appear, with NULL in the order columns and a NULL total.
+X: A=INNER JOIN: customers without a matching order are dropped, which is the opposite of the requirement, and the premise that every customer has an order is false.
+C=RIGHT JOIN from customers: the preserved side is orders, so customers without orders are lost.
+D=CROSS JOIN: it produces the Cartesian product without a match condition, so spend would be wrong and the row count would explode.
+T: To keep all rows of one table even without a match, make it the preserved side of an outer join.
+
+@ DBX-DAA D4 T4.6 applied definition
+S: Two tables, sales_2025 and sales_2026, have identical columns. An analyst needs a single result holding every row of both tables, keeping duplicates, with the lowest cost. Which statement does this?
+A: SELECT * FROM sales_2025 UNION SELECT * FROM sales_2026
+B: SELECT * FROM sales_2025 INTERSECT SELECT * FROM sales_2026
+C: SELECT * FROM sales_2025 UNION ALL SELECT * FROM sales_2026
+D: SELECT * FROM sales_2025 EXCEPT SELECT * FROM sales_2026
+K: C
+G: ## Set operations
+Set operations stack query results with matching columns.
+- `UNION ALL` appends the rows and keeps duplicates. It needs no deduplication, so it is the cheapest.
+- `UNION` (also `UNION DISTINCT`) appends and then removes duplicate rows, which adds a shuffle.
+- `INTERSECT` returns rows found in both inputs.
+- `EXCEPT` returns rows from the first input that are absent from the second.
+Columns are matched by position, so the order and compatible types must line up.
+W: UNION ALL: it appends both tables as they are, keeps duplicates and skips the deduplication step that UNION performs.
+X: A=UNION: it also combines both tables, but it removes duplicate rows, which loses repeated sales and costs a distinct step.
+B=INTERSECT: it returns only rows that appear in both tables, which is a small subset and not the full combination.
+D=EXCEPT: it returns rows of the first table missing from the second, so most of the second table is absent.
+T: Stack tables and keep every row: UNION ALL; stack and deduplicate: UNION.
+
+@ DBX-DAA D4 T4.6 applied troubleshooting
+S: An analyst joins orders (one row per order) with order_items (several rows per order) on order_id, then runs sum(orders.total). The result is far higher than the known revenue. What is the most likely cause?
+A: The join repeated each order once per matching item, so the order total was summed several times
+B: The SQL warehouse used Photon, which counts joined rows twice when a join key is repeated
+C: The LEFT JOIN removed all orders without items, which inflated the total of the remaining rows
+D: The sum function counts NULL values as ones, which raises the total whenever a join produces gaps in the data
+K: A
+G: ## Join fan-out
+When a one-to-many join is used, the "one" side repeats once per matching row on the "many" side. An order with four items appears four times, so an order-level column such as `total` is added four times. This is called fan-out or row multiplication. Fixes: aggregate the many side first in a subquery or CTE (`SELECT order_id, count(*) FROM order_items GROUP BY order_id`) and then join, or sum a column that lives at item grain. Check with `count(*)` before and after the join to confirm the grain.
+W: Fan-out: the one-to-many join repeats each order for every matching item, so an order-level total is summed once per item.
+X: B=Photon: the engine changes how fast a query runs, not its results, so it cannot produce inflated sums.
+C=LEFT JOIN: a left join keeps unmatched orders and does not drop them, and dropping rows would lower, not raise, the total.
+D=NULL as one: sum ignores NULL values and does not treat them as one, so NULL gaps cannot raise the total.
+T: Summing a parent column after a one-to-many join counts it per child row: aggregate first or sum at the child grain.
+
+@ DBX-DAA D4 T4.6 applied comparison
+S: An analyst has a table of employees and wants rows for all employees together with the department table rows, matching on dept_id, and must also keep departments that have no employees and employees without a department. Which join returns all of them?
+A: INNER JOIN, because it returns all rows from both tables regardless of the match
+B: LEFT SEMI JOIN, because it returns the columns of both tables for every pair of matching rows and all unmatched rows
+C: CROSS JOIN, because it adds the NULL values for rows without a match on the other side
+D: FULL OUTER JOIN, because it keeps the unmatched rows from both tables and fills missing columns with NULL
+K: D
+G: ## Outer joins in one view
+`LEFT`, `RIGHT` and `FULL OUTER` joins differ in which unmatched rows survive. FULL OUTER JOIN preserves both sides, so rows without a match on either side appear with NULL in the other table's columns. Related Spark SQL join types:
+- `LEFT SEMI JOIN` returns only left-table columns for rows that have a match, like an `EXISTS` filter.
+- `LEFT ANTI JOIN` returns left rows with no match.
+These are useful for filtering but do not return columns from both sides.
+W: FULL OUTER JOIN: it keeps matched pairs plus unmatched employees and unmatched departments, filling the missing side with NULL.
+X: A=INNER JOIN: it keeps only matched pairs, so employees without a department and empty departments are dropped.
+B=LEFT SEMI JOIN: it returns only columns of the left table for rows that have a match, so it neither returns both tables' columns nor keeps unmatched rows.
+C=CROSS JOIN: it returns every combination without a condition and never inserts NULL for missing matches.
+T: Keep unmatched rows from both sides: FULL OUTER JOIN.
+
+@ DBX-DAA D4 T4.6 applied use-case
+S: An analyst must find customers that appear in the customers table but have no row in the orders table, without returning any order columns. Which query is the most direct?
+A: SELECT * FROM customers c LEFT ANTI JOIN orders o ON o.customer_id = c.id
+B: SELECT * FROM customers c LEFT SEMI JOIN orders o ON o.customer_id = c.id
+C: SELECT * FROM customers c INNER JOIN orders o ON o.customer_id = c.id
+D: SELECT * FROM customers c UNION ALL SELECT * FROM orders o
+K: A
+G: ## Anti joins
+A `LEFT ANTI JOIN` returns the rows of the left table that have no match in the right table, and it returns only the left columns. It answers "which customers never ordered". The equivalent forms are `WHERE NOT EXISTS (subquery)` or a `LEFT JOIN ... WHERE o.customer_id IS NULL`. `LEFT SEMI JOIN` is the opposite: it keeps left rows that do have a match. Prefer anti or semi joins over `NOT IN` when the subquery column may contain NULL, because NOT IN returns no rows in that case.
+W: LEFT ANTI JOIN: it keeps customers with no matching order and returns only customer columns, exactly the requested list.
+X: B=LEFT SEMI JOIN: it returns the customers that do have orders, which is the opposite list.
+C=INNER JOIN: it returns matched customers together with their order columns, so no customers without orders appear.
+D=UNION ALL: it stacks two tables with different structures and does not compare them on a key, so it cannot find customers without orders.
+T: Rows in one table with no match in another: LEFT ANTI JOIN (or NOT EXISTS).
+
+@ DBX-DAA D4 T4.6 applied troubleshooting
+S: A query UNIONs two tables: SELECT id, name, city FROM a and SELECT id, city, name FROM b. It runs, but the city column shows names and the name column shows cities. Why?
+A: UNION deduplicates rows by sorting them, which swaps the string columns in the final output
+B: Set operations match columns by position, so the second query must list columns in the first one's order
+C: UNION ALL is required in place of UNION to keep the column names from the second query
+D: The tables must be joined first with INNER JOIN, because UNION cannot read tables from different schemas
+K: B
+G: ## Position, not name
+`UNION`, `UNION ALL`, `INTERSECT` and `EXCEPT` combine columns by position. The column names of the result come from the first query. If the second SELECT lists compatible types in a different order, the query still runs and silently mixes the data (two string columns here). Always list the columns explicitly in the same order in both queries. In SQL the safe practice is an explicit, aligned column list in every SELECT.
+W: Position matching: the second SELECT puts city where the first has name, so values land in the wrong output columns; align the order in both SELECT lists.
+X: A=Sort swap: deduplication compares whole rows and does not reorder or swap column values.
+C=UNION ALL: it changes only duplicate handling, and result names still come from the first query, so the mix-up would remain.
+D=Join first: a join is not required, since UNION can combine tables from any schema the user can read when the columns are compatible.
+T: Set operations match by column position; align the SELECT lists.
+
+@ DBX-DAA D4 T4.7 applied use-case
+S: An analyst needs the ten most recent orders from the orders table, with the newest first. Which statement returns them?
+A: SELECT * FROM orders GROUP BY order_date LIMIT 10
+B: SELECT * FROM orders WHERE order_date = max(order_date) LIMIT 10
+C: SELECT * FROM orders ORDER BY order_date ASC LIMIT 10
+D: SELECT * FROM orders ORDER BY order_date DESC LIMIT 10
+K: D
+G: ## Sorting and limiting
+`ORDER BY column DESC` sorts the newest value first, and `LIMIT n` keeps only the first n rows of the sorted result. Without `ORDER BY`, a `LIMIT` returns an arbitrary set of rows because Delta tables have no guaranteed row order. ASC (the default) puts the oldest first. Aggregates such as `max()` cannot be used directly in WHERE; they belong to a grouped or subquery context.
+W: ORDER BY order_date DESC LIMIT 10: it sorts newest first and returns the first ten rows of that order.
+X: A=GROUP BY: it forms one group per date and does not order the rows, and SELECT * with grouping is invalid.
+B=Aggregate in WHERE: an aggregate function is not allowed in a WHERE clause, and the condition would match one date only.
+C=ASC: the default ascending sort returns the ten oldest orders, the opposite of the requirement.
+T: Latest N rows: ORDER BY date DESC LIMIT N.
+
+@ DBX-DAA D4 T4.7 applied comparison
+S: An analyst wants the total sales per region but only for regions whose total exceeds 100000. Which clause expresses the condition on the total?
+A: WHERE sum(sales) > 100000, placed before GROUP BY
+B: ORDER BY sum(sales) > 100000, placed after GROUP BY
+C: HAVING sum(sales) > 100000, placed after GROUP BY region
+D: LIMIT sum(sales) > 100000, placed at the end of the query
+K: C
+G: ## WHERE versus HAVING
+`WHERE` filters individual rows before grouping, so it cannot use aggregate results. `HAVING` filters groups after aggregation, so it can test `sum(sales)`. The usual order of evaluation is FROM, WHERE, GROUP BY, HAVING, SELECT, ORDER BY, LIMIT. Use WHERE for row-level conditions such as `year = 2026` to reduce data early, and HAVING only for conditions on aggregates.
+W: HAVING: it runs after GROUP BY region, so it can compare each region's sum(sales) with the threshold.
+X: A=WHERE with sum: WHERE runs before aggregation, so an aggregate function is not allowed there.
+B=ORDER BY: it sorts the rows and does not remove regions; a boolean sort expression would not filter anything.
+D=LIMIT: it takes a number of rows and cannot accept a condition on a total.
+T: Filter rows with WHERE before grouping; filter aggregates with HAVING after grouping.
+
+@ DBX-DAA D4 T4.8 applied troubleshooting
+S: An analyst inherits the table main.ops.shipments and wants to know whether Databricks manages its files or whether they sit in a customer-owned location that other tools also write to. Which statement answers this from the SQL editor?
+A: DESCRIBE TABLE EXTENDED main.ops.shipments, whose output shows the table Type (MANAGED or EXTERNAL) and its Location
+B: DESCRIBE HISTORY main.ops.shipments, whose output shows the table Type and the storage Location of every version
+C: SHOW TABLES IN main.ops, whose output marks each table as managed or external and prints its storage path
+D: SELECT * FROM main.ops.shipments LIMIT 1, whose result header reveals the table type and the location of its files
+K: A
+G: ## Finding out the table type
+Managed and external tables look the same in queries, but they differ in who owns the files. `DESCRIBE TABLE EXTENDED <table>` returns the column list plus detailed table information, including a `Type` row (`MANAGED` or `EXTERNAL`), the `Location` and the provider (format). The Catalog Explorer overview page shows the same details. This matters before a `DROP TABLE`: for an external table Unity Catalog removes only the metadata and the files stay in cloud storage, while a managed table's files are deleted after a recovery period.
+W: DESCRIBE TABLE EXTENDED: it prints the detailed table information, including Type and Location, so the analyst sees whether the table is managed or external.
+X: B=DESCRIBE HISTORY: it lists write operations, users and versions for audit; it carries no table type or storage path.
+C=SHOW TABLES: it lists table names, schema and whether a table is temporary, and it says nothing about managed or external type or paths.
+D=SELECT with LIMIT: the result holds only data columns and rows, with no metadata about type or file location.
+T: To check managed or external and the storage location, run DESCRIBE TABLE EXTENDED.
+
+@ DBX-DAA D4 T4.8 applied use-case
+S: Delivery logs arrive as CSV files in an existing cloud folder that other non-Databricks tools also read. An analyst wants a Unity Catalog table over the folder without copying the data. Which statement type is appropriate, assuming the folder is a registered external location?
+A: CREATE TABLE logs USING CSV OPTIONS (header 'true') LOCATION '<folder path>', an external table over the files
+B: CREATE TABLE logs AS SELECT * FROM logs_view, which creates a managed Delta table in the default storage
+C: CREATE MATERIALIZED VIEW logs AS SELECT * FROM csv, which stores the CSV rows inside a pipeline
+D: CREATE TEMPORARY VIEW logs USING PARQUET, which turns the CSV files into Parquet files there
+K: A
+G: ## Creating tables over files
+`CREATE TABLE name USING <format> OPTIONS (...) LOCATION '<path>'` registers an external table over existing files. Supported formats for external tables include DELTA, CSV, JSON, AVRO, PARQUET, ORC and TEXT. The path must fall under an external location the user can use, with the `CREATE EXTERNAL TABLE` privilege. Reading directly from files is possible too with `SELECT * FROM read_files('<path>', format => 'csv')`. In contrast, `CREATE TABLE ... AS SELECT` into the default schema creates a managed Delta table with a copy of the data, which the question rules out.
+W: CREATE TABLE ... USING CSV ... LOCATION: it registers the existing CSV folder as an external table in place, so the files are not copied and other tools can still read them.
+X: B=CTAS into a managed table: it copies the data to managed storage, and the other tools would not see new files.
+C=Materialized view: it is a derived, refreshed result managed by a pipeline, not a registration of existing files.
+D=Temporary view USING PARQUET: it is session-only, and a Parquet reader would not interpret CSV files; no conversion happens in the folder.
+T: Table over existing files without a copy: CREATE TABLE ... USING <format> LOCATION (external).
+
+@ DBX-DAA D4 T4.8 applied comparison
+S: A team has a curated sales table in Unity Catalog that only Databricks users read, and the analyst wants Databricks to handle file compaction, optimization and storage placement automatically. Which table type does this?
+A: External table, because Unity Catalog optimizes only data that sits in a customer-owned bucket
+B: Foreign table, because it copies the source into managed storage and tunes the layout
+C: Temporary view, because it stores a tuned version of the data for the session
+D: Managed table, because Unity Catalog manages storage and optimization such as compaction
+K: D
+G: ## What managed tables add
+Unity Catalog managed tables are the default and recommended type for Delta Lake and Apache Iceberg. Unity Catalog handles reads, writes, storage and optimization, using features such as automatic file compaction and intelligent statistics collection, and predictive optimization maintains them. Compared to external or foreign tables they usually cost less to store and query. External tables keep control of the files with you; foreign tables only point at data in another system (for example through federation) and Databricks does not maintain their files.
+W: Managed table: storage location and table maintenance are handled by Unity Catalog, so compaction and optimization happen without the analyst doing anything.
+X: A=External table: Unity Catalog governs metadata but does not manage the data lifecycle, optimization or storage location of an external table.
+B=Foreign table: it represents data in an external system through federation, and it is not copied or tuned by Databricks.
+C=Temporary view: it holds only a query definition for the session and stores no tuned data.
+T: Want Databricks to own storage and optimization: managed table.
+
+@ DBX-DAA D4 T4.8 applied use-case
+S: An analyst loads a Parquet folder into a Unity Catalog table to share inside the company, with no non-Databricks readers. Which choice is best?
+A: Create an external table, because Parquet files cannot be stored in a managed table
+B: Create a managed table with CREATE TABLE ... AS SELECT * FROM read_files('<path>', format => 'parquet')
+C: Create a temporary view, because it keeps the data available to the company after the session ends
+D: Leave the files unregistered, because Unity Catalog cannot govern data loaded from Parquet
+K: B
+G: ## Choosing the table type for a load
+For a copy of data that only Databricks users need, Databricks recommends a managed table. `read_files` reads Parquet, CSV, JSON and other formats directly from a path, and `CREATE TABLE AS SELECT` writes the result into a managed Delta table, which gets governance, lineage and automatic maintenance. Use an external table when other systems must keep reading the same files or the data must stay where it is.
+W: Managed CTAS from read_files: it loads the Parquet data into a managed Delta table, which Unity Catalog governs and maintains and which fits an internal-only audience.
+X: A=External only: managed tables are created from Parquet data through a CTAS, so the claim that Parquet needs an external table is false.
+C=Temporary view: it disappears with the session and is not visible to other users.
+D=Unregistered files: tables created from Parquet data can be governed by Unity Catalog, and leaving files unregistered loses permissions and lineage.
+T: Internal-only copy: managed Delta table via CTAS; data that must stay in place or be read by others: external.
+
+@ DBX-DAA D4 T4.9 applied use-case
+S: Yesterday an ETL job overwrote part of the table prices with wrong values. An analyst needs the rows that exist in prices today but did not exist at version 12, without changing the table. Which query does this?
+A: SELECT * FROM prices EXCEPT SELECT * FROM prices VERSION AS OF 12
+B: SELECT * FROM prices INTERSECT SELECT * FROM prices VERSION AS OF 12
+C: SELECT * FROM prices UNION ALL SELECT * FROM prices VERSION AS OF 12
+D: RESTORE TABLE prices TO VERSION AS OF 12 and then compare the table with itself
+K: A
+G: ## Comparing a table with its past
+Delta Lake records every change as a table version. `VERSION AS OF <n>` or `TIMESTAMP AS OF '<time>'` reads an earlier state without changing the table, so it can sit in a normal query next to the current table. Combine it with a set operator to see what changed: `current EXCEPT past` gives rows that are new or modified, and `past EXCEPT current` gives rows that were removed or modified. `RESTORE TABLE` is different, because it writes a new version that rolls the live table back.
+Time travel works only while the data files of that version still exist. By default the files are kept 7 days (`deletedFileRetentionDuration`) and the table history 30 days.
+W: EXCEPT with VERSION AS OF: it returns the current rows that are absent from version 12, which are the new or changed prices, and it leaves the table untouched.
+X: B=INTERSECT: it returns only rows that are the same in both states, which are the unchanged prices and the opposite of the request.
+C=UNION ALL: it stacks the current rows on the old rows, so nothing is compared and duplicates appear for every unchanged row.
+D=RESTORE: it rolls the live table back to version 12 and modifies it, and afterwards the table equals the old state, so a comparison finds no difference.
+T: Compare current data with an earlier version: current EXCEPT the same table VERSION AS OF n.
+
+@ DBX-DAA D4 T4.9 applied tradeoff
+S: Finance needs the month-end revenue figure of every month to stay reproducible for two years. The source table uses default retention settings, and maintenance with VACUUM runs regularly. What should the analyst do at each month end?
+A: Save the month-end result as its own table with CREATE TABLE AS SELECT and report from that snapshot table
+B: Note the month-end timestamp and later query the source with TIMESTAMP AS OF, because history keeps every version
+C: Run DESCRIBE HISTORY on the source table and store the output, because the history rebuilds the old data
+D: Rely on the query cache of the SQL warehouse, because cached results stay valid until the data changes
+K: A
+G: ## Time travel is not an archive
+Time travel reads old versions only while their data files exist. With default settings the files are kept 7 days, and `VACUUM` deletes files that older versions need once they pass that threshold. The Databricks documentation warns against using table history as a long-term backup or archive. The history log itself (30 days by default) lists operations but does not hold the data. For figures that must stay reproducible, write the result to a table, which keeps its own files, or lengthen both retention properties, which is a table-owner decision that raises storage cost.
+W: Snapshot table: the figure is stored in its own files, so it does not depend on retention or VACUUM and stays reproducible for years.
+X: B=TIMESTAMP AS OF later: after the default 7 days the files of that month-end version can be vacuumed, so the query would fail or be blocked.
+C=Saving DESCRIBE HISTORY: the output holds operations, users and metrics, not the table rows, so the numbers cannot be rebuilt from it.
+D=Query cache: cached results are temporary, are cleared when the data changes or the warehouse restarts, and are not a record to report from.
+T: Long-term reproducibility needs a stored snapshot, not time travel on a table that is vacuumed.
+
+@ DBX-DAA D5 T5.1 applied definition
+S: An analyst asks what Photon does for the dashboards and ad hoc queries that run on a SQL warehouse. Which description is correct?
+A: It is a native vectorized query engine that speeds up supported SQL and DataFrame operations unchanged
+B: It is a caching layer that stores the final results of every query and returns them without running any work
+C: It is a Python library that the analyst imports to rewrite SQL queries into a faster form
+D: It is a scheduler that starts the warehouse earlier so that the first query of the day has no wait time
+K: A
+G: ## What Photon is
+Photon is the Databricks-native vectorized query engine, written in C++. The Spark optimizer (Catalyst) still plans the query, but for supported operations Photon takes over execution and processes data in columnar batches using CPU SIMD instructions, which avoids JVM garbage collection and JIT warm-up. It accelerates SQL, DataFrame calls, ETL and stateless streaming, and needs no code changes. Unsupported operations transparently fall back to the Spark runtime for that part. Photon is the default engine for SQL warehouses.
+W: Native vectorized engine: it executes supported operations faster in columnar batches, with the same queries and no rewrite.
+X: B=Result cache: caching of results is a separate feature; Photon runs the query faster and does not skip execution.
+C=Python library: Photon is part of the compute runtime and is never imported or used to rewrite SQL.
+D=Scheduler: starting warehouses early relates to auto stop and start behavior, not to the execution engine.
+T: Photon = vectorized C++ execution engine, on by default in SQL warehouses, no query changes.
+
+@ DBX-DAA D5 T5.1 applied use-case
+S: A team runs several kinds of queries on a SQL warehouse and asks which of them would gain the most from Photon. Which query workload fits best?
+A: A query that returns a single row in well under one second from a small lookup table
+B: A scan with joins and aggregations over a very large fact table that runs for minutes
+C: A stateful streaming query that keeps aggregates across micro-batches
+D: A task that spends most of its time waiting for an external API to answer
+K: B
+G: ## Where Photon helps
+Photon delivers the greatest benefit for longer-running queries that process large datasets, such as big scans, joins (hash joins replace sort-merge joins), aggregations and wide writes. Very short queries, which finish in a couple of seconds, show little gain because planning and scheduling dominate. Photon supports stateless streaming but not stateful streaming. Work bound by external systems is not CPU-bound on the engine either.
+W: Large scan with joins and aggregations: this is CPU-heavy work on lots of data, exactly where vectorized execution and hash joins give large speedups.
+X: A=Tiny lookup: execution time is dominated by planning and scheduling overhead, so there is little left to speed up.
+C=Stateful streaming: Photon does not support stateful streaming, so it cannot accelerate it.
+D=Waiting on an API: the time is spent waiting outside the engine, and a faster engine cannot reduce that wait.
+T: Photon helps most with long, large, CPU-bound SQL: scans, joins, aggregations.
+
+@ DBX-DAA D5 T5.1 applied comparison
+S: An analyst creates a new SQL warehouse and asks whether Photon has to be switched on and whether queries need changes. What is the correct answer?
+A: Photon must be enabled per query with a hint, and each query has to be rewritten in a Photon dialect
+B: Photon is available only on classic all-purpose clusters, not on SQL warehouses of any type
+C: Photon is on by default for SQL warehouses, and existing queries run unchanged
+D: Photon is on only for warehouses created through the REST API with a special runtime engine flag
+K: C
+G: ## Photon on SQL warehouses
+Photon is the default engine for all SQL warehouses, including serverless, pro and classic, and for serverless compute. For classic all-purpose compute, jobs compute and classic pipelines it is enabled by default and can be switched via a setting; when those resources are created through the Clusters or Jobs API, `runtime_engine` must be set to `PHOTON`. Because Photon is compatible with Spark APIs, no code or SQL changes are needed. If an operation is unsupported, execution falls back to Spark for that part, so the result stays correct.
+W: Default on, queries unchanged: SQL warehouses use Photon automatically, so the analyst has nothing to switch on and nothing to rewrite.
+X: A=Hint and rewrite: no hint or special dialect is needed, since Photon is compatible with existing SQL and DataFrame code.
+B=Clusters only: SQL warehouses are the place where Photon is the default engine.
+D=API flag: the explicit runtime_engine setting applies to Clusters and Jobs API compute, not to SQL warehouses, which already use Photon.
+T: SQL warehouse = Photon by default; no query changes.
+
+@ DBX-DAA D5 T5.1 applied troubleshooting
+S: A query on a Photon-enabled warehouse uses one operation that Photon does not support. The query is slower than expected but returns results. What happened?
+A: The query failed and was silently retried on a different warehouse type
+B: Photon rejected the query, so the analyst must disable it for the whole workspace
+C: The results are approximate, since unsupported operations return estimates and not exact values, which explains the slowdown
+D: Photon fell back to Spark for the unsupported part, and the rest of the query may still use Photon
+K: D
+G: ## Fallback behavior
+Photon covers a defined set of operators, expressions and data types. When a query contains something outside that set, Photon transparently falls back to the Spark runtime for the remainder of that operation, and the query still returns correct results. The cost is speed: that portion runs on the JVM engine. In the Query Profile you can see which operators ran in Photon and which did not. Reworking the query to use supported expressions can bring the speed back.
+W: Fallback to Spark: unsupported operations run on the Spark engine, which keeps the result correct but gives up some of the speedup.
+X: A=Retry on another warehouse: no failure occurs and no automatic move to another warehouse type happens.
+B=Rejection: Photon does not reject queries, and nothing needs to be disabled across the workspace.
+C=Approximate results: the engine choice does not change the semantics, and results stay exact.
+T: Unsupported operations fall back to Spark: correct but slower for that part.
+
+@ DBX-DAA D5 T5.1 applied comparison
+S: A team asks which of these workloads Photon is designed to accelerate. Which statement is correct?
+A: Only stateful streaming aggregations, since SQL queries are already fast enough on Spark
+B: Only machine learning model training with GPU instances
+C: Only queries written in the Python language, since SQL is executed by a separate engine
+D: SQL, DataFrame API calls, ETL batch jobs and stateless streaming, without code changes
+K: D
+G: ## Supported workloads
+Photon accelerates SQL workloads, DataFrame API calls (Python, R, Scala, Java), ETL pipelines and stateless streaming when writing to Delta or Parquet. Its native Parquet writer speeds up Delta Lake, Iceberg and Parquet writes, including UPDATE, DELETE, MERGE INTO, INSERT and CREATE TABLE AS SELECT. Stateful streaming is not supported. It is not a GPU feature and is not tied to a programming language, because it works at the execution layer below the APIs.
+W: SQL, DataFrames, ETL and stateless streaming: these are the workloads Photon is documented to speed up, with no code changes.
+X: A=Stateful streaming only: stateful streaming is exactly what Photon does not support, and SQL is its main use.
+B=GPU model training: Photon speeds up data processing on CPUs and is not a GPU training feature.
+C=Python only: SQL and DataFrame code in all APIs benefit, since Photon replaces the execution engine beneath them.
+T: Photon accelerates SQL, DataFrames, ETL and stateless streaming, not stateful streaming.
