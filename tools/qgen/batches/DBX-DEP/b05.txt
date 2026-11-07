@@ -37,24 +37,24 @@ T: Forward-fill NULLs with `last(col, true)` over a frame from the unbounded pre
 V: Spark SQL window functions
 
 @ DBX-DEP D3 T3.1 advanced tradeoff
-S: A table `account_events` has several rows per `account_id`, and `updated_at` has ties because two systems write in the same second. The silver job must keep exactly one row per account, the latest, and be repeatable across reruns. Which approach meets this?
-A: `max_by(payload, updated_at)` grouped by `account_id`, because it returns the payload of the row with the greatest timestamp
-B: `row_number()` over `PARTITION BY account_id ORDER BY updated_at DESC, event_id DESC`, filtered to row number 1
-C: `rank()` over `PARTITION BY account_id ORDER BY updated_at DESC`, filtered to rank 1, which always returns a single row per account
-D: `dropDuplicates(["account_id"])` after sorting the DataFrame by `updated_at` descending, since the sort order is preserved
-K: B
-G: ## Choosing the latest row per key
-"Latest per key" looks simple, but ties and shuffles break naive versions.
-- `row_number()` numbers rows 1, 2, 3 within the partition after sorting. Filtering on 1 yields exactly one row per key. Adding a unique tie-breaker (here `event_id`) makes the order total, so the choice is deterministic.
-- `rank()` gives equal rows the same rank, so a tie for first place returns several rows.
-- `max_by(expr, ordExpr)` is an aggregate; when several rows share the maximum `ordExpr`, the result is non-deterministic.
-- `dropDuplicates` after a sort keeps an arbitrary row per key, because the shuffle that groups the keys does not preserve the previous order.
-W: row_number with a tie-breaker: the sort key is made unique, so exactly one row has number 1 per account and every rerun picks the same row.
-X: A=max_by: the documentation states that with equal maximum ordering values the result is non-deterministic, so ties on `updated_at` can change the chosen payload between runs.
-C=rank: tied rows share rank 1, so the filter keeps two rows for an account whenever the latest timestamp is tied, which violates "exactly one row".
-D=dropDuplicates after sort: Spark does not guarantee which duplicate survives after the shuffle, so the sort gives no guarantee of keeping the newest row.
-T: For deterministic one-row-per-key selection use row_number with a unique tie-breaker, not rank, max_by or dropDuplicates.
-V: Spark SQL window functions
+S: A gold job needs one row per `sensor_id` that holds the three readings with the latest `ts` as an array. The team wants a single `GROUP BY sensor_id` aggregate, with no window function and no self-join. Which expression does this?
+A: `max_by(reading, ts, 3)`, which returns an array with the readings of the three rows with the largest `ts`
+B: `max_by(reading, ts)`, which returns the `reading` values of the three rows with the largest `ts` as an array
+C: `collect_list(reading)`, which returns the readings as an array sorted by `ts` from the newest to the oldest
+D: `first(reading, 3)`, which returns the first three `reading` values of each group in arrival order
+K: A
+G: ## Top-N values inside an aggregate
+`max_by(expr, ordExpr)` returns the `expr` value of the row with the largest `ordExpr` in each group. It has an optional third argument, `limit`:
+- Without `limit` the result has the type of `expr`: one value, taken from one row.
+- With `limit` (an `INT` from 1 to 100,000) the result is an `ARRAY` of up to `limit` values, taken from the rows with the largest `ordExpr` values.
+- Rows whose `ordExpr` is NULL are not included, and ties on the largest values make the result non-deterministic.
+This gives a "latest N per key" array in one aggregation step. When the full rows are needed, or ties must be broken in a repeatable way, a window function such as `row_number()` with a unique tie-breaker is the alternative.
+W: max_by with a limit: the third argument turns the result into an array of the values that belong to the three largest `ts` values per sensor, in one aggregate.
+X: B=max_by without limit: it returns a single value of the type of `reading`, from the one row with the largest `ts`, not an array of three.
+C=collect_list: the order of the elements in the array is non-deterministic, and it collects all readings, so neither the sorting by `ts` nor the limit of three is applied.
+D=first: its second argument is the boolean `ignoreNull`, not a count, so `3` is not a valid argument, and `first` would pick by arrival order rather than by `ts`.
+T: Use `max_by(expr, ordExpr, n)` to collect the n values with the latest ordering key per group in one aggregate.
+V: Spark SQL aggregations
 
 @ DBX-DEP D3 T3.1 advanced troubleshooting
 S: A report uses `GROUP BY ROLLUP(region, channel)` and shows a row with `region = 'EU'` and `channel = NULL`. Some analysts read it as "EU sales with no channel recorded", but the source also contains genuine NULL channels. How should the query tell the subtotal row from real NULL data?
@@ -210,15 +210,15 @@ So in a shared-table setup the check is "do all engines support the table featur
 W: Protocol upgrade: the property adds a table feature and raises the writer protocol, so external Delta clients without VARIANT support can break.
 X: A=Rewrite: setting a table property updates the protocol in the transaction log; it does not rewrite the existing data files.
 C=Only at creation: the documentation gives the ALTER TABLE syntax to enable support on an existing table.
-D=Iceberg v2 requirement: Delta stores VARIANT natively, and Iceberg v2 tables are the ones that do not support VARIANT columns.
+D=Iceberg requirement: Delta tables store VARIANT natively once the table feature is enabled, so no conversion to Iceberg is needed.
 T: Enabling VARIANT on a Delta table upgrades its writer protocol, so check external client compatibility first.
 V: VARIANT; Delta Lake
 
 @ DBX-DEP D3 T3.2 advanced tradeoff
 S: A compliance team must be able to prove the exact text of every webhook body received. The bronze table stores `body` as STRING and a derived column `v = parse_json(body)`. An engineer proposes to drop `body` and keep only `v`, converting back with `to_json(v)` when needed. What is the problem?
 A: `to_json` cannot convert a VARIANT value back to text, so the conversion is not available at all
-B: The conversion changes only the data type, so the proposal is safe and the original text can be rebuilt byte for byte
-C: `parse_json` is not the exact inverse of `to_json`: whitespace, key order and trailing zeros are not preserved, so keep the raw text
+B: The conversion only changes the data type, so the proposal is safe and the original text can be rebuilt byte for byte from the stored VARIANT value
+C: `parse_json` is not exactly reversible: whitespace, key order and trailing zeros are not preserved, so keep the raw text
 D: VARIANT values are stored as compressed archives that cannot be read after 30 days, so the raw text must be kept
 K: C
 G: ## VARIANT is a parsed representation
@@ -236,7 +236,7 @@ V: VARIANT
 
 @ DBX-DEP D3 T3.3 advanced troubleshooting
 S: A batch enrichment job runs `SELECT id, ai_query('databricks-llama', 'Summarize: ' || text) AS summary FROM tickets` over 8 million rows. A few hundred rows hit endpoint errors, and the entire query fails and discards hours of work. The team wants the other rows to complete and the failures to be retried later. What should change?
-A: Add `failOnError => false`; each result becomes a struct with response and error message, and failed rows are retried
+A: Add `failOnError => false`; each result becomes a struct with response and error message, so failed rows can be selected and retried later
 B: Split the table into thousands of small queries run one after another, so that an endpoint error only hits a small part of the data
 C: Wrap the call in `try_cast`, which turns any endpoint error into NULL before it can fail the query
 D: Switch the table to a provisioned throughput endpoint, which never returns row-level errors
@@ -391,9 +391,9 @@ V: ai_query; Unity Catalog volumes
 
 @ DBX-DEP D3 T3.4 advanced use-case
 S: A streaming table receives trip records. Rows with a NULL pickup or dropoff zip must not reach the gold reports, but compliance requires keeping them for review with the reason. Which design in a Lakeflow pipeline meets both needs?
-A: `expect_or_fail` on the zip rules, so that any invalid trip stops the whole update until the source is fixed
+A: `expect_or_fail` on the zip rules, so that any invalid trip stops the whole update until someone fixes the source data
 B: `expect_or_drop` on the zip rules; the dropped count in the metrics is enough to review the cases
-C: Add an `is_quarantined` flag in a table with `expect_all`, then expose valid and invalid rows as two views on the flag
+C: Add an `is_quarantined` flag in a table with `expect_all`, then expose valid and invalid rows as two views
 D: A plain `expect` on one table, since invalid rows are automatically written to a separate quarantine table
 K: C
 G: ## Quarantine pattern
@@ -412,9 +412,9 @@ V: Lakeflow Pipelines; expectations
 
 @ DBX-DEP D3 T3.4 advanced troubleshooting
 S: A triggered pipeline has a validation materialized view with `expect_or_fail("unique_pk", "num_entries = 1")` that checks the primary key of the `report` table. A violation is found, the validation flow fails, yet the downstream `report_export` table updated successfully with the duplicates. What explains this?
-A: In a triggered pipeline only that flow is rolled back; a validation table does not gate downstream tables, which update independently
+A: Only that flow is rolled back in a triggered pipeline; a validation table does not gate other tables, which update on their own
 B: The failure is retried in the background, and `report_export` read the data before the retry finished
-C: Fail expectations apply only to streaming tables, so the materialized view only warned and recorded metrics instead
+C: Fail expectations apply only to streaming tables, so the materialized view only warned and recorded the violation metrics instead of failing
 D: The pipeline needs a continuous mode to evaluate expectations, and a triggered update skips them
 K: A
 G: ## What expectations control
@@ -538,7 +538,7 @@ Expectations are supported on streaming tables, materialized views and views. Th
 - Flows that use an operator or flow type that does not support expectations (for example sinks).
 - Datasets with no expectations defined, or runs with no updates.
 - **Expectations are not supported with `AUTO CDC FROM SNAPSHOT`.**
-The usual workaround is to put the checks on a downstream dataset (a materialized view or streaming table that reads the CDC target) so that the validation runs on a supported flow. For change-feed CDC with `AUTO CDC`, validate the incoming change records before the flow.
+A practical workaround is to put the checks on a downstream dataset (a materialized view or streaming table that reads the CDC target) so that the validation runs on a supported flow. For change-feed CDC with `AUTO CDC`, validate the incoming change records before the flow.
 W: Downstream validation: the dataset that reads the dimension is a normal supported flow, so its expectations enforce and report metrics.
 X: A=Snapshot frequency: the limitation is unrelated to how often snapshots arrive.
 B=Append flow conversion: this would lose the SCD handling that the CDC flow provides, and the validation can be added without changing the flow type.
@@ -546,43 +546,42 @@ C=Comment rule: comments are documentation only; they never enforce anything.
 T: Expectations do not work with AUTO CDC FROM SNAPSHOT, so validate in a downstream dataset.
 V: Lakeflow Pipelines; AUTO CDC
 
-@ DBX-DEP D3 T3.4 advanced troubleshooting
-S: A pipeline author writes `@dp.expect("fresh", "is_recent_udf(event_ts)")` where `is_recent_udf` is a Python UDF that calls an internal calendar service, and the expectation is rejected. What is the correct fix?
-A: Register the UDF in Unity Catalog, because registered Python functions are allowed in expectations
-B: Use built-in SQL such as `event_ts >= current_timestamp() - INTERVAL 1 DAY`, or compute the value in the query and test the column
-C: Wrap the service call in a `try` block so that service errors become failed expectations and not pipeline failures
-D: Move the rule into a table property, which can hold arbitrary code for the pipeline to run
-K: B
-G: ## What a constraint may contain
-An expectation constraint is a SQL Boolean expression that must evaluate to true or false for each record. It can use built-in SQL functions, `CASE` expressions and boolean logic. It **cannot** contain:
-- custom Python functions,
-- external service calls,
-- subqueries that reference other tables.
-When the check needs more logic, compute the needed values in the dataset's query (a join to a calendar table, a derived column, a UDF in the SELECT) and write the expectation on the resulting plain column, for example `is_recent = true`.
-W: Built-in expression or derived column: the constraint stays a plain SQL Boolean, and any heavy logic is moved into the query before the expectation is evaluated.
-X: A=Unity Catalog registration: custom Python functions are excluded from constraints no matter where they are registered.
-C=try block: this is about Python exception handling, and the constraint language still disallows the service call.
-D=Table property: properties store settings, not executable rules, and the pipeline would not evaluate them.
-T: Expectation constraints are plain SQL booleans; move UDF or lookup logic into the query and test its output column.
+@ DBX-DEP D3 T3.4 advanced tradeoff
+S: A team writes its pipelines in SQL and wants to apply one shared set of 10 rules with a single drop action to 30 tables, the way Python authors use `expect_all_or_drop` with a dictionary. What is true for SQL datasets?
+A: Grouping rules with a collective action is Python only; in SQL each rule is its own `CONSTRAINT ... EXPECT ... ON VIOLATION DROP ROW` clause
+B: SQL supports only one expectation per dataset, so the 10 rules must be combined into a single boolean expression joined with `AND`
+C: SQL has an `EXPECT ALL` clause that reads a rules table by tag, which is the SQL equivalent of the Python dictionary helper
+D: SQL expectations cannot drop rows, so a shared drop action must be implemented in a Python dataset that reads the SQL output
+K: A
+G: ## Expectations in SQL versus Python
+Both languages allow several expectations on one dataset. In SQL every expectation is a separate clause with a name:
+- `CONSTRAINT valid_amount EXPECT (amount > 0) ON VIOLATION DROP ROW`
+- Without `ON VIOLATION` the action is warn (keep the row, record metrics); `DROP ROW` and `FAIL UPDATE` are the other two.
+Python adds the grouped decorators `expect_all`, `expect_all_or_drop` and `expect_all_or_fail`, which take a dictionary of name and constraint and apply one action to the whole group. The same dictionary can be reused for many datasets, and it can be loaded from a table or module.
+Dynamically loading expectations from a file is not supported in SQL. A team that wants central rule management for many tables therefore either repeats the clauses in SQL or moves those datasets to Python.
+W: Python-only grouping: the collective `expect_all*` actions and dictionaries exist in Python, while SQL expresses each rule as its own constraint clause with its own action.
+X: B=One rule per dataset: SQL allows multiple expectations in a single dataset, each with its own name, so combining them is not required and would hide which rule failed in the metrics.
+C=EXPECT ALL: no such SQL clause exists; the documentation states that only Python can group expectations and set collective actions, and that loading them dynamically from a file is not supported in SQL.
+D=No drop in SQL: `ON VIOLATION DROP ROW` is the SQL way to drop invalid records, so no Python detour is needed for the action itself.
+T: Only Python groups expectations with `expect_all*`; SQL declares each rule as a named CONSTRAINT with its own action.
 V: Lakeflow Pipelines; expectations
 
-@ DBX-DEP D3 T3.4 advanced use-case
-S: Before a nightly publish, a team must stop downstream tables when `report` contains duplicate primary keys, and a validation view with `expect_or_fail` is written. To make sure the publish is blocked, how should the work be organized?
-A: Put the validation and the publish in the same pipeline, because dataset dependencies make the publish wait for the validation view
-B: Set the publish tables to `expect_or_drop` so that duplicate keys disappear before they are published
-C: Create the validation in its own pipeline and run it before the publish pipeline as a dependent task in a job
-D: Run the publish pipeline in continuous mode so that it restarts automatically whenever the validation fails
-K: C
-G: ## Gating with a job
-A validation dataset such as `SELECT pk, count(*) AS num_entries FROM report GROUP BY pk` with `expect_or_fail("unique_pk", "num_entries = 1")` surfaces violations, but inside one pipeline it does not make other datasets wait.
-The documented way to stop downstream processing:
-1. Put the validation in its own pipeline.
-2. Orchestrate the pipelines in a Lakeflow job, with the publish pipeline task depending on the validation task.
-3. A pipeline task fails when its update fails, so the dependent publish task does not run.
-More generally, conditional execution and complex dependencies belong to a job, not to expectations.
-W: Separate pipelines and a task dependency: a failed validation update fails its task, and the dependent publish task is skipped.
-X: A=Same pipeline: reading a validation view from another dataset does not create a wait, so the publish can update while the validation fails.
-B=Drop on publish tables: it silently removes rows with duplicate keys and does not stop the publish, so downstream users get incomplete data.
-D=Continuous restart: a continuous pipeline would stop the dependent flows on failure, but it does not conditionally run a publish after a successful validation.
-T: To gate downstream work on a validation, run validation and publish as separate pipeline tasks with a dependency in a job.
-V: Lakeflow Pipelines; Lakeflow Jobs
+@ DBX-DEP D3 T3.4 advanced troubleshooting
+S: A streaming table in a pipeline has `expect_or_drop` rules. An engineer sums the expectation counts from `flow_progress` event log rows whose status is `COMPLETED` and gets no counts for some updates, although rows were dropped. Which change finds the counts?
+A: Also read the `flow_progress` events with status `RUNNING`, because for some flows the metrics are reported per micro-batch there
+B: Switch the rules to `expect_or_fail`, because fail actions record the complete expectation metrics in the final event of every update, even when the update itself fails
+C: Run a full refresh of the table, which rewrites the metrics into the `COMPLETED` event of the update
+D: Query the Delta history of the target table, where each streaming write stores the dropped-row count
+K: A
+G: ## Where expectation metrics are reported
+Expectation metrics for `warn` and `drop` actions are recorded in `flow_progress` events of the pipeline event log, which is also the source for the Data quality tab.
+- For some flows a `COMPLETED` event does not contain the metrics. They are reported in each micro-batch in a `flow_progress` event with status `RUNNING`.
+- Metrics are also missing when no expectations are defined, when the update had no new data for the flow, when the flow type (for example a sink) does not support expectations, or when the pipeline lacks the settings that capture metrics.
+- For `fail` actions no metrics exist, because the update does not succeed.
+A reliable audit query therefore aggregates the expectation details of the `RUNNING` and `COMPLETED` flow_progress events of the flow, not only the final one.
+W: Read the per-micro-batch events: the drop counts of a streaming flow can sit in RUNNING flow_progress rows, so an aggregation that filters on COMPLETED misses them.
+X: B=Fail action: a failing expectation stops the update before metrics are recorded, so it yields no counts at all and would stop the table.
+C=Full refresh: it reprocesses the data but does not change where the metrics are reported, and it is expensive for a reporting problem.
+D=Delta history: the history lists write operations of the table; the expectation drop count belongs to pipeline flow metrics in the event log.
+T: Sum expectation metrics from RUNNING and COMPLETED flow_progress events, since streaming flows report per micro-batch.
+V: Lakeflow Pipelines; expectations
