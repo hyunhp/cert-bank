@@ -31,6 +31,7 @@ const STUDY_EXAMS = [
   ["GCP-PDE", "Professional Data Engineer", "professional", "gcp"],
   ["GCP-PSE", "Professional Cloud Security Engineer", "professional", "gcp"],
   ["DBX-DEA", "Data Engineer Associate", "associate", "databricks"],
+  ["DBX-DEP", "Data Engineer Professional", "professional", "databricks"],
   ["TF-TA004", "Terraform Associate (004)", "associate", "hashicorp"],
   ["VLT-VA003", "Vault Associate (003)", "associate", "hashicorp"],
   ["TF-IEP002", "Terraform Infrastructure Engineer Professional (002)", "professional", "hashicorp"],
