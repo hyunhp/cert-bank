@@ -1,0 +1,429 @@
+# DBX-DEP batch 11: T8.4 Git folders CI/CD (rest) 4, T9.1 table layout design 7, T9.2 dimensional models, materialized views, Metric Views 8 (guide read 2026-11-07)
+# src: https://docs.databricks.com/aws/en/repos/ci-cd-techniques-with-repos.html
+# src: https://docs.databricks.com/aws/en/repos/git-operations-with-repos.html
+# src: https://docs.databricks.com/aws/en/dev-tools/ci-cd/
+# src: https://docs.databricks.com/aws/en/delta/tune-file-size.html
+# src: https://docs.databricks.com/aws/en/tables/partitions.html
+# src: https://docs.databricks.com/aws/en/iceberg/index.html
+# src: https://docs.databricks.com/aws/en/tables/constraints.html
+# src: https://docs.databricks.com/aws/en/transform/data-modeling.html
+# src: https://docs.databricks.com/aws/en/views/materialized.html
+# src: https://docs.databricks.com/aws/en/metric-views/
+# src: https://docs.databricks.com/aws/en/metric-views/data-modeling/
+# src: https://docs.databricks.com/aws/en/metric-views/materialization.html
+
+@ DBX-DEP D8 T8.4 advanced troubleshooting
+S: A production Git folder tracks the `release` branch and runs the nightly jobs of a team. During an incident, an admin edits a notebook directly in the production folder and commits nothing. The next night the merge automation tries to update the folder after a merged pull request and the update fails because of local changes. Which process prevents this situation in the future?
+A: Make hotfixes on a branch in a user-level Git folder, merge the pull request, and let only the automation update the production folder
+B: Give every on-call admin edit access to the production folder and let the automation reset local changes before each pull
+C: Move the production jobs to point at the notebooks in the on-call admin's user-level Git folder, which that admin keeps on the `release` branch and edits freely during incidents
+D: Turn off the merge automation and ask admins to pull the `release` branch by hand in the production folder after each merge
+K: A
+G: ## Two kinds of Git folders
+Databricks separates the Git folders where people develop from the Git folders that run production.
+- A **user-level Git folder** lives under `/Workspace/Users/<email>/`. It is a personal checkout: the user creates a branch, edits, commits and pushes to the remote Git service.
+- A **production Git folder** is created by an admin outside the user folders. It is bound to a deployment branch and is the source that automated workflows run from. It should be updated only by automation after a pull request is merged into that branch, and most users get only run permission on it.
+## Why edits in the production folder hurt
+The remote repository is the source of truth. A local edit in the production folder is a change that exists nowhere in Git: it is not reviewed, it is lost or conflicts at the next pull, and production behaviour no longer matches the branch.
+Example: the hotfix is made on a `hotfix/fix-null-join` branch in an admin's user folder, pushed, reviewed, merged into `release`, and the automation pulls it into the production folder minutes later.
+W: Hotfix by pull request: production changes go through a branch and a merged pull request, and only the automation (plus admins and service principals with the needed rights) updates the production folder, so it never holds uncommitted local changes.
+X: B=Edit access plus hard reset: allowing edits again recreates unreviewed production changes, and silently discarding local work hides the real problem and removes the audit trail the branch provides.
+C=Jobs pointing to a personal folder: production would then depend on one person's checkout and credentials, and a branch switch or an absent admin changes what runs without any review.
+D=Manual pulls: removing the automation puts a human step back into every release and does not stop admins from editing the folder directly, so the same drift can happen again.
+T: Production Git folders are run-only deployment targets that automation updates from a merged deployment branch; changes are made on branches and merged.
+V: Databricks Git folders
+
+@ DBX-DEP D8 T8.4 advanced use-case
+S: A GitHub Actions workflow pulls the latest commits into a production Git folder whenever a pull request is merged into the deployment branch. The workflow authenticates with the Databricks access of an engineer, and the Git folder was cloned with that engineer's personal Git credential. After the engineer leaves the company and the account is deactivated, deployments stop working. Which design avoids this?
+A: Let each engineer who merges a pull request run the pull manually with their own account, so the credential always belongs to someone who is currently employed
+B: Create a service principal with its own Git credential, give it the production folder, and let the workflow call the update as that principal
+C: Make the Git repository public so that no Git credential is needed for the clone, and let the workflow keep authenticating as the shared team lead account
+D: Keep the former engineer's token in the CI service as a shared secret, renewed each quarter, since Git folders need a person as owner
+K: B
+G: ## Identity of the automation
+A production Git folder needs two identities that do not depend on a person: one that talks to the **Databricks workspace** (to call the Repos API or the SDK) and one that talks to the **Git provider** (to fetch the branch).
+- A **service principal** is a non-human identity in Databricks. Databricks documents using one with its own Git credential so it can access the repository, creating the production folder for the repository and branch, and giving it run permission on the folder.
+- Personal credentials and personal folders disappear with the person, and the identity in the Git history and audit logs becomes ambiguous.
+## Pattern
+1. Choose the repository and the deployment branch.
+2. Create the service principal and configure its Git credential.
+3. Create the production Git folder for that branch and share it: run permission for project users and for the principal.
+4. Let the CI service (for example GitHub Actions) call the update on merge.
+W: Service principal with its own Git credential: access to the folder and the repository no longer depends on any employee account, and the automation runs under an identity that can be audited and restricted.
+X: A=Manual pulls by merging engineers: this puts a human step in every release and still uses personal credentials, which keeps the dependency on individual accounts instead of removing it.
+C=Public repository and shared lead account: making code public is a security decision unrelated to deployment, and a shared personal account hides who changed what and still disappears when that person leaves.
+D=Shared token of a former employee: a deactivated person's credential is not a stable foundation, and the claim is wrong because Git folders can be owned and updated by service principals.
+T: Run production Git folder automation as a service principal with its own Git credential, not as a person.
+V: Databricks Git folders, service principals
+
+@ DBX-DEP D8 T8.4 applied tradeoff
+S: A platform team has no external CI service that can reach the workspace, but wants the production Git folder to follow its deployment branch within a short time after each merged pull request. The team has the Databricks SDK available on serverless compute. Which approach fits this constraint?
+A: Run a notebook as a frequent scheduled job under a service principal that updates the production Git folder to the deployment branch through the SDK or the Repos API
+B: Have the production jobs themselves run `git clone` into local disk of the cluster at start, so no Git folder in the workspace is needed anymore
+C: Ask the engineers to push directly to the production Git folder from their user folders, since pushing from a user-level folder replaces the content of the production one
+D: Create a second production Git folder per merged pull request and delete the previous one, because an existing Git folder cannot be moved to a newer commit
+K: A
+G: ## Keeping a Git folder in sync
+A Git folder does not update itself when the remote branch changes. Something has to ask the workspace to pull. Databricks documents two options for production folders:
+- **External CI/CD**, such as GitHub Actions, that calls the Repos API after a merge into the deployment branch.
+- **A scheduled job** when no external CI/CD is available. A small notebook uses the Databricks SDK (`WorkspaceClient`) to update the folder to a given branch, and the job runs on a schedule under a service principal.
+## Trade-off
+The scheduled job is simple but not event driven: the folder can lag by up to the schedule interval, and the job must have the right to the folder and a working Git credential. External CI is immediate and keeps deployment logic in the same system that runs tests.
+W: Scheduled sync job: a small notebook run by a job under a service principal updates the Git folder to the deployment branch, which is the documented fallback when external CI/CD cannot be used, at the price of a delay up to the schedule interval.
+X: B=Cloning at job start: this skips review of what is deployed, needs Git credentials on every cluster, and gives up the workspace folder that jobs, permissions and notebooks navigation are built around.
+C=Pushing from user folders to the production one: pushes go to the remote repository, not between workspace folders, and production should change only through merged pull requests.
+D=New folder per pull request: an existing Git folder can be updated to the current head of a branch, so replacing it only breaks paths and permissions that jobs depend on.
+T: Without external CI, a scheduled job under a service principal can update the production Git folder to the deployment branch.
+V: Databricks Git folders, Databricks SDK
+
+@ DBX-DEP D8 T8.4 advanced comparison
+S: A team has notebooks and Python modules in Git, and wants to deploy to development, staging and production. In each environment two Lakeflow Jobs and one pipeline must be created or updated with environment-specific compute settings, run-as identities and permissions, and the same commit must be promoted unchanged through the stages. Which choice fits best?
+A: One production Git folder per stage that follows the deployment branch, since a Git folder also deploys job, pipeline and permission definitions
+B: One shared Git folder switched between branches by the CI service, with jobs created manually in each workspace using the notebook paths in that folder
+C: Declarative Automation Bundles with the jobs and pipeline in source, per-target overrides and deployment by CI, plus Git folders for development
+D: Git folders for development only, and a nightly export of all notebooks as files to cloud storage that each environment imports on the next day
+K: C
+G: ## What a Git folder deploys and what it does not
+A Git folder synchronizes **files**: notebooks, modules and configuration at a branch. It does not define jobs, pipelines, compute or permissions. The Databricks documentation says that if you only need to deploy code into the workspace, a production Git folder is enough; for CI/CD of whole workflows it recommends **Declarative Automation Bundles** (formerly Databricks Asset Bundles).
+## What bundles add
+- Jobs, pipelines and other resources are described as source files, so they are reviewed and versioned with the code.
+- **Targets** override settings per environment (compute, run-as identity, permissions) while the resource definition stays the same.
+- A CI service runs validate and deploy for each stage from the same commit.
+- Bundles and Git folders combine: a bundle can be developed and managed in a workspace Git folder.
+## Decision rule
+Code only: Git folder. Code plus resources, per-environment settings and promotion of one commit: bundle.
+W: Bundles with targets: the resource definitions and per-environment overrides live in source and a CI service deploys the same commit to each stage, while Git folders still serve for development.
+X: A=Git folders carrying definitions: a Git folder only pulls files, so jobs, pipeline settings, run-as identities and permissions would still have to be created and maintained separately in every workspace.
+B=Shared folder and manual jobs: manual job creation drifts between environments, and a single folder that is switched between branches cannot hold three stages at once.
+D=Nightly export and import: it delays promotion by a day, loses commit traceability and still does not create or configure the jobs and the pipeline.
+T: Git folders sync code; bundles deploy the resources and their per-environment configuration.
+V: Declarative Automation Bundles, Databricks Git folders
+
+@ DBX-DEP D9 T9.1 advanced use-case
+S: A structured streaming job appends to an external Delta table (not Unity Catalog managed) every 30 seconds. Over weeks the table accumulates tens of thousands of files of a few MB each, and read queries slow down. The table is about 300 GB and no maintenance job is scheduled. Which change addresses the cause at the lowest operational cost?
+A: Set the table properties for optimized writes and auto compaction, so files are written larger and small ones are compacted after commits
+B: Add `repartition(1)` before each micro-batch write so every trigger produces exactly one file, and keep the trigger at 30 seconds
+C: Run `VACUUM` with zero hours of retention after every micro-batch, so the table has fewer old files that readers need to open
+D: Partition the table by the minute of the ingestion time so that each trigger writes into its own partition and no files have to be merged
+K: A
+G: ## The small files problem
+Every write creates at least one new Parquet file. A stream that commits every few seconds creates many small files, and each query then pays for listing, opening and planning over all of them.
+Databricks offers layers of defence:
+- **Optimized writes** shuffle data before writing, so each write produces fewer, larger files. They add some write latency because of the shuffle.
+- **Auto compaction** runs after a successful write, on the cluster that wrote, and compacts small files that were not compacted before.
+- **`OPTIMIZE`** rewrites files in bulk. For tables larger than 1 TB Databricks still recommends a scheduled `OPTIMIZE`.
+- **Predictive optimization** does this automatically for Unity Catalog managed tables. This table is external, so it does not apply here.
+## Setting
+Both features are table properties (`delta.autoOptimize.optimizeWrite`, `delta.autoOptimize.autoCompact`), so they apply to every writer of the table without changing job code.
+W: Optimized writes and auto compaction: files are written larger from the start and leftover small ones are compacted after commits, with no extra scheduler, which is the least operational effort for an external table of this size.
+X: B=repartition(1): a single task writes every batch, which makes the file count per batch one but limits throughput, and Databricks advises against manual repartition or coalesce before writes when optimized writes are used.
+C=VACUUM with zero retention: VACUUM only deletes files that are no longer referenced by the table, so it does not merge live small files, and zero retention risks breaking concurrent readers and streams.
+D=Minute partitions: this creates thousands of tiny partitions that each hold a few small files, which makes the small files problem worse and cannot be compacted across partition boundaries.
+T: For frequent small appends, enable optimized writes and auto compaction on the table; combine with scheduled OPTIMIZE for very large tables.
+V: Delta Lake, OPTIMIZE
+
+@ DBX-DEP D9 T9.1 advanced troubleshooting
+S: A Unity Catalog managed table of 1.5 TB has grown to 9 TB over two years. It is maintained only by predictive optimization. An engineer checks the files and finds that many older files are about 256 MB while newly written ones are close to 500 MB, and wants all files to converge to one larger size. `OPTIMIZE` does not rewrite the older 256 MB files. What explains this and how can the engineer reach the goal?
+A: The older files are corrupt, so `OPTIMIZE` skips them; the engineer must run `FSCK REPAIR TABLE` to rebuild them
+B: Predictive optimization rewrites files only once a year, so the engineer must wait for the next yearly cycle to see all files merged
+C: The autotuned target grew with the table and `OPTIMIZE` does not rewrite earlier files; a fixed `delta.targetFileSize` compacts them to one size
+D: The older files sit in the first partition written and are locked, so the engineer must drop that partition and reload it from the source
+K: C
+G: ## Autotuned file size
+For tables without a configured target, Databricks tunes the target file size from the table size: smaller files for smaller tables and larger files for larger ones so that the file count does not explode. For a table below 2.56 TB the target is 256 MB; from 2.56 TB to 10 TB it grows linearly from 256 MB to 1 GB; above 10 TB it is 1 GB.
+## Consequence of growth
+When the target grows, `OPTIMIZE` does not rewrite existing files into larger ones just because the target moved. A big table can therefore always contain files below the current target. This is expected behaviour, not corruption.
+## Taking control
+Setting the table property `delta.targetFileSize` (for Iceberg `iceberg.targetFileSize`) fixes the target. The trade-off is that autotuning is turned off for that table, so the engineer owns the choice as the table keeps growing.
+W: Fixed target file size: older files that are already near an earlier autotuned target are left alone, and a configured `delta.targetFileSize` is the documented way to compact them to one chosen size.
+X: A=FSCK REPAIR: the files are valid, they are only smaller than a target that grew later, and FSCK handles missing files in the log rather than size.
+B=Yearly cycle: predictive optimization runs maintenance based on table activity and does not defer work to an annual schedule; the files stay small because of how the target moves, not timing.
+D=Locked partition: files are not locked and the described table may not even be partitioned; rewriting data from the source would be needlessly costly for a settings issue.
+T: Autotuned target sizes grow with the table and old files are not rewritten; set a fixed target file size to force convergence.
+V: Delta Lake, predictive optimization
+
+@ DBX-DEP D9 T9.1 advanced troubleshooting
+S: On a Unity Catalog managed table queried through a SQL warehouse, an engineer sets `delta.targetFileSize` to 100 MB and then notices that a nightly batch `INSERT` still produces files of other sizes, while the scheduled `OPTIMIZE` runs produce files close to 100 MB. Which statement explains this?
+A: The property applies only at table creation and later changes affect no operation, so `OPTIMIZE` produced files near 100 MB by coincidence
+B: On managed tables with a SQL warehouse only `OPTIMIZE` respects `targetFileSize`, while ordinary writes use automatic tuning
+C: The `INSERT` ignored the property because it ran after midnight, and file sizes are reset daily by predictive optimization regardless of the table property
+D: Files from an `INSERT` always match the number of source partitions, so the property can be honoured only if the source is repartitioned to 100 MB slices first
+K: B
+G: ## Who respects the target
+`delta.targetFileSize` is a best-effort target for data layout operations, such as `OPTIMIZE`, liquid clustering, auto compaction and optimized writes. For Unity Catalog managed tables used with a SQL warehouse or a recent Databricks Runtime, Databricks tunes most settings automatically and the documentation states that only `OPTIMIZE` commands respect `targetFileSize`.
+## Practical design
+- Do not expect the write path of a managed table to produce files of the configured size; compaction by `OPTIMIZE` (manual or by predictive optimization) brings files to the target afterwards.
+- The size of files written by a job still depends on partitioning of the data being written, shuffle layout and the optimized write setting.
+- Check what produced a file set in the table history: auto compaction shows up as an `OPTIMIZE` operation with the `auto` parameter true.
+W: Only OPTIMIZE honours the target on managed tables: ordinary inserts rely on automatic tuning, so the observed difference between the insert and the compaction output is by design.
+X: A=Creation-only property: table properties can be set and changed with `ALTER TABLE ... SET TBLPROPERTIES`, and the compaction results show that the property takes effect.
+C=Daily reset: no feature resets the table property after midnight, and predictive optimization respects the configured target when it compacts.
+D=Repartitioning the source: this does not make the write path follow the property, and manual repartition before writes is discouraged when optimized writes are active.
+T: On Unity Catalog managed tables with SQL warehouses or current runtimes, only OPTIMIZE respects targetFileSize.
+V: Delta Lake, Unity Catalog
+
+@ DBX-DEP D9 T9.1 advanced tradeoff
+S: A multi-tenant fact table holds 600 GB of events from 5,000 customers. Data per customer is very uneven, and the average customer has about 120 MB. Most queries filter on one `tenant_id`. A designer proposes `PARTITIONED BY (tenant_id)` to map the physical layout to the way the data is queried. Which assessment is correct?
+A: Partitioning is the right choice because the query filter is on `tenant_id`, and one partition directory per tenant guarantees that a query reads only that tenant's files
+B: Partitioning is acceptable only if the table is also partitioned by every other column used in a filter, so that each filter column has its own directory level
+C: Partitioning should be done on the `event_timestamp` instead, since a timestamp column has the highest cardinality and so gives the finest possible directories
+D: Do not partition: the table is under 1 TB and the average partition would be far below 1 GB, so clustering on `tenant_id` achieves the skipping without thousands of small partitions
+K: D
+G: ## Partitioning rules of thumb
+A partition is a directory of files and each partition needs its own files. Databricks recommends:
+- With less than 1 TB of data, do not partition. Between 1 and 100 TB, prefer liquid clustering; partitioning more often hurts than helps.
+- Verify that each partition holds at least 1 GB. Fewer larger partitions beat many small ones.
+- Partitioning suits low or known cardinality columns (dates, regions), not high cardinality such as timestamps.
+- Files cannot be combined across partition boundaries, so over-partitioning creates small files that compaction cannot merge.
+## The arithmetic in this case
+600 GB divided by 5,000 tenants is about 120 MB per tenant on average, which is about an eighth of the 1 GB guidance, and the skew means many tenants are even smaller. Clustering on `tenant_id` keeps similar tenants together in files so that data skipping works, without fixed directories.
+## Grain
+The grain of the table (one row per event) does not make `tenant_id` a partition column; the filter pattern and the size of each value do.
+W: Cluster instead of partition: the table is below the 1 TB line and an average of about 120 MB per tenant is far below the 1 GB guidance, so tenant clustering gives the skipping without small partitions.
+X: A=Partition per tenant: a filter on the partition column does prune directories, but thousands of tiny partitions create many small files that cannot be merged across partitions, so the guarantee is paid for with slower scans and writes.
+B=Partition on every filter column: multiplying partition columns multiplies the number of directories and makes each partition smaller, which is the opposite of what the guidance recommends.
+C=Timestamp partitions: high-cardinality columns such as timestamps are the documented example of a bad partition key, because they create a huge number of tiny partitions.
+T: Do not partition below 1 TB or when partitions would be under about 1 GB; cluster on the filter column instead.
+V: Delta Lake, liquid clustering
+
+@ DBX-DEP D9 T9.1 advanced use-case
+S: A data platform team writes to a managed Apache Iceberg table in Unity Catalog from Spark on Databricks, and an external engine appends micro-batches to the same table through the Iceberg REST catalog interface. The external engine's job runs often and leaves many small files. The team debates scheduling compaction jobs in the external engine. What does Databricks documentation say about maintenance of this table?
+A: Unity Catalog handles snapshot expiration and compaction for managed Iceberg tables and predictive optimization runs `OPTIMIZE` on them
+B: Compaction is possible only from the external engine that writes the data, because Databricks treats Iceberg tables as read-only for maintenance
+C: Managed Iceberg tables must first be converted to Delta, because `OPTIMIZE` cannot run on any table that uses the Iceberg format in Unity Catalog
+D: File compaction must be scheduled by the owner with a rewrite procedure of the external engine, and Unity Catalog only tracks which snapshots exist
+K: A
+G: ## Managed Iceberg tables in Unity Catalog
+Iceberg tables created in Unity Catalog are **managed Iceberg tables**. They can be created from Databricks Runtime or Databricks SQL and from external engines that support the Iceberg REST Catalog API (Spark, Flink, Trino, Kafka and others).
+Because the table is managed, platform features apply:
+- Unity Catalog manages lifecycle tasks such as snapshot expiration and file compaction.
+- Predictive optimization automatically runs `OPTIMIZE`; `OPTIMIZE` can also be run manually, for example to recluster after a clustering key change.
+- Liquid clustering is the layout feature; `PARTITION BY` columns on managed Iceberg tables are interpreted as clustering keys.
+- Auto compaction and optimized writes have Iceberg settings with the `iceberg` prefix.
+## Design consequence
+The layout of the table is decided once in Unity Catalog, not separately per engine. External writers can keep to simple appends, and compaction does not need an extra owner or schedule in each engine.
+W: Platform-managed maintenance: for managed Iceberg tables, Unity Catalog handles snapshot expiration and compaction and predictive optimization runs OPTIMIZE, whichever engine wrote the small files.
+X: B=External-only compaction: Databricks supports running OPTIMIZE on managed Iceberg tables, manually or through predictive optimization, so the external engine is not the only option.
+C=Conversion to Delta first: OPTIMIZE is available for managed Iceberg tables, including a form that reclusters data after clustering keys change, so no conversion is needed.
+D=Scheduled rewrite in the external engine: this duplicates maintenance the platform already performs and risks two engines competing to rewrite the same files.
+T: Managed Iceberg tables in Unity Catalog get compaction, snapshot expiration and predictive optimization from the platform.
+V: Apache Iceberg, Unity Catalog, predictive optimization
+
+@ DBX-DEP D9 T9.1 advanced troubleshooting
+S: A backfill job rewrites one year of data into a Delta table that is partitioned by `event_date`. Spark has 800 shuffle partitions, each task holds rows for many dates, and the job writes about 300,000 files of a few MB. The code calls `repartition(100)` before the write to limit the number of files, but each task still writes into many date directories. Which fix addresses the cause?
+A: Replace `repartition(100)` with `coalesce(1)` so that the whole backfill is written by one task
+B: Raise `spark.sql.shuffle.partitions` to 8000 so each task holds fewer dates, and keep the manual repartition before the write
+C: Switch the partition column to `event_timestamp` so that every task writes into one directory only
+D: Enable optimized writes and drop the manual repartition, so rows are shuffled by partition value and each date gets fewer, larger files
+K: D
+G: ## Why partitioned writes explode in file count
+In a partitioned write each Spark task writes one file per partition value it holds. With N tasks and D dates, up to N x D files can be created. A manual `repartition(n)` redistributes rows by hash or round robin, so every task still holds many dates.
+## Optimized writes
+Optimized writes add a shuffle on the partition value before the write, so the rows of one date land in few tasks and each partition directory gets fewer, larger files. They are most effective for partitioned tables, at the cost of extra write latency from the shuffle. Databricks recommends not using `coalesce(n)` or `repartition(n)` just before a write when optimized writes are on.
+## Alternative
+Repartitioning by the partition column itself (`repartition("event_date")`) has the same effect in code, but skew toward heavy dates can create stragglers.
+W: Optimized writes: a shuffle by partition value before writing concentrates each date in few tasks, producing fewer, larger files per directory, and removes the manual repartition that cannot do this.
+X: A=coalesce(1): one task writing a year of data removes parallelism and risks memory and runtime failures, and it still does not align files to directories as a controlled design.
+B=More shuffle partitions: spreading data over more tasks means each task holds fewer rows per date, which creates more and smaller files rather than fewer.
+C=Timestamp partition: a timestamp has very high cardinality, and one directory per second makes the small files problem catastrophic.
+T: For partitioned writes, optimized writes group rows by partition value before writing; do not fight them with manual repartition.
+V: Delta Lake, optimized writes
+
+@ DBX-DEP D9 T9.1 advanced tradeoff
+S: An append-only streaming job on a Unity Catalog managed table shows latency spikes after every commit. The job's cluster executes a short compaction step right after each successful write, and the team needs predictable micro-batch latency. They want compaction to keep working. What is the best change?
+A: Disable predictive optimization on the schema, because it is the feature that blocks the writing cluster after each commit
+B: Turn off auto compaction in the job's session and let predictive optimization compact the table asynchronously
+C: Set `delta.targetFileSize` to the smallest allowed value, so that the compaction after each commit has no files to merge
+D: Disable all compaction features on the table and run a manual `OPTIMIZE` once each quarter, when queries become slow
+K: B
+G: ## Synchronous versus asynchronous compaction
+Auto compaction and predictive optimization are independent features that can be used separately or together:
+- **Auto compaction** runs synchronously on the cluster that performs the write, right after a successful write, and compacts files that were not compacted before. It uses that cluster's resources and adds to the time before the task is done.
+- **Predictive optimization** runs maintenance such as `OPTIMIZE` and `VACUUM` asynchronously on serverless compute for Unity Catalog managed tables.
+## Design
+For an append-only job with strict latency needs, turn auto compaction off in the session of that job (the session setting overrides it for all tables the job writes) and let predictive optimization keep the files compact in the background. For `MERGE`, `UPDATE` and `DELETE` the documentation says auto compaction and optimized writes are always on and cannot be turned off, so this approach applies to appends.
+W: Session-level off, asynchronous maintenance: removing the synchronous compaction from the writer takes the latency out of the commit path while predictive optimization still compacts files on serverless compute.
+X: A=Disabling predictive optimization: it runs asynchronously on serverless compute and not on the writing cluster, so it is not the cause of the post-commit step and disabling it also removes compaction.
+C=Smallest target size: a tiny target does not prevent the compaction step from running, and it produces more files which defeats the goal of compaction.
+D=Yearly OPTIMIZE: leaving small files for a year degrades read performance and cost, and predictive optimization already offers a free alternative.
+T: Auto compaction is synchronous on the writer; predictive optimization is asynchronous, so latency-sensitive appenders can leave compaction to the latter.
+V: Delta Lake, predictive optimization
+
+@ DBX-DEP D9 T9.2 advanced use-case
+S: Analysts query a heavily normalized (third normal form) model in the lakehouse: a typical dashboard query joins nine tables and filters on attributes of a distant lookup table, and plans often scan far more data than necessary. The team can redesign the gold layer. Which direction does Databricks recommend for a new analytical model?
+A: Keep third normal form and add informational foreign keys, because declared constraints make the optimizer prune files by following the relationship graph
+B: Model a star schema with a fact table at the event grain and denormalized dimension tables, so there are fewer joins and filters can skip files
+C: Flatten everything into one wide table with every dimension attribute copied in, because storage is cheap and dimension tables are unnecessary
+D: Split each dimension into many small tables joined by surrogate keys so each table stays tiny, since many small joins always beat a few large scans
+K: B
+G: ## Dimensional modeling on Databricks
+Databricks can work with any model, but for a new lakehouse it recommends against heavily normalized models such as third normal form and favours **star** or **snowflake** schemas.
+- **Fact table**: one row per business event at a declared grain (an order line, a click), with numeric measures and foreign keys to dimensions.
+- **Dimension tables**: descriptive attributes (customer, product, date) used to filter and group; denormalized so that one join reaches many attributes.
+## Why it fits
+- Fewer joins in typical queries; the optimizer can struggle when one query joins many tables, and it may fail to skip records when the filter is on a field in another table.
+- More attributes in a single table allow file-level statistics to skip large amounts of data.
+- Fewer keys must be kept in sync, which matters because primary and foreign keys are informational and not enforced.
+W: Star schema: a fact table at a clear grain with denormalized dimensions reduces joins and puts filters on tables whose statistics allow data skipping, which is the documented recommendation.
+X: A=Informational foreign keys on 3NF: these constraints are not enforced and only hint at relationships, they do not remove the nine joins and do not turn filters on lookup tables into file pruning.
+C=One wide table with no dimensions: this explodes storage and updates (changing a customer attribute rewrites every fact row) and loses the reuse and governance of shared dimensions.
+D=Many tiny dimension tables: more joins is exactly what the optimizer handles least well, so splitting increases the plan complexity the team wants to remove.
+T: For new analytical models use star or snowflake schemas with a clear fact grain, not heavily normalized 3NF.
+V: Delta Lake, data modeling
+
+@ DBX-DEP D9 T9.2 advanced troubleshooting
+S: A fact table `fact_sales` declares `FOREIGN KEY (customer_sk) REFERENCES dim_customer`, and `dim_customer` declares a primary key on `customer_sk`. A late-arriving fact row with `customer_sk = 987654` is written before the customer exists. The write succeeds, and a BI report that inner-joins the two tables silently drops the sale. How should the pipeline be designed?
+A: Rely on the constraint but add `ENFORCED` to the foreign key, so Unity Catalog rejects the orphan row in the next run
+B: Remove the key declarations from both tables, since the informational constraints are what lets rows be written without a dimension
+C: Handle orphans in the pipeline with an inferred or unknown dimension member, or quarantine, plus quality checks, as keys are not enforced
+D: Make the BI report use a left join with `COALESCE` on every column, because the foreign key then repairs missing dimension rows when the report runs
+K: C
+G: ## Constraints in the lakehouse
+Databricks has two groups of constraints.
+- **Enforced**: `NOT NULL` and `CHECK` verify data before rows are added.
+- **Informational**: primary key, foreign key and unique constraints describe relationships but are not enforced. They document the model, help tools and can help the optimizer, but they never reject a row.
+## Referential integrity is the pipeline's job
+Late-arriving facts are a classic dimensional modeling problem. Typical designs:
+- insert a placeholder dimension row (an inferred member) for the unknown key and update it when the real attribute data arrives;
+- map such facts to an "Unknown" member;
+- quarantine them and report on the quality check.
+Each table is also a separate transaction by default, so a fact and its dimension can be momentarily out of step; downstream queries must tolerate this.
+W: Pipeline-level handling: because foreign keys are informational, the pipeline creates inferred dimension members or quarantines orphans and measures the problem with quality checks.
+X: A=ENFORCED keyword: primary and foreign key constraints on Databricks are informational and cannot be enforced, so no setting makes the write fail.
+B=Removing the declarations: the constraints did not cause the orphan; they only document the model and may help optimization, so removing them loses metadata without fixing the data.
+D=Left join with COALESCE: the constraint does not repair data at query time, and hiding missing dimension rows in each report leaves the sale attributed to no customer.
+T: Primary and foreign keys are informational; enforce referential integrity in the pipeline with inferred members, quarantine and quality checks.
+V: Unity Catalog constraints
+
+@ DBX-DEP D9 T9.2 advanced troubleshooting
+S: `dim_customer` is an SCD Type 2 table with columns `customer_id`, `segment`, `__START_AT` and `__END_AT`, which has several rows per customer. A report joins `fact_orders` to it with `ON f.customer_id = d.customer_id` and revenue by segment is inflated for customers who changed segment. What is the correct modeling fix?
+A: Join on the business key and restrict to the version valid at the order date using `__START_AT` and `__END_AT`
+B: Add `DISTINCT` to the final `SELECT` so that duplicate fact rows disappear from the revenue totals
+C: Convert the dimension to SCD Type 1 and overwrite the segment in place, so every order shows the latest segment and history is dropped
+D: Add a primary key constraint on `customer_id` of the dimension, so the join returns only one match per key because the engine enforces uniqueness
+K: A
+G: ## SCD Type 2 and fact joins
+A Type 2 dimension keeps one row per version of an entity, each with a validity range (`__START_AT` to `__END_AT`, where `__END_AT` is `NULL` for the current version in tables created by AUTO CDC). Joining a fact on the business key alone matches every version of the customer, so each order is repeated once per version and the SUM inflates.
+## Choices
+- **Point-in-time join**: restrict to the version that was valid when the fact happened. This reports the order under the segment the customer had then.
+- **Current version only**: filter `__END_AT IS NULL` when the question is about today's segment.
+- **Surrogate keys**: assign the version's key to the fact at load time so reports can join on it directly.
+## Constraints do not help
+A declared primary key is informational. It cannot make the join return one row per customer.
+W: Point-in-time join: restricting the dimension to the version valid at the order date makes the join return one row per fact and reports each order under the segment of that time.
+X: B=DISTINCT on the result: it removes identical rows, not the extra version rows, and can also delete legitimate fact rows of identical values, which corrupts totals.
+C=Switching to SCD Type 1: this throws away history the business chose to keep and answers a different question (current segment) instead of fixing the join.
+D=Primary key on customer_id: constraints are informational and not enforced, and a business key is not unique in a Type 2 table anyway.
+T: Join facts to SCD Type 2 dimensions on the business key plus the validity range, or on a surrogate key assigned at load time.
+V: Unity Catalog, AUTO CDC, dimensional modeling
+
+@ DBX-DEP D9 T9.2 advanced tradeoff
+S: Finance dashboards read a 4-billion-row `fact_orders` table. Three dashboards need revenue by (day, region), by (day, product) and by (day, region, product), and one of them needs average order value. The team plans materialized views and wants as few as possible with correct results for any roll-up. Which design fits?
+A: One view per dashboard storing `AVG(order_value)` for each grain, because averages can be summed later when a user selects a coarser grain
+B: One materialized view at (day, region, product) storing `SUM(revenue)` and `COUNT(*)`, with dashboards computing the average as a ratio of sums
+C: Three standard views with the same queries, since a standard view keeps its result stored in a table and so is faster than a materialized view
+D: A materialized view that stores `COUNT(DISTINCT customer_id)` per group, and dashboards add those counts to get customers per coarser grain
+K: B
+G: ## Pre-computed aggregation with materialized views
+A materialized view stores the result of a query and refreshes it as sources change, incrementally where the query allows (Delta sources with row tracking), otherwise by full recompute. Dashboards that read the stored result avoid scanning the base table.
+## Grain and additivity
+The stored grain decides which questions can be answered.
+- **Additive** measures (`SUM`, `COUNT`) roll up to coarser grains by summing.
+- **Non-additive** measures (averages, ratios, distinct counts) cannot: the average of group averages is not the overall average, and distinct customers of two groups overlap.
+- Store the **components** (sum and count) and compute the ratio after the roll-up.
+## Trade-off
+One view at the finest needed grain serves all dashboards and has one refresh to maintain, at the price of more rows than the coarsest dashboard needs.
+W: Single view with additive components: sums and counts at the finest grain roll up correctly to every coarser grain, and the average order value is the ratio of the rolled-up sums.
+X: A=Stored averages: an average is not additive, and summing or averaging group averages gives wrong results whenever groups have different sizes.
+C=Standard view: a standard view stores nothing and recomputes its query on demand, so it saves neither scanning nor compute compared with the base table.
+D=Adding distinct counts: customers appear in several groups, so adding the group counts overstates the number of distinct customers at coarser grains.
+T: Materialize additive components at the finest needed grain and compute ratios and averages after roll-up.
+V: Materialized views
+
+@ DBX-DEP D9 T9.2 advanced use-case
+S: Three teams report "revenue per active customer", each in its own standard view that groups by region and divides revenue by distinct customers. A fourth team groups the same view by product and gets numbers that cannot be compared with the others, and the average of regional ratios does not equal the global ratio. The company wants one governed definition that every team can group by any dimension. What should the data engineer build?
+A: A Unity Catalog metric view that defines the ratio measure once, with dimensions as fields, queried with `MEASURE()`
+B: One materialized view per team that stores the regional ratio as a column, plus a policy that teams average the stored ratios
+C: A shared notebook with the formula that each team copies into its own views, adjusted to its grouping when needed
+D: A table with one row per region that a nightly job writes with the ratio, so every team reads the same number
+K: A
+G: ## Metric views
+Unity Catalog **metric views** form a semantic layer. They separate **measure** definitions from the **fields** (dimensions) used to group, filter and aggregate them. A standard view locks in aggregations and groupings when it is created; a metric view defines the metric once, for example sum of revenue divided by the distinct customer count, and users group by any available field at query time. The query engine generates the correct computation for the chosen grouping.
+## Core components
+- Source: a table-like asset or a SQL query
+- Joins to dimension tables
+- Filters that define the scope (for example only completed orders)
+- Fields: categorical or unaggregated columns
+- Measures: aggregations, with composability (measures can reference other measures)
+Consumers evaluate a measure with `MEASURE(measure_name)` while grouping by fields.
+## Why it fixes the problem
+A ratio of aggregates must be computed from the numerator and denominator at the chosen grain. Because the measure is defined once, every grouping calculates it consistently, instead of averaging pre-computed ratios.
+W: Metric view: one governed definition of the ratio measure with fields as dimensions lets every team group by region, product or any other field and get a correctly computed value for that grouping.
+X: B=Stored regional ratios: averaging ratios of groups of different size is the exact error that produced inconsistent figures, and it cannot answer the product grouping.
+C=Copied formula: each copy can drift, nothing governs which version is correct, and each team keeps the grouping it chose when writing the view.
+D=Per-region table: it fixes only the regional grain, so teams cannot group by product or other attributes, and the distinct count cannot be recomputed from the stored ratio.
+T: Define ratio and distinct-count measures once in a metric view and group by any field at query time; do not store or average ratios.
+V: Unity Catalog metric views
+
+@ DBX-DEP D9 T9.2 advanced troubleshooting
+S: A metric view uses `fact_orders` as its source and joins `dim_customer`, an SCD Type 2 table with several rows per `customer_id`, on `customer_id`. Revenue by customer segment is wrong for customers who changed segment: the numbers show only one version of the segment. What explains the result and what is the fix?
+A: Metric views reject joins to Type 2 tables, so the engine copies the fact table first; replace the join with an `INNER JOIN` in the dashboard
+B: The join is many-to-many and the engine takes the first matching row; join a source query with one row per customer
+C: Metric view measures are always evaluated on the dimension table, so revenue is attributed to the segment of the dimension row stored last
+D: The metric view repeated the fact rows for each version of the dimension, so a measure should divide revenue by the number of versions
+K: B
+G: ## Joins in metric views
+A metric view's `source` is usually the fact table. It joins dimension tables with a `LEFT OUTER JOIN`; star schemas (fact joined to dimensions) and snowflake schemas (multi-level dimensions) are supported. Joins are made only when the selected fields and measures need the joined table.
+- The join must be **many-to-one**: each fact row matches at most one dimension row.
+- With a many-to-many relationship the engine selects the first matching row of the joined table, so results are silently incomplete rather than failing.
+- `rely.at_most_one_match: true` declares the many-to-one relationship, which allows the engine to optimize filters on joined fields.
+## Fix for a Type 2 dimension
+Do not join the raw history. Give the join a `source` that is a SQL query yielding exactly one row per key: the current version, or a point-in-time design in which the fact carries a surrogate key of the right version.
+W: First-match behaviour of many-to-many joins: the engine takes one row from the dimension, so the join must be to a source with one row per key to get a deterministic, intended segment.
+X: A=Rejection of Type 2 joins: nothing in the metric view rejects such tables, it accepts the join and applies the first-match rule; an INNER JOIN in a dashboard does not change what the metric view does.
+C=Evaluation on the dimension: measures aggregate the source fact columns, and the dimension only supplies grouping fields, so revenue does not come from the last stored dimension row.
+D=Fact duplication: the many-to-one rule means the engine does not expand fact rows for one-to-many dimensions, and dividing by version counts would be an incorrect, fragile patch.
+T: Metric view joins must be many-to-one; a many-to-many join silently picks the first match, so join a one-row-per-key source.
+V: Unity Catalog metric views
+
+@ DBX-DEP D9 T9.2 advanced comparison
+S: A team has a gold materialized view that cleans, joins and denormalizes orders for performance and wants to publish governed KPIs to dashboards, notebooks and AI assistants. A colleague proposes to put the KPI logic inside the same materialized view as extra aggregated columns. What is the better division of responsibilities?
+A: Keep both in the materialized view, because a materialized view can store several groupings at once and so also serves as the semantic layer
+B: Move the heavy joins into a standard view and define the KPIs in the materialized view, because a standard view is always faster than stored results
+C: Keep the materialized view as the stored layer and define a metric view on top, so measures and fields are defined once
+D: Drop the materialized view and put all cleaning, joining and denormalizing logic into the metric view, since metric views replace transformation tables
+K: C
+G: ## Two layers, two jobs
+- A **materialized view** physically stores the result of a query, refreshed incrementally when possible. It is a performance and transformation tool: clean, enrich and denormalize base tables and serve pre-computed results.
+- A **metric view** is a semantic definition: it states what to measure (measures), how to segment (fields), the joins and the filters that define scope. It is evaluated at query time for the grouping that the user chooses.
+Metric view sources can be a table, a view, a materialized view, a streaming table or a SQL query, so the layers combine naturally: pipeline output feeds the metric view.
+## Why not merge them
+Aggregated columns in a materialized view fix the grouping and the formula at build time, so each new question needs a new column or view. Putting the semantic definitions on top keeps the heavy work stored once and the KPI meaning defined once.
+(Metric views can also be materialized by Databricks, which keeps the definition separate from how it is stored.)
+W: Layering: the materialized view carries the expensive transformation as stored data, and the metric view on top defines governed measures and fields that every consumer groups as needed.
+X: A=Everything in the materialized view: stored aggregated columns fix the grouping and formula at creation time, so they cannot answer new groupings and do not define reusable fields and measures for BI and AI tools.
+B=Standard view for joins: a standard view recomputes on demand, so it is not faster than stored results, and KPIs inside a materialized view repeat the fixed-grouping problem.
+D=Metric view as the only layer: a metric view defines measures and joins over a source; it is not a substitute for the stored transformation layer that makes sources clean and fast.
+T: Use materialized views for stored transformations and metric views for governed measures and dimensions on top of them.
+V: Materialized views, Unity Catalog metric views
+
+@ DBX-DEP D9 T9.2 advanced troubleshooting
+S: A gold table `fact_orders` stores one row per order line. It also carries the order-level `shipping_fee`, repeated on every line of the order. Finance reports `SUM(shipping_fee)` that is far higher than the invoiced shipping, while `SUM(line_amount)` is correct. What design change fixes the model?
+A: Add a primary key on `order_id` in the fact table, so the engine removes the repeated shipping values at query time
+B: Divide `shipping_fee` by the largest `line_number` in every report, because the repeated lines are a reporting issue only
+C: Keep the table, but change `shipping_fee` to a `DOUBLE` type, so repeated values are no longer added together
+D: Keep each fact table at one declared grain: move the shipping fee to an order-level fact table or allocate it to lines in the load
+K: D
+G: ## Fact table grain
+The **grain** states what one row of a fact table represents, for example one order line. Every measure in the table must be true at that grain. A measure that belongs to a coarser level (the order) and is repeated on each line is not additive: summing it counts it once per line.
+## Fixes
+- Create a second fact table at the order grain for order-level measures (shipping fee, order discount), joined to the same dimensions.
+- Or allocate the order-level amount to its lines during the load (for example in proportion to the line amount), so the sum over lines equals the order value.
+## What does not help
+Informational primary keys do not change query results, and report-side divisions hide the problem in each report. The model should make the correct aggregate the easy one.
+W: One grain per fact table: moving the order-level fee to an order-grain fact or allocating it to lines during load makes every stored measure additive at its table grain.
+X: A=Primary key on order_id: keys are informational and not enforced and do not deduplicate, and an order id repeats across lines anyway.
+B=Division in reports: each report must copy the workaround and orders with different line counts and gaps break it, so the model stays wrong.
+C=Changing the data type: the type affects precision and not the number of times a repeated value is added.
+T: Each fact table has one declared grain, and measures that belong to a coarser level go to a separate fact or are allocated.
+V: Delta Lake, dimensional modeling
