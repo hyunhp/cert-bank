@@ -1,0 +1,561 @@
+# DBX-DEP batch 07: T4.5 Jobs monitoring (2), T5.1 managed tables / Predictive Optimization / Liquid Clustering overhead (7), T5.2 deletion vectors vs Liquid Clustering vs CLUSTER BY AUTO (9), T5.3 disk cache (6), T5.4 Change Data Feed (4) (guide read 2026-11-07)
+# src: https://docs.databricks.com/aws/en/jobs/monitor
+# src: https://docs.databricks.com/aws/en/tables/managed
+# src: https://docs.databricks.com/aws/en/optimizations/predictive-optimization
+# src: https://docs.databricks.com/aws/en/delta/clustering
+# src: https://docs.databricks.com/aws/en/delta/deletion-vectors
+# src: https://docs.databricks.com/aws/en/optimizations/disk-cache
+# src: https://docs.databricks.com/aws/en/delta/delta-change-data-feed
+
+@ DBX-DEP D4 T4.5 advanced troubleshooting
+S: A Lakeflow Jobs job has the chain `extract` -> `load` -> `cleanup`, where `cleanup` uses the run-if condition "All done". In one run `load` fails and `cleanup` still runs and succeeds. The on-call dashboard counts only runs whose result is "Failed". What does the Jobs UI report for this run, and what does that mean for monitoring?
+A: The run is Succeeded with failures, because its only leaf task succeeded, so a filter on "Failed" misses it and task-level statuses are needed
+B: The run is Failed, because any failed task fails the whole run, so the dashboard counts it and the result of `cleanup` has no effect
+C: The run is Succeeded, because tasks with run-if conditions are left out of the status, so only the result of `extract` decides the run state
+D: The run is Skipped, because `cleanup` replaced the failed task, so the dashboard ignores it until the failed task is repaired
+K: A
+G: ## How a job run status is derived
+Lakeflow Jobs does not compute the run status from every task. It looks at the **leaf tasks**, the tasks that have no downstream dependents.
+- **Succeeded**: all tasks succeeded.
+- **Succeeded with failures**: some tasks failed, but all leaf tasks succeeded.
+- **Failed**: one or more leaf tasks failed.
+- **Skipped**: the run did not execute, for example because the maximum number of concurrent runs was exceeded.
+## Why this matters for monitoring
+A task with a run-if condition such as "All done" executes even when its upstream failed. When that task is the leaf and it succeeds, the failure of an inner task is not visible in the run-level status. Dashboards and alerts that filter on run status alone can miss real failures, so production jobs should also notify on task-level failures or inspect the task statuses in the run matrix and the Graph, Timeline and List views of the run.
+W: Succeeded with failures: `cleanup` is the only leaf task and it succeeded while `load` failed, which is exactly the definition of this status, so a filter on "Failed" does not list the run.
+X: B=Any failure fails the run: run status is derived from the leaf tasks, not from every task, so a failed inner task does not make the run Failed on its own.
+C=Run-if tasks ignored: a run-if condition only decides whether a task executes. The failed `load` is still recorded and is what produces the "with failures" qualifier.
+D=Skipped run: Skipped describes a run that was not executed, for example because of the concurrency limit. A run in which tasks ran and one failed is never reported as Skipped.
+T: Run status follows the leaf tasks, so a successful "All done" leaf hides an inner failure behind Succeeded with failures.
+V: Lakeflow Jobs
+
+@ DBX-DEP D4 T4.5 applied troubleshooting
+S: An Apache Airflow DAG starts Databricks work with `DatabricksSubmitRunOperator`. An engineer opens the workspace Runs list and types the Airflow task name into the Name filter, but the runs do not appear, although the Run status filter shows failures from that hour. How should the engineer find the runs, and what is the more durable design?
+A: Filter by Run ID, Run as or start time, because submitted runs are one-time runs not backed by a saved job; for durable searchable history create a job and trigger it
+B: Wait for the 60-day retention window to index the runs under the Airflow DAG name, because one-time runs are added to the Name filter only after retention completes
+C: Filter by the Launched column set to schedule, because Airflow runs are always scheduled runs that carry the DAG name as the job name in the list
+D: Export the runs to HTML first, because runs from external orchestrators are visible in the Runs list only after their notebook output has been exported
+K: A
+G: ## One-time runs versus jobs
+The Jobs API `runs/submit` endpoint, also used by the Airflow `DatabricksSubmitRunOperator`, creates a **one-time run**. No saved job exists behind it, so the run has no job Name, no stored settings and no built-in retry configuration.
+## Finding them in the Runs list
+The Runs tab of the Jobs & Pipelines area lists runs of all jobs and pipelines you can access for 60 days, including runs started by external orchestrators. Because a one-time run has no job, you cannot find it by job Name. Use filters that do apply: **Run ID**, **Run as**, the start or end time window, status or error code.
+## Durable design
+When the team wants searchable history, tags and retries per job, define a real job with `jobs/create` and trigger it with `run-now` from Airflow (`DatabricksRunNowOperator`), so runs are grouped under one job.
+W: Filter by run attributes: one-time runs lack a job name, so Run ID, Run as and time filters find them, and a saved job triggered by the orchestrator gives a durable, named history.
+X: B=Retention indexing: retention only removes history after 60 days. Nothing ever adds a one-time run to the Name filter, because there is no job name to match.
+C=Launched filter: the Launched column shows how a run was triggered, such as a schedule, an API request or a manual start. Airflow submissions arrive as API requests and carry no job name.
+D=HTML export first: exporting is a way to keep a rendered notebook run after expiry. It plays no role in whether a run is listed.
+T: Runs from `runs/submit` are one-time runs without a job name, so find them by run ID, run-as or time, and use saved jobs for durable history.
+V: Lakeflow Jobs
+
+@ DBX-DEP D5 T5.1 applied tradeoff
+S: A platform team owns 300 external Delta tables in Unity Catalog. Every table needs hand-scheduled compaction, `VACUUM`, statistics refresh and clustering-key reviews, and the team wants to remove that operations work without writing new maintenance jobs. Which approach delivers the most overhead reduction?
+A: Convert the tables to Unity Catalog managed tables and enable predictive optimization with automatic liquid clustering, so Databricks schedules maintenance and adapts the keys
+B: Keep the tables external and enable predictive optimization on their catalog, because the setting applies to every table type as long as the schema inherits it
+C: Keep the tables external and add `delta.autoOptimize.optimizeWrite` on each table, because optimized writes replace `VACUUM`, statistics refresh and key selection
+D: Move the maintenance into one serverless Lakeflow Jobs job per schema that runs `OPTIMIZE` and `VACUUM`, because scheduled jobs are what predictive optimization uses on any table
+K: A
+G: ## What managed tables add
+Unity Catalog **managed tables** are the default and recommended table type. Unity Catalog manages their storage, reads, writes and optimization. Several features exist only for managed tables, not for external or foreign tables:
+- **Predictive optimization** runs `OPTIMIZE`, `VACUUM` and `ANALYZE` when its analysis says the table benefits.
+- **Automatic liquid clustering** (`CLUSTER BY AUTO`) selects and updates clustering keys from query history.
+- Automatic file deletion after `DROP TABLE`, catalog commits and multi-statement transactions.
+## The decision
+Predictive optimization only supports Unity Catalog managed tables. The way to remove the maintenance work is therefore to convert external tables to managed tables first, then enable predictive optimization (and automatic liquid clustering where the query patterns change).
+W: Managed tables plus predictive optimization: the conversion makes the tables eligible, and the platform then runs compaction, vacuum, statistics and key selection with no team-owned jobs.
+X: B=Catalog setting on external tables: predictive optimization supports only managed tables, so enabling it on the catalog leaves external tables without maintenance.
+C=Optimized writes: optimized writes only improve file sizes during a write. They do not vacuum unreferenced files, refresh statistics or choose clustering keys.
+D=Per-schema jobs: this keeps the team-owned maintenance the requirement tries to remove, and predictive optimization does not run as a user-defined job.
+T: Predictive optimization and automatic liquid clustering work only on Unity Catalog managed tables, so convert external tables first.
+V: Unity Catalog managed tables, Predictive optimization
+
+@ DBX-DEP D5 T5.1 applied use-case
+S: Finance wants to know what predictive optimization costs and which tables it changes. The platform engineer is told that the maintenance is not billed to any team cluster. Where does that work run, and where can the engineer audit it?
+A: It runs on serverless jobs compute billed as a serverless SKU, and `system.storage.predictive_optimization_operations_history` lists operations
+B: It runs on the driver of the cluster that last wrote the table, and the Spark UI of that cluster shows the maintenance operations as queries
+C: It runs on a shared SQL warehouse chosen at the catalog level, and the warehouse query history is the only place that lists the operations
+D: It runs inside the control plane without any compute cost, and Unity Catalog audit logs carry the details but never operation counts or costs
+K: A
+G: ## Compute and observability
+Predictive optimization runs `OPTIMIZE`, `VACUUM`, `ANALYZE` and index refresh on **serverless compute for jobs**. It does not borrow the cluster of the last writer and you do not size anything. Because it is serverless, it is billed to the account as a serverless jobs SKU.
+## Auditing
+Databricks exposes the system table `system.storage.predictive_optimization_operations_history` for operations, costs and impact. Joining it to billing usage lets FinOps attribute the cost per table and operation type. Together with the `DESCRIBE TABLE EXTENDED ... AS JSON` evaluation results and the Catalog Explorer History tab, you can also see why a table was skipped.
+W: Serverless jobs compute plus the system table: the work is billed as a serverless jobs SKU and the operations history table lists what ran and the effect.
+X: B=Driver of the last writer: maintenance is not tied to a user cluster, so the Spark UI of a writer never shows it.
+C=Shared SQL warehouse: no warehouse is configured for predictive optimization. It uses serverless compute for jobs, so warehouse query history is not its record.
+D=Free control plane work: the operations consume serverless compute that is billed. The system table also records operations and cost, not just generic audit events.
+T: Predictive optimization runs on billed serverless jobs compute and is audited through the predictive optimization operations history system table.
+V: Predictive optimization, system tables
+
+@ DBX-DEP D5 T5.1 advanced troubleshooting
+S: A team enables predictive optimization on a catalog whose tables hold 90 days of history for audits and sometimes need time travel of 30 days. Weeks later, queries with `VERSION AS OF` older than 8 days fail because files are gone. No one ran `VACUUM`. What should have been done, and what fixes the future behavior?
+A: Set `delta.deletedFileRetentionDuration` to 30 days on the tables before relying on predictive optimization, because its `VACUUM` honors that property
+B: Disable `VACUUM` in the predictive optimization settings for the catalog, because the operation list can be edited per operation type on every table
+C: Increase the `delta.logRetentionDuration` only, because the log retention alone controls how long data files stay on storage after vacuum
+D: Run `OPTIMIZE` more often so that old versions are compacted into the newest version, because compaction keeps the files needed for time travel
+K: A
+G: ## Time travel depends on file retention
+Delta time travel reads old table versions through data files that the transaction log no longer references but that still exist on storage. `VACUUM` deletes unreferenced files older than the retention threshold, which comes from the table property `delta.deletedFileRetentionDuration` (default 7 days).
+## Predictive optimization and VACUUM
+Predictive optimization runs `VACUUM` for managed tables. It respects the retention property, and even when the property is set below 7 days, it keeps files for a minimum of 7 days. If you need longer time travel, **set the property before enabling predictive optimization**, for example:
+`ALTER TABLE t SET TBLPROPERTIES ('delta.deletedFileRetentionDuration' = '30 days')`
+Log retention (`delta.logRetentionDuration`) controls how long the history metadata stays, but a missing data file still breaks the read.
+W: Table-level file retention: setting the deleted file retention to 30 days makes predictive optimization's `VACUUM` keep unreferenced files that long, so older versions stay readable.
+X: B=Operation toggles: predictive optimization is enabled or disabled for an account, catalog, schema or table. The documentation gives no per-operation switch for `VACUUM`.
+C=Log retention only: the log can still list the version, but the read fails when its data files were vacuumed, so file retention is the control that matters.
+D=More OPTIMIZE: compaction writes new files and leaves old files unreferenced. Those old files are what `VACUUM` then removes, so compaction does not preserve history.
+T: Set `delta.deletedFileRetentionDuration` for the needed time-travel window before predictive optimization starts vacuuming.
+V: Predictive optimization, Delta time travel
+
+@ DBX-DEP D5 T5.1 advanced troubleshooting
+S: A managed table has predictive optimization enabled through its schema, yet analysts see slow filters on `order_date` and the table was never given clustering keys. The engineer wants the reason predictive optimization did or did not act on automatic clustering key selection. Which action gives that information?
+A: Run `DESCRIBE TABLE EXTENDED ... AS JSON` and read `predictive_optimization_evaluations`, or open the table History in Catalog Explorer
+B: Query `system.access.audit` for failed `OPTIMIZE` statements, because skipped evaluations are written there as errors with a reason code
+C: Read the Spark UI of the last writer cluster, because predictive optimization evaluations run on that cluster and log skipped keys there
+D: Run `ANALYZE TABLE ... COMPUTE STATISTICS` and compare the row counts, because clustering is skipped whenever statistics are older than the table
+K: A
+G: ## Why automatic clustering may do nothing
+Automatic liquid clustering (`CLUSTER BY AUTO`) picks keys only when it is cost-aware worthwhile. It can skip a table when:
+- the table is too small to benefit,
+- the table already has an effective layout, such as keys that match the query pattern or insertion order,
+- the table has few queries to learn from.
+## How to find out
+After predictive optimization evaluates a managed table, each operation type has a latest evaluation result: `COMPACTION`, `CLUSTERING`, `AUTO_CLUSTERING_COLUMN_SELECTION` and `VACUUM`. You can read them with `DESCRIBE TABLE EXTENDED ... AS JSON` (field `predictive_optimization_evaluations`) or in the History tab of Catalog Explorer, where rows labelled "Not applied" carry the skip reason. Results can take some time to appear, and only the latest evaluation is kept. Note also that automatic clustering has to be turned on for the table, not only predictive optimization.
+W: Evaluation results: the JSON describe output and the History tab are the documented places where the skip reason of each predictive optimization operation is shown.
+X: B=Audit log search: skipped evaluations are not statement failures, and the audit system table is not the documented source for skip reasons.
+C=Writer cluster Spark UI: predictive optimization runs on serverless jobs compute, not on the cluster that wrote the data, so that Spark UI has nothing about it.
+D=Statistics comparison: stale statistics are not the documented reason, and running `ANALYZE` returns no information about key selection.
+T: Use `predictive_optimization_evaluations` from `DESCRIBE TABLE EXTENDED ... AS JSON` or the Catalog Explorer History tab to see why an operation was skipped.
+V: Predictive optimization, Liquid Clustering
+
+@ DBX-DEP D5 T5.1 applied tradeoff
+S: An engineer drops several external Delta tables and several managed tables in the same catalog to cut costs, then notices that cloud storage cost fell only for some of them. Which statement explains the difference and the operational advantage of managed tables?
+A: Dropping a managed table makes Databricks delete its files after a recovery period, while files of an external table stay and must be deleted manually from storage
+B: Dropping an external table deletes its files immediately, while files of a managed table stay until `VACUUM` is run with a zero-hour retention
+C: Dropping either type deletes the files after the recovery period, so the difference comes from the clusters that were still caching old files
+D: Dropping a managed table leaves files in place permanently, because the catalog cannot delete data it does not own, whereas external table files expire with the metastore
+K: A
+G: ## Dropping tables
+- **Managed table**: Unity Catalog owns the data files. After `DROP TABLE`, the table can be recovered for a recovery period (7 days by default, configurable at catalog or schema level), and then Databricks automatically deletes the files in cloud storage.
+- **External table**: Unity Catalog owns only the metadata. `DROP TABLE` removes the table definition, and the files in your own bucket stay until you delete them.
+## Operational impact
+Forgotten external data keeps costing storage and may keep sensitive data longer than intended. Managed tables remove this clean-up task and are one of the features that reduce operational overhead.
+W: Managed versus external drop behavior: files of a managed table are removed automatically after the recovery period, while an external table's files remain until someone deletes them.
+X: B=Reversed behavior: dropping an external table never deletes its files, and managed table files are removed by the platform without a manual `VACUUM`.
+C=Caching explanation: cached copies live on worker disks and do not stop cloud storage deletion, so they cannot explain different storage bills.
+D=Permanent managed files: Unity Catalog does own managed table files and deletes them after the recovery period; external files are not removed by the metastore.
+T: Managed tables get automatic file deletion after the drop recovery period; external table files must be removed manually.
+V: Unity Catalog managed tables
+
+@ DBX-DEP D5 T5.1 advanced use-case
+S: A streaming job appends micro-batches of about 5 MB each to a liquid-clustered managed table. Over weeks the data skipping on the clustering keys degrades, although the table definition never changed. Predictive optimization is disabled for this table. What explains the degradation and what is the lowest-overhead fix?
+A: Clustering on write only triggers when a transaction reaches a size threshold, so small batches stay unclustered; enable predictive optimization so incremental clustering runs
+B: Liquid clustering clusters only data written by batch jobs, so streaming writers never produce clustered files; convert the sink to a partitioned table to restore skipping
+C: Clustering keys expire after a fixed number of commits, so the keys must be re-declared with `ALTER TABLE ... CLUSTER BY` every night by a scheduled job
+D: Streaming checkpoints block clustering metadata, so the stream must be restarted with a new checkpoint each week to rebuild the data layout
+K: A
+G: ## Clustering on write
+Liquid clustering clusters data during some writes (`INSERT INTO`, CTAS/RTAS, `COPY INTO`, append writes). Clustering on write only triggers when the data in the transaction meets a **size threshold** that depends on the number of clustering columns (lower for managed tables than for other Delta tables). Small micro-batches fall below it and land unclustered. Structured Streaming needs an additional setting for eager clustering on write, and then only when recent updates exceed the thresholds.
+## Incremental clustering
+`OPTIMIZE` clusters the data that is not yet clustered, incrementally. Predictive optimization runs `OPTIMIZE` for enabled managed tables, and Databricks recommends disabling scheduled `OPTIMIZE` jobs when it is on. So enabling predictive optimization removes the maintenance work.
+W: Threshold plus predictive optimization: tiny micro-batches are not clustered at write time, and predictive optimization's incremental `OPTIMIZE` clusters them without a manual job.
+X: B=Batch only: streaming writes into clustered tables are supported; they are just clustered on write under extra conditions, so partitioning is not required.
+C=Expiring keys: clustering keys stay in the table metadata until changed. They do not expire and need no nightly re-declaration.
+D=Checkpoint blocking: checkpoints track stream progress and do not hold clustering metadata, so recreating them rebuilds nothing.
+T: Small writes skip clustering on write, so rely on predictive optimization's incremental `OPTIMIZE` instead of manual clustering jobs.
+V: Liquid Clustering, Predictive optimization
+
+@ DBX-DEP D5 T5.2 advanced tradeoff
+S: A 20 TB Delta table receives a nightly `MERGE` that updates about 0.1% of rows scattered across most files. The job rewrites a large share of the Parquet files and runs for hours, while the reading queries are already fast. Which change targets the write cost, and what does it add?
+A: Enable deletion vectors, so changed rows are marked in metadata instead of rewriting files; reads apply them until compaction rewrites the files
+B: Add more clustering keys with `CLUSTER BY`, so changed rows land in fewer files; reads then need no extra work because keys are free
+C: Turn on the disk cache on all workers, so the files rewritten by `MERGE` are served from local SSD; reads then pay only the first fetch
+D: Run `VACUUM` before every merge, so old files do not slow the file lookup; reads then apply a lower retention threshold
+K: A
+G: ## Write amplification
+Without deletion vectors, changing one row requires rewriting the whole Parquet file that contains it. A `MERGE` that touches few rows in many files rewrites most of the table.
+## Deletion vectors
+With deletion vectors, `DELETE`, `UPDATE` and `MERGE` mark rows as removed in a small side structure and write the new row versions elsewhere. The file is not rewritten. Readers apply the vector at query time to compute the current state.
+## Trade-offs
+- Reads carry a small extra cost until the files are physically rewritten (`OPTIMIZE`, `REORG TABLE ... APPLY (PURGE)`, or auto-compaction).
+- Enabling them upgrades the table protocol, so clients without support cannot read the table.
+- Tables with deletion vectors support row-level concurrency.
+They fit write-heavy patterns with scattered modifications, whereas clustering improves read pruning.
+W: Deletion vectors: marking modified rows in metadata avoids rewriting the scattered files, which is the actual cost, and the price is query-time application until compaction.
+X: B=More clustering keys: clustering improves read pruning and does not stop a merge from rewriting the files that contain changed rows. Extra keys can even reduce skipping for single-column filters on smaller tables.
+C=Disk cache: caching accelerates reads of unchanged data files and does nothing about the writing of new Parquet files during the merge.
+D=VACUUM before merges: vacuum deletes unreferenced files after the retention period and is unrelated to the amount of data a merge rewrites.
+T: Deletion vectors cut the cost of scattered row-level changes by avoiding file rewrites, at the price of read-time application until compaction.
+V: Delta deletion vectors
+
+@ DBX-DEP D5 T5.2 advanced troubleshooting
+S: After a platform team enabled deletion vectors on a Delta table, a downstream analytics service that uses an older open-source Delta reader begins failing on reads of the table, while Databricks queries work. The team cannot upgrade that reader this quarter. What is the supported way to restore compatibility?
+A: Drop the deletion vectors table feature from the table, which removes the feature from the protocol so older clients can read it again
+B: Delete the `_delta_log` entries that mention deletion vectors, because readers fail on protocol actions that are older than the table
+C: Rewrite the table with `VACUUM` at zero retention, because vacuum removes the deletion vector files and resets the protocol
+D: Set `spark.databricks.delta.reorg.purgeMode` to `rows` on the older reader, because that configuration makes the reader ignore protocol features
+K: A
+G: ## Deletion vectors change the protocol
+When you enable deletion vectors, Databricks upgrades the table protocol. Clients without deletion vector support can no longer read the table. Support varies by client and version, so external engines are the usual place where this shows up.
+## Reverting
+Disabling the table property only stops new deletion vectors; it does not downgrade the protocol by itself. To restore compatibility, **drop the table feature** with `ALTER TABLE ... DROP FEATURE deletionVectors`, which purges existing deletion vectors and downgrades the protocol (supported in newer runtimes, with legacy support in older ones). The purge configuration `spark.databricks.delta.reorg.purgeMode` only affects how large purges are scoped.
+Editing `_delta_log` by hand corrupts the table.
+W: Drop the table feature: this rewrites files that have deletion vectors and removes the feature from the protocol, so the older reader can read again.
+X: B=Editing the log: manual log edits risk corrupting the table, and the protocol is changed with a documented command, not by deleting entries.
+C=Zero-retention VACUUM: vacuum deletes unreferenced files and never rewrites data with pending deletion vectors or downgrades the protocol.
+D=Purge mode on the reader: that setting belongs to purge operations on the Databricks side and does not change what protocol features a reader understands.
+T: To make a table readable by clients without deletion vector support, drop the deletion vectors table feature.
+V: Delta deletion vectors
+
+@ DBX-DEP D5 T5.2 applied troubleshooting
+S: A table with deletion vectors enabled feeds a Presto-compatible symlink manifest, and the `GENERATE symlink_format_manifest` step now fails. Writers keep running throughout the day. Which sequence resolves it?
+A: Run `REORG TABLE ... APPLY (PURGE)` with no concurrent writes, then generate the manifest; incremental generation stays unsupported
+B: Run `OPTIMIZE ZORDER BY` on the table, then enable incremental manifest generation with the table property, which supports deletion vectors natively
+C: Run `VACUUM` with the default retention, then run the generation; vacuum rewrites files with deletion vectors into clean files
+D: Disable the disk cache on the cluster, then rerun the generation, because cached deletion vectors cause manifest generation to fail
+K: A
+G: ## Manifest generation and deletion vectors
+Symlink-format manifests list the Parquet files for engines such as Presto or Athena. Those engines cannot apply deletion vectors, so Databricks does not generate a manifest for a table whose files use deletion vectors.
+## Workaround
+1. Make sure no concurrent writes run.
+2. Run `REORG TABLE ... APPLY (PURGE)`, which rewrites all files that carry deletion vector changes.
+3. Run `GENERATE` for the manifest.
+Incrementally generated manifests (the symlink-format-manifest table property) are also not supported for tables with deletion vectors enabled, so each refresh needs the purge first, or the table feature must be dropped.
+W: Purge then generate: rewriting the files with deletion vectors makes them plain Parquet files that a manifest can list, provided nothing writes meanwhile.
+X: B=ZORDER and incremental manifests: Z-ordering does not purge deletion vectors, and incremental manifest generation is documented as unsupported with deletion vectors.
+C=Default VACUUM: vacuum removes unreferenced files only; it does not rewrite files that have soft-deleted rows.
+D=Disk cache: the cache holds file data for reads and has no effect on manifest generation.
+T: Purge deletion vectors with `REORG TABLE ... APPLY (PURGE)` before generating a symlink manifest.
+V: Delta deletion vectors
+
+@ DBX-DEP D5 T5.2 advanced use-case
+S: A Delta table in the team's own external storage (not Unity Catalog managed) is queried all day with filters on `tenant_id` and `event_date`; this access pattern has been stable for a year. The team wants better data skipping without partitioning. Which choice is correct?
+A: Set manual keys with `CLUSTER BY (tenant_id, event_date)`, because automatic key selection is only available for Unity Catalog managed tables
+B: Use `CLUSTER BY AUTO`, because automatic liquid clustering selects keys for any Delta table, including external tables outside Unity Catalog management
+C: Enable deletion vectors, because they store min and max values per file and improve data skipping on filtered columns
+D: Enable predictive optimization on the table and leave the keys unset, because it chooses keys for external tables from query history
+K: A
+G: ## Choosing the technique by access pattern
+- Selective filters on known columns of a table with a stable query pattern: **liquid clustering with explicit keys** (`CLUSTER BY (col1, col2)`).
+- Changing or unknown query patterns on a Unity Catalog managed table: **`CLUSTER BY AUTO`** lets predictive optimization pick and evolve keys.
+- Scattered row-level changes making writes expensive: **deletion vectors**.
+## The managed table constraint
+Automatic liquid clustering and predictive optimization are available only for Unity Catalog managed tables. For an external table, you choose the keys yourself. Deletion vectors do not store statistics: they mark deleted rows, so they are unrelated to data skipping.
+W: Manual clustering keys: the filters are stable and the table is external, so declaring the keys yourself is both possible and effective.
+X: B=CLUSTER BY AUTO on external: automatic liquid clustering requires predictive optimization, which supports only managed tables, so it cannot be used here.
+C=Deletion vectors for skipping: they record which rows were removed from files, not min/max statistics, so they do not improve filtering.
+D=Predictive optimization on external: predictive optimization supports only managed tables, so it ignores this table.
+T: Use explicit liquid clustering keys for stable filters on external tables; automatic keys need managed tables with predictive optimization.
+V: Liquid Clustering
+
+@ DBX-DEP D5 T5.2 applied use-case
+S: A managed table uses explicit keys `CLUSTER BY (region)`. Analysts always filter on `region` but other filters have drifted over time. The team wants to keep `region` as a starting hint and let Databricks adapt further. Which statements do this?
+A: `ALTER TABLE sales CLUSTER BY (region);` then `ALTER TABLE sales CLUSTER BY AUTO;`
+B: `ALTER TABLE sales CLUSTER BY AUTO (region);` because the column list is an argument of the auto keyword
+C: `ALTER TABLE sales CLUSTER BY NONE;` then `OPTIMIZE sales ZORDER BY (region);` to let Databricks adapt the z-order
+D: `ALTER TABLE sales SET TBLPROPERTIES ('delta.autoClustering' = 'region');` to seed the key selection
+K: A
+G: ## Seeding automatic liquid clustering
+`CLUSTER BY AUTO` can be enabled on an existing table, including a table with manually specified keys. To give the selection **initial hints**, set the clustering keys first and then turn on automatic clustering:
+`ALTER TABLE sales CLUSTER BY (region);`
+`ALTER TABLE sales CLUSTER BY AUTO;`
+Databricks analyzes the query workload, and changes the keys only when the predicted data skipping gain outweighs the cost of re-clustering. It runs asynchronously through predictive optimization, so the table must be a Unity Catalog managed table.
+`CLUSTER BY NONE` removes clustering. Z-ordering is not combined with liquid clustering.
+W: Set keys, then AUTO: the explicit keys act as the initial hints and the second statement lets predictive optimization adapt them over time.
+X: B=AUTO with a column list: the automatic clause takes no column arguments, so the statement is invalid.
+C=NONE plus ZORDER: removing clustering and using Z-order brings back the manual technique the team is moving away from, and `ZORDER` never adapts.
+D=Invented property: there is no such table property; the documented way is the two-statement sequence.
+T: Set explicit keys first and then `CLUSTER BY AUTO` to seed automatic liquid clustering with hints.
+V: Liquid Clustering
+
+@ DBX-DEP D5 T5.2 advanced troubleshooting
+S: A table with `CLUSTER BY AUTO` used to skip well. After a refactor, a nightly job runs `CREATE OR REPLACE TABLE sales_agg AS SELECT ...` without a clustering clause, and filter performance on the table falls back to full scans. The previous clustering columns are also gone. What happened and how is it fixed?
+A: Replacing the table without `CLUSTER BY AUTO` turns off automatic clustering and drops the columns, so restate the clause
+B: The nightly job exhausted the key budget of predictive optimization, so its clustering is paused until the next billing month starts
+C: `CREATE OR REPLACE` keeps all clustering properties, so the scans come from stale statistics and need a manual `ANALYZE` on the table
+D: Automatic clustering is disabled for tables created with CTAS, so the table must be created empty and then loaded with `INSERT`
+K: A
+G: ## Replacing a table resets its layout settings
+For a table that has automatic liquid clustering, running `CREATE OR REPLACE TABLE` **without** `CLUSTER BY AUTO` turns off automatic clustering and does not keep the previously selected clustering columns. Layout settings are part of the definition you give in the statement.
+## Fix and prevention
+Include `CLUSTER BY AUTO` (or explicit `CLUSTER BY (...)`) in every `CREATE OR REPLACE` or `REPLACE TABLE ... AS` statement, or switch to `INSERT OVERWRITE` / `MERGE` when only the data should change. Check the setting with `DESCRIBE TABLE` or `SHOW TBLPROPERTIES`: the `clusterByAuto` property is `true` and `clusteringColumns` shows the current keys.
+W: Layout reset by replace: the statement defined no clustering, so automatic clustering was switched off and the learned columns were discarded; restating `CLUSTER BY AUTO` restores it.
+X: B=Key budget: no key budget or billing-month pause exists for predictive optimization's clustering selection.
+C=Properties preserved: replacing without the clause does not keep automatic clustering, and statistics refresh would not restore skipping that depends on clustering keys.
+D=CTAS limitation: automatic liquid clustering is supported with CTAS and RTAS statements, so no empty table plus insert is needed.
+T: `CREATE OR REPLACE` without `CLUSTER BY AUTO` turns automatic clustering off, so restate the clause in the statement.
+V: Liquid Clustering
+
+@ DBX-DEP D5 T5.2 advanced tradeoff
+S: A managed table receives hourly `MERGE` upserts that touch scattered rows, and analysts run selective dashboard queries filtering on `customer_id` and `order_date`. Query and merge times are both poor. A colleague says deletion vectors and Liquid Clustering are alternatives, so only one is needed. What is the best response?
+A: Use both, because deletion vectors reduce file rewrites during the merge while clustering keys improve data skipping for the dashboard filters
+B: Use only deletion vectors, because marking rows in metadata also sorts files by `customer_id` and improves data skipping for the filters
+C: Use only clustering, because clustering keys stop `MERGE` from rewriting files by routing updates into the same few files
+D: Use neither, because the table should be partitioned on `customer_id`, which removes both problems at once
+K: A
+G: ## Two different problems
+- **Write cost** of scattered row-level changes is a file-rewrite problem. Deletion vectors address it by recording modifications in metadata and deferring physical rewrites.
+- **Read cost** of selective filters is a data skipping problem. Liquid clustering addresses it by co-locating rows with similar key values so min/max statistics prune files.
+The techniques are complementary and can be applied to the same table. Tables with both also support row-level concurrency, which reduces conflicts between concurrent writers.
+## Caution
+Clustering after merges may need incremental `OPTIMIZE`; on managed tables predictive optimization runs it. Deletion vectors do not sort data and clustering does not avoid rewrites of files that hold changed rows.
+W: Combine both: deletion vectors target the expensive merge rewrites and clustering keys target pruning for the dashboards, so each fixes one of the two symptoms.
+X: B=Only deletion vectors: they do not order rows or carry value statistics, so they do not improve skipping on `customer_id` and `order_date`.
+C=Only clustering: clustering does not prevent file rewrites. A changed row still forces its file to be rewritten without deletion vectors.
+D=Partitioning on customer_id: a high-cardinality partition key produces too many small partitions and files, and does not address scattered merge rewrites.
+T: Deletion vectors speed up writes of scattered changes and Liquid Clustering speeds up filtered reads, so they are complementary.
+V: Delta deletion vectors, Liquid Clustering
+
+@ DBX-DEP D5 T5.2 advanced use-case
+S: A managed events table is queried with filters on `event_date` in nearly every query and on `device_id`, a very high-cardinality column, only in some queries. The engineer wants better skipping on both and wants the low-cardinality column prioritized. Which configuration fits?
+A: Cluster by both columns with `event_date` as hierarchical clustering column, and keep `device_id` as a standard key
+B: Cluster by both columns and make `device_id` the first hierarchical column, because high-cardinality columns give the strongest prioritization
+C: Cluster by `device_id` only, because a second key always reduces skipping on tables of every size
+D: Partition by `device_id` and cluster by `event_date`, because liquid clustering keys must differ from partition columns
+K: A
+G: ## Prioritizing clustering keys
+Hierarchical clustering lets you prioritize some keys. Data is organized by the highest-priority column first and then by each following one. It is configured with the table property `delta.liquid.hierarchicalClusteringColumns`; every column in it must also be a clustering key, and order matters.
+## Guidance
+- Use **low-cardinality** columns for the hierarchical part and order them from lower to higher cardinality.
+- Keep **high-cardinality** columns as standard clustering keys. A high-cardinality hierarchical key can reduce the effectiveness of lower-priority keys and hurt query performance.
+Up to four clustering keys are allowed, and for tables under about 10 TB more keys can hurt single-column filters.
+W: Hierarchical `event_date` with standard `device_id`: the low-cardinality column is prioritized, while the high-cardinality key stays standard as recommended.
+X: B=Hierarchical `device_id`: documentation recommends keeping high-cardinality columns as standard keys because a high-cardinality hierarchical key weakens the other keys.
+C=Single high-cardinality key: filters on `event_date` would not benefit. More keys can degrade single-column filters on small tables, but not always.
+D=Partition plus clustering: partitioning on a high-cardinality column creates too many small partitions, and clustering is not compatible with partitioning on the same table.
+T: Put low-cardinality, always-filtered columns in the hierarchical clustering property and keep high-cardinality ones as standard keys.
+V: Liquid Clustering
+
+@ DBX-DEP D5 T5.2 advanced troubleshooting
+S: A wide Delta table has 150 columns. A team clusters it by `CLUSTER BY (merchant_ref)`, where `merchant_ref` is the 70th column, but queries filtering on it still scan nearly every file. Data was recently added by many writers. What is the most likely cause and fix?
+A: Clustering keys need collected statistics and by default only the first 32 columns have them, so include the column in the statistics columns
+B: Liquid clustering supports only string keys of a fixed length, so the column must be cast to a short string before the table is clustered
+C: Clustering is applied to the first 32 columns only, so the column must be renamed with a prefix that sorts it to the start of the schema
+D: The table needs partitioning first, because liquid clustering works only on columns that also appear as partition columns
+K: A
+G: ## Clustering depends on statistics
+Data skipping uses per-file min/max statistics. Liquid clustering orders rows by the keys, but it can prune files only when statistics exist for those columns. **Clustering keys must be columns that have statistics collected.** Delta Lake collects statistics for the first 32 columns by default, so a key beyond that is not useful until statistics are collected for it.
+## Fix
+Reorder the schema or set the table's statistics columns (for example `delta.dataSkippingStatsColumns`) to include the key, then run `OPTIMIZE` so the layout and statistics are consistent. Predictive optimization collects statistics intelligently on managed tables.
+W: Missing statistics on the key: the 70th column lies beyond the default 32 statistics columns, so files cannot be pruned until the statistics columns include it.
+X: B=String-only keys: clustering supports several data types, not only short strings, so casting is neither required nor a fix.
+C=First 32 columns only: clustering is not restricted to the first 32 columns; the dependence is on statistics collection, and renaming does not change column position.
+D=Partitioning first: clustering is not compatible with partitioning on the same table and needs no partition columns.
+T: Clustering keys must have collected statistics, so keys beyond the default statistics columns need configuration.
+V: Liquid Clustering, data skipping
+
+@ DBX-DEP D5 T5.3 applied use-case
+S: Analysts run dozens of dashboard queries each hour against the same Delta tables on a classic cluster. Reads from cloud storage dominate latency. The engineer suggests adding `df.cache()` calls to every notebook. What is the better approach?
+A: Rely on the disk cache on worker types with local SSD, which copies Parquet and Delta files after the first read and needs no code changes
+B: Add `df.cache()` everywhere, because the disk cache is only available for DataFrames that were explicitly persisted in memory
+C: Set `spark.databricks.io.cache.maxDiskUsage` to zero, because disabling local storage forces faster reads directly from object storage
+D: Run `CACHE SELECT` after each write on a SQL warehouse, because the command is the only way to fill the disk cache on warehouses
+K: A
+G: ## Disk cache (formerly Delta cache)
+The Databricks **disk cache** (formerly called the Delta cache or DBIO cache) stores copies of remote Parquet data files, including Delta files, on the worker's local storage in a fast intermediate format. It is:
+- automatic: filled on the first read, with no code change,
+- lazy and applies to any Parquet table in S3, ABFS and other file systems,
+- evicted in LRU order or when files change.
+Best practice: choose worker instance types that support disk caching, and prefer it over the Apache Spark cache for repeated reads of Parquet and Delta data.
+## Spark cache contrast
+`df.cache()` stores in-memory blocks for a DataFrame or RDD, requires code changes and is lost when workers go away.
+W: Disk cache on SSD workers: repeated reads of the same files run locally after the first fetch and the feature needs no notebook changes.
+X: B=Persist everywhere: the disk cache is not tied to persisted DataFrames; it works at file level automatically.
+C=Zero disk usage: setting the cache size to zero removes the cache benefit and makes reads slower, not faster.
+D=CACHE SELECT: on SQL warehouses the command is ignored, and an enhanced disk caching algorithm is used automatically.
+T: Use the automatic disk cache on cache-accelerated workers for repeated reads of Parquet/Delta files.
+V: Disk cache
+
+@ DBX-DEP D5 T5.3 advanced troubleshooting
+S: A team schedules a job after every `MERGE` and `OPTIMIZE` that tries to invalidate the disk cache on all workers, fearing that analysts could read stale rows from cached copies of rewritten files. The job is flaky and adds minutes to each run. What should the engineer conclude?
+A: The job is unnecessary, because the disk cache detects created, deleted, modified and overwritten files and evicts stale entries automatically
+B: The job is necessary, because the disk cache never detects changes and keeps serving old files until the cluster is restarted
+C: The job is necessary only for `OPTIMIZE`, because compaction rewrites files without informing the disk cache although merges do
+D: The job is necessary only for streaming reads, because the disk cache serves batch reads from storage metadata but streaming reads from stale copies
+K: A
+G: ## Cache consistency
+The disk cache keys its entries on the underlying data files. Delta tables never modify a data file in place: writes add new files and the log marks old ones removed. The disk cache also automatically detects when files are created, deleted, modified or overwritten and updates its content, so stale entries are invalidated and evicted without a manual step.
+## Operational consequence
+There is no need to explicitly invalidate cached data after writes, compaction or merges. A restart of the cluster empties the cache but is not needed for correctness. Time spent on invalidation jobs is waste.
+W: Automatic invalidation: changes to files are detected and stale entries evicted, so readers never see stale rows because of the cache.
+X: B=Never detects changes: the documentation states the opposite, so restarts are not needed for consistency.
+C=Only for OPTIMIZE: compaction is a normal file change and is handled the same as other writes.
+D=Streaming only: there is no documented difference between batch and streaming reads; file changes are detected in both cases.
+T: The disk cache invalidates entries on file changes by itself, so no manual invalidation is needed after writes.
+V: Disk cache
+
+@ DBX-DEP D5 T5.3 applied tradeoff
+S: A notebook reads a large Delta table, applies a heavy join and aggregation, and then uses the resulting DataFrame in five separate actions. The cluster has SSD workers with the disk cache enabled, but the join still repeats five times. Which technique reduces the repeated work?
+A: Persist the joined DataFrame with the Apache Spark cache, because the disk cache stores source file copies and not transformation results
+B: Increase the disk cache size, because it stores the joined results automatically once it has enough space on the local disk
+C: Rely on the disk cache alone, because it evaluates the lineage of the DataFrame and caches the join result after the first action
+D: Run `OPTIMIZE ZORDER` on the source table, because it materializes the join output in the table's layout
+K: A
+G: ## What each cache stores
+- The **disk cache** stores copies of the *source* Parquet files on local disks. It speeds up reading data from remote storage, but Spark still runs the join and aggregation each time.
+- The **Apache Spark cache** (`cache()` / `persist()`) stores a DataFrame or RDD, so it can hold the *result* of expensive transformations as in-memory blocks.
+## Choosing
+For repeated reads of the same table, use the disk cache. For a computed intermediate DataFrame reused by several actions, persist it and call `unpersist()` when done. Note that the Spark cache can lose partitions when autoscaling removes workers; Spark rereads or recomputes them as needed.
+W: Spark cache for derived results: it holds the joined DataFrame, so later actions skip the recomputation that the disk cache cannot avoid.
+X: B=Bigger disk cache: it holds file bytes, not transformation output, so extra space only caches more source files.
+C=Disk cache evaluates lineage: it works at the file level, not at DataFrame lineage level, and does not cache join results.
+D=OPTIMIZE ZORDER: it rewrites the source table's files and does not store the output of a join.
+T: Disk cache speeds source file reads; persist a derived DataFrame with the Spark cache when several actions reuse it.
+V: Disk cache, Spark cache
+
+@ DBX-DEP D5 T5.3 advanced troubleshooting
+S: A heavily reused DataFrame is persisted with `df.cache()` on an autoscaling cluster. During quiet periods the cluster scales down, and the next report is slower than the first although the data did not change. What is the cause, and what do the docs recommend for repeated reads of Parquet and Delta data?
+A: Removing a worker loses the Spark cache blocks on it and partitions are reread; use the disk cache on SSD workers for repeated file reads
+B: Autoscaling invalidates the Parquet files on storage, so the data must be rewritten with `OPTIMIZE` before the cache can be used again
+C: The Spark cache expires after a fixed number of minutes, so a scheduled job must call `cache()` again each hour
+D: The disk cache and the Spark cache share one memory pool, so scaling down halves the pool and evicts the DataFrame
+K: A
+G: ## Cache and autoscaling
+Spark cache blocks live in the memory of workers. When a worker is decommissioned, its blocks are lost; Spark then rereads the missing partitions from the source as needed. With autoscaling enabled, this makes the Spark cache unstable.
+## Disk cache
+The disk cache stores copies of the source files on each worker's local SSD and refills automatically on later reads. Databricks recommends the disk cache instead of the Spark cache for repeated reads of Parquet and Delta Lake data. Local SSD storage is used up to a configured share (at most half of the available space by default).
+W: Lost blocks on removed workers: scale-down discards cached partitions, causing rereads, and the disk cache is the recommended mechanism for repeated reads of Delta data.
+X: B=Autoscaling touches files: scaling changes the cluster size and never rewrites or invalidates files on storage.
+C=Time-based expiry: Spark cache is evicted by LRU or `unpersist`, not by a time limit.
+D=Shared pool: the Spark cache lives in memory and the disk cache on local SSD, so they are separate.
+T: Spark cache blocks vanish when autoscaling removes workers, so use the disk cache for repeated reads of Delta data.
+V: Disk cache, autoscaling
+
+@ DBX-DEP D5 T5.3 applied tradeoff
+S: A data engineer created a cluster with worker types that have only network-attached storage. Repeated queries against the same tables are no faster the second time. Which change addresses this with the least configuration?
+A: Choose cache-accelerated worker types with local SSD storage, which Databricks configures automatically for the disk cache
+B: Keep the workers and set `spark.databricks.io.cache.enabled` to true, because the flag alone creates local cache storage on network-only nodes
+C: Move to a driver-only cluster, because the driver's memory is the only location where the disk cache stores file copies
+D: Add `CACHE SELECT` statements to the notebook, because the command creates SSD volumes for each table it caches
+K: A
+G: ## Where the disk cache lives
+The disk cache stores file copies on the workers' **local storage**. It is enabled by default only on worker instance types that support it. The recommended and easiest approach is to choose a worker type with SSD volumes, which Databricks configures for disk caching. By default the cache uses at most half of the SSD space; options such as `spark.databricks.io.cache.maxDiskUsage` tune it.
+## Why the flag is not enough
+Setting `spark.databricks.io.cache.enabled` turns the feature on or off, but if the node has no suitable local storage there is nowhere to put the copies. Disabling it later only stops new reads and writes of the cache; existing files stay on disk.
+W: Cache-accelerated workers: local SSDs give the disk cache a place to store file copies, and Databricks configures it optimally.
+X: B=Flag only: the setting toggles behavior but cannot create local storage on instances that lack it.
+C=Driver-only: the cache is on worker local storage, not in driver memory.
+D=CACHE SELECT: the command fills cache but cannot create SSDs, and it is ignored on SQL warehouses and newer runtimes.
+T: Disk caching needs workers with local SSD, so pick cache-accelerated instance types.
+V: Disk cache
+
+@ DBX-DEP D5 T5.3 applied troubleshooting
+S: A team moves a notebook workload to a SQL warehouse. Its warm-up step `CACHE SELECT * FROM sales` appears to do nothing, and the engineer asks whether warm-up is broken. What is the correct statement?
+A: The command is ignored on SQL warehouses, which use an enhanced disk caching algorithm automatically, so no manual warm-up is needed
+B: The command fails silently because Unity Catalog tables cannot be cached, so the data must be copied to a table in the legacy metastore
+C: The command works only on clusters with driver memory above a threshold, so the warehouse must be resized to run it
+D: The command needs the Photon engine disabled, so the warehouse must be switched to classic mode before warming
+K: A
+G: ## CACHE SELECT
+`CACHE SELECT` was the way to pre-load the disk cache on clusters. In SQL warehouses and in newer Databricks Runtime versions, the command is ignored because an enhanced disk caching algorithm is used instead.
+## Implication
+Do not build warm-up logic around `CACHE SELECT` on warehouses. Repeated reads of the same files are cached automatically on the first read, and the cache invalidates itself when files change. If the first query after a restart must be fast, schedule a normal query as warm-up.
+W: Ignored by design: the warehouse uses an enhanced algorithm, so the statement needs no replacement and its absence is not a failure.
+X: B=Unity Catalog tables uncacheable: the disk cache works for Parquet and Delta files in any supported location, including Unity Catalog tables.
+C=Driver memory: the disk cache is on worker local storage, and the warehouse sizing is unrelated to this command.
+D=Photon toggle: no relation between the Photon engine setting and this command is documented, and switching a warehouse to classic mode does not change the caching behavior.
+T: `CACHE SELECT` is ignored on SQL warehouses because enhanced disk caching is automatic.
+V: Disk cache, SQL warehouse
+
+@ DBX-DEP D5 T5.3 advanced tradeoff
+S: An engineer benchmarks a query for a release and wants to measure cold reads that do not benefit from or populate the disk cache, without deleting anything from the workers. Which setting achieves that?
+A: Set `spark.databricks.io.cache.enabled` to false, which stops queries from reading the cache and from adding new data to it
+B: Set `spark.databricks.io.cache.enabled` to false, which also deletes the files already stored in the local storage of each worker
+C: Set `spark.databricks.io.cache.compression.enabled` to false, which bypasses cached data for every following query
+D: Set `spark.databricks.io.cache.maxMetaDataCache` to zero, which turns off data caching but keeps metadata caching
+K: A
+G: ## Switching the disk cache
+`spark.databricks.io.cache.enabled` shows and sets whether the disk cache is on. Setting it to `false` prevents queries from **adding data to the cache and from reading data from the cache**. It does not drop what is already in local storage; those files simply stay unused until the cache is enabled again or the cluster restarts.
+## Other settings
+- `spark.databricks.io.cache.maxDiskUsage`: disk space per node for cached data.
+- `spark.databricks.io.cache.maxMetaDataCache`: disk space for cached metadata.
+- `spark.databricks.io.cache.compression.enabled`: whether cached data is compressed.
+They tune the cache and do not bypass it.
+W: Disable the cache flag: queries neither read from nor write to the cache, which gives a cold-read measurement while leaving old files in place.
+X: B=Deleting files: the documentation says disabling does not drop data already in local storage, so nothing is deleted.
+C=Compression flag: it only changes whether cached data is stored compressed.
+D=Metadata cache size: it only limits space for cached metadata; it is not a data cache switch.
+T: Disabling the disk cache flag stops reads from and writes to it without deleting existing cached files.
+V: Disk cache
+
+@ DBX-DEP D5 T5.4 advanced tradeoff
+S: A managed Delta table with row tracking enabled is the target of heavy `MERGE` and `UPDATE` jobs. Legacy change data feed is enabled on it with `delta.enableChangeDataFeed`, which adds write overhead and storage, and downstream jobs read changes through `readChangeFeed`. The platform supports automatic change data feed. What is the correct way to move?
+A: Unset the legacy table property and keep the same `readChangeFeed` and `table_changes()` reads, because both feeds cannot be active together
+B: Keep legacy change data feed enabled and also enable automatic change data feed, because the two feeds merge into a single change stream
+C: Rewrite all downstream readers to use a new `table_changes_auto()` function, because the reading APIs differ between the two approaches
+D: Drop and recreate the table with deletion vectors, because automatic change data feed is implemented as an extension of deletion vectors
+K: A
+G: ## Two ways to get a change feed
+- **Legacy change data feed** materializes changes at write time, needs `delta.enableChangeDataFeed = true` on each table and may add change data files.
+- **Automatic change data feed** computes changes when the table is read, using row tracking (Delta) or row lineage (Iceberg v3). It needs no per-table setting, improves write performance and lowers storage cost for `MERGE` and `UPDATE`, but needs a supported runtime and a Unity Catalog table (managed with row tracking, or external with row tracking).
+## Migrating
+Verify the requirements, then run `ALTER TABLE t UNSET TBLPROPERTIES ('delta.enableChangeDataFeed')`. You cannot use both together. The reading APIs `table_changes()` and `readChangeFeed` are the same, so downstream code stays unchanged. Limitations: it is not supported on tables with row filters or column masks.
+W: Unset the legacy property: automatic change data feed uses the same read APIs, and legacy and automatic feeds are mutually exclusive.
+X: B=Both active: the documentation states legacy and automatic feeds cannot be used together.
+C=New function: automatic feeds are read through the same `table_changes()` and `readChangeFeed` APIs.
+D=Deletion vectors: automatic change data feed relies on row tracking or row lineage, not on deletion vectors.
+T: Migrate to automatic change data feed by unsetting the legacy property; the read APIs stay the same.
+V: Change Data Feed
+
+@ DBX-DEP D5 T5.4 advanced troubleshooting
+S: A downstream job streams the change feed of `silver_orders` with `readChangeFeed` into `gold_orders`. Its checkpoint is corrupted. `gold_orders` already contains all changes up to and including table version 75 of the source, and source versions 70 and above are still in the history. A restart with a new checkpoint and no other option would reload the whole source as inserts. What is the right recovery?
+A: Start a new stream with a new checkpoint location and `startingVersion` set to 76, because the target already reflects everything up to 75
+B: Reuse the corrupted checkpoint with `startingVersion` set to 70, because the checkpoint resumes from the earlier of the two positions
+C: Start with a new checkpoint and `startingVersion` set to 0, because reading change data always requires the first version of the table
+D: Delete the source table history up to version 75 with `VACUUM`, because a stream then starts at the first remaining version
+K: A
+G: ## Where a change feed stream starts
+When a stream starts without a checkpoint, the change feed first returns the **latest snapshot of the table as INSERT records**, then the future changes. That suits a new pipeline, but if the target already holds the changes up to a version, replaying the snapshot would reprocess or duplicate data.
+## Recovery
+Set the `startingVersion` option (a version number or timestamp) and write to the existing target with a **new checkpoint location**. Choose the first version the target has not applied (76 here).
+Important: the version must still be available in the table history. If it was removed, the stream fails to start from a new checkpoint. Managed tables clean up history automatically, so every starting version is eventually deleted, and a change feed is not a permanent record.
+W: New checkpoint plus the next version: it avoids the snapshot-as-insert replay and continues exactly after the last applied change.
+X: B=Corrupted checkpoint reuse: the checkpoint is the broken part, and starting at 70 would replay already applied changes.
+C=Starting at zero: that would replay the whole history, including changes already applied, and the early versions may no longer be available.
+D=VACUUM history deletion: this does not set the stream's start and removes data needed for time travel.
+T: Recover a change feed stream with a new checkpoint and `startingVersion` set to the first unapplied version, while that version is still in history.
+V: Change Data Feed
+
+@ DBX-DEP D5 T5.4 advanced use-case
+S: A downstream job reads `table_changes('customers', 41, 45)` and applies each row to a dimension table with `MERGE`. Several customers appear more than once in the range, with `update_preimage` and `update_postimage` rows. The merge fails with a multiple-match error on `customer_id`. Which transformation before the merge is correct?
+A: Drop `update_preimage` rows, keep the highest `_commit_version` row per `customer_id`, and apply deletes from `_change_type = 'delete'`
+B: Keep only `update_preimage` rows, because they contain the values that the dimension table must hold after the change
+C: Keep all rows and sort by `_commit_timestamp`, because MERGE applies duplicates in the order of the sort column
+D: Group by `_change_type` and take the maximum, because the feed does not contain version information per row
+K: A
+G: ## Reading the feed correctly
+The change feed has metadata columns `_change_type` (`insert`, `update_preimage`, `update_postimage`, `delete`), `_commit_version` and `_commit_timestamp`.
+- `update_preimage` is the value before the update, `update_postimage` after it.
+- A key can change several times in a version range, so a range read can return many rows per key.
+## Preparing a merge
+`MERGE` requires at most one source row per target row. So:
+1. Remove `update_preimage` rows.
+2. Keep the latest row per key by `_commit_version` (a window with `row_number()` ordered by version).
+3. Treat rows whose latest `_change_type` is `delete` as deletes, others as upserts.
+Sorting does not make `MERGE` accept duplicates.
+W: Deduplicate to the latest change: removing preimages and keeping the highest version per key leaves one row per key and maps deletes correctly.
+X: B=Preimages: they hold old values, so applying them would restore stale data.
+C=Sorting: MERGE raises an error when several source rows match the same target row, whatever the ordering.
+D=No version info: every change row carries `_commit_version` and `_commit_timestamp`.
+T: Before merging a change feed range, drop preimages and keep the latest change per key by commit version.
+V: Change Data Feed
+
+@ DBX-DEP D5 T5.4 applied troubleshooting
+S: A batch job reads `table_changes('accounts', 10, 30)` on a table with column mapping enabled. Version 22 renamed a column. The job fails, and reading versions 10-21 and 23-30 separately works. Which statement is correct?
+A: A query cannot span a non-additive schema change such as a rename, so split the range into parts before and after the change
+B: Change data feed supports only the latest schema, so the job must read from version 22 onward after dropping history before it
+C: Renaming a column permanently disables the feed, so it must be turned on again with a new table property
+D: The job fails because the range exceeds 20 versions, so each read must cover at most 20 versions
+K: A
+G: ## Schema changes and change data feed
+Change data feed reads use the schema of the latest table version or, for a bounded range, the schema of the range's end version. With column mapping, renames and drops do not rewrite data files, but they are **non-additive schema changes** (rename or drop column, data type change, nullability change).
+You cannot read a change feed for a transaction or range in which such a change occurs. Additive changes (new columns) are supported. Queries that end after the change can read earlier ranges using the end-version schema, but the range itself cannot span the change.
+## Handling it
+Split the read into ranges before and after the change, and handle the renamed column explicitly in the downstream logic. This is a read limitation: the table itself and the feed stay enabled.
+W: Split at the change: the failing range includes the version of the rename, while ranges on either side of it succeed, as observed.
+X: B=Latest schema only: ranges before the change can still be read, as the successful reads show.
+C=Feed disabled: a rename does not turn the feed off. Only turning off legacy change data feed makes that interval unqueryable.
+D=Range length: no 20-version limit is documented, and the successful split ranges prove the cause is the schema change.
+T: Change data feed queries cannot span a non-additive schema change, so split the version range around it.
+V: Change Data Feed
