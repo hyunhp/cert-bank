@@ -1,14 +1,20 @@
 # TODO
 
 ## Now (warm start — keep this section current; update it with every merge)
-Updated 2026-11-06.
+Updated 2026-11-07.
 - UI + mock pass 2026-11-02/03 DONE (PR 82-99, all merged): level pick opens first exam; vendor tabs + ★ pill; exam picker (level groups, 2 columns on desktop, accordion on phones, folds after a pick; same on study.html); one-line stats; text buttons; `lastDay` ENDS badge (`exam-specs.json` + `LAST_DAY` in index.html, test keeps them equal); mock: sticky Prev/Flag/Next bar, single `Review & finish`, results/review polish, weakest-domain shortcut, perfect-score verdict; draw avoids the last 2 mocks (`aws_qbank_mock_recent_v1`) + crypto shuffle; study quiz result line; number commas; explanation names with a colon repaired (212 lines) + `tools/explain_format_test.py`.
 - Mock readiness panel (setup + results): last 3 full exams each timed, in time, >=80% unseen, >= target (80 / 85 pro / pass+10), every domain >=70% per exam. Attempts under 25% answered are not saved (no history, no seen). `x` on Recent attempts removes one.
 - Data scope fix 2026-11-03: shared questions keep the primary exam's raw `domainCode`/`taskId`; qgen now stamps `examDomain`/`examTask` in every exam file (`qgen.py stamp`, run by ingest/share), guarded by `tools/data_scope_test.py`. External readers of the raw files must use those two fields (feedback: SAP-C03 D2 and SCS-C03 D4 sets looked off when grouped by raw `domainCode`).
 - Change log (owner agreed 2026-11-04): `data/changes/<PR>.json` per data PR via `tools/qgen/changes.py`; message the blogger-publisher session only for `important` entries (rules in CLAUDE.md). Backfilled PR 97 (explanation name fix, 175 entries, none important).
 - Blog link (owner delegated 2026-11-04): footer of index.html shows `Practice sets on the blog (external site, may show ads)` from `BLOG_FROM` 2026-11-21 (hub https://bigdatabreakthroughs.blogspot.com/p/exams.html; do not link single posts). Checked 2026-11-04: hub 200, label pages 200 but "No posts" yet, Blogger pages carry AdSense. Reminder set for 2026-11-22: all 34 `/search/label/<EXAM>` pages must list posts; else push `BLOG_FROM` later.
 - Open UI ideas: `ENDS` badge on study.html chips; per-day study quiz results are not stored; history has no per-question time.
-- In progress (2026-11-07): DBX-DEP (Databricks Data Engineer Professional, guide of 2026-10-09) bank DONE on branch `dbx-dep`, PR pending owner OK to merge (bulk add): 300 questions in
+- Session handoff 2026-11-07 (owner /clear): 2026-11-06/07 cycle merged PR 104 (PLTR +175), 105+106 (GCP-PDE bank, guide, glossary), 107+108 (GCP-PSE bank, guide, glossary), 109 (DBX-DEP bank). Open:
+  DBX-DEP study guide (45 tasks, plan like PDE/PSE: 4 writers, 4 Learn reviewers, glossary by Sonnet + reviewer, README row, PR), then other Databricks exams. Recipe per exam: read official guide, register
+  (`exam-specs.json`, `exam-tasks.json`, `tools/qgen/tasks.json` Korean names, `index.html` EXAMS + EXAM_LEVEL, vendor doc section, `PLAN.md`), writers in waves of 4, one reviewer per batch, ingest each reviewed
+  batch BEFORE the next review starts, `check --siblings`, full tests, PR, `changes.py <PR>`, ask owner, merge, message publisher for `important` entries. Check a reviewer's deletion against the docs before accepting it.
+  Flaky tests seen once each (rerun passed): `mock_e2e_test` "review option entries in shown order", `resume_test` "answered card shown again"; `study_test` raced the exam summary render (fixed 2026-11-06).
+  Network: `www.palantir.com`, `spark.apache.org` allowed 2026-11-06; `support.google.com` still blocked (GCP retake rules, PSE T1.3 settings); learn/certification.palantir.com 403 (site side).
+- In progress (2026-11-07): DBX-DEP (Databricks Data Engineer Professional, guide of 2026-10-09) bank merged (PR 109, publisher informed): 300 questions in
   b01-b11 from PLAN.md, single answer, each reviewed; reviewers replaced 3-7 of 28 per batch as duplicates of published DBX-DEA/DBX-DEP questions (ingest each reviewed batch before the next review
   starts) and fixed wrong claims (e.g. 9 TB table file size 900 MB, driver log access needs CAN MANAGE, deleted jobs keep their last state in system.lakeflow.jobs). `tools/qgen/qgen.py` header
   now accepts two-digit tasks (T1.10-T1.12). Study guide + glossary + README row not started. GCP-PSE study guide + glossary merged (PR 108); GCP-PSE bank (PR 107), GCP-PDE (PR 105, 106), PLTR top-up (PR 104) merged.
