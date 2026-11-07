@@ -22,24 +22,24 @@
 # src: https://docs.databricks.com/aws/en/compute/serverless/limitations.html
 
 @ DBX-DEP D1 T1.5 applied troubleshooting
-S: A job `nightly_orders` has the tasks `extract` -> `load_orders` -> `publish`. The notebook of `load_orders` runs `INSERT INTO silver.orders SELECT * FROM staging.orders_batch` and then `INSERT INTO silver.order_items SELECT * FROM staging.items_batch`. The second statement failed on a schema mismatch, so the run ended with `load_orders` failed and `publish` skipped. The schema was fixed in the job configuration. An engineer wants to recover the run through the Jobs API or CLI with the least recomputation. What should be done first?
-A: Call repair run for the failed run and rely on the transaction log, because Delta rolls back the whole task when any statement of the task fails
-B: Make the two inserts idempotent, for example with `MERGE` on the order key, and then repair the run so that only `load_orders` and `publish` execute again
-C: Start a new run with run-now instead of a repair, because a new run is the only way to reset the partial output of the failed task
-D: Repair the run and pass a parameter that tells the job service to resume the notebook at the statement that failed, so the first insert is not repeated
-K: B
-G: ## What a repair run does
-A multi-task job run can be repaired: Lakeflow Jobs re-runs only the tasks that were unsuccessful (failed, canceled or skipped because of an upstream failure) and keeps the results of the tasks that succeeded. In the API this is the repair-run request, optionally listing the tasks to re-run, and the CLI wraps the same call.
-- Unsuccessful tasks run again **from their beginning**, using the current job and task settings, so a configuration fix is picked up.
-- Lakeflow Jobs does not make a task idempotent. The task here committed its first Delta transaction before the second one failed, so that commit stays in the table.
-- A repair run is only available for jobs with two or more tasks, and a new job cluster is created for tasks that shared a job cluster.
-## Idempotent writes
-Delta guarantees atomicity per statement (one commit), not per notebook. If a task contains several commits, a restart repeats the ones that already succeeded. Writing with `MERGE` on a key, or overwriting the batch with `replaceWhere`, makes a repeat harmless. Example: re-running `INSERT INTO silver.orders` appends the same 2 million rows a second time, while `MERGE INTO silver.orders ... WHEN NOT MATCHED THEN INSERT *` does not.
-W: Idempotent writes plus repair: the first insert already committed and a repair restarts the task from its first statement, so the writes must tolerate a repeat, and the repair avoids recomputing `extract`.
-X: A=Rollback assumption: Delta commits per statement, so the first insert is already a committed table version and nothing rolls back when a later statement of the task fails.
-C=New run: a full run repeats `extract` and `load_orders` from the start, so it duplicates the first insert exactly like a repair would and also wastes the extract work.
-D=Resume parameter: a repair can override parameters, but the job service has no notion of notebook statements, so the notebook code would have to implement the skipping itself.
-T: A repair re-runs failed tasks from their first line, so tasks with several commits must be idempotent before they are repaired.
+S: A nightly job `refresh_dim` has one notebook task that failed after a short outage of the source system. The source is healthy again and the notebook is idempotent. The engineer opens the failed run and looks for the repair option to re-run only the failed work, but repair cannot be used. What explains this, and what should be done?
+A: Repair needs the run to be canceled first, so the engineer cancels the failed run in the Jobs UI and then repairs it
+B: Repair is blocked for tasks on serverless compute, so the task must move to a classic job cluster before the run is repaired
+C: Repair is supported only for jobs that orchestrate two or more tasks, so the job is triggered again with Run now
+D: Repair needs a task-level retry policy, so the engineer adds retries to the notebook task and then repairs the failed run
+K: C
+G: ## What repair run does
+A repair run re-runs only the unsuccessful tasks of a multi-task job run (failed, canceled, or skipped because an upstream task failed) together with the tasks that depend on them. Successful tasks are not repeated, which saves time and compute. Unsuccessful tasks run again from their beginning with the current job and task settings, so a configuration fix is picked up.
+- Repair is supported only with jobs that orchestrate **two or more tasks**.
+- A failed single-task job is re-run by triggering it again with **Run now**.
+- Lakeflow Jobs does not make tasks idempotent, so a task that wrote partial output can duplicate it when repaired. Here the notebook is idempotent, so a fresh run is safe.
+## Example
+Job `refresh_dim` has the single task `rebuild_dim`. The run failed on a source outage. There is nothing to repair selectively, so Run now starts a new run of the one task. If the job also had a `publish` task after `rebuild_dim`, a repair would re-run `rebuild_dim` and `publish` only.
+W: Run now for a single-task job: repair exists only for jobs with two or more tasks, and with an idempotent notebook a new run gives the same result as a repair would.
+X: A=Cancel first: repair applies to failed or canceled runs, so the run state is not the reason; the task count is.
+B=Serverless block: a repair re-runs tasks on any compute with the current settings; compute type is not the condition.
+D=Retry policy: retries are not a prerequisite of repair; the condition is the number of tasks, and a single-task job simply runs again with Run now.
+T: Repair needs two or more tasks; a failed single-task job is re-run with Run now.
 V: Lakeflow Jobs
 
 @ DBX-DEP D1 T1.6 advanced tradeoff
@@ -167,22 +167,24 @@ T: Full refresh only the downstream streaming table whose source keeps the full 
 V: Spark Declarative Pipelines
 
 @ DBX-DEP D1 T1.7 advanced troubleshooting
-S: A CDC feed from a database is applied with `create_auto_cdc_flow(..., keys=["id"], sequence_by="commit_ts", stored_as_scd_type=1)`. `commit_ts` has one-second resolution. For some keys two committed changes carry the same `commit_ts`, and the target sometimes keeps the earlier change. The feed also has a monotonically increasing `log_offset`. What is the correct fix?
-A: Use `sequence_by = struct("commit_ts", "log_offset")`, so ties on the first field are broken by the second
-B: Use the Auto Loader `_ingest_time` of each record as the sequence column, because it is unique for every arriving record
-C: Run `dropDuplicates(["id", "commit_ts"])` on the source first, so that only one record of each pair reaches the flow
-D: Switch to SCD Type 2 with `stored_as_scd_type=2`, which keeps both changes since they have the same sequence value
-K: A
-G: ## Sequencing in AUTO CDC
-`AUTO CDC` (formerly APPLY CHANGES) applies change events in the order of the `sequence_by` column, not in arrival order, so out-of-order events are handled correctly. The column must have a sortable type, must not contain `NULL`, and should be a monotonically increasing representation of the true event order, with **one distinct update per key at each sequence value**.
-- To break ties use a struct: the API orders by the first field, then the second, and so on (`SEQUENCE BY STRUCT(commit_ts, log_offset)` in SQL).
-- Arrival time is not the order of events, and removing records loses real changes.
-Example: two updates for key 7 at the same second, offsets 1001 and 1002: the struct orders them, so offset 1002 wins.
-W: Struct sequence: the pair gives a total order inside each key, so ties on the timestamp are resolved by the log position and the last committed change wins.
-X: B=Ingest time: it describes when the pipeline saw a record, not the order in the source, so a retried or reordered message would overwrite a newer change.
-C=Deduplicate on id and timestamp: one of two real updates is discarded, so the target may end with the earlier value, and which one survives is arbitrary.
-D=SCD Type 2: the requirement of one distinct update per key and sequence value still applies, so equal sequence values stay ambiguous in a history table too.
-T: Break ties in AUTO CDC ordering with a struct of source columns that gives a total order per key; never use arrival time.
+S: A Debezium topic is applied with `create_auto_cdc_flow(..., keys=["id"], sequence_by="source_ts", apply_as_deletes=expr("op = 'd'"), stored_as_scd_type=1)`. Delete events from one connector carry `source_ts = NULL`, while every event has a numeric `log_position` that grows with the source order. Deletes are not applied correctly. What is the best fix?
+A: Set `ignore_null_updates=True` on the flow, so that a NULL `source_ts` keeps the stored sequence value of the key
+B: Sequence by a column that is never NULL and follows the source order, such as `log_position`, or a struct that starts with it
+C: Replace the NULL with `current_timestamp()` in the source view, so that a delete always sorts after the earlier updates
+D: Leave the NULL values in place, because the flow sorts NULL sequence values first and applies those deletes before any update
+K: B
+G: ## Requirements for the sequence column
+`AUTO CDC` (formerly APPLY CHANGES) applies events in the order of the `sequence_by` column, not in arrival order. The column must be sortable, must be a monotonically increasing representation of the correct event order, and must have **one distinct update per key at each sequencing value**. `NULL` sequencing values are not supported.
+- A delete event is an event like any other: it needs a real sequence value so that the flow can decide whether it is newer than the stored row.
+- A struct such as `SEQUENCE BY STRUCT(log_position, source_ts)` orders by the first field and breaks ties with the next one.
+- `ignore_null_updates` is about the attribute columns of an update, not about the sequence column.
+## Example
+Delete for key 7 with `log_position = 1042` and `source_ts = NULL`. Sequencing by `log_position` gives the delete a defined place after the update at 1041.
+W: Non-null source-order sequence: every event, including deletes, gets a defined position in the source order, which the flow requires.
+X: A=Ignore NULL updates: the option controls whether NULL attribute values overwrite stored columns; it does not give a NULL sequence value a position.
+C=Processing time: a value assigned in the pipeline follows arrival, not the order of changes in the source, so a late old event would look newest.
+D=Leave NULL: NULL sequencing values are not supported, so the flow cannot rely on any placement of those events.
+T: The AUTO CDC sequence column must be non-null and follow the source order for every event, deletes included.
 V: Spark Declarative Pipelines
 
 @ DBX-DEP D1 T1.7 advanced use-case
@@ -345,23 +347,24 @@ T: Choose Structured Streaming with foreachBatch for imperative multi-target per
 V: Structured Streaming
 
 @ DBX-DEP D1 T1.8 applied troubleshooting
-S: The streaming table `bronze_events` ingests from a Kafka topic. Operations recreated the topic with the same name, so offsets restarted at zero and the flow now fails because the stored offsets no longer exist. The existing rows must be kept (the old topic data is gone), and ingestion must continue from the beginning of the new topic. What should the engineer do?
-A: Start an update that resets the streaming checkpoint of that flow only and keeps the table data, using the pipelines REST API
-B: Start a full refresh of the streaming table, which clears the table data and the checkpoint and reads the new topic from the start
-C: Run a default refresh again, because checkpoints resynchronize with the topic offsets automatically on the next update
-D: Delete the checkpoint folder in cloud storage by hand, as is done for a Structured Streaming query, and rerun the update
-K: A
-G: ## Checkpoint management differs
-In plain Structured Streaming you choose the checkpoint location and, to restart from scratch, delete or change it yourself. In pipelines the checkpoints belong to the flows and the platform manages them. The update types are:
-- default refresh: continue from the checkpoint,
-- full refresh: clear the table data and the checkpoints, then reprocess everything from the source,
-- selective reset: clear the checkpoints of chosen flows through the REST API, **without** clearing the table data.
-Resetting makes the flow read the source from its start again. Rows already in the table stay, so the source must not overlap with data that was ingested earlier unless duplicates are acceptable; here the old topic is gone, so no duplicates are expected.
-W: Selective checkpoint reset: the flow forgets its stale offsets and starts from the beginning of the new topic while the old rows stay.
-X: B=Full refresh: it clears the table data, and the old topic's events exist nowhere else, so history would be lost permanently.
-C=Default refresh: it continues from the stored offsets, which are invalid for the recreated topic, so the update fails the same way.
-D=Manual deletion: pipeline checkpoints are managed by the platform, not an external location the engineer owns, and the supported way to clear them is the update option.
-T: To restart a streaming flow while keeping its data, clear only that flow's checkpoints; full refresh also deletes the data.
+S: An analyst runs `SELECT * FROM main.gold.daily_revenue VERSION AS OF 12` on a materialized view defined in a Spark Declarative Pipeline, and the query is rejected. The same syntax works on the pipeline's streaming tables. The analyst must compare today's revenue with last week's values. What should the engineer do?
+A: Turn on the Preview channel of the pipeline, which adds Delta time travel for materialized views
+B: Move the pipeline to classic compute, because only classic pipelines keep the Delta history of materialized views
+C: Convert the view into a streaming table over the raw events, because its aggregate then needs no recompute
+D: Keep dated copies of the result in a Delta table, for example with a scheduled job, and query that history instead
+K: D
+G: ## Time travel in pipelines
+Delta Lake time travel queries (`VERSION AS OF`, `TIMESTAMP AS OF`) are supported only with streaming tables in pipelines. Materialized views do not support them. This is one of the differences from plain Delta tables and from Structured Streaming code.
+- A materialized view is a recomputed query result; its history is not exposed for time travel.
+- The compute type and the pipeline channel do not change this rule.
+- When the history of an aggregate matters, store it explicitly: append a snapshot with a date column to a table.
+## Example
+A job task runs `INSERT INTO main.gold.daily_revenue_history SELECT current_date() AS snapshot_date, * FROM main.gold.daily_revenue` after each update. Last week's values are a filter on `snapshot_date`.
+W: Dated copies in a Delta table: the history is stored explicitly in an object that supports normal queries, because the view itself cannot be time-traveled.
+X: A=Preview channel: it tests pending runtime changes and does not change the rule that time travel is limited to streaming tables.
+B=Classic compute: the limitation belongs to materialized views in pipelines, not to the compute type.
+C=Streaming table over events: it changes the semantics (each row once, no recompute on changes) and the table would not provide last week's aggregate values by itself.
+T: Time travel works on pipeline streaming tables only; store dated snapshots when the history of a materialized view is needed.
 V: Spark Declarative Pipelines
 
 @ DBX-DEP D1 T1.8 advanced use-case
@@ -403,25 +406,25 @@ D=Continuous for small volumes: continuous mode needs always-running compute, so
 T: Pick triggered pipelines for minute-to-hour freshness and continuous for seconds-to-minutes freshness.
 V: Spark Declarative Pipelines
 
-@ DBX-DEP D1 T1.8 advanced use-case
-S: The streaming table `events_all` is fed by one Kafka topic for the EU region and consumers read this one table. A new APAC topic must be added to the same table. The EU history is large and must not be reprocessed. Which approach fits a Spark Declarative Pipeline?
-A: Rewrite the table query as a UNION of both topics, which keeps the EU progress because the checkpoint is shared
-B: Define a second append flow that targets `events_all` and reads the APAC topic, leaving the EU flow unchanged
-C: Create a second streaming table for APAC plus a materialized view that unions both, then point consumers to the view
-D: Define an AUTO CDC flow for the APAC topic into `events_all`, which merges its rows with the EU rows by key
-K: B
-G: ## Append flows
-Each streaming table has a default append flow with the same name as the table. More flows can be defined separately and written into the same target; any number of append flows can write to one streaming table. This is meant for:
-- adding streaming sources to an existing table without a full refresh,
-- backfilling historical data,
-- combining sources without `UNION`.
-Every flow has its own checkpoint. In plain Structured Streaming, changing the number of sources of a query is not allowed with an existing checkpoint, which is why a UNION rewrite needs a new checkpoint (in a pipeline this means reprocessing).
-An AUTO CDC flow can only target tables that are targeted by AUTO CDC flows.
-W: Second append flow: the new source gets its own flow and checkpoint, the EU flow continues unchanged, and consumers keep reading one table.
-X: A=UNION rewrite: changing the sources of the existing query is incompatible with its checkpoint, so EU history would be reprocessed or a refresh would be needed.
-C=Separate table and view: it works technically but creates two objects, and consumers would have to change from the existing table to the view, which contradicts the requirement.
-D=AUTO CDC flow: a table that is the target of an append flow cannot be the target of AUTO CDC, and event rows have no keys to merge on.
-T: Add a source to an existing streaming table with another append flow instead of rewriting the query.
+@ DBX-DEP D1 T1.8 advanced troubleshooting
+S: Two teams each own a pipeline. Both pipelines define the streaming table `main.sales.events`, each reading a different Kafka topic, and the second pipeline fails to start because the dataset is already defined elsewhere. What is the right redesign?
+A: Define the table in one pipeline and add one append flow per topic, so that all sources write to the single table
+B: Keep both definitions and run one pipeline in continuous mode, because continuous updates serialize the writes of both
+C: Declare the second definition as a materialized view, because several pipelines may write to one materialized view
+D: Run the second pipeline on classic compute, because the single-definition rule applies only to serverless pipelines
+K: A
+G: ## Datasets are defined once
+A pipeline dataset can be defined only once and can be the target of only a single operation across all pipelines. The exception is a streaming table with **append flows**: any number of append flows can write to one streaming table, each with its own checkpoint.
+- A flow is the unit that reads a source and writes a target; the default flow of a streaming table has the table's name.
+- Extra flows are defined separately from the target, which lets you add sources without a full refresh.
+- Two pipelines cannot both own the table; one pipeline owns it and carries the flows.
+## Example
+In one pipeline: `CREATE STREAMING TABLE events;` then `CREATE FLOW eu_flow AS INSERT INTO events BY NAME SELECT * FROM STREAM(eu_topic_bronze);` and a second flow for the other topic.
+W: One owning pipeline with an append flow per source: the table is defined once and still receives rows from both topics.
+X: B=Continuous mode: pipeline mode controls update timing, not which pipelines may define a dataset, so the second definition still fails.
+C=Materialized view: a materialized view is also a dataset that can be defined only once and is a recomputed query result, not a place for two pipelines to write.
+D=Classic compute: the rule is a property of pipeline datasets and does not depend on the compute type.
+T: Define a pipeline dataset once and add sources to a streaming table with append flows in the owning pipeline.
 V: Spark Declarative Pipelines
 
 @ DBX-DEP D1 T1.9 advanced troubleshooting
@@ -526,60 +529,65 @@ T: If/else conditions accept only numeric, string and boolean values, so publish
 V: Lakeflow Jobs
 
 @ DBX-DEP D1 T1.10 advanced troubleshooting
-S: A job task on serverless compute installs the in-house wheel `geofast` with C extensions. The wheel was built only for `x86_64`. The task passes on many runs but fails on some with an installation error for that wheel, and nothing changed in the code. The team wants to stay on serverless. What is the best fix?
-A: Add an init script that compiles the extension on the node at start-up, so that the wheel is installed on any architecture
-B: Pin the same base environment version in every run, because the installation error comes from a version difference
-C: Switch the task to the performance-optimized mode, which always places the run on the x86_64 hardware of the earlier runs
-D: Publish a pure-Python wheel, or an `aarch64` and an `x86_64` wheel selected by `platform_machine` markers
-K: D
-G: ## Serverless does not fix the CPU architecture
-Serverless compute for notebooks and jobs does not guarantee a CPU architecture: a run can land on `aarch64` or `x86_64`, and this can change between runs. A wheel with native extensions is built for one architecture and fails to install on the other. This explains an intermittent failure without any code change.
-- Use **pure-Python wheels** (tag `py3-none-any`) where possible.
-- Otherwise provide both architecture variants and constrain each with a `platform_machine` environment marker in the dependency list.
-- Serverless offers no compute policies or init scripts; dependencies are declared in the environment of the notebook or job task.
-Classic compute with a fixed instance type is an alternative when the library cannot be rebuilt.
-W: Architecture-aware dependencies: a pure-Python wheel, or one wheel per architecture selected by markers, installs on whichever hardware serverless picks.
-X: A=Init script: serverless compute does not support init scripts, and compilation at start-up is not how dependencies are installed there.
-B=Pinning the environment version: the version defines pre-installed libraries, but not the CPU architecture, so the intermittent wheel failure would remain.
-C=Performance-optimized mode: it affects start-up and execution speed, not the hardware architecture, which is not guaranteed in either mode.
-T: Serverless can run on aarch64 or x86_64, so native wheels need both variants or a pure-Python build.
-V: Serverless compute
+S: A classic pipeline with enhanced autoscaling ingests a heavy stream. Every few days an update fails because an executor runs out of memory on a skewed microbatch, although the maximum worker count is never reached. The team does not want to choose instance types by hand. Which change fits?
+A: Raise the maximum number of workers, because enhanced autoscaling adds memory to every existing worker as the worker count grows
+B: Switch the pipeline to the Preview channel, because the pending runtime changes remove the out-of-memory limit of executors
+C: Convert the pipeline to serverless, which adds vertical autoscaling that selects instance types able to avoid out-of-memory failures
+D: Set the pipeline to continuous mode, because a long-lived cluster keeps enough memory for all microbatches
+K: C
+G: ## Horizontal and vertical autoscaling
+Enhanced autoscaling is horizontal: it adds and removes workers as the workload changes. It does not change the memory of one worker.
+- **Serverless pipelines** add **vertical autoscaling** on top: Databricks automatically allocates the most cost-efficient instance types that can run the pipeline without failing because of out-of-memory errors.
+- Serverless pipelines also refresh materialized views incrementally and pipeline microbatches concurrently (stream pipelining).
+- Converting an existing Unity Catalog pipeline to serverless removes the compute settings that were configured for it.
+## Example
+A skewed microbatch needs more memory than the chosen worker type offers. More workers do not help because each worker still has the same memory; a serverless pipeline moves to a larger instance type.
+W: Serverless with vertical autoscaling: the platform selects instance sizes that avoid executor out-of-memory failures, with no manual instance choice.
+X: A=More workers: this is horizontal scaling; each worker keeps the same memory, and the limit of workers was never reached anyway.
+B=Preview channel: the channel tests pending runtime changes and new features; it is not a memory setting.
+D=Continuous mode: the pipeline mode decides when updates run, not how much memory an executor has.
+T: Executor out-of-memory failures in a pipeline are addressed by serverless vertical autoscaling, not by more workers.
+V: Spark Declarative Pipelines
 
-@ DBX-DEP D1 T1.10 applied use-case
-S: A job task on serverless compute must install an internal package from an authenticated PyPI mirror. An engineer sets `os.environ["PIP_INDEX_URL"]` in the first notebook cell and then runs `%pip install` for the package, but the installation uses the public index or fails. Which approach is supported?
-A: Set the index in a compute-scoped environment variable on the serverless compute, which is applied before the cells run
-B: Specify `index-url` or `extra-index-url` in the task's dependency specification, or use admin default repositories
-C: Run an init script that writes a `pip.conf` file to every node, because init scripts run before Python starts
-D: Export the proxy variables in the notebook before `%pip install`, because code in cells controls how packages are fetched
+@ DBX-DEP D1 T1.10 applied troubleshooting
+S: A notebook is moved from a classic cluster to serverless compute for jobs. It calls `spark.catalog.cacheTable("dim_customer")` before several joins and `df.checkpoint()` to cut a long lineage. The task now fails with exceptions on these two calls. What is the right adjustment?
+A: Apply a compute policy that allows the cache commands, because serverless honors policies for the Spark caching APIs
+B: Use `df.cache()` or `df.persist()` for the reused DataFrame, and write the intermediate result to a Delta table instead of `df.checkpoint()`
+C: Rewrite the notebook in Scala, because serverless notebooks support the full cache and checkpoint API for Scala code
+D: Replace the catalog call with the SQL statement `CACHE TABLE dim_customer`, which serverless accepts in place of the API
 K: B
-G: ## Dependencies are resolved before your code
-For serverless notebooks and job tasks, Databricks resolves and installs the declared dependencies of the environment **before** the notebook or task code runs. That has consequences:
-- Code in a cell cannot change how dependencies are fetched; proxy or index settings applied at runtime have no effect on that installation.
-- Serverless does not support compute-scoped environment variables, compute policies or init scripts.
-- To use a private or authenticated repository, put `index-url` or `extra-index-url` in the dependency specification (any format valid in a `requirements.txt`), or let a workspace admin set default package repositories for serverless notebooks and jobs, so users need not specify them.
-W: Index options in the specification or admin defaults: both are applied by the platform at installation time, which is when the index has to be known.
-X: A=Compute environment variable: serverless compute does not support compute-scoped environment variables, so there is nowhere to set it.
-C=Init script: serverless has no init scripts, so the configuration file would never be written.
-D=Variables in cells: the environment is installed before cell code runs, so the settings come too late to affect which index is used.
-T: On serverless, declare private indexes in the dependency specification or admin defaults, not in code or init scripts.
+G: ## Caching on serverless compute
+Serverless compute does not support some cache and lineage APIs; using them raises an exception.
+- Not supported: `df.checkpoint()`, `spark.catalog.cacheTable()`, `uncacheTable()`, `clearCache()`, and the SQL commands `CACHE TABLE`, `UNCACHE TABLE`, `REFRESH TABLE` and `CLEAR CACHE`.
+- Supported: `df.cache()`, `df.persist()` and `df.unpersist()`.
+- Serverless does not support compute policies, and Scala and R are not supported in notebooks.
+## Example
+`df = spark.table("dim_customer").persist()` replaces `cacheTable`; `df.write.mode("overwrite").saveAsTable("main.tmp.stage")` followed by a read replaces `checkpoint()` as the way to cut the lineage.
+W: DataFrame persist plus a Delta table: both are supported on serverless and cover the caching and lineage-cutting needs of the notebook.
+X: A=Compute policy: serverless has no compute policies, and policies would not change the list of unsupported APIs.
+C=Scala: Scala is not supported in serverless notebooks, so this does not run at all.
+D=CACHE TABLE: the SQL command is on the same unsupported list as the catalog API.
+T: On serverless use persist() and tables instead of cacheTable, CACHE TABLE and checkpoint().
 V: Serverless compute
 
 @ DBX-DEP D1 T1.10 applied troubleshooting
-S: A pipeline defined in a bundle uses classic compute with a `clusters` block (instance types, an init script, a Spark conf) and installs a private Python library through the init script. The team sets `serverless: true` for the pipeline. The deployment or update fails because of the `clusters` block. What is the correct adjustment?
-A: Keep the `clusters` block but reduce it to the label `default`, since serverless pipelines read the label only
-B: Move the init script to a pipeline configuration key, because configuration keys are executed as scripts on serverless compute
-C: Keep the `clusters` block and set its worker count to 0, because serverless uses it only as a cap on the number of workers
-D: Remove the `clusters` block and declare the Python library in the pipeline's environment dependencies
-K: D
-G: ## Serverless pipelines take over compute
-A serverless pipeline runs on Databricks-managed compute and removes most infrastructure settings. Databricks recommends serverless for new pipelines.
-- Compute settings cannot be added in a `clusters` object of the pipeline JSON (or the equivalent bundle resource); doing so gives an error. When a pipeline is converted to serverless, the previously configured compute settings are removed.
-- External Python dependencies are declared through the pipeline's **Environment** settings; `dbutils.library.restartPython()` is not supported for installing or reloading libraries at runtime.
-- The pipeline `configuration` key-value pairs still carry parameters and Spark settings that are supported.
-- Serverless pipelines require Unity Catalog and give incremental refresh of materialized views, stream pipelining and vertical autoscaling.
-W: Environment dependencies without a clusters block: serverless accepts the library through the environment and the settings that remain valid stay in the configuration.
-X: A=Reduced clusters block: any `clusters` object is rejected for a serverless pipeline; there is no label-only form.
-B=Configuration as scripts: configuration entries are key-value settings and parameters, not executable scripts.
-C=Zero workers: the `clusters` object cannot be used with serverless at all, and workers are managed by Databricks.
-T: Serverless pipelines reject `clusters` settings; declare Python libraries in the pipeline environment instead.
-V: Spark Declarative Pipelines
+S: Two notebook tasks of one job exchange intermediate data. The first runs `CREATE GLOBAL TEMPORARY VIEW stage_orders AS ...` and the second reads `global_temp.stage_orders`. This works on a shared job cluster but fails after the tasks move to serverless compute. What is the recommended approach?
+A: Share the data through a table, because serverless does not support global temporary views and each task runs in its own environment
+B: Replace the global temporary view with a session temporary view, because both tasks of a job share one session on serverless
+C: Pass the view's rows to the second task through task values, because they carry any volume of data between tasks
+D: Pin both tasks to the same serverless environment version, because the version decides which temporary views are shared
+K: A
+G: ## Passing data between tasks
+Global temporary views are not supported on serverless compute. Databricks recommends session temporary views or tables when data must be passed across sessions.
+- Each job task runs in an isolated environment, so a session temporary view of one task is not visible in another task.
+- A table (Unity Catalog managed table or Delta table) persists the data and works for any size.
+- Task values carry small scalar results (a count, a path) between tasks; they are limited in size and are not a data transport.
+## Example
+Task 1 ends with `df.write.mode("overwrite").saveAsTable("main.tmp.stage_orders")`; task 2 starts with `spark.table("main.tmp.stage_orders")`.
+W: Table as hand-off: it survives the end of the first task, is visible to the second task and does not depend on global temporary views.
+X: B=Session view: a session temporary view lives in one session, and each task has its own isolated environment, so the second task cannot read it.
+C=Task values: they are meant for small values and have a size limit; they are not a way to pass tables.
+D=Environment version: the version defines the base libraries and runtime, not the sharing of temporary views between tasks.
+T: Serverless has no global temporary views; hand data between tasks through tables.
+V: Serverless compute
+
