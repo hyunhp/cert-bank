@@ -13,6 +13,7 @@
 # src: https://docs.databricks.com/aws/en/sql/language-manual/functions/from_avro
 # src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/options
 # src: https://docs.databricks.com/aws/en/delta/delta-change-data-feed
+# src: https://docs.databricks.com/aws/en/ldp/cdc
 # src: https://docs.databricks.com/aws/en/delta/merge
 # src: https://docs.databricks.com/aws/en/delta/uniform
 # src: https://docs.databricks.com/aws/en/iceberg/index
@@ -202,25 +203,24 @@ D=Rejecting different delays: the engine accepts different delays per input by d
 T: min protects slow inputs and costs latency; max lowers latency and state but can silently drop late data.
 V: Structured Streaming
 
-@ DBX-DEP D1 T1.12 advanced use-case
-S: Device events carry a unique `guid`, but a gateway re-sends some events with a new `event_time` stamp up to 3 hours after the first send. A stream currently uses `dropDuplicates(["guid", "event_time"])` and duplicates still reach the silver table. The team wants one row per `guid` with bounded state. Which implementation fits?
-A: `dropDuplicates(["guid"])` without a watermark, since state per key is small and the table will not grow noticeably
-B: `withWatermark("event_time", "4 hours").dropDuplicatesWithinWatermark(["guid"])`, with a threshold above the largest gap between duplicates
-C: `withWatermark("event_time", "1 hour").dropDuplicatesWithinWatermark(["guid"])`, because a shorter threshold keeps less state and still guarantees all duplicates are removed
-D: `distinct()` on the full row after `withWatermark("event_time", "4 hours")`, which removes any event that arrived twice within the threshold
-K: B
-G: ## Deduplication needs state
-Structured Streaming guarantees exactly-once processing of its input but does not deduplicate records that a source delivers twice. Deduplication keeps the keys it has seen in state.
-- `dropDuplicates(cols)` without a watermark keeps every key forever: state grows without bound.
-- `dropDuplicates` including the event time column only drops rows that match on all listed columns, so re-stamped duplicates survive.
-- `dropDuplicatesWithinWatermark(cols)` (needs a watermark) deduplicates on a subset of columns even when event time differs between duplicates, and removes the key from state after the watermark. Duplicates within the threshold are always dropped; to guarantee all of them, the threshold must exceed the maximum timestamp difference between duplicate events.
-## Rule
-Size the watermark from the data: here 3 hours between copies needs more than 3 hours.
-W: dropDuplicatesWithinWatermark on guid with a 4-hour watermark: it ignores the changing timestamp, bounds state, and the threshold covers the 3-hour gap.
-X: A=Unbounded dropDuplicates: without a watermark, every guid stays in state indefinitely, which eventually causes memory and checkpoint problems.
-C=One-hour threshold: copies arriving up to 3 hours later fall outside it, so duplicates are only dropped sometimes, not guaranteed.
-D=distinct on the full row: rows that differ in the re-stamped event time are not identical, so the stamped duplicates are not removed.
-T: Use dropDuplicatesWithinWatermark on the business key, with a watermark larger than the maximum gap between duplicates.
+@ DBX-DEP D1 T1.12 advanced troubleshooting
+S: A windowed count uses `withWatermark("event_time", "15 minutes")` in update mode. In earlier micro-batches the latest event time seen was 12:40. The next micro-batch contains a record X with event time 12:30 and a record Y with event time 11:50. What does Spark guarantee about them?
+A: X is guaranteed to be aggregated, while Y is not guaranteed to be dropped, because the guarantee is strict in one direction only
+B: X is aggregated and Y is guaranteed to be dropped, because the watermark is a hard cutoff that removes every older record
+C: Both are aggregated, because update mode keeps every window open and the watermark only controls when results are written
+D: X may be dropped, because a record older than the latest event time already seen counts as late whatever the threshold
+K: A
+G: ## What the watermark promises
+The engine tracks the maximum event time seen and sets the watermark to that value minus the threshold at the start of each trigger. Here the watermark is `12:40 - 15 min = 12:25`. The Spark guide states the guarantee for aggregations:
+- Data less than the threshold behind the latest data processed is guaranteed to be aggregated. X is 10 minutes behind, so it is counted.
+- Data delayed by more than the threshold is not guaranteed to be dropped: it may or may not be aggregated, and the later it is, the less likely the engine processes it. Y is 50 minutes behind, so it is normally discarded, but the contract does not promise it.
+## State cleanup
+With append or update mode, state of windows that end before the watermark is removed; complete mode keeps all state, so it cannot use a watermark for cleanup. Design downstream logic so that it does not depend on very late records being dropped or kept.
+W: One-directional guarantee: X is within the threshold and is always aggregated, while Y is beyond it and the engine may drop it or still count it.
+X: B=Hard cutoff: Spark documents the guarantee as strict only in one direction, so very late data is not guaranteed to be dropped.
+C=Every window open: update mode with a watermark removes state of old windows, so records for them are not reliably aggregated.
+D=Older than the latest event: only lateness beyond the threshold matters; records out of order within the threshold are guaranteed to be processed.
+T: A watermark guarantees that data within the threshold is aggregated, but late data beyond it may be dropped or not.
 V: Structured Streaming
 
 @ DBX-DEP D1 T1.12 advanced troubleshooting
@@ -345,9 +345,9 @@ C: Set `maxFetchDuration` to a very small value, which makes each batch finish e
 D: Switch the queries to enhanced fan-out, so that each query gets its own dedicated read throughput per shard instead of sharing the polling limit
 K: D
 G: ## Shared limits in polling mode
-Each Kinesis shard supports a fixed number of `GetRecords` calls per second (five), shared across all polling readers of that shard. With N polling queries the calls are split, so queries get throttled (`ReadProvisionedThroughputExceeded`) and fall behind (iterator age grows) no matter how large the cluster is. Mitigations: set `minFetchPeriod` to at least `200ms * N`, add shards, or use enhanced fan-out.
+Each Kinesis shard supports a fixed number of `GetRecords` calls per second, shared across all polling readers of that shard. With several polling queries the calls are split, so queries get throttled (`ReadProvisionedThroughputExceeded`) and fall behind (iterator age grows) no matter how large the cluster is. Databricks advises that a query be the only consumer of the stream; with several readers, use enhanced fan-out.
 ## Enhanced fan-out (EFO)
-EFO registers each query as its own consumer with dedicated throughput per shard (2 MB/s per shard per consumer, up to 20 consumers per stream) delivered in push mode. Consumers add cloud cost; `requireConsumerDeregistration` can remove them when the query stops.
+EFO registers each query as its own consumer with dedicated throughput per shard, delivered in push mode. Consumers add cloud cost; `requireConsumerDeregistration` can remove them when the query stops.
 W: Enhanced fan-out: each query becomes a dedicated consumer with its own per-shard throughput, so the readers no longer compete for the shared `GetRecords` limit.
 X: B=shardsPerTask: it changes how shards map to Spark tasks, not the per-shard API limit that the three queries share.
 C=maxFetchDuration: this option trades completeness of each batch for speed and does not raise the per-shard limit; it can even increase calls and throttling.
@@ -432,25 +432,25 @@ D=File notification mode: the filter applies to names in every detection mode, s
 T: Auto Loader ignores files and folders whose names start with underscore or dot unless ignoredPathSegmentRegex is changed.
 V: Auto Loader
 
-@ DBX-DEP D2 T2.2 advanced troubleshooting
-S: A silver stream reads the Delta table `bronze.orders`. A nightly compliance job runs `DELETE FROM bronze.orders WHERE customer_id IN (...)`, and the stream then fails with an error about modified or deleted data in its source. Silver must keep processing new appends, and a separate purge job removes the same customers from silver. What fits?
-A: Set `ignoreChanges` to `true`, the recommended option for new workloads, which skips rewritten files without any duplicates downstream
-B: Set `ignoreDeletes` to `true`, which tolerates row-level deletes anywhere in the source table
-C: Set `skipChangeCommits` to `true` on the streaming read, so commits that update or delete existing rows are skipped and appends keep flowing
-D: Delete the checkpoint after each nightly delete so the stream restarts from the current table version
-K: C
-G: ## Streaming reads need append-only sources
-A Delta table read as a stream is assumed to be append-only. An `UPDATE`, `DELETE`, `MERGE INTO` or overwrite on the source rewrites files and makes the stream throw, unless you choose how to handle such commits.
-- `skipChangeCommits`: ignores commits that delete or modify existing rows and processes only appends. Databricks recommends it for most workloads that do not use change data feed. Changes must be propagated by separate logic (here, the purge job).
-- `ignoreDeletes`: legacy, tolerates only deletes at partition boundaries (whole-partition drops).
-- `ignoreChanges`: legacy (superseded in current runtimes by `skipChangeCommits`); rewritten files are re-emitted, so unchanged rows come again and downstream must cope with duplicates.
-- Change data feed: use it when the downstream table must also reflect the changes.
-W: skipChangeCommits: it ignores the delete commit and continues with appends, which matches the requirement that a separate job purges silver.
-X: B=ignoreDeletes: it covers only deletes that remove whole partitions, so a row-level delete by customer still fails the stream.
-A=ignoreChanges: it is the legacy option; it re-emits rewritten files with unchanged rows, so duplicates reach silver, and it is replaced by skipChangeCommits.
-D=Deleting the checkpoint: the stream would restart and reprocess the source from its beginning or a start option, duplicating data and losing state.
-T: Use skipChangeCommits to continue past source updates and deletes, or change data feed when the changes must flow downstream.
-V: Delta Lake, Structured Streaming
+@ DBX-DEP D2 T2.2 advanced use-case
+S: A Lakeflow pipeline keeps a customer dimension current from a CDC feed. Events for one customer can arrive out of order, and two events of one customer sometimes carry the same `event_ts`, with `event_id` increasing between them. The target must hold only the latest state per customer. Which `AUTO CDC` setup fits?
+A: Keys on `customer_id`, SCD type 1 and `SEQUENCE BY STRUCT(event_ts, event_id)`, so late events lose against newer ones and ties fall back to the second field
+B: Keys on `customer_id`, SCD type 2 and `SEQUENCE BY` the file arrival time, so each event is stored as a history row in the order the files were read
+C: Keys on `customer_id`, SCD type 1 and `SEQUENCE BY event_ts` alone, because the engine breaks equal timestamps by the order in which it received the rows
+D: A `MERGE` in `foreachBatch` that updates on every match, because a micro-batch always lists events in the order in which they were produced
+K: A
+G: ## Out-of-order CDC
+Applying change events in arrival order gives wrong results when they arrive late or out of order. The `AUTO CDC` API in Lakeflow pipelines orders events by a sequencing column that you name, and applies the one with the highest value per key.
+- SCD type 1 overwrites the row and keeps no history; SCD type 2 keeps a row per version.
+- To sequence by several columns, combine them in a `STRUCT`: the first field orders first and, on a tie, the second field decides.
+- A late event with a lower sequence value than the stored one does not overwrite the newer state.
+Example: `SEQUENCE BY STRUCT(event_ts, event_id)` with keys on `customer_id` and SCD type 1.
+W: SCD type 1 with a struct sequence: only the latest state per key is kept, late events cannot overwrite newer ones, and the second field makes equal timestamps deterministic.
+X: B=SCD type 2 on arrival time: type 2 keeps history, not only the latest state, and arrival time reproduces exactly the disorder the sequencing is meant to remove.
+C=Single timestamp: the documentation uses a struct to break ties, because equal values leave the winner undefined instead of following arrival order.
+D=Manual MERGE: a batch carries no ordering guarantee, and several matching source rows for one target row make the merge fail.
+T: Use AUTO CDC with a sequencing column, and a STRUCT for tie-breaks, to apply out-of-order changes correctly.
+V: Lakeflow Pipelines, AUTO CDC
 
 @ DBX-DEP D2 T2.2 advanced use-case
 S: A silver job reads the change data feed of `bronze.customers` with `readChangeFeed` and upserts into `silver.dim_customer` in `foreachBatch`. One micro-batch spans several commits that touch customer 42: an insert, an update (rows `update_preimage` and `update_postimage`) and later a delete. A single `MERGE` on `customer_id` against this raw batch fails or gives wrong results. Which preparation of the batch is correct?
