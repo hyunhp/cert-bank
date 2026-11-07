@@ -9,22 +9,20 @@ Updated 2026-11-07.
 - Blog link (owner delegated 2026-11-04): footer of index.html shows `Practice sets on the blog (external site, may show ads)` from `BLOG_FROM` 2026-11-21 (hub https://bigdatabreakthroughs.blogspot.com/p/exams.html; do not link single posts). Checked 2026-11-04: hub 200, label pages 200 but "No posts" yet, Blogger pages carry AdSense. Reminder set for 2026-11-22: all 34 `/search/label/<EXAM>` pages must list posts; else push `BLOG_FROM` later.
 - Open UI ideas: `ENDS` badge on study.html chips; per-day study quiz results are not stored; history has no per-question time.
 - Session handoff 2026-11-07 (owner /clear): 2026-11-06/07 cycle merged PR 104 (PLTR +175), 105+106 (GCP-PDE bank, guide, glossary), 107+108 (GCP-PSE bank, guide, glossary), 109 (DBX-DEP bank). Open:
-  DBX-DEP study guide (45 tasks, plan like PDE/PSE: 4 writers, 4 Learn reviewers, glossary by Sonnet + reviewer, README row, PR), then other Databricks exams. Recipe per exam: read official guide, register
+  other Databricks exams. Recipe per exam: read official guide, register
   (`exam-specs.json`, `exam-tasks.json`, `tools/qgen/tasks.json` Korean names, `index.html` EXAMS + EXAM_LEVEL, vendor doc section, `PLAN.md`), writers in waves of 4, one reviewer per batch, ingest each reviewed
   batch BEFORE the next review starts, `check --siblings`, full tests, PR, `changes.py <PR>`, ask owner, merge, message publisher for `important` entries. Check a reviewer's deletion against the docs before accepting it.
   Flaky tests seen once each (rerun passed): `mock_e2e_test` "review option entries in shown order", `resume_test` "answered card shown again"; `study_test` raced the exam summary render (fixed 2026-11-06).
   Network: `www.palantir.com`, `spark.apache.org` allowed 2026-11-06; `support.google.com` still blocked (GCP retake rules, PSE T1.3 settings); learn/certification.palantir.com 403 (site side).
-- In progress (2026-11-07): DBX-DEP (Databricks Data Engineer Professional, guide of 2026-10-09) bank merged (PR 109, publisher informed): 300 questions in
-  b01-b11 from PLAN.md, single answer, each reviewed; reviewers replaced 3-7 of 28 per batch as duplicates of published DBX-DEA/DBX-DEP questions (ingest each reviewed batch before the next review
-  starts) and fixed wrong claims (e.g. 9 TB table file size 900 MB, driver log access needs CAN MANAGE, deleted jobs keep their last state in system.lakeflow.jobs). `tools/qgen/qgen.py` header
-  now accepts two-digit tasks (T1.10-T1.12). Study guide + glossary + README row not started. GCP-PSE study guide + glossary merged (PR 108); GCP-PSE bank (PR 107), GCP-PDE (PR 105, 106), PLTR top-up (PR 104) merged.
+- Done 2026-11-07: DBX-DEP (Data Engineer Professional, guide of 2026-10-09) bank (PR 109) + study guide (25 days, D1 6, D2 3, D3 3, D4 3, D5 3, D6/D7 2, D8 3, D9 1, final; 4 writers + 4 Learn reviewers, ~40 fixes) + glossary (+12 `dbx-*` terms, 16 tagged, Sonnet-reviewed) + README row. Bank: 300 questions, single answer, each reviewed;
   Preview/Beta kept out of keys: MySQL and PostgreSQL Lakeflow Connect connectors, Metric Views "relationships", ABAC on views/metastore/DENY, many system tables (audit, pipeline_events, predictive optimization history),
   Python SDK, direct deployment engine, VACUUM LITE, unique constraints. The exam page (59 q, 10 sections) disagrees with the guide (60 q, 9 sections): the bank follows the guide.
+  Study-guide facts: Lakeflow system-table retention "about a year" (overview says 395 days, jobs page 365); preimage/postimage CDF dedup is a common pattern, not a documented rule.
   Docs renames: Agent Studio -> "AIP Chatbot Studio"; Dataplex Universal Catalog -> "Knowledge Catalog"; Analytics Hub -> "BigQuery sharing"; Dataproc -> "Managed Service for Apache Spark";
   Composer -> "Managed Service for Apache Airflow"; Log Analytics -> "Observability Analytics"; legacy org-policy constraints have `compute.managed.*` names (notes in `tools/qgen/GCP.md`;
   keys use the guide names). PSE T1.3 (password, session and 2-step verification policy) is documented only on support.google.com (blocked here): the bank keeps to architecture-doc facts.
   Preview or tier-bound and kept out of keys: SCC Enterprise tier is deprecated, Binary Authorization continuous validation, Assured Workloads workload updates, EKM zero-downtime migration.
-  Next: DBX-DEP study guide + glossary, then other Databricks exams (Data Analyst Associate, ML Associate/Professional, GenAI Engineer Associate, Context Engineering Associate). Open gaps: Gemini app and Gems (GAIL T2.2); Gemini Cloud Assist is
+  Next: other Databricks exams (Data Analyst Associate, ML Associate/Professional, GenAI Engineer Associate, Context Engineering Associate). Open gaps: Gemini app and Gems (GAIL T2.2); Gemini Cloud Assist is
   private preview (noted in PCA); re-check Spark claims now that spark.apache.org is reachable.
 - Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; GCP-CDL bank and study guide; MLA-C02 study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
