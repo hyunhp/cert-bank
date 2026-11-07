@@ -54,3 +54,25 @@ Writing rules (in addition to the DBX-DEA ones above):
 - Overlap: DBX-DEA (same platform, associate depth) already has Auto Loader, COPY INTO, Jobs, Unity Catalog basics, Git folders and bundles basics. Read its published
   questions first (grep data/DBX-DEA.json) and test the professional decision (when X over Y, what fails, how to repair). DEA-C01 and GCP-PDE share concepts, not products.
 - Spark API pages (spark.apache.org) are reachable since 2026-11-06; use them for Structured Streaming semantics.
+
+## DBX-DAA Databricks Certified Data Analyst Associate (added 2026-11-07)
+Sources: https://www.databricks.com/learn/certification/data-analyst-associate and the guide
+https://www.databricks.com/sites/default/files/2026-10/Databricks-Certified-Data-Analyst-Associate-Exam-Guide-August-2026.pdf
+(guide updated 2026-10-08, exam published 2026-10-19, read 2026-11-07). The guide still carries a template line ("[Author: list every section ...]"); the outline itself is complete.
+
+| Item | Value |
+|---|---|
+| Questions | 45 scored multiple choice (+ up to 10 unscored), 90 min, USD 200, valid 2 years, no prerequisite, 6 months hands-on recommended |
+| Pass mark | Not published. `passMarkUnpublished: true`; the mock aims at 80% |
+| Sections | D1 Platform 11%, D2 Managing Data 8%, D3 Importing Data 5%, D4 Executing queries with Databricks SQL and SQL warehouses 20%, D5 Analyzing Queries 15%, D6 Dashboards and Visualizations 16%, D7 AI/BI Genie Agents (Genie spaces) 12%, D8 Data Modeling with Databricks SQL 5%, D9 Securing Data 8% |
+| Tasks | 39 (`data/exam-tasks.json`): 1.1-1.3, 2.1-2.3, 3.1-3.2, 4.1-4.9, 5.1-5.6, 6.1-6.7, 7.1-7.4, 8.1-8.2, 9.1-9.3 (one per outline bullet) |
+| Code | All SQL is ANSI SQL per the exam page; short snippets (<=6 lines) fine |
+| Format | Single answer only (the guide's samples are single answer): this bank uses single answer only |
+
+Writing rules (in addition to the DBX-DEA ones above):
+- Analyst view, not engineer view: which query, view, table type, dashboard setting or Genie setting answers the business need. Test the decision, not the click path.
+- Current names: Genie Code (Databricks Assistant), AI/BI Dashboards, AI/BI Genie Agents (Genie spaces; docs may still say "Genie spaces"), SQL warehouse (serverless, pro, classic),
+  Lakeflow Declarative Pipelines, Lakeflow Connect, Unity Catalog metric views, Predictive Optimization, Liquid Clustering. Old names only in G: once.
+- Preview/Beta check on every docs page banner. Likely candidates: Genie Agents features (benchmarks, channel apps, Trusted Assets variants), dashboard embedding, external lineage, Lakebase,
+  metric views, governed tags, Lakeflow Connect connectors, Genie Code slash commands. No prices, DBU rates, limits or runtime versions.
+- Overlap: DBX-DEA owns Auto Loader, COPY INTO, Jobs, Delta basics and Unity Catalog grants at engineer depth. Read its published questions first (grep data/DBX-DEA.json) and ask the analyst-side decision.
