@@ -8,15 +8,16 @@ Updated 2026-11-06.
 - Change log (owner agreed 2026-11-04): `data/changes/<PR>.json` per data PR via `tools/qgen/changes.py`; message the blogger-publisher session only for `important` entries (rules in CLAUDE.md). Backfilled PR 97 (explanation name fix, 175 entries, none important).
 - Blog link (owner delegated 2026-11-04): footer of index.html shows `Practice sets on the blog (external site, may show ads)` from `BLOG_FROM` 2026-11-21 (hub https://bigdatabreakthroughs.blogspot.com/p/exams.html; do not link single posts). Checked 2026-11-04: hub 200, label pages 200 but "No posts" yet, Blogger pages carry AdSense. Reminder set for 2026-11-22: all 34 `/search/label/<EXAM>` pages must list posts; else push `BLOG_FROM` later.
 - Open UI ideas: `ENDS` badge on study.html chips; per-day study quiz results are not stored; history has no per-question time.
-- In progress (2026-11-06): GCP-PSE (Professional Cloud Security Engineer) bank DONE on branch `gcp-pse`, PR pending owner OK to merge (bulk add): 275 questions in b01-b10
-  from PLAN.md (about 47 multi-answer), each reviewed; reviewers replaced about 5 of 28 per batch as duplicates of published GCP-PCA/ACE/PDE/PSE questions (parallel writers could not see each other's
-  scenarios: ingest each reviewed batch before the next review starts) and fixed wrong claims (folder-level firewall goto_next cannot exempt an org deny, Packet Mirroring filters are optional,
-  Cloud NAT/Autokey/OS Login wording). Study guide + glossary + README row not started. GCP-PDE bank, study guide and glossary merged (PR 105, 106); PLTR top-up merged (PR 104).
+- In progress (2026-11-06): GCP-PSE (Professional Cloud Security Engineer) bank merged (PR 107, 275 questions); study guide (23 days, 4 writers + 4 Learn reviewers, about 24 fixes;
+  writers re-checked their own claims this time, reviewers still found 2-11 per file) + glossary (+8 `gcp-*` terms, 18 tagged, 7 shared terms made cloud-neutral) on branch `gcp-pse-study`,
+  PR pending owner OK. GCP-PDE bank/guide/glossary (PR 105, 106) and PLTR top-up (PR 104) merged. Lessons: parallel writers cannot see each other's scenarios, reviewers replaced about 5 of 28
+  per batch as duplicates (ingest each reviewed batch before the next review starts); a reviewer's deletion can be wrong (PSC connection limit does cause Pending: check the docs before accepting it);
+  reviewers with no docs access to a claim should say so. PSE T1.3 (password, session, 2-step verification settings) is documented only on support.google.com (blocked here).
   Docs renames: Agent Studio -> "AIP Chatbot Studio"; Dataplex Universal Catalog -> "Knowledge Catalog"; Analytics Hub -> "BigQuery sharing"; Dataproc -> "Managed Service for Apache Spark";
   Composer -> "Managed Service for Apache Airflow"; Log Analytics -> "Observability Analytics"; legacy org-policy constraints have `compute.managed.*` names (notes in `tools/qgen/GCP.md`;
   keys use the guide names). PSE T1.3 (password, session and 2-step verification policy) is documented only on support.google.com (blocked here): the bank keeps to architecture-doc facts.
   Preview or tier-bound and kept out of keys: SCC Enterprise tier is deprecated, Binary Authorization continuous validation, Assured Workloads workload updates, EKM zero-downtime migration.
-  Next: GCP-PSE study guide + glossary, then more Databricks exams. Open gaps: Gemini app and Gems (GAIL T2.2); Gemini Cloud Assist is
+  Next: more Databricks exams. Open gaps: Gemini app and Gems (GAIL T2.2); Gemini Cloud Assist is
   private preview (noted in PCA); re-check Spark claims now that spark.apache.org is reachable.
 - Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; GCP-CDL bank and study guide; MLA-C02 study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
