@@ -60,8 +60,32 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # Windows consoles 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 DATA = ROOT / "data"
 STATE = ROOT / "tools/qgen/ingested.json"          # block hash -> question id
-SPECS = json.loads((DATA / "exam-specs.json").read_text(encoding="utf-8"))
-TASKS = json.loads((ROOT / "tools/qgen/tasks.json").read_text(encoding="utf-8"))
+
+
+def read_json(path, default=None):
+    """Parsed JSON of `path`; `default` when the file does not exist and a default is given."""
+    if default is not None and not path.exists():
+        return default
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_json(path, obj, ascii_only=False, sort_keys=False):
+    """Write `obj` the way every data file is stored: 1-space indent, trailing newline, LF line ends."""
+    text = json.dumps(obj, indent=1, ensure_ascii=ascii_only, sort_keys=sort_keys) + "\n"
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
+def load_state():
+    """The ingest ledger (block hash -> question id); empty when nothing was ingested yet."""
+    return read_json(STATE, {})
+
+
+def save_state(state):
+    write_json(STATE, state, ascii_only=True, sort_keys=True)
+
+
+SPECS = read_json(DATA / "exam-specs.json")
+TASKS = read_json(ROOT / "tools/qgen/tasks.json")
 EXAMS = [k for k in SPECS if not k.startswith("_")]
 TARGET_MULT = 5                                   # pool target = 5 full exams
 DIFFS = {"applied", "advanced"}
@@ -75,10 +99,10 @@ def load_exam(code):
     path = DATA / f"{code}.json"
     if not path.exists():
         return []
-    qs = json.loads(path.read_text(encoding="utf-8"))
+    qs = read_json(path)
     exp_path = DATA / "explanations" / f"{code}.json"
     if exp_path.exists():
-        exp = json.loads(exp_path.read_text(encoding="utf-8"))
+        exp = read_json(exp_path)
         for q in qs:
             q["explanation"] = exp[q["id"]]
     return qs
@@ -88,30 +112,47 @@ def save_exam(code, qs):
     """Write data/<EXAM>.json without explanations and data/explanations/<EXAM>.json ({id: text}).
     The site loads the lean question file first and the explanations only when a question is revealed."""
     lean = [{k: v for k, v in q.items() if k != "explanation"} for q in qs]
-    (DATA / f"{code}.json").write_text(json.dumps(lean, indent=1, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+    write_json(DATA / f"{code}.json", lean)
     exp = {q["id"]: q["explanation"] for q in sorted(qs, key=lambda x: x["id"])}
     (DATA / "explanations").mkdir(exist_ok=True)
-    (DATA / "explanations" / f"{code}.json").write_text(json.dumps(exp, indent=1, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+    write_json(DATA / "explanations" / f"{code}.json", exp)
 
 
+DOMAINS_PATH = DATA / "exam-domains.json"
 def domain_map():
-    p = DATA / "exam-domains.json"
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    return read_json(DOMAINS_PATH, {})
+
+
+def save_domain_map(dmap):
+    write_json(DOMAINS_PATH, dict(sorted(dmap.items())), ascii_only=True)
 
 
 SHARES_PATH = ROOT / "tools/qgen/shares.json"
 def share_rules():
-    return json.loads(SHARES_PATH.read_text(encoding="utf-8")) if SHARES_PATH.exists() else {}
+    return read_json(SHARES_PATH, {})
 
 
 TASKMAP_PATH = DATA / "exam-shared-tasks.json"
 def task_map():
-    return json.loads(TASKMAP_PATH.read_text(encoding="utf-8")) if TASKMAP_PATH.exists() else {}
+    return read_json(TASKMAP_PATH, {})
 
 
 def save_task_map(tmap):
     tmap = {k: v for k, v in sorted(tmap.items()) if v}
-    TASKMAP_PATH.write_text(json.dumps(tmap, indent=1, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+    write_json(TASKMAP_PATH, tmap, ascii_only=True, sort_keys=True)
+
+
+def save_shared_maps(dmap, tmap):
+    save_domain_map(dmap)
+    save_task_map(tmap)
+
+
+def refresh_site_index():
+    """Re-stamp examDomain/examTask and rebuild the site's download index (counts + cache-busting hashes)."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    stamp_exam_fields()
+    import build_data_index
+    build_data_index.build()
 
 
 def apply_shares(qid, exam_codes, shared, dom_in, rules, tmap):
@@ -162,12 +203,12 @@ def stamp_exam_fields():
         path = DATA / f"{code}.json"
         if not path.exists():
             continue
-        qs = json.loads(path.read_text(encoding="utf-8"))
+        qs = read_json(path)
         for q in qs:
             q.pop("examDomain", None); q.pop("examTask", None)
             q["examDomain"] = domain_of(q, code, dmap)
             q["examTask"] = exam_task(q, code, tmap)
-        path.write_text(json.dumps(qs, indent=1, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+        write_json(path, qs)
 
 
 def target(code):
@@ -307,6 +348,67 @@ def published():
     return _published
 
 
+def header_errors(exam, dom, task, diff, scen, where):
+    """Problems in the `@ EXAM Dx Tx.x diff scenario` header fields (the exam itself is known to exist)."""
+    errors = []
+    if not any(d["code"] == dom for d in SPECS[exam]["domains"]):
+        errors.append(f"{where}: {exam} has no {dom}")
+    if task[1] != dom[1]:
+        errors.append(f"{where}: task {task} is not in {dom}")
+    if diff not in DIFFS:
+        errors.append(f"{where}: difficulty must be one of {sorted(DIFFS)}")
+    if scen not in SCEN:
+        errors.append(f"{where}: scenarioType must be one of {sorted(SCEN)}")
+    return errors
+
+
+def parse_shared_tags(extra, where):
+    """`+EXAM:Dx` tags of a header -> ({exam: domain}, errors)."""
+    shared, errors = {}, []
+    for tok in extra.split():
+        m = re.match(r"^\+(\S+):(D\d)$", tok)
+        if not m or m.group(1) not in SPECS:
+            errors.append(f"{where}: bad shared tag {tok!r} (use +SOA-C03:D2)")
+        else:
+            shared[m.group(1)] = m.group(2)
+    return shared, errors
+
+
+def field_errors(f, letters, where):
+    """Missing or malformed top-level fields: choice letters and the required S/K/W/X/T lines."""
+    errors = []
+    if letters not in (list("ABCD"), list("ABCDE")):
+        errors.append(f"{where}: choices must be A-D or A-E, got {letters}")
+    for k in ("S", "K", "W", "X", "T"):
+        if not f.get(k):
+            errors.append(f"{where}: missing {k}:")
+    return errors
+
+
+def answer_errors(f, letters, keys, wrong, where):
+    """Checks that need the parsed answer keys: multi/single choice count, stem suffix, duplicate texts, X: coverage."""
+    errors = []
+    if len(keys) > 1:
+        want = f"(Select {NUM_WORD.get(len(keys), len(keys))})"
+        if not f["S"].endswith(want):
+            errors.append(f"{where}: multi-answer stem must end with {want}")
+        if len(letters) != 5:
+            errors.append(f"{where}: multi-answer questions use 5 choices")
+    elif len(letters) != 4:
+        errors.append(f"{where}: single-answer questions use 4 choices")
+    texts = [f[k] for k in letters]
+    if len(set(t.lower() for t in texts)) != len(texts):
+        errors.append(f"{where}: duplicate choice text")
+    missing = [k for k in letters if k not in keys and k not in wrong]
+    if missing:
+        errors.append(f"{where}: X: has no reason for wrong choice(s) {missing}")
+    return errors
+
+
+def stem_hash(stem):
+    return hashlib.sha1(re.sub(r"\s+", " ", stem.lower()).encode()).hexdigest()[:12]
+
+
 def build(block, errors):
     if EXPL_HEAD.match(block["_head"]):
         return build_explain(block, errors)
@@ -320,49 +422,19 @@ def build(block, errors):
     if exam not in SPECS:
         errors.append(f"{where}: unknown exam {exam}")
         return None
-    if not any(d["code"] == dom for d in SPECS[exam]["domains"]):
-        errors.append(f"{where}: {exam} has no {dom}")
-    if task[1] != dom[1]:
-        errors.append(f"{where}: task {task} is not in {dom}")
-    if diff not in DIFFS:
-        errors.append(f"{where}: difficulty must be one of {sorted(DIFFS)}")
-    if scen not in SCEN:
-        errors.append(f"{where}: scenarioType must be one of {sorted(SCEN)}")
-    shared = {}
-    for tok in extra.split():
-        m = re.match(r"^\+(\S+):(D\d)$", tok)
-        if not m or m.group(1) not in SPECS:
-            errors.append(f"{where}: bad shared tag {tok!r} (use +SOA-C03:D2)")
-        else:
-            shared[m.group(1)] = m.group(2)
+    errors += header_errors(exam, dom, task, diff, scen, where)
+    shared, tag_errors = parse_shared_tags(extra, where)
+    errors += tag_errors
     letters = [k for k in "ABCDE" if k in f]
-    if letters not in (list("ABCD"), list("ABCDE")):
-        errors.append(f"{where}: choices must be A-D or A-E, got {letters}")
-    for k in ("S", "K", "W", "X", "T"):
-        if not f.get(k):
-            errors.append(f"{where}: missing {k}:")
+    errors += field_errors(f, letters, where)
     if errors and any(e.startswith(where) for e in errors):
         return None
     keys = [k.strip() for k in f["K"].split(",")]
     if any(k not in letters for k in keys) or len(set(keys)) != len(keys):
         errors.append(f"{where}: bad K: {f['K']}")
         return None
-    multi = len(keys) > 1
-    if multi:
-        want = f"(Select {NUM_WORD.get(len(keys), len(keys))})"
-        if not f["S"].endswith(want):
-            errors.append(f"{where}: multi-answer stem must end with {want}")
-        if len(letters) != 5:
-            errors.append(f"{where}: multi-answer questions use 5 choices")
-    elif len(letters) != 4:
-        errors.append(f"{where}: single-answer questions use 4 choices")
-    texts = [f[k] for k in letters]
-    if len(set(t.lower() for t in texts)) != len(texts):
-        errors.append(f"{where}: duplicate choice text")
     wrong = split_x(f["X"])
-    missing = [k for k in letters if k not in keys and k not in wrong]
-    if missing:
-        errors.append(f"{where}: X: has no reason for wrong choice(s) {missing}")
+    errors += answer_errors(f, letters, keys, wrong, where)
     if f.get("G"):
         rich_checks(f, {k: v for k, v in wrong.items() if k not in keys}, where, errors)
     why_by = why_by_key(f, keys, where, errors) if f.get("G") else {}
@@ -373,7 +445,7 @@ def build(block, errors):
         "stem": f["S"], "choices": {k: f[k] for k in letters}, "keys": keys, "why": f["W"],
         "wrong": wrong, "why_by": why_by, "take": f["T"], "bg": f.get("G") or None, "services": [s.strip() for s in f.get("V", "").split(",") if s.strip()],
         "pin": f.get("I") or None,
-        "hash": hashlib.sha1(re.sub(r"\s+", " ", f["S"].lower()).encode()).hexdigest()[:12], "where": where,
+        "hash": stem_hash(f["S"]), "where": where,
     }
 
 
@@ -461,19 +533,21 @@ def sibling_items(path, state):
     return out
 
 
-def check(path, write=False, siblings=False):
-    blocks = parse(path)
-    errors, warns = [], []
-    built = [b for b in (build(b, errors) for b in blocks) if b]
-    explains = [b for b in built if b.get("explain_only")]
-    items = [b for b in built if not b.get("explain_only")]
+def batch_shape_errors(blocks, explains, items):
+    """Whole-batch problems: repeated explain blocks, explain-only mixed with new questions, empty file."""
+    errors = []
     dup = collections.Counter(e["id"] for e in explains)
     errors += [f"{q}: more than one explain block" for q, n in dup.items() if n > 1]
     if explains and items:
         errors.append("keep explain-only blocks and new questions in separate batch files")
     if not blocks:
         errors.append("no question blocks found")
-    state = json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {}
+    return errors
+
+
+def batch_state_errors(items, state):
+    """Duplicate stems inside the batch, and blocks superseded by a later `I: <id>` rewrite."""
+    errors = []
     seen_hash = collections.Counter(i["hash"] for i in items)
     for i in items:
         if seen_hash[i["hash"]] > 1:
@@ -484,8 +558,11 @@ def check(path, write=False, siblings=False):
         if not i["pin"] and id_hashes.get(state.get(i["hash"]), 0) > 1:
             errors.append(f"{i['where']}: superseded - {state[i['hash']]} was rewritten later with an `I:` block; "
                           f"delete this block (re-ingesting it would revert the fix)")
+    return errors
 
-    # near-duplicate check against every existing question of the same exams (excluding own earlier ingest)
+
+def comparison_pool(path, items, state, siblings):
+    """(existing questions, their texts) a new batch is compared with: the same exams, minus the batch's own earlier ingest."""
     exams = sorted({i["exam"] for i in items} | {e for i in items for e in i["shared"]})
     existing = {}
     for e in exams:
@@ -498,6 +575,12 @@ def check(path, write=False, siblings=False):
         sib = sibling_items(path, state)
         ex_list += [{"id": x["id"], "stem": x["stem"]} for x in sib]
         ex_texts += [x["text"] for x in sib]
+    return ex_list, ex_texts
+
+
+def near_duplicate_findings(items, ex_list, ex_texts):
+    """(errors, warns) from cosine similarity of each new question to the pool and to earlier questions of the batch."""
+    errors, warns = [], []
     new_texts = [qtext(i["stem"], [i["choices"][k] for k in i["keys"]]) for i in items]
     vecs = vectors(ex_texts + new_texts)
     ev, nv = vecs[: len(ex_texts)], vecs[len(ex_texts):]
@@ -515,8 +598,21 @@ def check(path, write=False, siblings=False):
             errors.append(f"{i['where']}: near-duplicate of {bq['id']} (cos {best:.2f}): {bq['stem'][:90]}")
         elif best >= 0.55:
             warns.append(f"{i['where']}: similar to {bq['id']} (cos {best:.2f})")
+    return errors, warns
 
-    # length bias: correct answer conspicuously longest
+
+def stands_out(i, longest):
+    """correct answer is the longest (or shortest) option by a visible margin (8%), not a near-tie"""
+    lens = {k: len(t) for k, t in i["choices"].items()}
+    wrong = [l for k, l in lens.items() if k not in i["keys"]]
+    if longest:
+        return min(lens[k] for k in i["keys"]) > max(wrong) * 1.08
+    return max(lens[k] for k in i["keys"]) < min(wrong) * 0.92
+
+
+def length_bias_findings(items):
+    """(errors, warns, info line or None): the correct answer must not conspicuously be the longest or shortest option."""
+    errors, warns, info = [], [], None
     longest = 0
     for i in items:
         lens = {k: len(t) for k, t in i["choices"].items()}
@@ -527,20 +623,13 @@ def check(path, write=False, siblings=False):
             warns.append(f"{i['where']}: correct answer is much longer than every distractor")
     if items and longest / len(items) > 0.25:
         errors.append(f"length bias: correct answer is clearly longest in {longest}/{len(items)} questions (max 25%)")
-    def stands_out(i, longest):
-        """correct answer is the longest (or shortest) option by a visible margin (8%), not a near-tie"""
-        lens = {k: len(t) for k, t in i["choices"].items()}
-        wrong = [l for k, l in lens.items() if k not in i["keys"]]
-        if longest:
-            return min(lens[k] for k in i["keys"]) > max(wrong) * 1.08
-        return max(lens[k] for k in i["keys"]) < min(wrong) * 0.92
     strict = sum(1 for i in items if stands_out(i, True))
     # single-answer baseline is 25% (1 of 4); multi-answer questions raise it, so allow some headroom
     limit = 0.25 + 0.3 * sum(1 for i in items if len(i["keys"]) > 1) / max(1, len(items))
     if items and strict / len(items) > limit:
         errors.append(f"length bias: correct answer is clearly the longest option in {strict}/{len(items)} questions (limit {limit:.0%})")
     elif items:
-        print(f"  correct answer clearly longest in {strict}/{len(items)} ({strict / len(items):.0%}, limit {limit:.0%})")
+        info = f"  correct answer clearly longest in {strict}/{len(items)} ({strict / len(items):.0%}, limit {limit:.0%})"
     singles = [i for i in items if len(i["keys"]) == 1]
     short = sum(1 for i in singles if stands_out(i, False))
     if singles and short / len(singles) > 0.30:
@@ -550,13 +639,34 @@ def check(path, write=False, siblings=False):
         c = lens[i["keys"][0]]
         if c * 2 < min(l for k, l in lens.items() if k not in i["keys"]):
             warns.append(f"{i['where']}: correct answer is less than half the length of every distractor")
+    return errors, warns, info
 
-    multi = sum(1 for i in items if len(i["keys"]) > 1)
+
+def batch_summary(path, explains, items, errors, warns):
     if explains:
-        print(f"{path}: {len(explains)} explanation rewrites, {len(errors)} errors, {len(warns)} warnings")
-    else:
-        rich = sum(1 for i in items if i["bg"])
-        print(f"{path}: {len(items)} questions ({rich} detailed), {multi} multi-answer, {len(errors)} errors, {len(warns)} warnings")
+        return f"{path}: {len(explains)} explanation rewrites, {len(errors)} errors, {len(warns)} warnings"
+    multi = sum(1 for i in items if len(i["keys"]) > 1)
+    rich = sum(1 for i in items if i["bg"])
+    return f"{path}: {len(items)} questions ({rich} detailed), {multi} multi-answer, {len(errors)} errors, {len(warns)} warnings"
+
+
+def check(path, write=False, siblings=False):
+    blocks = parse(path)
+    errors, warns = [], []
+    built = [b for b in (build(b, errors) for b in blocks) if b]
+    explains = [b for b in built if b.get("explain_only")]
+    items = [b for b in built if not b.get("explain_only")]
+    errors += batch_shape_errors(blocks, explains, items)
+    state = load_state()
+    errors += batch_state_errors(items, state)
+    ex_list, ex_texts = comparison_pool(path, items, state, siblings)
+    dup_errors, dup_warns = near_duplicate_findings(items, ex_list, ex_texts)
+    bias_errors, bias_warns, info = length_bias_findings(items)
+    errors += dup_errors + bias_errors
+    warns += dup_warns + bias_warns
+    if info:
+        print(info)
+    print(batch_summary(path, explains, items, errors, warns))
     for e in errors:
         print("  ERROR", e)
     for w in warns:
@@ -585,9 +695,19 @@ def place(i, letters, n, pos, rng):
     return layout, {old: "ABCDE"[p] for p, old in enumerate(layout)}
 
 
+def load_all_exams():
+    return {e: load_exam(e) for e in EXAMS}
+
+
+def save_all_exams(files):
+    for e in EXAMS:
+        files[e].sort(key=lambda x: x["id"])
+        save_exam(e, files[e])
+
+
 def ingest_explanations(explains):
     """Replace only the explanation of published questions (every exam file that holds them)."""
-    files = {e: load_exam(e) for e in EXAMS}
+    files = load_all_exams()
     done = set()
     for x in explains:
         letters = list(x["choices"])
@@ -601,18 +721,64 @@ def ingest_explanations(explains):
     for e in EXAMS:
         save_exam(e, files[e])
     print(f"ingested: {len(done)} explanations rewritten")
-    sys.path.insert(0, str(ROOT / "tools"))
-    stamp_exam_fields()
-    import build_data_index
-    build_data_index.build()
+    refresh_site_index()
+
+
+def first_free_number(all_ids, state):
+    """Ids are never reused: the ledger (hash -> id) also remembers ids of questions that were removed since."""
+    ledger_ids = [v for v in state.values() if isinstance(v, str) and re.fullmatch(r"Q\d+", v)]
+    return max(int(i[1:]) for i in all_ids + ledger_ids) + 1
+
+
+def same_choices(prev, i):
+    """True when the published question has exactly the batch block's choices and correct answers (order aside)."""
+    return bool(prev) and sorted(c["text"] for c in prev["choices"]) == sorted(i["choices"].values()) and \
+        sorted(c["text"] for c in prev["choices"] if c["key"] in prev["correctKeys"]) == sorted(i["choices"][k] for k in i["keys"])
+
+
+def choice_layout(i, prev, pos, rng):
+    """(layout, old letter -> new letter). Unchanged choices keep the published order so re-ingesting an edited batch is stable."""
+    if same_choices(prev, i):
+        by_text = {t: k for k, t in i["choices"].items()}
+        layout = [by_text[c["text"]] for c in prev["choices"]]
+        return layout, {old: "ABCDE"[p] for p, old in enumerate(layout)}
+    letters = list(i["choices"])
+    return place(i, letters, len(letters), pos, rng)
+
+
+def keeps_rich_explanation(prev, i, choices):
+    """A short block never overwrites a detailed explanation written later (same choices only)."""
+    return bool(prev and not i["bg"] and prev["explanation"].startswith(RICH)
+                and [c["text"] for c in prev["choices"]] == [c["text"] for c in choices])
+
+
+def question_record(i, choices, correct, layout, prev, keep_rich, qid, exam_codes):
+    return {
+        "stem": i["stem"], "choices": choices, "correctKeys": correct,
+        "explanation": prev["explanation"] if keep_rich else explanation(i, layout), "difficulty": i["diff"], "scenarioType": i["scen"],
+        "services": i["services"], "taskId": i["task"], "domainCode": i["dom"], "examCodes": exam_codes, "id": qid,
+    }
+
+
+def put_question(files, q):
+    """Add or replace `q` in every exam file that lists it in examCodes; drop it from files it no longer belongs to."""
+    for e in EXAMS:
+        lst = files[e]
+        idx = next((n_ for n_, x in enumerate(lst) if x["id"] == q["id"]), None)
+        if e in q["examCodes"]:
+            if idx is None:
+                lst.append(q)
+            else:
+                lst[idx] = q
+        elif idx is not None:                   # exam removed from an edited block
+            lst.pop(idx)
 
 
 def ingest(items, state):
     rng = random.Random()
     all_ids = [q["id"] for e in EXAMS for q in load_exam(e)]
-    # Ids are never reused: the ledger (hash -> id) also remembers ids of questions that were removed since.
-    next_num = max(int(i[1:]) for i in all_ids + [v for v in state.values() if isinstance(v, str) and re.fullmatch(r"Q\d+", v)]) + 1
-    files = {e: load_exam(e) for e in EXAMS}
+    next_num = first_free_number(all_ids, state)
+    files = load_all_exams()
     dmap = domain_map()
     rules = share_rules()
     tmap = task_map()
@@ -621,25 +787,12 @@ def ingest(items, state):
     added = updated = 0
     existing = {q["id"]: q for e in EXAMS for q in files[e]}
     for i in items:
-        letters = list(i["choices"])
-        n = len(letters)
         if i["pin"]:
             state[i["hash"]] = i["pin"]           # I: Qxxxxxx keeps the id when a stem is rewritten
         prev = existing.get(state.get(i["hash"]))
-        if prev and sorted(c["text"] for c in prev["choices"]) == sorted(i["choices"].values()) and \
-                sorted(c["text"] for c in prev["choices"] if c["key"] in prev["correctKeys"]) == sorted(i["choices"][k] for k in i["keys"]):
-            # unchanged choices: keep the published order so re-ingesting an edited batch is stable
-            by_text = {t: k for k, t in i["choices"].items()}
-            layout = [by_text[c["text"]] for c in prev["choices"]]
-            newkey = {old: "ABCDE"[p] for p, old in enumerate(layout)}
-        else:
-            layout = None
-        if layout is None:
-            layout, newkey = place(i, letters, n, pos, rng)
+        layout, newkey = choice_layout(i, prev, pos, rng)
         choices = [{"key": "ABCDE"[p], "text": i["choices"][old]} for p, old in enumerate(layout)]
-        # a short block never overwrites a detailed explanation written later (same choices only)
-        keep_rich = bool(prev and not i["bg"] and prev["explanation"].startswith(RICH)
-                         and [c["text"] for c in prev["choices"]] == [c["text"] for c in choices])
+        keep_rich = keeps_rich_explanation(prev, i, choices)
         correct = sorted(newkey[k] for k in i["keys"])
         if not prev:
             for k in correct:
@@ -653,55 +806,23 @@ def ingest(items, state):
         shared = dict(i["shared"])
         tmap.pop(qid, None)
         apply_shares(qid, exam_codes, shared, lambda src: i["dom"] if src == i["exam"] else i["shared"][src], rules, tmap)
-        q = {
-            "stem": i["stem"], "choices": choices, "correctKeys": correct,
-            "explanation": prev["explanation"] if keep_rich else explanation(i, layout), "difficulty": i["diff"], "scenarioType": i["scen"],
-            "services": i["services"], "taskId": i["task"], "domainCode": i["dom"], "examCodes": exam_codes, "id": qid,
-        }
-        for e in EXAMS:
-            lst = files[e]
-            idx = next((n_ for n_, x in enumerate(lst) if x["id"] == qid), None)
-            if e in exam_codes:
-                if idx is None:
-                    lst.append(q)
-                else:
-                    lst[idx] = q
-            elif idx is not None:                   # exam removed from an edited block
-                lst.pop(idx)
+        put_question(files, question_record(i, choices, correct, layout, prev, keep_rich, qid, exam_codes))
         dmap.pop(qid, None)
         if shared:
             dmap[qid] = shared
         state[i["hash"]] = qid
         added += is_new
         updated += not is_new
-    for e in EXAMS:
-        files[e].sort(key=lambda x: x["id"])
-        save_exam(e, files[e])
-    (DATA / "exam-domains.json").write_text(json.dumps(dict(sorted(dmap.items())), indent=1) + "\n", encoding="utf-8", newline="\n")
-    save_task_map(tmap)
-    STATE.write_text(json.dumps(state, indent=1, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+    save_all_exams(files)
+    save_shared_maps(dmap, tmap)
+    save_state(state)
     print(f"ingested: {added} new, {updated} updated")
-    # keep the site's download index (counts + cache-busting hashes) in step with data/
-    sys.path.insert(0, str(ROOT / "tools"))
-    stamp_exam_fields()
-    import build_data_index
-    build_data_index.build()
+    refresh_site_index()
 
 
-def share(dst):
-    """Apply the sharing rule for dst to every published question of its source exam."""
-    rule = share_rules().get(dst)
-    if not rule:
-        sys.exit(f"no sharing rule for {dst} in {SHARES_PATH.relative_to(ROOT)}")
-    src, exclude, tasks = rule["from"], set(rule.get("exclude", [])), rule.get("tasks")
-    files = {e: load_exam(e) for e in EXAMS}
-    dmap = domain_map()
-    tmap = task_map()
+def add_to_target(dst, src, files, exclude, tasks, dmap, tmap):
+    """Put every not-yet-shared question of `src` into `dst` (all of them, or those a task list names); returns the count."""
     have = {q["id"] for q in files[dst]}
-    if tasks:
-        missing = sorted(set(tasks) - {q["id"] for q in files[src]})
-        if missing:
-            sys.exit(f"{dst} task list names questions that are not in {src}: {missing[:10]}")
     added = 0
     for q in files[src]:
         if q["id"] in exclude or q["id"] in have or (tasks is not None and q["id"] not in tasks):
@@ -718,7 +839,11 @@ def share(dst):
         files[dst].append(q)
         dmap.setdefault(q["id"], {})[dst] = dom
         added += 1
-    # An id added to "exclude" after it was shared leaves the target exam again (its home exam keeps it).
+    return added
+
+
+def remove_excluded(dst, files, exclude, dmap, tmap):
+    """An id added to "exclude" after it was shared leaves the target exam again (its home exam keeps it)."""
     removed = [q["id"] for q in files[dst] if q["id"] in exclude and q["examCodes"][0] != dst]
     for qid in removed:
         for e in EXAMS:
@@ -728,18 +853,30 @@ def share(dst):
         dmap.get(qid, {}).pop(dst, None)
         tmap.get(qid, {}).pop(dst, None)
     files[dst] = [q for q in files[dst] if q["id"] not in removed]
+    return removed
+
+
+def share(dst):
+    """Apply the sharing rule for dst to every published question of its source exam."""
+    rule = share_rules().get(dst)
+    if not rule:
+        sys.exit(f"no sharing rule for {dst} in {SHARES_PATH.relative_to(ROOT)}")
+    src, exclude, tasks = rule["from"], set(rule.get("exclude", [])), rule.get("tasks")
+    files = load_all_exams()
+    dmap = domain_map()
+    tmap = task_map()
+    if tasks:
+        missing = sorted(set(tasks) - {q["id"] for q in files[src]})
+        if missing:
+            sys.exit(f"{dst} task list names questions that are not in {src}: {missing[:10]}")
+    added = add_to_target(dst, src, files, exclude, tasks, dmap, tmap)
+    removed = remove_excluded(dst, files, exclude, dmap, tmap)
     dmap = {k: v for k, v in dmap.items() if v}
-    for e in EXAMS:
-        files[e].sort(key=lambda x: x["id"])
-        save_exam(e, files[e])
-    (DATA / "exam-domains.json").write_text(json.dumps(dict(sorted(dmap.items())), indent=1) + "\n", encoding="utf-8", newline="\n")
-    save_task_map(tmap)
+    save_all_exams(files)
+    save_shared_maps(dmap, tmap)
     print(f"shared: {added} questions of {src} now also in {dst} ({len(exclude)} excluded"
           + (f"; removed from {dst}: {', '.join(removed)}" if removed else "") + ")")
-    sys.path.insert(0, str(ROOT / "tools"))
-    stamp_exam_fields()
-    import build_data_index
-    build_data_index.build()
+    refresh_site_index()
 
 
 def report():
@@ -768,10 +905,7 @@ if __name__ == "__main__":
         for e in sys.argv[2:]:
             share(e)
     elif cmd == "stamp":                     # (re)write examDomain / examTask in every exam file
-        stamp_exam_fields()
-        sys.path.insert(0, str(ROOT / "tools"))
-        import build_data_index
-        build_data_index.build()
+        refresh_site_index()
     elif cmd in ("check", "ingest"):
         # check --siblings also compares against the not-yet-ingested batch files next to it (parallel writers)
         sib = cmd == "check" and "--siblings" in sys.argv
