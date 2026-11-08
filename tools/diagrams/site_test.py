@@ -3,15 +3,13 @@ and check the diagram renders with no page errors and no horizontal overflow at 
     python3 tools/diagrams/site_test.py
 """
 import re, sys
-import functools, http.server, threading, json, glob
+import json, glob
 from playwright.sync_api import sync_playwright
 import pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from testkit import serve
 ROOT=str(pathlib.Path(__file__).resolve().parents[2])
-class Q(http.server.SimpleHTTPRequestHandler):
-    def log_message(self,*a): pass
-srv=http.server.ThreadingHTTPServer(("127.0.0.1",0),functools.partial(Q,directory=ROOT))
-threading.Thread(target=srv.serve_forever,daemon=True).start()
-BASE=f"http://127.0.0.1:{srv.server_address[1]}/"
+srv, BASE = serve(ROOT)
 ids=set(json.load(open(f"{ROOT}/diagrams/index.json",encoding="utf-8"))["ids"])
 exams={}
 for f in sorted(g for g in glob.glob(f"{ROOT}/data/*.json") if re.fullmatch(r"[A-Z]+(?:-[A-Z0-9]+)+\.json", pathlib.Path(g).name)):

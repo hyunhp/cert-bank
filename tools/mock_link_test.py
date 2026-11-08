@@ -1,13 +1,11 @@
 """Regression tests for opening mock exams by link, including stale saved exam state."""
-import subprocess, time, json, sys, re
+import json, sys, re
 from playwright.sync_api import sync_playwright
 import pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from testkit import serve
 ROOT = str(pathlib.Path(__file__).resolve().parents[1])
-PORT = 8768
-srv = subprocess.Popen([sys.executable, "-m", "http.server", str(PORT)], cwd=ROOT,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-time.sleep(1.2)
-BASE = f"http://localhost:{PORT}/"
+srv, BASE = serve(ROOT)
 ok = fail = 0
 def check(name, cond, info=""):
     global ok, fail
@@ -94,5 +92,5 @@ try:
         check("back closes mock", pg.evaluate("document.getElementById('mockRoot').hidden"))
         ctx.close(); b.close()
 finally:
-    srv.terminate()
+    srv.shutdown()
 print(f"{ok}/{ok+fail} passed"); sys.exit(1 if fail else 0)

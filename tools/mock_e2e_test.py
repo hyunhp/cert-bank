@@ -2,17 +2,14 @@
     python3 tools/mock_e2e_test.py
 """
 import re
-import functools, http.server, threading, sys, json, pathlib, time
+import sys, json, pathlib, time
 from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from testkit import serve, Checker
 ROOT = str(pathlib.Path(__file__).resolve().parents[1])
-class Q(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, *a): pass
-srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Q, directory=ROOT))
-threading.Thread(target=srv.serve_forever, daemon=True).start()
-BASE = f"http://127.0.0.1:{srv.server_address[1]}/"
+srv, BASE = serve(ROOT)
 data = {p.stem: {q["id"]: q for q in json.load(open(p, encoding="utf-8"))} for p in pathlib.Path(ROOT, "data").glob("*.json") if re.fullmatch(r"[A-Z]+(?:-[A-Z0-9]+)+", p.stem)}
-res = []
-def ok(n, c, info=""): res.append((n, bool(c))); print(("PASS " if c else "FAIL ") + n + (f"  [{info}]" if info and not c else ""))
+C = Checker(verbose=True); ok = C.check
 
 def state(pg): return pg.evaluate("JSON.parse(localStorage.getItem('aws_qbank_mock_active_v1')||'null')")
 
@@ -178,5 +175,4 @@ with sync_playwright() as p:
     ok("browser back leaves mock mode", not pg.evaluate("document.querySelector('.wrap').hidden") and pg.evaluate("document.getElementById('mockRoot').hidden"))
     ctx.close(); b.close()
 srv.shutdown()
-f = [n for n, c in res if not c]
-print(f"{len(res) - len(f)}/{len(res)} passed"); sys.exit(1 if f else 0)
+sys.exit(C.exit())

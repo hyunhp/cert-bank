@@ -7,22 +7,16 @@
 - Revealing explanations stays smooth on a 4x-throttled CPU (no long frames; a diagram gets a wider limit).
     python3 tools/loading_perf_test.py
 """
-import functools, http.server, json, pathlib, re, sys, threading
+import json, pathlib, re, sys
 from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from testkit import serve, Checker
 
 ROOT = str(pathlib.Path(__file__).resolve().parents[1])
-class Q(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, *a): pass
-srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Q, directory=ROOT))
-threading.Thread(target=srv.serve_forever, daemon=True).start()
-BASE = f"http://127.0.0.1:{srv.server_address[1]}/"
+srv, BASE = serve(ROOT)
 index = json.load(open(pathlib.Path(ROOT, "data", "exams-index.json"), encoding="utf-8"))
 diag_ids = set(json.load(open(pathlib.Path(ROOT, "diagrams", "index.json"), encoding="utf-8"))["ids"])
-ok = fail = 0
-def check(name, cond, info=""):
-    global ok, fail
-    if cond: ok += 1
-    else: fail += 1; print("FAIL", name, info)
+C = Checker(); check = C.check
 
 with sync_playwright() as p:
     b = p.chromium.launch()
@@ -91,4 +85,4 @@ with sync_playwright() as p:
     check("exam file carries no explanations", "explanation" not in json.load(open(pathlib.Path(ROOT, "data", "SAA-C03.json"), encoding="utf-8"))[0])
     b.close()
 srv.shutdown()
-print(f"{ok}/{ok+fail} passed"); sys.exit(1 if fail else 0)
+sys.exit(C.exit())
