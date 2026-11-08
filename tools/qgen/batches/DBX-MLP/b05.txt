@@ -123,81 +123,83 @@ D=They are the same: they are different operations with different outputs, and t
 T: Delta time travel gives table snapshots; a time series feature table gives per-row as-of matching.
 V: Databricks Feature Store, Delta Lake
 
-@ DBX-MLP D1 T1.19 advanced troubleshooting
-S: A nightly job computes `customer_features` only for customers active that day and runs `fe.write_table(name="ml.crm.customer_features", df=today_df, mode="overwrite")`. After some days the endpoint returns default values for most customers. What is the repair?
-A: Switch the job to `mode="append"` so that each night's rows are added to the table and the newest row is chosen at lookup time
-B: Keep overwrite but recompute every customer nightly, because feature tables cannot be updated for only some primary keys
-C: Use `mode="merge"` so that rows are upserted by primary key and customers missing from the DataFrame keep their previous values
-D: Create a new feature table each night and republish it, since the old one is unusable after the first overwrite
-K: C
-G: ## Write modes of write_table
-`FeatureEngineeringClient.write_table` writes a DataFrame into a Unity Catalog feature table:
-- `mode="merge"` upserts by primary key; rows whose key is not in the DataFrame are left unchanged. This is the mode Databricks shows for scheduled updates.
-- `mode="overwrite"` replaces the table contents with the DataFrame. Every key not present in the DataFrame disappears.
-## What went wrong
-Overwriting with only active customers deletes everyone else. Lookups for missing keys return the default values or `null`. A scheduled Lakeflow Job running the same notebook with `merge` keeps old customers and refreshes active ones.
-W: Merge upserts by primary key and leaves untouched rows in place, so inactive customers retain their last values while active ones are refreshed.
-X: A=Append: a regular feature table needs a unique primary key. Appending duplicate keys would violate the key semantics, and lookups do not choose the "newest" row.
-B=Full recompute only: partial updates are supported with `mode="merge"`, and recomputing every customer nightly wastes compute for no reason.
-D=A new table each night: this breaks lineage and the model's recorded table name, and it is unnecessary because the existing table stays valid under merge.
-T: Use `mode="merge"` for incremental feature refreshes; `overwrite` deletes keys that are not in the DataFrame.
-V: Databricks Feature Store, Lakeflow Jobs
-
-@ DBX-MLP D1 T1.19 advanced tradeoff
-S: Clickstream events arrive from a message bus and a recommendation model needs session features that are fresh within about a minute, plus the same features for nightly retraining. Which pipeline design on Databricks fits?
-A: Compute the features at request time inside the web app from the raw events it keeps, then cache only the finished model inputs in a separate store
-B: Write the stream straight into the online store and skip the offline table, since training jobs can read the online store later on
-C: Run an hourly batch notebook that overwrites the feature table, because feature tables cannot accept streaming writes from Structured Streaming
-D: Pass a streaming DataFrame to `write_table(..., mode="merge")` from a continuous job, so one table feeds online publishing and retraining
+@ DBX-MLP D1 T1.19 advanced use-case
+S: `ml.sales.store_stats` is an existing Delta table with no constraints, owned by the analyst. Its `store_id` and `snap_ts TIMESTAMP` columns are nullable and hold 14 months of hourly history. It must become a point-in-time feature table in place, without copying the data. Which sequence works?
+A: Run `ALTER TABLE ... ADD CONSTRAINT store_stats_pk PRIMARY KEY (store_id, snap_ts TIMESERIES)` directly, because Unity Catalog sets key columns to NOT NULL while it adds the constraint
+B: Create a new table with `CREATE TABLE AS SELECT` that declares the key and `TIMESERIES` in its DDL, because a primary key can only be declared when a table is first created
+C: Add `PRIMARY KEY (store_id, snap_ts)` after setting both columns to NOT NULL, then pass `timeseries_columns="snap_ts"` in every `FeatureLookup` so that the lookups run as of the label time
+D: Run `ALTER COLUMN ... SET NOT NULL` on both key columns, then `ADD CONSTRAINT ... PRIMARY KEY (store_id, snap_ts TIMESERIES)`, which makes it a time series feature table
 K: D
-G: ## Streaming into a feature table
-Databricks Feature Store supports streaming: you can write feature values to a feature table from a streaming source, and the feature code can use Structured Streaming to turn raw events into features. In the client, pass a streaming `DataFrame` to `write_table`; it returns a `StreamingQuery`, so the job keeps running (for example as a continuous Lakeflow Job).
-## Why one offline table
-The offline feature table is a Delta table in Unity Catalog. It is the source of truth for training, batch scoring, lineage and governance, and it can be published to an online store for low-latency serving. Writing around it creates a second code path, and training-serving skew.
-W: A streaming `write_table` with merge keeps one governed Delta feature table fresh. That table serves retraining and batch scoring directly and can be published to the online store.
-X: A=Compute in the app: this puts feature logic in application code, so training uses different code than serving and raw event history is not available at request time.
-B=Online store only: the online store holds the latest value per entity, not the history required to create training sets, and it bypasses Unity Catalog lineage of the offline table.
-C=Hourly overwrite: the minute-level freshness target is missed, and the premise is wrong because streaming writes to feature tables are supported. Overwrite would also drop keys.
-T: Streaming `write_table` into one offline feature table gives fresh features for serving and reproducible training from a single pipeline.
-V: Databricks Feature Store, Structured Streaming
-
-@ DBX-MLP D1 T1.19 advanced troubleshooting
-S: After a refactor, `avg_basket` in `ml.shop.cust_features` was changed in place from `INT` to `DOUBLE`, and `sessions_7d` was renamed to `sessions_week`. Registered models trained on the table now fail in training and in serving. What is the correct pattern for evolving this table?
-A: Rename the columns back and then recreate every registered model version, because Unity Catalog never lets features keep the same name after an edit
-B: Leave existing names, types and keys unchanged; add the new features as new columns through `write_table`, move models to them, then retire old ones
-C: Drop the table and let `create_training_set` regenerate it with the new schema when the next model is trained from the pipeline
-D: Convert the table to a time series table so that each schema variation is stored in a separate row, and models select the row that matches
-K: B
-G: ## What can change safely
-A feature table is a contract with every model that was logged against it: models store the table name, feature names and lookup keys. The documentation lists what must not be updated: the primary key, the partition key, and the name or data type of an existing feature. Altering those breaks downstream pipelines that use the features for training and serving.
-## Safe evolution
-- Add new features: run `write_table` with a DataFrame that contains the primary key and the new columns. The schema is extended and values are merged by key.
-- Keep old features until no deployed model uses them, then retire them; new models train on the new columns.
-- Lineage in Unity Catalog shows which models use which features before you retire any.
-W: Additive changes through `write_table` extend the schema while old names and types stay valid for existing models. New models adopt the new columns and the old ones are retired when unused.
-X: A=Restore names and recreate models: restoring names helps, but the claim that names cannot be edited is false. The real rule is not to edit names and types of features that models use.
-C=Drop the table: `create_training_set` reads feature tables and does not create them. Dropping removes lineage and breaks every model that references the table.
-D=Time series rows per schema: a timeseries key adds time semantics, not schema versions, and one row cannot hold two column definitions.
-T: Evolve feature tables additively; never change the key, partition key, or the name or type of a feature that models use.
+G: ## Turning an existing Delta table into a feature table
+Any Unity Catalog Delta table with a primary key constraint can serve as a feature table. A table without a key is converted in place with two kinds of statements, and only the table owner can declare the constraint.
+- Key columns must be `NOT NULL`: run `ALTER TABLE <t> ALTER COLUMN <col> SET NOT NULL` for each key column first.
+- Add the constraint: `ALTER TABLE <t> ADD CONSTRAINT <name> PRIMARY KEY (store_id, snap_ts TIMESERIES)`. The `TIMESERIES` keyword on one key column (Databricks Runtime 13.3 LTS or above) is what makes the table a time series feature table.
+## Where the time designation lives
+Point-in-time behavior is a property of the table key, not of the lookup. The `FeatureLookup` only names `timestamp_lookup_key`, a column of the label DataFrame. Once the constraint exists, the table appears in the Features UI and works with `create_training_set` and `score_batch`.
+W: Setting the key columns to NOT NULL and then adding a primary key with `TIMESERIES` on the timestamp converts the existing table in place and keeps all its history.
+X: A=Constraint only: the documented procedure sets each key column to NOT NULL first, and a key over nullable columns is not accepted, so the single statement does not work on this table.
+B=Copy with CTAS: a constraint can be added to an existing table with `ALTER TABLE`, so copying 14 months of history is unnecessary and the stem asks for an in-place change.
+C=Designation in the lookup: `timeseries_columns` belongs to table creation. A plain key without `TIMESERIES` gives no as-of join, and a `DATE` or `TIMESTAMP` key left undeclared is rejected by `create_training_set`.
+T: Convert a Delta table in place with SET NOT NULL, then `PRIMARY KEY (..., ts TIMESERIES)`; the time designation sits in the key.
 V: Databricks Feature Store, Unity Catalog
 
-@ DBX-MLP D1 T1.19 applied use-case
-S: A model was trained from two feature tables, then logged with `mlflow.sklearn.log_model(model, "model")`. A batch job calls `fe.score_batch(model_uri=..., df=keys_df)` with only the lookup keys and fails to find features. What should the training code have done?
-A: Log it with `fe.log_model(model, ..., flavor=mlflow.sklearn, training_set=training_set)` after setting the registry URI to `databricks-uc`
-B: Call `mlflow.log_param` once for each feature table name and lookup key so that `score_batch` can read the names from the run parameters
-C: Register the model in the legacy workspace registry, because only that registry stores the table references that `score_batch` needs
-D: Add the feature columns to the input DataFrame, then train with `create_training_set` using `exclude_columns` for the keys only
+@ DBX-MLP D1 T1.19 advanced troubleshooting
+S: A feature job keeps daily history in `ml.crm.cust_daily` with primary key `(cust_id, snap_date DATE)`. The key was created without the `TIMESERIES` keyword, and `create_training_set` now raises an error about the `DATE` key column. Each label must receive the latest snapshot on or before its own date. What is the fix?
+A: Declare `snap_date` as the `TIMESERIES` key column of the table and set `timestamp_lookup_key` on the `FeatureLookup` to the label's date column
+B: Change `snap_date` to `STRING`, which keeps all the history and makes each lookup return the most recent earlier snapshot for the label
+C: Remove `snap_date` from the key and overwrite the table every night, so that each label is joined to the single newest row of its customer
+D: Upgrade `databricks-feature-engineering`, because newer releases treat any `DATE` key column as a time series column without a declaration
 K: A
-G: ## Model packaging
-Feature lookups at inference come from metadata stored with the model. `FeatureEngineeringClient.log_model` takes the `training_set` returned by `create_training_set` and packages the table names, feature names, lookup keys and any `FeatureFunction`s with the model. At inference the caller supplies keys; `score_batch` (offline store) or Model Serving (online store) fetches features automatically.
-- Plain `mlflow.sklearn.log_model` stores only the estimator, so the lineage and lookups are lost.
-- Set the registry URI to `databricks-uc` and register to a three-level name so the model and its feature lineage are governed in Unity Catalog. The workspace Feature Store and model registry are the legacy options.
-W: `fe.log_model` with the `training_set` packages the lookup definitions with the model, so `score_batch` and Model Serving can retrieve the features from only the keys.
-X: B=Log parameters: parameters are plain run metadata. `score_batch` does not read table names from them, and keys and timestamps would be missing anyway.
-C=Workspace registry: it is the legacy registry, and the metadata comes from `fe.log_model`, not from the registry. Unity Catalog is the supported route.
-D=Feature columns in the input: that is just a flat model, and the batch job would have to compute and join features itself, which is the work the feature store removes.
-T: Log feature-store models with `fe.log_model(..., training_set=...)` so that scoring needs only keys.
-V: Databricks Feature Store, MLflow, Unity Catalog
+G: ## Date keys must be declared
+A `DATE` or `TIMESTAMP` primary key column that is not declared as a time series column cannot be used with `create_feature_spec()`, `create_training_set()` or `publish_table()`. These APIs require every such column to be declared as a timeseries column.
+- A date as a plain part of the key gives only exact-match semantics. Databricks documents this for use cases that really need exact matching: change the column to `STRING`.
+- For as-of semantics, mark the column `TIMESERIES` in the key (`PRIMARY KEY (cust_id, snap_date TIMESERIES)`, or `timeseries_columns` in `create_table`) and name `timestamp_lookup_key` in the lookup.
+## Why the other designs fail
+Exact matching returns nothing for a label on a day without a snapshot, and a single overwritten row per customer brings back leakage.
+W: Declaring the date as the time series key gives the as-of join the label needs, and the existing history is kept.
+X: B=STRING key: this is the documented route for plain exact-match lookups, so labels on dates without a snapshot receive nothing instead of the latest earlier one.
+C=Overwrite with one row: it deletes the history and every old label then sees the newest values, which is the leakage that point-in-time joins prevent.
+D=Newer client: the requirement is part of the API contract, so no release infers the designation. Only the table definition can declare it.
+T: A DATE or TIMESTAMP key column needs the TIMESERIES declaration for as-of joins; STRING gives exact matches only.
+V: Databricks Feature Store, Unity Catalog
+
+@ DBX-MLP D1 T1.19 advanced tradeoff
+S: A time series feature table for ad impressions has key `(region, advertiser_id, campaign_id, ts TIMESERIES)` and 6 billion rows. Writes and training-set lookups are slower than expected. Which redesign follows Databricks guidance for performant writes and lookups?
+A: Partition the table by `region` and by `ts` so that every as-of lookup reads only the partition that matches its label timestamp
+B: Declare `campaign_id` as a second `TIMESERIES` column so that the as-of join can also match the campaign by recency
+C: Merge the three entity columns into one entity key column and keep `(campaign_key, ts TIMESERIES)` as a two-column key with liquid clustering
+D: Move `ts` out of the key into an ordinary feature column, so that lookups need only the entity columns and run as exact matches
+K: C
+G: ## Key design of time series feature tables
+A time series feature table has exactly one timestamp key and cannot have partition columns. Databricks recommends no more than two primary key columns, so that writes and lookups stay performant, and liquid clustering (client 0.6.0 and later) for faster point-in-time lookups.
+- Entity columns that always travel together are combined into one entity key, for example a concatenated or hashed `campaign_key` computed in the feature pipeline and in the label DataFrame.
+- The timestamp stays in the key, because the as-of join needs it.
+## Result
+A two-column key plus liquid clustering matches the guidance. The model records the lookup key, so training and serving use the same combined column.
+W: A single entity key with the timestamp gives the recommended two-column key, and liquid clustering supports the as-of lookups without partitions.
+X: A=Partitioning: a time series feature table cannot have partition columns, and the clustering recommendation replaces partitions for this layout.
+B=Second TIMESERIES column: the table must have one timestamp key, and a campaign identifier has no meaning as a time to match by recency.
+D=Timestamp as a feature: without the timeseries key there is no as-of join, so each label would need an exact timestamp match or would receive leaked values.
+T: Time series feature tables take one timestamp key and at most two key columns; combine entity columns and cluster instead of partitioning.
+V: Databricks Feature Store, Unity Catalog
+
+@ DBX-MLP D1 T1.19 advanced troubleshooting
+S: A Lakeflow Job task writes hourly rows to the time series table `ml.ops.store_hourly` (key `(store_id, hour_ts TIMESERIES)`) with `fe.write_table(name=..., df=hour_df, mode="merge")`. After a transient failure the task is retried and re-writes hours that were already stored. What happens, and what must stay true?
+A: Rows are appended a second time, since a time series table is append-only, so the job needs an extra step that removes the duplicates
+B: Rows with the same `(store_id, hour_ts)` are matched and updated, so the retry is safe while each row still carries every feature
+C: The retry fails on the first repeated row with a key violation, so the job must delete the stored hours before it runs again
+D: Rows already stored are skipped and keep their old values, so corrected values from the retry never reach the table
+K: B
+G: ## Merge matches on the whole primary key
+`write_table(mode="merge")` updates rows whose primary key already exists in the table and inserts the rest. In a time series feature table the timestamp is part of the key, so a retried batch hits the same `(store_id, hour_ts)` keys and replaces those rows instead of adding new ones. Rows with other keys stay unchanged.
+## Condition
+In a time series feature table the DataFrame must supply values for all features of the table, because the as-of lookup takes whole rows and keeps nulls. A retry that rewrites only part of the columns would store nulls over the earlier values.
+W: Merge matches on `(store_id, hour_ts)`, so a retried write updates the same rows, and complete rows keep the as-of lookups correct.
+X: A=Append-only: merge upserts by key and the table is an ordinary Delta table, so repeated keys are updated in place and no duplicate rows appear.
+C=Key violation: the merge handles existing keys as updates, so the retry does not fail and no manual delete is needed.
+D=Skipped rows: matched rows are updated with the new values, so a corrected value in the retry does replace the old one.
+T: Merge on a time series table is idempotent per (entity, timestamp), provided each row holds all features.
+V: Databricks Feature Store, Lakeflow Jobs
 
 @ DBX-MLP D1 T1.19 applied use-case
 S: A platform team wants to expose the view `ml.crm.v_cust_orders`, defined as `SELECT c.id, SUM(o.amt) spend FROM customers c JOIN orders o USING(id) GROUP BY c.id`, as a feature table. Registering it fails. What is the correct approach?
