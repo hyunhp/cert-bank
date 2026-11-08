@@ -15,10 +15,10 @@ G: ## What a feature table is
 In Unity Catalog a feature table is simply a Delta table that has a primary key constraint; the key identifies the entity (a customer, a product) whose features the row holds. You can create it with Databricks SQL, the Python `FeatureEngineeringClient`, or a pipeline. The exam guide still says "feature store" and the older workspace-level version (Workspace Feature Store, now legacy, with a `timestamp_keys` argument). Databricks now recommends Feature Views for new work, where Databricks manages the feature pipelines; feature tables, which you populate yourself, remain fully supported and are what this question tests.
 ## Time series feature tables
 Feature values change over time. If a model is trained on feature values measured after the label's timestamp, the training data leaks the future. A **time series feature table** marks one primary key column with the `TIMESERIES` keyword (`PRIMARY KEY (customer_id, ts TIMESERIES)`). With that marking, `create_training_set` and `score_batch` perform an as-of join: for each label row they pick the latest feature row at or before the lookup timestamp. In Python the same marking is the `timeseries_columns` argument.
-If a timestamp column is a key but not marked `TIMESERIES`, Feature Store applies no point-in-time logic and matches only rows with exactly equal times.
+A `DATE` or `TIMESTAMP` primary key column that is not marked `TIMESERIES` is rejected: `create_training_set` returns an error until the column is declared a timeseries key (or changed to `STRING` for plain exact-match keys).
 W: Declaring the timestamp as a `TIMESERIES` key column makes the table a time series feature table, so training and scoring use an as-of join that returns the latest value at or before each label's timestamp.
 X: A=Key on customer only: with one row per customer the table keeps just one set of values, and a plain timestamp column is ordinary data that the join never uses for point-in-time matching.
-C=Timestamp key without the keyword: the column is part of the key, but without `TIMESERIES` the lookup matches only rows with an exactly equal timestamp, so most labels find no values instead of the latest earlier ones.
+C=Timestamp key without the keyword: a `DATE` or `TIMESTAMP` primary key column that is not declared `TIMESERIES` makes `create_training_set` return an error, and there is no automatic detection of the time column.
 D=Partition by timestamp: partitioning only organizes files for faster reads. It does not change the key, and the key still holds one row per customer, so history is not queryable as of a time.
 T: Mark the time column of the key `TIMESERIES` to get point-in-time (as-of) lookups; a plain timestamp key only matches exact times.
 V: Unity Catalog, Feature Store
@@ -85,11 +85,11 @@ V: Unity Catalog, Delta Lake
 
 @ DBX-MLA D1 T1.6 applied use-case
 S: Several teams need a subset of an existing feature table (only customers aged 18 to 35) for offline training, without copying data. The table has primary key `customer_id`. What does Unity Catalog allow?
-A: Create a `SELECT ... WHERE` view over that single table that keeps the key columns, and use it as a feature table for offline training
+A: Create a materialized view only; plain views cannot be feature tables because they hold no data of their own
 B: Create a view that joins the table to a segments table with `JOIN` and `GROUP BY`, and publish that view to the online store for serving
-C: Create a materialized view only; plain views cannot be feature tables because they hold no data of their own
+C: Create a `SELECT ... WHERE` view over that single table that keeps the key columns, and use it as a feature table for offline training
 D: Copy the filtered rows into a CSV and register the file path as a feature table, so any team can read the subset
-K: A
+K: C
 G: ## Views as feature tables
 A **simple SELECT view** can be used as a feature table. It is a view over a single Delta table in Unity Catalog whose primary keys are selected without `JOIN`, `GROUP BY` or `DISTINCT`; `SELECT`, `FROM`, `WHERE`, `ORDER BY`, `LIMIT` and `OFFSET` are allowed. This needs `databricks-feature-engineering` 0.7.0 or above (built into Databricks Runtime 16.0 ML).
 Limits:
@@ -98,7 +98,7 @@ Limits:
 - If a source column is renamed, the view's select list must be renamed to match.
 W: A filter-only view over one table keeps the key and qualifies as a feature table for offline training, so teams get a subset without copying data.
 X: B=Join and aggregate view, published online: a view with `JOIN` or `GROUP BY` is not a simple SELECT view, and view-backed feature tables cannot be published to online stores at all.
-C=Only a materialized view: a simple SELECT view qualifies as a feature table, so a materialized view is not required.
+A=Only a materialized view: a simple SELECT view qualifies as a feature table, so a materialized view is not required.
 D=CSV path: a feature table must be a Delta table or a qualifying view in Unity Catalog with a key; a file path has neither governance nor a key.
 T: A single-table SELECT/WHERE view that keeps the keys can be a feature table for offline use; it cannot be published online.
 V: Unity Catalog, Feature Store
@@ -126,7 +126,7 @@ V: Feature Store, Delta Lake
 S: A feature table `ml.shop.customer_features` is keyed by `customer_id`. A data scientist computes a new feature, `avg_basket_90d`, in a DataFrame that has `customer_id` and the new column. How can the new feature be added to the existing table?
 A: Drop the table, recreate it with a column for the new feature and recompute every old feature as well
 B: Create a second feature table with the new column and merge the two tables into a new training dataset on every run
-C: Call `fe.create_table` with the same name and `mode="overwrite"` so the new schema replaces the old one
+C: Call `fe.create_table` again with the same name and the wider DataFrame so that the new schema replaces the old one
 D: Call `fe.write_table` with the DataFrame, which adds the column to the schema and merges the values by `customer_id`
 K: D
 G: ## Adding features to an existing table
@@ -135,7 +135,7 @@ What you should not change: the primary key, the partition key, and the name or 
 W: Writing a DataFrame that contains the key and the new column through `write_table` extends the schema and merges the values by key, so nothing is dropped or recomputed.
 X: A=Drop and recreate: it discards the table, its history and lineage, and breaks every model and endpoint that references it, only to add one column.
 B=Second table: it works but fragments the features across tables, adding another `FeatureLookup` and join for every user. The documented way is to extend the existing table.
-C=`create_table` with overwrite: `create_table` creates a new table and does not take over an existing one with a different schema; the table schema is extended via `write_table`.
+C=`create_table` again: it creates a new table, has no overwrite mode and fails for a name that already exists; the schema is extended via `write_table`.
 T: New columns come in through `write_table` with the primary key included; never change existing key or feature definitions.
 V: Feature Store, Delta Lake
 
@@ -188,7 +188,7 @@ G: ## Keeping feature values fresh
 Feature tables are only as good as their latest write. Databricks recommends a **scheduled job** (Lakeflow Jobs) that runs a notebook which computes the features and writes them with `mode="merge"`, for example daily. An existing manual job can be converted to a scheduled one. For features that must be fresher than a batch cadence allows, pass a streaming DataFrame to `write_table` instead.
 Also keep the same feature computation function for the scheduled job and for backfills so that old and new rows agree. Merging by key keeps unchanged keys, so a failed run does not wipe the table.
 W: A scheduled job with a merge write keeps values current without manual work and without risking the rows the run did not touch.
-X: A=View over raw data: a view with joins or aggregations is not a simple SELECT view, so it cannot serve as a feature table, and recomputing at query time moves the feature logic to every consumer.
+X: A=View over raw data: feature values are then recomputed by every consumer at query time, and a view with joins or aggregations is not a simple SELECT view, so it cannot be a feature table.
 C=Weekly deletion: deleting a feature table drops the underlying Delta table and breaks models, endpoints and jobs that depend on it.
 D=Manual overwrite: it is still manual, and overwrite replaces all rows, so a partial run leaves the table incomplete.
 T: Refresh feature tables with a scheduled job that writes with `mode="merge"`.
@@ -277,17 +277,17 @@ V: Feature Store
 
 @ DBX-MLA D1 T1.8 applied use-case
 S: Some training rows refer to new customers that have no row yet in `customer_features`. The team wants the model to use an age of 18 and tier `"bronze"` for them instead of nulls. What do they set?
-A: `default_values={"age": 18, "membership_tier": "bronze"}` in the `FeatureLookup`
+A: `exclude_columns=["age", "membership_tier"]` so those features are skipped for the missing customers
 B: A `fillna` call on the DataFrame after `load_df`, which they repeat in the scoring notebook
-C: `exclude_columns=["age", "membership_tier"]` so those features are skipped for the missing customers
+C: `default_values={"age": 18, "membership_tier": "bronze"}` in the `FeatureLookup`
 D: `label=None` in `create_training_set` so the training set tolerates rows without features
-K: A
+K: C
 G: ## Left joins and missing keys
 `create_training_set` performs a **left join** from the training DataFrame to the feature tables. A row whose key is absent in the feature table is kept, with nulls in the feature columns. To control this, the `FeatureLookup` has a `default_values` parameter: a dictionary from feature name to the value to use when the feature store has no value for an ID. If the feature columns are renamed with `rename_outputs`, the dictionary must use the renamed names.
 Because the defaults are part of the lookup stored with the model, they are also applied when the model looks up features at inference. A `fillna` after `load_df` would not be: changes after `load_df` are not part of the model's feature metadata.
 W: `default_values` on the `FeatureLookup` fills in the stated values where no feature row exists and is stored with the model's lookup definition.
 X: B=`fillna` after `load_df`: modifications to that DataFrame are not applied at inference through the lookup, so training and scoring would disagree for new customers.
-C=`exclude_columns`: it removes columns from the output DataFrame, such as the join keys, rather than filling the missing values.
+A=`exclude_columns`: it removes columns from the output DataFrame, such as the join keys, rather than filling the missing values.
 D=`label=None`: it declares an unsupervised training set (no label column) and has no effect on missing feature rows.
 T: Use `default_values` in the `FeatureLookup` to fill features for keys the feature table does not have.
 V: Feature Store
@@ -328,8 +328,8 @@ V: Feature Store
 
 @ DBX-MLA D1 T1.9 applied troubleshooting
 S: A data scientist trained a scikit-learn model on `training_set.load_df()` features but logged it with `mlflow.sklearn.log_model(model, "m")`. In batch scoring, `fe.score_batch` with a DataFrame of only `customer_id` fails to find the model's input features. What is the cause and the fix?
-A: The feature table is not published to an online store yet; publish it with `publish_table` and then rerun the nightly scoring job
-B: The model carries no feature metadata, since it was not logged with the feature client; log it again with `fe.log_model(..., training_set=...)`
+A: The feature table has no online copy yet, so the lookup finds nothing; publish it with `publish_table` and then rerun the nightly scoring job
+B: The model carries no feature metadata, as it was not logged with the feature client; log it again with `fe.log_model(..., training_set=...)`
 C: `score_batch` supports only SparkML models; retrain the model as a Spark ML pipeline
 D: The model was registered with an alias; remove the alias so that the lookup is possible
 K: B
@@ -362,35 +362,35 @@ V: Feature Store
 
 @ DBX-MLA D1 T1.9 applied troubleshooting
 S: Training used `training_set.load_df()`, followed by a standard scaler fit on the DataFrame, and the scaled data trained the model. The model was logged with `fe.log_model(..., training_set=...)`. After deployment, batch predictions through `score_batch` score much worse than the validation metrics. What is the likely cause?
-A: The scaling in the notebook is not part of the model's feature metadata, so inference passes unscaled features to a model trained on scaled data
-B: `score_batch` always reads the feature values from the online store, which holds older values than the offline feature table does
-C: Models that are packaged with features lose the training labels, which lowers predictions
+A: Models that are packaged with features lose the training labels, which lowers predictions
+B: `score_batch` always reads the feature values from the online store, which holds older values than the offline feature table does, so scores are stale
+C: The scaling in the notebook is not part of the model's feature metadata, so inference passes unscaled features to a model trained on scaled data
 D: The scaler was fit on the training data; `score_batch` re-fits it on the batch data and changes the scale
-K: A
+K: C
 G: ## Do not transform outside the model
 At inference the client recreates only what the training set describes: the table lookups (and feature functions). Any change you make to the `load_df` output before training, such as scaling, encoding or filtering, is **not** applied at inference. The model then receives differently prepared inputs than in training and performs worse, with no error message.
 Fixes: put the preprocessing inside the logged model (for example a scikit-learn `Pipeline` containing the scaler, logged as one model), or store the transformed values as features in the table, or compute them with a feature function.
 Batch scoring reads the offline tables.
 W: The scaling happens outside the packaged lookups, so at inference the unscaled features hit a model trained on scaled values; moving the scaler into a pipeline in the logged model fixes the mismatch.
 X: B=Online store: `score_batch` retrieves features from the offline Delta tables; online values are used by serving endpoints.
-C=Lost labels: labels are used only in training; the packaged model never needs them and its predictions are unaffected by their absence.
+A=Lost labels: labels are used only in training; the packaged model never needs them and its predictions are unaffected by their absence.
 D=Re-fit at scoring: a scaler in a notebook is not stored in the model; if it were inside a pipeline it would be reused, not re-fit.
 T: Keep preprocessing inside the logged model (a pipeline), or in the features; steps applied after `load_df` do not run at scoring.
 V: Feature Store, MLflow
 
 @ DBX-MLA D1 T1.10 applied definition
 S: Which statement correctly contrasts the offline and the online feature store in Databricks?
-A: The offline store holds the Delta feature tables for discovery, training and batch scoring; the Lakebase-based online store serves real-time apps
-B: The offline store keeps the full history for batch scoring on cheap object storage, and the online store is a read-only cache that keeps its own schema with different key columns
+A: The offline store keeps the full history for batch scoring on cheap object storage, and the online store is a read-only cache that keeps its own schema with different key columns
+B: The offline store holds the Delta feature tables for discovery, training and batch scoring; the Lakebase-based online store serves real-time apps
 C: The offline store is the place where models are served from, and the online store holds only the model artifacts and their versions
 D: The offline store is for notebooks only; the online store is any Delta table that has a primary key, so both can be written by streaming jobs
-K: A
+K: B
 G: ## Offline versus online
 Feature tables in Unity Catalog are Delta tables: this is the **offline store**. It is used for feature discovery, model training and batch inference, where throughput matters more than latency.
 The **online feature store** is a low-latency, high-scale store for real-time applications and for automatic feature lookup in model serving endpoints. It is powered by Databricks Lakebase and you populate it by publishing offline tables (`publish_table`). Lineage and governance stay tied to the source table, and Databricks keeps the online table in sync according to the publish mode.
 Feature tables and Feature Views can both publish to the Online Feature Store; feature tables can also use a third-party online store. The legacy Workspace Feature Store (the older name in the exam guide) is not the current path.
 W: The offline tables are the Delta tables for discovery, training and batch scoring; the Lakebase-powered online store gives the millisecond lookups real-time applications need.
-X: B=Cache with its own schema: the online table mirrors the published offline table and the entity key; it is populated from the offline table and is not a separate dataset.
+X: A=Cache with its own schema: the online table mirrors the published offline table and the entity key; it is populated from the offline table and is not a separate dataset.
 C=Serving and model artifacts: the offline store is not where models are served; models live in Unity Catalog and serve from endpoints, while the online store holds feature values.
 D=Notebook-only offline store: the offline store is the main source for training and batch jobs, and an ordinary keyed Delta table is a feature table, not an online store.
 T: Offline = Delta tables for training and batch; online = low-latency Lakebase-backed store for real-time lookups, filled by publishing.
@@ -437,18 +437,18 @@ V: Feature Store, Lakebase
 
 @ DBX-MLA D1 T1.10 applied use-case
 S: A fraud model must be called by a payments app with a few milliseconds of budget, and it needs customer features that update all day. The model was trained with `create_training_set` and logged with the feature client. Which design fits?
-A: Publish the feature tables to the online store and serve the model on a Model Serving endpoint, which looks the features up by key
+A: Deploy the model to an endpoint that queries the offline Delta feature table directly with a SQL warehouse for each request
 B: Deploy the model to an endpoint and let the payments app send the whole customer history with every request, using no feature store at all
 C: Run the model once an hour as a batch job with `score_batch`, and write the predictions to a Delta table that the app queries
-D: Deploy the model to an endpoint that queries the offline Delta feature table directly with a SQL warehouse for each request
-K: A
+D: Publish the feature tables to the online store and serve the model on a Model Serving endpoint, which looks the features up by key
+K: D
 G: ## Serving with features
 Real-time inference needs two things: a model endpoint and low-latency features. Models trained with Feature Store keep references to their features. When deployed with Mosaic AI Model Serving, the endpoint uses Unity Catalog to find the matching **online** tables and fetches features by primary key for each request, so the caller only sends keys (for example `customer_id`). The same feature definitions serve training and inference, which avoids training/serving skew.
 Offline Delta tables are optimized for throughput, not for millisecond point reads, and a batch job gives results that are only as fresh as its schedule.
 W: Publishing to the online store and serving through Model Serving gives key-based lookups at low latency with features kept current from the offline table.
 X: B=History in every request: it moves feature computation into every caller, risks differences from training and makes the payload large.
 C=Hourly batch scoring: predictions up to an hour old do not satisfy a per-transaction decision with features that change all day.
-D=Offline table per request: querying Delta through a warehouse per call adds latency far above a few milliseconds; the online store exists for point reads.
+A=Offline table per request: querying Delta through a warehouse per call adds latency far above a few milliseconds; the online store exists for point reads.
 T: Real-time features: publish offline tables to the online store and serve the model; endpoints do the key lookups.
 V: Feature Store, Model Serving, Lakebase
 
