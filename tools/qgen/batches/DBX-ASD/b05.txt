@@ -90,10 +90,10 @@ S: A delivery report computes the transit time in days with the code below. Orde
 `df.withColumn("days", F.datediff("order_date", "ship_date"))`
 
 How does the developer fix it?
-A: Wrap the result in `F.abs(...)` after converting both columns to timestamps first
-B: Replace `datediff` with `months_between` and multiply the result by 30 to obtain days
+A: Wrap the result in `F.abs(...)` after converting both columns to timestamps first, so all values are positive
+B: Replace `datediff` with `months_between` and multiply the fractional months result by 30 to obtain days
 C: Swap the arguments to `F.datediff("ship_date", "order_date")`, because the end date comes first
-D: Cast both columns to string first so Spark compares them in calendar order
+D: Cast both columns to string first so that Spark compares the two values in calendar order, not numerically
 K: C
 G: ## Argument order of datediff
 `datediff(end, start)` returns the number of days **from start to end**. The later date goes first, which is the reverse of how many people read "difference between order and ship". With the arguments swapped the sign flips.
@@ -147,7 +147,7 @@ T: `date_trunc(unit, ts)` returns a timestamp, `trunc(date, unit)` returns a dat
 
 @ DBX-ASD D3 T3.4 advanced troubleshooting
 S: The same job runs on two clusters. One has `spark.sql.session.timeZone` set to `UTC`, the other to `America/Los_Angeles`. For the epoch value `0`, `F.from_unixtime(F.lit(0))` returns `1970-01-01 00:00:00` on the first cluster and `1969-12-31 16:00:00` on the second. What explains the difference, and what should the developer do?
-A: Spark converts epoch seconds with the time zone of the driver machine, so the cluster nodes must have the same operating system clock settings
+A: Spark ignores the session setting and always uses the operating system time zone of each node, so the nodes need identical OS time zones
 B: The epoch value itself changes with the time zone, so the source column has to be rewritten with `unix_timestamp` on both clusters
 C: The function rounds to the nearest hour in each region, so the developer should pass an explicit pattern such as `yyyy-MM-dd HH`
 D: `from_unixtime` renders the instant in the session time zone, so the developer should set the same `spark.sql.session.timeZone` on both clusters
@@ -160,32 +160,31 @@ A Unix epoch value names one instant, independent of any time zone. A string suc
 ## Example
 Epoch `0` is midnight in UTC. Los Angeles is 8 hours behind UTC in winter, so the local reading is `16:00` on the previous day.
 W: The instant is the same; the text is rendered in each cluster's session time zone, so aligning `spark.sql.session.timeZone` makes both outputs identical.
-X: A=Driver OS clock: the setting that decides is the Spark session time zone; correcting operating system clocks does not change how Spark formats a timestamp when that setting is explicit.
+X: A=Node OS time zone: the OS zone only matters as the default when the session setting is unset; here the setting is explicit, so it decides and aligning operating system zones changes nothing.
 B=Epoch changes with zone: epoch seconds are zone independent by definition. `unix_timestamp` would only parse text back to the same number.
 C=Rounding to the hour: no rounding happens; the whole 8 hour shift comes from the zone. A different pattern would change the layout of the text, not the instant it shows.
 T: Epoch is zone-free; the text from `from_unixtime` depends on `spark.sql.session.timeZone`, so set it explicitly.
 
-@ DBX-ASD D3 T3.5 applied use-case
-S: `orders` has ids 1, 2, 3, 4 and `customers` has ids 1 and 2. The `customer_id` of `orders` is the key. The developer needs the orders that have no matching customer, with only the columns of `orders`. Which join returns this?
-
-`orders.join(customers, "customer_id", ???)`
-A: `"left"`
-B: `"left_anti"`
-C: `"left_semi"`
-D: `"right"`
+@ DBX-ASD D3 T3.5 applied troubleshooting
+S: `orders` has `customer_id` values 1, 2, NULL and 4. `customers` has `customer_id` values 1, 2 and NULL. A developer runs `orders.join(customers, "customer_id", "left_anti")` to list the orders without a matching customer. Which rows are returned?
+A: Only the order with `customer_id` 4, because a NULL key matches a NULL key
+B: The orders with `customer_id` NULL and 4, because a NULL key never equals another key
+C: No rows, because every order has a row with the same key in `customers`
+D: All four orders, because an anti join with a NULL on both sides is not evaluated
 K: B
-G: ## Join types that filter instead of combine
-Most joins add columns from the right side. Two join types only use the right side to **filter** the left side and return only the left columns:
-- `left_semi` keeps left rows that **have** at least one match on the right. A left row is returned once, even when several right rows match.
-- `left_anti` keeps left rows that have **no** match on the right.
-Other types combine: `inner` (matches only), `left`/`right`/`full` (matches plus unmatched rows of one or both sides with NULLs), `cross` (all pairs).
+G: ## NULL keys in joins
+A join condition on column names is an equality test, and in SQL semantics `NULL = NULL` is not true. A row whose key is NULL therefore never has a match on the other side, even when the other side also holds NULL.
+- `inner` and `left_semi` drop such rows from the result.
+- `left` and `left_anti` keep them: with `left_anti` a NULL-key row counts as "no match" and is returned.
+- `Column.eqNullSafe` (`<=>` in SQL) treats two NULLs as equal; use it as the condition when NULL keys must match.
+`left_anti` and `left_semi` return only the columns of the left side.
 ## Example
-Orders 3 and 4 have no customer, so `left_anti` returns exactly those two rows and the columns of `orders`.
-W: left_anti returns the left rows without a match and only the left columns, which is the set of orphaned orders 3 and 4.
-X: A=left: all four orders would be returned, orders 3 and 4 with NULL customer columns, and the customer columns would be included. A further filter would be needed.
-C=left_semi: this is the opposite filter; it returns orders 1 and 2, the ones that do have a customer.
-D=right: it keeps every customer, with the orders that match them, and drops orders without a customer, so the orphaned orders are missing.
-T: Find rows without a match with `left_anti`; find rows with a match, without duplicates, with `left_semi`.
+Orders 1 and 2 match. Order 4 has no customer. The order with a NULL key cannot match the NULL customer, so both the NULL order and order 4 are returned.
+W: left_anti keeps the left rows without a match; the NULL key never matches, so the rows with NULL and 4 are returned, with orders columns only.
+X: A=NULL matches NULL: that is the null-safe comparison (`eqNullSafe`), which a plain column-name join does not use.
+C=No rows: the NULL-key order has no equal key on the other side, since NULL equals nothing, and order 4 has no customer at all.
+D=All four orders: orders 1 and 2 do match customers 1 and 2 and are removed; only unmatched rows are kept.
+T: Join keys with NULL never match, so `left_anti` returns them; use `eqNullSafe` when NULLs must pair up.
 
 @ DBX-ASD D3 T3.5 applied definition
 S: `df1` has columns `k1, k2, x` with rows `(1,'a',10)`, `(1,'b',20)`, `(2,'a',30)`. `df2` has columns `k1, k2, y` with rows `(1,'a',100)`, `(1,'a',200)`, `(2,'b',300)`, `(2,'a',400)`. What does `df1.join(df2, ["k1", "k2"])` return?
@@ -206,24 +205,25 @@ B=Duplicate key columns: the key columns appear twice only when the condition is
 D=Deduplicated keys: joins never deduplicate; the repeated right key produces repeated output rows.
 T: A list of names joins on all of them and keeps one copy of each key; duplicate keys multiply rows.
 
-@ DBX-ASD D3 T3.5 applied troubleshooting
-S: Two daily extracts have the same columns, but in a different order: `a` has `(id, amount)` and `b` has `(amount, id)`. A developer runs `a.union(b)` and gets rows where `id` holds amounts. What is the correct fix?
-A: Use `a.unionByName(b)` so columns are matched by name
-B: Use `a.union(b).distinct()` so mismatched rows are removed
-C: Use `a.join(b, "id", "outer")` so Spark aligns the columns
-D: Add `.repartition("id")` before the union so values land in the right column
-K: A
-G: ## union resolves by position
-`DataFrame.union(other)` combines the rows of two DataFrames **by column position**, as SQL `UNION ALL` does. Names are ignored: the first column of one side lines up with the first of the other. When the order differs, values end up in the wrong columns; if the types allow it no error is raised.
-- `unionByName(other)` matches columns by **name**, which is the safe choice for extracts that may be re-ordered.
-- `unionByName(other, allowMissingColumns=True)` fills columns missing on one side with NULL.
+@ DBX-ASD D3 T3.5 applied comparison
+S: `a` holds the single column `v` with rows 1, 1, 2. `b` holds `v` with the single row 1. A developer compares `a.subtract(b)` with `a.exceptAll(b)`. What do the two calls return?
+A: `subtract` returns the rows 1 and 2, and `exceptAll` returns only the row 2
+B: Both return only the row 2, because the value 1 occurs in `b`
+C: `subtract` returns only the row 2, and `exceptAll` returns the rows 1 and 2
+D: `subtract` returns the rows 1, 1 and 2, and `exceptAll` returns only the row 2
+K: C
+G: ## Set operations on DataFrames
+Both methods return the rows of one DataFrame that are missing from another, but they treat duplicates differently.
+- `subtract` is SQL `EXCEPT DISTINCT`: it removes duplicates from the result and removes every row that also appears in the other DataFrame.
+- `exceptAll` is SQL `EXCEPT ALL`: it keeps duplicates and subtracts one occurrence per matching row of the other side.
+- `intersect` / `intersectAll` follow the same split. Columns are matched by position.
 ## Example
-`a.unionByName(b)` keeps `id` with `id` and `amount` with `amount`, whichever order the files arrive in.
-W: unionByName pairs columns by name, so id stays with id and amount with amount regardless of the order in each source.
-X: B=distinct: removing duplicate rows does nothing to realign columns; the swapped values would still be in the wrong columns.
-C=Outer join: a join combines rows horizontally on a key. It would not stack the two extracts and would duplicate columns, so it is a different operation.
-D=repartition: repartitioning changes how rows are distributed across tasks, not which column holds which value.
-T: `union` is by position, `unionByName` is by name; use the latter when column order can vary.
+`a` has 1 twice. `subtract` removes all rows equal to 1 and returns `2`. `exceptAll` removes only one `1` (the single row in `b`) and returns `1` and `2`.
+W: subtract is a distinct set difference, so 1 disappears completely; exceptAll removes one copy per row of the other side, leaving 1 and 2.
+X: A=Swapped behavior: it gives each method the other one's semantics; the distinct variant is the one that drops the value 1 entirely.
+B=Both return 2: that holds only for `subtract`; `exceptAll` counts occurrences, and `a` has two 1s against one in `b`.
+D=Duplicates in subtract: `subtract` returns distinct rows only, and it would not keep any 1, because 1 is present in `b`.
+T: `subtract` = EXCEPT DISTINCT; `exceptAll` = EXCEPT ALL, which respects row counts.
 
 @ DBX-ASD D3 T3.5 applied comparison
 S: A team migrates a SQL query that combines two tables with `UNION` into the DataFrame API and writes `a.union(b)`. The row count is now higher than in the SQL result, because `a` and `b` share 1,000 identical rows. What causes the difference, and what restores the SQL result?
@@ -350,9 +350,9 @@ T: `FAILFAST` stops on bad records, `DROPMALFORMED` drops them, `PERMISSIVE` nul
 @ DBX-ASD D3 T3.6 applied troubleshooting
 S: A CSV file has the header `name,id`. A developer reads it with `.option("header", True).schema(schema)` where `schema = "id INT, name STRING"`. The values of `id` are mostly NULL and `name` holds the numbers. What is the cause?
 A: A CSV schema is applied to the columns by position, so the field order must match the file column order
-B: A schema string is case sensitive, so `id` must be written as `ID` to match the file header
-C: Spark sorts schema fields alphabetically before it reads, which moves `id` behind `name`
-D: A header option forces Spark to infer the types again, which overrides the declared types
+B: A schema string is case sensitive, so the field `id` must be written as `ID` to match the file header exactly
+C: Spark sorts the declared schema fields alphabetically before it reads, which moves `id` behind `name`
+D: A header option forces Spark to infer the column types again, which overrides the declared types
 K: A
 G: ## Positional schemas for CSV
 CSV files have no column identity apart from position. When you pass a schema, Spark assigns the declared fields to the file columns **in order**: the first field gets the first column, and so on. By default `enforceSchema=true`, so header names in the file are ignored for this matching.
@@ -369,10 +369,10 @@ T: For CSV an explicit schema is positional: declare fields in the file's column
 
 @ DBX-ASD D3 T3.6 applied definition
 S: A developer reads Parquet files with `spark.read.option("inferSchema", "true").parquet(path)` because the CSV jobs of the team use that option. What is its effect on the Parquet read?
-A: It makes Spark scan all files once more to check every column type, which doubles read time
-B: It converts all numeric columns to double, because inferred types are widened
-C: It forces Spark to ignore the file schema and to treat every column as a string
-D: It has no effect, because Parquet files store their schema and Spark reads it from the file footers
+A: It makes Spark scan all files once more to check every column type, which doubles the read time
+B: It converts all numeric columns to double, because the inferred types are always widened first
+C: It forces Spark to ignore the file schema and to treat every column of the files as a plain string
+D: It has no effect, because Parquet stores its schema in the footers
 K: D
 G: ## Self-describing versus text formats
 Text formats such as CSV store only characters, so Spark either uses an explicit schema or scans the data to guess types (`inferSchema`, an extra pass over the data). Binary columnar formats are **self-describing**:
@@ -581,7 +581,7 @@ S: A job writes Parquet files for a downstream reader that wants each output fil
 A: `df.sortWithinPartitions("ts")`
 B: `df.orderBy("ts")`
 C: `df.coalesce(1).collect()`
-D: `df.sample(0.5).sort("ts")`
+D: `df.sample(0.5).sort("ts").limit(100000)`
 K: A
 G: ## Global sort versus per-partition sort
 - `orderBy` / `sort` produce a **total order**: Spark range-partitions the data (a shuffle), so partition 0 holds the smallest values, partition 1 the next, and so on.
