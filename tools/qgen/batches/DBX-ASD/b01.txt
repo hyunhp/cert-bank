@@ -1,0 +1,552 @@
+# DBX-ASD batch 01: D1 (T1.1 advantages and challenges, T1.2 core components, T1.3 DataFrame/SparkSession/caching/storage levels/GC, T1.4 job-stage-task hierarchy), single answer, detailed explanations
+# src: https://spark.apache.org/docs/latest/cluster-overview.html
+# src: https://spark.apache.org/docs/latest/rdd-programming-guide.html
+# src: https://spark.apache.org/docs/latest/tuning.html
+# src: https://spark.apache.org/docs/latest/configuration.html
+# src: https://spark.apache.org/docs/latest/job-scheduling.html
+# src: https://spark.apache.org/docs/latest/sql-performance-tuning.html
+# src: https://spark.apache.org/docs/latest/sql-programming-guide.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.cache.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.unpersist.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.SparkSession.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.SparkSession.builder.getOrCreate.html
+
+@ DBX-ASD D1 T1.1 applied use-case
+S: A team trains a model by running 30 passes over the same 200 GB dataset. Their earlier MapReduce implementation wrote every pass's output to distributed storage and read it back at the start of the next pass. Which Apache Spark capability most directly cuts the run time of the iterative job?
+A: Spark replaces the cluster manager with a built-in single JVM scheduler, so no resources have to be negotiated before each pass starts.
+B: Spark compresses all intermediate data with a lossy codec, so each pass reads far fewer bytes than the original dataset holds.
+C: Spark can keep the working dataset in executor memory across passes with `cache()` or `persist()`, so later passes skip the re-read from storage.
+D: Spark fuses all 30 passes into a single task automatically, so the dataset is scanned only once regardless of how many actions run.
+K: C
+G: ## Why iterative work was slow before Spark
+In the MapReduce model every job reads its input from distributed storage and writes its result back to it. An algorithm that loops over the same data 30 times therefore pays 30 reads and 30 writes of the full dataset.
+## What Spark changes
+Spark executors can hold partitions in memory (and spill to local disk when needed). When a DataFrame is marked with `cache()` or `persist()`, the first action materializes its partitions in the executors, and later actions read them from there instead of recomputing from the source.
+- Spark still shuffles and spills when needed; memory is an optimization, not a requirement.
+- The same engine also pipelines narrow transformations inside one stage, which saves intermediate writes within a pass.
+W: Caching the working dataset in executor memory is the iterative-workload advantage: after the first pass the partitions are served from the executors, so passes 2 to 30 avoid re-reading and re-writing storage.
+X: A=Built-in scheduler: Spark still uses a cluster manager (standalone, YARN or Kubernetes) to get executors, and negotiation happens once per application, not before each pass. It is not what removes the repeated I/O.
+B=Lossy compression: Spark never alters data with a lossy codec. Compression such as Snappy or Zstandard is lossless and does not change how many times the data has to be re-read.
+D=Single task for all passes: each action triggers its own job and the passes depend on earlier results, so Spark cannot merge them into one scan. It reuses cached data rather than skipping the passes.
+T: Spark's iterative speed-up comes from keeping the working set in executor memory between actions instead of round-tripping through storage.
+
+@ DBX-ASD D1 T1.1 applied definition
+S: A company runs nightly SQL ETL, a streaming ingestion job and a model-training job on three separate systems, each with its own API, optimizer and cluster. Which benefit of adopting Apache Spark addresses this fragmentation?
+A: One engine with shared DataFrame and SQL APIs covers batch, streaming and machine learning, so one optimizer and one cluster serve all three workloads.
+B: Spark rewrites any pipeline into a single-node program, which removes network transfer and the need to size a cluster for each workload.
+C: Spark converts streaming and machine-learning code to plain SQL automatically, so developers no longer need to learn any module-specific API.
+D: Spark ships its own distributed file system, so ETL, streaming and training jobs no longer need an external storage layer for their data.
+K: A
+G: ## The unified engine idea
+Spark is one engine with several modules on top: Spark SQL and DataFrames, Structured Streaming, MLlib and the pandas API on Spark. They share the same execution core, the Catalyst optimizer for DataFrame and SQL work, and the same cluster resources.
+## What that buys a team
+- Code for batch and streaming can use the same DataFrame operations, so a transformation written once can serve both.
+- One deployment, one security model and one monitoring surface instead of three.
+- Data moves between stages of a pipeline (for example ETL output into model training) in the same process rather than across systems.
+W: One engine and shared APIs across SQL, streaming and ML is the documented advantage: the same optimizer, scheduler and cluster serve every workload, which removes the three-system fragmentation.
+X: B=Single-node rewrite: Spark is a distributed engine and does not collapse a pipeline onto one node; its value is scaling out across executors.
+C=Automatic conversion to SQL: each module keeps its own API (for example `readStream` and `pyspark.ml`); they interoperate on DataFrames but are not translated into SQL for you.
+D=Own file system: Spark has no storage layer. It reads and writes external systems such as cloud object storage, HDFS or Delta tables.
+T: Spark's advantage is a unified engine: one set of DataFrame/SQL APIs and one optimizer across batch, streaming and ML.
+
+@ DBX-ASD D1 T1.1 applied troubleshooting
+S: A nightly job reads a folder of 3 million JSON files of about 50 KB each (150 GB total). A Spark UI check shows that the read stage takes longer than the whole transformation that follows, although the cluster has idle cores. Which Spark challenge does this describe?
+A: Too many executors are registered, so the driver spends the stage time rebalancing cached blocks between them.
+B: A wide transformation is moving data across the network, which is the cost of a shuffle rather than of the file read.
+C: Lazy evaluation is recomputing the folder listing once for every column used later in the query plan.
+D: The small-files problem: opening and listing millions of tiny files adds per-file overhead that dwarfs the data scanned.
+K: D
+G: ## Small files and distributed engines
+Spark plans file reads by packing files into partitions. `spark.sql.files.maxPartitionBytes` (default 128 MB) caps the bytes per partition, and `spark.sql.files.openCostInBytes` (default 4 MB) adds an estimated cost for each file opened. Millions of 50 KB files still need millions of listing calls, open calls and metadata reads, even when Spark packs several files into one partition.
+## Why the cluster idles
+Per-file overhead is spent mostly on the driver (listing and planning) and in object-store requests, not in CPU on the executors. That is why cores sit idle while the stage is slow.
+## What developers do about it
+Compact the data into fewer, larger files (for example 128 MB to 1 GB each) when it is written, and avoid writing one file per tiny batch.
+W: This is the small-files challenge: file open, listing and metadata cost grows with the file count, not the byte count, so 3 million tiny files make the read slow while cores wait.
+X: A=Too many executors: executors do not rebalance cached blocks among themselves because of a read, and the stage in question is a file scan, not a caching problem.
+B=Shuffle cost: the slow part is the read stage, which has no shuffle yet. A shuffle would show up as shuffle read/write between stages.
+C=Lazy recomputation: Spark builds the plan once per action, and a folder listing is not repeated per column. The symptom is tied to the file count.
+T: Many tiny files make reads slow because per-file overhead dominates; the fix is compaction into fewer, larger files.
+
+@ DBX-ASD D1 T1.1 applied comparison
+S: A node in a Spark cluster fails in the middle of a long batch job, and the partitions it held are lost. Which Spark characteristic lets the job finish without the developer having to restart it by hand?
+A: Every partition is automatically replicated to three nodes before any transformation runs, so a copy is always available elsewhere.
+B: Spark records the lineage of transformations behind each partition and recomputes only the lost partitions on other executors.
+C: The driver writes a full checkpoint to distributed storage after every transformation, so work always resumes from the last step.
+D: The cluster manager pauses the application until the failed node returns and then replays the stage on that same node.
+K: B
+G: ## Lineage as fault tolerance
+Transformations are lazy: Spark first builds a plan (the lineage) that says how each partition is derived from its inputs. If an executor dies and its partitions or shuffle output are lost, the scheduler re-runs the tasks that produce just those partitions on other executors.
+- No replication is needed by default; replicated storage levels such as `MEMORY_ONLY_2` are an opt-in.
+- Checkpointing is also opt-in. It truncates long lineages by saving data to reliable storage, but Spark does not do it after every step.
+## Limits
+The driver must stay alive. Recomputation is cheap for narrow dependencies and costs more when lost output came from a wide (shuffle) dependency.
+W: Lineage-based recomputation is the built-in fault tolerance: the driver knows how every partition was derived, so only the lost partitions are rebuilt on healthy executors and the job continues.
+X: A=Automatic 3x replication: Spark does not replicate partitions by default; replication happens only if you choose a `_2` storage level, and it is not applied before transformations.
+C=Checkpoint after each step: checkpointing is explicit (`checkpoint()`), is not automatic, and would be very slow if done after every transformation.
+D=Pause and replay on the same node: the scheduler reschedules the failed tasks on other available executors rather than waiting for the failed node.
+T: Spark tolerates failures by recomputing lost partitions from their lineage on other executors, not by default replication or checkpointing.
+
+@ DBX-ASD D1 T1.1 applied tradeoff
+S: A developer's job runs `orderBy` on a 2 TB DataFrame and then `groupBy("country").count()` on the result. The Spark UI shows heavy "Shuffle Read" and "Shuffle Write" and long stage times compared with a plain `filter` pass over the same data. What is the underlying challenge?
+A: Wide transformations must redistribute rows across executors over the network and through disk, which costs far more than narrow, per-partition work.
+B: Narrow transformations such as `filter` are always slower than `groupBy` because they are executed by the driver one partition at a time.
+C: Each `orderBy` and `groupBy` forces Spark to collect the full 2 TB onto the driver, which then redistributes the result back to the executors.
+D: The data is stored in columnar format, which prevents Spark from running sorts and aggregations in parallel on more than one core.
+K: A
+G: ## Narrow and wide dependencies
+- A **narrow** transformation (`filter`, `select`, `withColumn`, `map`-like) computes each output partition from one input partition. It runs inside the executor that already holds the data and needs no data movement.
+- A **wide** transformation (`groupBy`, `join` without broadcast, `orderBy`, `distinct`, `repartition`) needs rows with the same key, or the same sort range, in the same partition. Spark must move rows between executors: map tasks write shuffle files to local disk, and reduce tasks fetch them over the network.
+## Why this is the classic Spark cost
+Shuffle involves serialization, disk writes and network transfer, and it also marks a stage boundary. Reducing shuffles (filter early, avoid unnecessary sorts, broadcast small tables) is the main performance work in Spark.
+W: Wide transformations such as `orderBy` and `groupBy` shuffle data between executors via disk and network, which is why shuffle read/write dominates the UI and the stages are slower than a narrow `filter`.
+X: B=Narrow slower than wide: filtering runs in parallel on executors, not on the driver, and needs no data movement, so it is cheaper than a shuffle.
+C=Collecting to the driver: shuffles move data directly between executors. The driver coordinates but does not receive or redistribute the 2 TB.
+D=Columnar format blocks parallelism: formats such as Parquet are columnar and still split into many partitions that run in parallel; the cost here is the shuffle.
+T: The main distributed-processing challenge is shuffle cost: wide transformations move data across the network and through disk, narrow ones do not.
+
+@ DBX-ASD D1 T1.1 applied troubleshooting
+S: A developer calls `big_df.collect()` on a 90 GB DataFrame from a driver with 8 GB of memory. The job fails with a driver out-of-memory error or an error about the total size of serialized results. What distributed-computing challenge does this illustrate?
+A: Executors cannot write their results to shared storage as fast as the driver reads them, so the cluster manager aborts the whole application.
+B: Lazy evaluation keeps the plan hidden until an action runs, so the query is rejected by the driver before any data is read from the source.
+C: Data that was spread across many executors is pulled into the single driver process, whose memory is much smaller than the distributed data.
+D: The DataFrame was cached with the default storage level, and cached data may not be returned to the driver by any action.
+K: C
+G: ## Distributed data, one driver
+A DataFrame is split into partitions stored and processed on many executors, so its total size can be far larger than any one machine. Actions such as `collect()`, `toPandas()` and `take(n)` bring rows back to the driver, a single process whose heap is set with `spark.driver.memory`.
+## What stops you
+`spark.driver.maxResultSize` (default 1 GB) limits the total size of serialized results per action; a job whose results exceed it is aborted. Even below that limit, the deserialized objects can exhaust the driver heap.
+## What to do instead
+Aggregate or filter on the executors first, write the result to storage, or use `take`/`limit` for samples.
+W: `collect()` moves every partition into the one driver process. When the distributed result is larger than the driver can hold (or than `spark.driver.maxResultSize`), the action fails, which is the classic memory challenge of distributed data.
+X: A=Executors slower than the driver: executors send results over RPC to the driver and are not limited by storage writes. Nothing is being written in this action.
+B=Plan rejected before reading: lazy evaluation delays work until an action, but the action here does start reading; the failure appears when results accumulate on the driver.
+D=Cached DataFrame restriction: caching has no rule against returning rows to the driver; any DataFrame, cached or not, can be collected if the result fits.
+T: Actions that return data (`collect`, `toPandas`) move distributed data into a single driver, so size results first or aggregate on executors.
+
+@ DBX-ASD D1 T1.1 advanced comparison
+S: Two engineers implement the same aggregation in PySpark. One uses `df.groupBy("k").agg(F.sum("v"))`; the other uses a Python lambda on an RDD from `df.rdd.map(...).reduceByKey(...)`. The DataFrame version runs noticeably faster on the same cluster. Which advantage of Spark's structured APIs explains it?
+A: DataFrame code runs only on the driver, so it avoids the cost of shipping work to executors that the lambda version pays.
+B: DataFrame operations are planned by the Catalyst optimizer and executed by the JVM engine, so Python code does not touch each row.
+C: DataFrames keep all data on disk in a compressed format, so they never need the memory that RDD lambdas consume.
+D: The RDD version cannot run in parallel because Python lambdas hold the global interpreter lock on the whole cluster at once.
+K: B
+G: ## Structured APIs versus Python lambdas
+A DataFrame or SQL query describes what you want. Spark parses it into a logical plan, the Catalyst optimizer improves it (column pruning, predicate pushdown, join strategy), and the JVM executes the optimized plan on executors. In PySpark the Python code only builds the plan, so a built-in expression such as `F.sum` runs at JVM speed for every language.
+## What the lambda version pays
+`df.rdd.map(lambda ...)` hands rows to Python worker processes: each row is serialized from the JVM to Python and back, and Catalyst cannot see inside the lambda to optimize it. This is the main reason structured APIs and built-in functions are preferred.
+W: The DataFrame version is planned by Catalyst and executed inside the JVM, so no Python call is made per row; the RDD lambda version serializes rows to Python workers and gets no optimization.
+X: A=Runs only on the driver: DataFrame work is distributed across executors like any other Spark job; the driver builds the plan and coordinates.
+C=Everything on disk: DataFrames use memory and spill to disk when needed. Being on disk is not the reason, and it would normally be slower.
+D=Global interpreter lock across the cluster: the lock applies per Python process, not to the whole cluster. The RDD job still runs in parallel across workers, just with per-row serialization cost.
+T: Structured APIs let Catalyst optimize and run the work in the JVM, so they beat Python lambdas that serialize each row.
+
+@ DBX-ASD D1 T1.2 applied definition
+S: A PySpark application is launched with `spark-submit`. It reads a Parquet table, transforms it and writes the result. Which component builds the execution plan for the application, splits each job into stages and tasks, and sends those tasks to executors?
+A: Each executor, by negotiating with the other executors in the cluster to share the stages of every job.
+B: The cluster manager, which examines the code of the application to build its stages before any executor is started.
+C: The worker node's operating system, which turns each DataFrame operation into tasks for the local cores.
+D: The driver, whose SparkSession and scheduler turn the DataFrame operations into stages and tasks for the executors.
+K: D
+G: ## The three roles in a Spark application
+- The **driver** runs your main program (it hosts the `SparkSession` and `SparkContext`). It builds the plan for every action, divides it into stages and tasks, and schedules them on executors. It also collects the results of actions.
+- The **cluster manager** (standalone, YARN or Kubernetes) only allocates resources: it launches executors for the application. It does not read your code.
+- **Executors** are processes on worker nodes that run tasks and hold cached data. Each application gets its own executors.
+## Consequence
+The driver must be reachable from the executors for the whole lifetime of the application, and it should run close to the workers.
+W: The driver turns DataFrame operations into a plan, divides it into stages and tasks, and ships the tasks to executors; this is the scheduling role of the driver program.
+X: A=Executors negotiating: executors run the tasks they receive and report back to the driver. They do not plan stages or coordinate with each other to share jobs.
+B=Cluster manager: it hands out resources (containers or pods for executors), but it does not understand the application's DataFrame code or create stages.
+C=Worker OS: the operating system only schedules processes and threads. Spark's own DAG and task schedulers in the driver decide what tasks exist.
+T: The driver plans and schedules; the cluster manager allocates executors; executors run tasks and cache data.
+
+@ DBX-ASD D1 T1.2 applied comparison
+S: An administrator wants to understand which Spark component decides how many executor processes, and with how many cores and how much memory, are started for an application on a shared YARN or Kubernetes cluster. Which component grants these resources?
+A: The driver's task scheduler, which chooses the number of cores each executor uses after tasks are submitted.
+B: The cluster manager, which allocates resources across applications and launches the executors Spark asks for.
+C: The block manager on each executor, which reserves memory on peers when a cached partition does not fit.
+D: The Spark SQL catalog, which stores per-table settings for executor sizing and applies them at query time.
+K: B
+G: ## Resource negotiation
+When an application starts, its SparkContext connects to a cluster manager (Spark's standalone manager, Hadoop YARN or Kubernetes). The application requests executors with settings such as `spark.executor.instances`, `spark.executor.cores` and `spark.executor.memory`, and the manager decides whether it can grant them and where to run them.
+## Spark's stance
+Spark is agnostic to the manager: once it has executors that can talk to each other and to the driver, it works the same way. The cluster manager also divides resources among different applications on the cluster, while scheduling inside one application is done by Spark itself.
+W: The cluster manager allocates executors across applications and launches them with the requested cores and memory; Spark is agnostic about which manager is used.
+X: A=Driver task scheduler: it assigns tasks to executor slots that already exist. It does not create executor processes or decide their size.
+C=Block manager: it stores and serves data blocks (cached partitions, shuffle output). It does not allocate other executors' memory or processes.
+D=SQL catalog: it holds metadata about databases, tables and functions. Resource sizing is a configuration of the application and the cluster manager, not catalog metadata.
+T: The cluster manager hands out executors (cores and memory); the driver schedules tasks onto them.
+
+@ DBX-ASD D1 T1.2 applied definition
+S: An executor is started with a 10 GB heap, and the unified memory region M is shared by execution (shuffles, joins, sorts) and storage (cached blocks). Which setting defines the part of M whose cached blocks execution is not allowed to evict?
+A: `spark.memory.fraction`, which sets the share of the heap that cached blocks may never leave.
+B: `spark.executor.memoryOverhead`, which reserves memory for cached blocks outside the JVM heap.
+C: `spark.driver.maxResultSize`, which limits how much cached data an executor may hold in memory.
+D: `spark.memory.storageFraction`, which sets the subregion R of M where cached blocks are immune to eviction.
+K: D
+G: ## Unified memory
+Executor heap use in Spark falls into execution memory (shuffles, joins, sorts, aggregations) and storage memory (cached data, broadcast data). They share one unified region M.
+- `spark.memory.fraction` (default 0.6) sets the size of M as a fraction of the heap minus about 300 MiB. The remaining 40% is for user data structures, internal metadata and a safety margin against out-of-memory errors.
+- `spark.memory.storageFraction` (default 0.5) sets the size of the subregion R inside M where cached blocks are never evicted by execution.
+## Borrowing rules
+When no execution memory is in use, storage may take all of M and the other way around. Execution can evict cached blocks, but only until storage falls to R. Storage cannot evict execution memory. Most users should leave both settings at their defaults.
+W: `spark.memory.storageFraction` sets R, the part of the unified region in which cached blocks are immune to eviction by execution.
+X: A=`spark.memory.fraction`: it sizes the whole unified region M (default 0.6 of heap), within which execution may still evict cache above R.
+B=`spark.executor.memoryOverhead`: this is non-heap memory for VM and native overhead; it is not the cache protection setting.
+C=`spark.driver.maxResultSize`: it caps serialized action results returned to the driver and has nothing to do with executor storage.
+T: `spark.memory.fraction` sizes unified memory M; `spark.memory.storageFraction` sizes the eviction-protected cache part R inside it.
+
+@ DBX-ASD D1 T1.2 applied use-case
+S: A cluster has 3 executors, each with 4 cores, and `spark.task.cpus` is 1. A stage has 60 tasks that each take about 10 seconds and the cluster runs nothing else. Ignoring scheduling overhead, roughly how long does the stage take?
+A: About 50 seconds, because 12 tasks run at once and the 60 tasks need five waves.
+B: About 150 seconds, because only one executor's 4 cores can run tasks at a time.
+C: About 600 seconds, because tasks of a single stage must run one after another.
+D: About 10 seconds, because Spark starts all 60 tasks at the same moment.
+K: A
+G: ## Cores are task slots
+Each executor runs tasks in parallel in threads, one task per core when `spark.task.cpus` is 1. The total number of tasks that can run at the same time is `executors x cores per executor`. Here that is `3 x 4 = 12` slots.
+## Waves
+If a stage has more tasks than slots, the extra tasks queue and run as slots free up. With 60 equal tasks and 12 slots, `60 / 12 = 5` waves of 10 seconds each, so about 50 seconds.
+- Fewer partitions than slots leaves cores idle.
+- Many more partitions than slots is fine and helps balance uneven tasks.
+W: The cluster has 12 task slots, so 60 equal tasks of 10 seconds finish in 5 waves, about 50 seconds.
+X: B=Only one executor works: all three executors take tasks at the same time; the 4-core count applies to each executor, so the real slot count is 12, not 4.
+C=Sequential tasks: tasks in a stage are independent and run in parallel across all available slots. Stages depend on each other, tasks inside one do not.
+D=All 60 at once: Spark can run only as many tasks as there are free slots (12); the rest wait.
+T: Parallel tasks = executors x cores per executor (divided by `spark.task.cpus`); more tasks than slots run in waves.
+
+@ DBX-ASD D1 T1.2 applied troubleshooting
+S: A long-running application loses one of its executors to a node failure while a cached DataFrame is spread across all executors. The driver is healthy. What happens?
+A: The application fails at once, because cached data lost together with an executor cannot be rebuilt after the original job has started.
+B: The driver restarts every stage of the application from the first job onward, discarding all of the results computed so far.
+C: Spark reschedules the lost executor's tasks elsewhere and recomputes the lost cached partitions from lineage when they are next needed.
+D: The cluster manager restores the lost partitions from a hidden replica and the same task resumes from its last point on a new node.
+K: C
+G: ## What an executor holds
+An executor is a process on a worker node. It runs tasks and keeps data blocks for the application: cached partitions in storage memory and shuffle files on local disk. Losing the process loses those blocks and any running tasks.
+## What Spark does
+The driver detects the lost executor, reschedules the tasks that were running there on the remaining (or newly requested) executors, and recomputes missing cached partitions from the lineage the next time they are needed. If shuffle files were lost, the map tasks that wrote them are re-run. The application survives as long as the driver does.
+- Replicated storage levels (`_2`) can reduce recomputation but are opt-in.
+W: The driver reschedules the failed tasks on other executors and recomputes only the lost cached partitions from lineage when needed, so the application continues.
+X: A=Application fails: lost cached blocks are never fatal on their own, because Spark can recompute them. Failure would come from a lost driver or repeated task failures.
+B=Restart everything: Spark re-runs only the affected tasks and missing partitions or shuffle outputs, not completed work in unaffected partitions.
+D=Hidden replica: there is no replica unless a replicated storage level was chosen, and the cluster manager does not manage data blocks.
+T: A lost executor costs recomputation of its partitions from lineage; only losing the driver ends the application.
+
+@ DBX-ASD D1 T1.2 applied comparison
+S: Two data scientists each run a notebook that is its own Spark application on the same cluster. The first reads a large table and calls `cache()` followed by `count()`. The second then reads the same table and runs a query. What does the second application see?
+A: Both applications share one block store on the cluster, so the second notebook reads the first notebook's cached partitions.
+B: The second application reads the cached blocks only if it uses the same `appName` as the first one.
+C: The second application can attach to the cached DataFrame once the first one's driver is told to broadcast it.
+D: The second application reads from storage again, because each application has its own executors and cached data is not shared between applications.
+K: D
+G: ## Isolation between applications
+Each Spark application (one `SparkContext`) gets its own executor processes for the application's whole lifetime. Executors of different applications run in different JVMs, so one application cannot read another's cached blocks, broadcast variables or temporary views.
+- Benefits: scheduling and executor isolation between applications.
+- Cost: sharing data across applications requires writing it to an external storage system (for example Parquet or Delta files) or a table.
+## Within one application
+A second `SparkSession` created with `newSession()` shares the `SparkContext` and the table cache, but separate applications do not.
+W: Executors belong to a single application, so cached blocks are private to it; the second notebook reads the table from storage again.
+X: A=Shared block store: there is no cluster-wide block store across applications; each executor's block manager serves only its own application.
+B=Same appName: names are labels for the UI and have no effect on data sharing.
+C=Broadcast to attach: a broadcast variable is a read-only value shipped to one application's executors; it does not expose cached DataFrames to other applications.
+T: Cached data lives in an application's own executors; separate applications share data only through external storage.
+
+@ DBX-ASD D1 T1.2 advanced use-case
+S: A developer runs the code below on a cluster and notices that the `print` output from the `foreach` call does not appear in the notebook or driver console, while the `total` line prints normally.
+```
+rows = df.filter("x > 5").collect()
+total = sum(r.x for r in rows)
+print(total)
+df.foreach(lambda r: print(r.x))
+```
+Where does each part run?
+A: The `sum` runs in the driver's Python process after `collect`, and the `foreach` lambda runs on executors, so its prints go to the executor logs.
+B: Both run in the driver, but `foreach` output is buffered until the driver finishes and is then written to the console on exit.
+C: Both run on executors, and Spark forwards the first `print` to the driver console but drops the one inside `foreach`.
+D: The `sum` runs on the cluster manager, and the `foreach` lambda runs on the driver after the stage completes.
+K: A
+G: ## Which code runs where
+- Plain Python statements in your script, such as the `sum` over `rows` and the first `print`, run in the **driver**'s Python process.
+- Functions passed to DataFrame or RDD operations (`foreach`, `map`, UDFs) are serialized and sent to the **executors**, where they run on the partitions. Their `print` writes to the executor's stdout, which you can read in the executor logs in the Spark UI.
+## Practical rules
+- Do not use `foreach` with `print` to see results; use `show()`, `take()` or collect a small sample.
+- Do not try to update a driver-side Python variable from inside `foreach`; the closure is copied to executors. An accumulator is the supported way to count things.
+W: Code outside the Spark operations runs on the driver after `collect` returns, while the `foreach` lambda is shipped to the executors, so its output lands in executor logs.
+X: B=Both on the driver: only the driver code runs there. The lambda is executed by tasks on executors, and nothing buffers its output for the driver.
+C=Both on executors: the `sum` and first `print` work on a local list in the driver; Spark never forwards executor stdout to the driver console.
+D=Cluster manager and driver: the cluster manager never runs application code, and a `foreach` lambda executes on executors, not on the driver.
+T: Top-level Python runs on the driver; lambdas passed to DataFrame operations run on the executors, so their output goes to executor logs.
+
+@ DBX-ASD D1 T1.3 applied definition
+S: A Scala developer moves to PySpark and asks which structured abstraction replaces the typed `Dataset[T]` API in Python. Which statement is accurate?
+A: PySpark provides the typed `Dataset[T]` API through a Python decorator, which gives compile-time type checking of column types.
+B: PySpark exposes only RDDs to developers, because DataFrames and Datasets exist only in the Scala and Java languages.
+C: The typed `Dataset[T]` API exists only in Scala and Java; Python uses the untyped DataFrame, which runs on the same Catalyst engine.
+D: PySpark's DataFrame runs on a separate Python engine and supports only a subset of the optimizations of the Scala DataFrame.
+K: C
+G: ## DataFrame and Dataset
+- A **DataFrame** is a distributed collection of rows organized into named columns, like a table. It carries a schema, so Spark can optimize queries over it.
+- A **Dataset** adds compile-time types in Scala and Java (`Dataset[T]`); a DataFrame is `Dataset[Row]` there.
+- **Python has no Dataset API.** PySpark developers use the DataFrame; column types are checked at analysis time (when the query is resolved), not at compile time.
+## Same engine
+DataFrame and SQL operations are planned by Catalyst and executed by the same JVM engine regardless of language, so PySpark DataFrame code gets the same optimizations as Scala.
+W: The typed Dataset exists only for Scala and Java; PySpark's DataFrame uses the same Catalyst optimizer and execution engine.
+X: A=Decorator for typed Dataset: PySpark has no typed Dataset, and Python's dynamic typing means schema errors are caught when the query is analyzed, not compiled.
+B=Only RDDs: DataFrames are fully supported in PySpark and are the recommended API; RDDs are the low-level alternative.
+D=Different engine: the DataFrame in Python builds the same logical plan; the plan then runs in the JVM, so optimizations match.
+T: PySpark has DataFrames only (typed Datasets are Scala/Java), and both share the Catalyst engine.
+
+@ DBX-ASD D1 T1.3 applied troubleshooting
+S: A notebook cell builds a SparkSession and then a second cell, run later, executes the same builder call with a different `appName`.
+```
+s1 = SparkSession.builder.appName("etl").getOrCreate()
+s2 = SparkSession.builder.appName("report").getOrCreate()
+```
+What does the second call do?
+A: It creates a second independent SparkContext and session, so the application now runs two separate sets of executors.
+B: It raises an error because only one session may be built per Python process, and the builder refuses a second call.
+C: It stops the first session and builds a new one, which discards the first session's cached tables and temporary views.
+D: It returns the existing session instead of creating another, because `getOrCreate()` reuses the active global default session.
+K: D
+G: ## SparkSession lifecycle
+`SparkSession` is the entry point to DataFrame and SQL functionality. In a notebook or `pyspark` shell the platform usually creates `spark` for you.
+- `builder.getOrCreate()` first checks for a valid global default session. If one exists it is returned (builder options are applied to it); otherwise a new session is built and becomes the default.
+- A JVM hosts one active `SparkContext` per application, so extra calls do not add executors.
+- `spark.newSession()` creates a session with separate SQL configuration, temporary views and UDFs but the same `SparkContext` and table cache.
+- `spark.stop()` ends the session and the context, releasing executors.
+W: `getOrCreate()` returns the existing global default session if there is one, so the second call reuses it rather than creating another context.
+X: A=Second context: one application runs one `SparkContext`; calling the builder again does not start more executors.
+B=Error on second build: the builder is designed to be called repeatedly; nothing raises just because a session exists.
+C=Stop and rebuild: `getOrCreate()` never stops a running session; only `spark.stop()` does that.
+T: `getOrCreate()` is idempotent: it returns the active session and does not create a second context.
+
+@ DBX-ASD D1 T1.3 applied use-case
+S: A developer runs the code below and wants to know what happens on each line with respect to caching.
+```
+df = spark.read.parquet(path).filter("amount > 0").cache()
+n = df.count()
+s = df.agg({"amount": "sum"}).first()
+```
+Which description is correct?
+A: `cache()` loads the data into memory at once, so `count()` and the aggregation both read the cached copy without any scan.
+B: `cache()` only marks the plan; `count()` materializes the cached partitions, and the aggregation later reads them from cache.
+C: Nothing is cached, because `cache()` only has an effect on RDDs and ignores DataFrames in PySpark.
+D: Both actions rescan the Parquet files because `cache()` stores data only for the lifetime of the single action that called it.
+K: B
+G: ## Caching is lazy
+`cache()` is shorthand for `persist()` with the default storage level. It does not run a job. It tells Spark to keep the partitions of this DataFrame's plan once they are computed.
+- The first action (here `count()`) computes the partitions and stores them in executor storage memory.
+- Later actions on the same cached plan read the stored partitions instead of re-reading Parquet and re-applying the filter.
+## Default level
+For DataFrames the default is `MEMORY_AND_DISK_DESER`, so partitions that do not fit in memory spill to local disk rather than being dropped. `unpersist()` frees the blocks.
+W: `cache()` marks the DataFrame; the first action `count()` fills the cache, and the second action reads the cached partitions instead of rescanning Parquet.
+X: A=Immediate load: `cache()` is lazy and runs nothing, so the first action still has to read the files once.
+C=RDD-only: DataFrames have `cache()` and `persist()` and use the same block storage; the effect is documented for DataFrames.
+D=Per-action lifetime: cached blocks stay in executors until `unpersist()`, eviction or the end of the application, so later actions reuse them.
+T: `cache()` is lazy: the first action populates it and later actions read from it.
+
+@ DBX-ASD D1 T1.3 applied tradeoff
+S: A 25 GB DataFrame read through JDBC is reused by many later actions. The executors have about 10 GB of storage memory in total, and re-reading from the source database is slow and expensive. Which choice best fits?
+A: `persist(StorageLevel.MEMORY_AND_DISK)`, so partitions that do not fit in memory are written to local disk and read back instead of recomputed.
+B: `persist(StorageLevel.MEMORY_ONLY)`, so partitions that do not fit in memory are recomputed from the JDBC source each time they are needed.
+C: `persist(StorageLevel.DISK_ONLY)`, because any cached data should stay off executor memory to leave all memory for execution.
+D: `persist(StorageLevel.MEMORY_AND_DISK_2)`, because replicating every partition is the only way to keep the cached data complete.
+K: A
+G: ## Storage levels and what happens when memory is short
+The `StorageLevel` decides where cached partitions live:
+- `MEMORY_ONLY`: partitions that do not fit in memory are not cached and are recomputed each time they are needed.
+- `MEMORY_AND_DISK`: partitions that do not fit in memory are stored on local disk and read from there.
+- `DISK_ONLY`: partitions are only on disk.
+- `_2` variants (for example `MEMORY_AND_DISK_2`) replicate each partition on two nodes.
+In Python, data is serialized with pickle anyway for RDD levels, so the serialized (`_SER`) variants are not offered.
+## Choosing
+Use the default memory-first level when data fits. When recomputation is expensive, as with a slow JDBC read, spill to disk (a local disk read is much cheaper than a database round trip).
+W: `MEMORY_AND_DISK` keeps what fits in memory and spills the rest to local disk, so the slow JDBC source is not queried again for the overflow.
+X: B=`MEMORY_ONLY`: with only 10 GB of storage for 25 GB of data, most partitions would be recomputed from the database on every action, which is the cost to avoid.
+C=`DISK_ONLY`: it wastes the memory that could hold part of the data and makes every read slower than needed.
+D=`MEMORY_AND_DISK_2`: replication doubles the storage needed and addresses node loss, not a shortage of memory; it is not the only way to keep the data complete.
+T: When recomputation is expensive and memory is short, use `MEMORY_AND_DISK` so overflow spills to disk instead of being recomputed.
+
+@ DBX-ASD D1 T1.3 advanced troubleshooting
+S: A loop builds a new cached DataFrame on each of 50 iterations, and each iteration uses only its own cached result. After about 20 iterations stages slow down, and the Storage tab shows that executor storage memory is full of old iterations' blocks. Which fix targets the cause?
+A: Call `spark.catalog.clearCache()` at the start of each iteration, even though some cached tables are still used later.
+B: Call `cache()` a second time on each new DataFrame, so Spark prioritizes it over the older cached blocks.
+C: Call `unpersist()` on the previous iteration's DataFrame once the new one is materialized, so its blocks are released.
+D: Call `checkpoint()` on every iteration, because checkpointing removes older cached blocks from executor memory.
+K: C
+G: ## What fills storage memory
+Cached blocks stay in executor storage memory until `unpersist()` is called, they are evicted (least recently used) to make room, or the application ends. A loop that caches a new DataFrame each time and never releases the old ones accumulates dead blocks. Spark eventually evicts them, but only under pressure, which shows up as slow stages and recomputation.
+## The fix
+`df.unpersist()` marks the DataFrame as non-persistent and removes all its blocks from memory and disk. Unpersist an old result after the next one has been computed (so you do not drop data you still need).
+- `spark.catalog.clearCache()` removes every cached table and DataFrame in the session, including ones you still need.
+W: `unpersist()` on the previous iteration's DataFrame releases exactly the blocks that are no longer needed, keeping storage memory free for the current iteration.
+X: A=`clearCache()` every iteration: it drops all cached data in the session, including tables still needed later, causing recomputation.
+B=Calling `cache()` again: marking an already cached plan changes nothing and gives no priority; old blocks stay until evicted.
+D=`checkpoint()`: it writes the data to reliable storage and truncates lineage, but it does not remove other DataFrames' cached blocks.
+T: Release cached DataFrames you no longer need with `unpersist()`; otherwise they hold storage memory until evicted.
+
+@ DBX-ASD D1 T1.3 advanced troubleshooting
+S: A job caches several large DataFrames. In the Spark UI the tasks show long garbage collection times, and the GC log on the executors shows the Old generation almost full. Which adjustment does the Spark tuning guide suggest first for this symptom?
+A: Raise `spark.memory.fraction` toward 0.9, so Spark can cache more objects before collections are needed.
+B: Increase `spark.sql.shuffle.partitions` to 2000, since a larger number of shuffle partitions empties the Old generation.
+C: Cache with a `_2` replicated storage level, so a second copy on another node absorbs the pressure of collections.
+D: Lower `spark.memory.fraction`, so less memory is used for cached objects and the Old generation is not full.
+K: D
+G: ## GC cost in Spark
+Garbage collection cost grows with the number of Java objects. Caching many objects on the JVM heap fills the Old (tenured) generation, and full collections then pause tasks.
+## Tuning guide steps
+- Measure first: add verbose GC options and look at how often collections run and how long they take (the logs are on the worker nodes).
+- If the Old generation is close to full, **lower `spark.memory.fraction`** (default 0.6) so that less memory is used for caching; the guide says it is better to cache fewer objects than to slow down tasks.
+- Alternatively reduce the Young generation size, and consider storing data in a compact (serialized) form to cut the object count.
+W: Lowering `spark.memory.fraction` reduces how much the heap is used for cached objects, which relieves a nearly full Old generation; the tuning guide lists this as the step for this symptom.
+X: A=Raising the fraction: it lets Spark use even more of the heap for cache and execution, which makes a full Old generation worse.
+B=More shuffle partitions: this changes task sizes in shuffle stages but does not reduce the objects held in the Old generation by cached data.
+C=Replication: a `_2` level stores a second copy on another node, which adds memory pressure instead of removing it.
+T: When GC logs show a nearly full Old generation, cache fewer objects (lower `spark.memory.fraction`) or store data more compactly.
+
+@ DBX-ASD D1 T1.3 applied comparison
+S: A developer runs the following in a notebook where `spark` is an existing session.
+```
+s2 = spark.newSession()
+spark.range(3).createOrReplaceTempView("t")
+s2.sql("SELECT * FROM t").show()
+```
+What happens on the last line?
+A: It prints the three rows, because temporary views are shared by every session that runs on the same SparkContext.
+B: It prints the three rows, because `newSession()` copies the registered views of the original session.
+C: It fails because `t` is not found: temporary views are session-scoped, although the new session shares the SparkContext and table cache.
+D: It fails because `newSession()` starts a new application with its own executors, which cannot read the first session's data.
+K: C
+G: ## What a session owns
+A `SparkSession` keeps its own SQL configuration, registered temporary views and UDFs. `newSession()` creates another session that shares only the underlying `SparkContext` (so the same executors) and the table cache.
+- `createOrReplaceTempView` registers a view in the current session only. The other session does not see it.
+- A global temporary view (`createGlobalTempView`) is shared across sessions of one application under the `global_temp` database.
+## Why it matters
+Sessions give isolation of SQL settings and temporary names inside one application without paying for new executors.
+W: Temporary views are scoped to the session that registered them, so the new session fails to find `t` even though both sessions share one SparkContext.
+X: A=Shared views: views are per session; sharing across sessions would need a global temporary view.
+B=Copied views: `newSession()` starts with separate SQLConf, views and UDFs, not a copy of the creator's registered views.
+D=New application: the new session shares the same SparkContext and executors, so it is not a new application; the failure is about the view name scope.
+T: Temporary views are session-scoped; `newSession()` shares the SparkContext and cache but not views, UDFs or SQL settings.
+
+@ DBX-ASD D1 T1.4 applied definition
+S: A developer runs the code below on a new session. Which lines cause Spark to start a job?
+```
+df = spark.range(1_000_000)
+a = df.filter("id % 2 = 0")
+b = a.withColumn("sq", a.id * a.id)
+n = b.count()
+b.write.mode("overwrite").parquet(out)
+```
+A: Only the `count()` and `write` lines; the lines that build `df`, `a` and `b` only add transformations to the plan.
+B: Every line, because each statement creates a new DataFrame that Spark computes immediately.
+C: Only the `write` line, since `count()` can be answered from metadata and does not need a job.
+D: The `filter` and `withColumn` lines, because transformations run when defined and actions only fetch the result.
+K: A
+G: ## Action starts a job
+Spark's hierarchy begins with the **job**: a parallel computation spawned in response to an action such as `count`, `collect` or `save`/`write`. Transformations (`range`, `filter`, `withColumn`, `select`, `join`) are lazy: they extend the logical plan and nothing runs.
+- The `count()` line triggers one job that computes the result for the driver.
+- The `write` line triggers another job that writes the output files.
+Each job is then split into stages and tasks. Both jobs recompute `df`, `a` and `b` because nothing was cached.
+W: Only actions create jobs, so `count()` and `write` each start one, while `range`, `filter` and `withColumn` just build the plan.
+X: B=Every line: creating a DataFrame from a transformation does not compute anything; execution waits for an action.
+C=Only write: `count()` is an action that has to compute the number of rows from a non-trivial plan (filter and withColumn), so it runs a job.
+D=Transformations run first: it is the opposite; transformations are lazy and actions trigger execution.
+T: A job is created per action; transformations only extend the plan.
+
+@ DBX-ASD D1 T1.4 applied use-case
+S: A developer reads a Parquet table and chains `filter`, `withColumn`, `coalesce(4)` and `groupBy("k").count()` before writing. Which of these transformations forces Spark to create a new stage because it needs a shuffle?
+A: `filter`, since it must inspect every row of the table and so needs the rows redistributed between executors first.
+B: `withColumn`, since adding a new column forces all existing data to be moved so that every partition has it.
+C: `coalesce(4)`, since it always shuffles all rows to reduce the partition count.
+D: `groupBy("k").count()`, since rows with the same key must be brought together in one partition.
+K: D
+G: ## Stages are cut at shuffles
+Spark divides a job into **stages** at shuffle boundaries. Within a stage, narrow transformations are pipelined: each task runs `filter`, `withColumn` and similar operations on its partition in a single pass without moving data.
+- Narrow: `filter`, `select`, `withColumn`, `union`, and `coalesce` (it merges existing partitions on the same executor where possible, with no full shuffle by default).
+- Wide: `groupBy` aggregations, most joins, `distinct`, `orderBy`, `repartition`.
+## In this pipeline
+Before the `groupBy`, one stage reads, filters, adds the column and coalesces. The `groupBy` introduces the shuffle: a second stage reads shuffle output and counts per key.
+W: `groupBy("k").count()` needs all rows of a key together, so a shuffle (and a stage boundary) is required; the earlier steps are narrow and pipelined into the first stage.
+X: A=`filter`: it works on each row independently inside its partition, so no data moves.
+B=`withColumn`: computing a column is a per-row, per-partition operation; other partitions do not need the value.
+C=`coalesce(4)`: it narrows partitions by combining existing ones without a full shuffle (unlike `repartition`), so it does not create a stage boundary by default.
+T: A shuffle (wide dependency) such as `groupBy` ends a stage; narrow steps are pipelined inside one.
+
+@ DBX-ASD D1 T1.4 applied use-case
+S: A developer creates a DataFrame with `spark.range(0, 1000, 1, 8)`, which has 8 partitions, applies `filter` and `select`, and then calls `count()`. In the Spark UI, how many tasks does the first stage of that job run?
+A: 1, because a stage runs one task for each job.
+B: 200, because every stage uses `spark.sql.shuffle.partitions` tasks.
+C: 8, because a stage runs one task for each partition of its input.
+D: 1000, because a stage runs one task for each row.
+K: C
+G: ## Tasks and partitions
+A **task** is the unit of work sent to an executor: one task processes one partition of the stage's input. The number of tasks in a stage therefore equals the number of partitions of the data it reads.
+- Narrow operations (`filter`, `select`) do not change the partition count, so the first stage has 8 tasks.
+- `spark.sql.shuffle.partitions` (default 200) sets the partition count after a shuffle, which affects the stage that reads shuffle output (and AQE can coalesce it), not the first stage reading source data.
+## Consequence
+Parallelism is limited by the number of partitions and the number of executor cores that can run the tasks at the same time.
+W: The first stage reads the 8 partitions of the range, so it runs 8 tasks, one per partition; `filter` and `select` keep the partitioning.
+X: A=One per job: a job has many tasks; a stage runs a task per partition.
+B=200 per stage: the shuffle partition setting applies to stages that read shuffle output, not to the stage reading the source.
+D=One per row: tasks work on whole partitions of many rows each, not on single rows.
+T: Number of tasks in a stage = number of partitions it processes.
+
+@ DBX-ASD D1 T1.4 applied troubleshooting
+S: One task in a stage fails with a transient network exception while fetching its input on an executor. Assume default Spark settings. What does Spark do?
+A: It aborts the job immediately, because any single failed task means that the stage result would be incomplete and unusable.
+B: It retries the task, possibly on another executor, and aborts the job only if the task fails `spark.task.maxFailures` times (default 4).
+C: It reruns every task of the whole stage from the start and throws away the output of tasks that had already succeeded.
+D: It skips that partition and continues, so the job finishes with a result that is missing the failed task's rows.
+K: B
+G: ## Task failure handling
+Tasks are the retryable unit. When a task fails, the task scheduler retries it, often on a different executor (for example if the executor itself is unhealthy). The setting `spark.task.maxFailures` (default 4) is the number of failures of any particular task before the job is given up.
+- Completed tasks of the stage keep their output.
+- A failed job is reported with the cause of the last failure; the usual causes are deterministic errors (bad data, code exceptions, out of memory) that fail every retry.
+## Why this matters
+A transient problem is absorbed by retries, while a repeating error shows up as a failed job and stage in the UI.
+W: Spark retries the failed task (possibly elsewhere) up to `spark.task.maxFailures` times, and the job is aborted only if that limit is hit.
+X: A=Immediate abort: a single failure of a task is expected in a large cluster and is retried first.
+C=Rerun the entire stage: only the failed task is rescheduled; successful tasks keep their results.
+D=Skip the partition: Spark never silently drops data; a task that keeps failing fails the job.
+T: Tasks are retried individually (default 4 attempts); only repeated failure of one task aborts the job.
+
+@ DBX-ASD D1 T1.4 advanced troubleshooting
+S: A developer runs `agg = df.groupBy("k").count()` and calls `agg.count()` and then `agg.show()`, with no `cache()` anywhere. In the Spark UI the second job lists a stage as "skipped". What explains this?
+A: The shuffle output files written by the first job are still available, so Spark reuses them and skips recomputing that stage.
+B: The second job was partly cancelled by the driver because the first job already returned the same data to the application.
+C: Adaptive Query Execution removed the stage because the aggregation contained no rows to process.
+D: The skipped stage's tasks were automatically replicated to another executor, so they need not run again.
+K: A
+G: ## Where skipped stages come from
+When a job has a shuffle, the map-side tasks write shuffle files to the executors' local disk and the next stage reads them. If another job in the same application reuses the same shuffled data (same plan, shuffle files still present), the scheduler does not re-run the map stage and the UI marks it **skipped**.
+- Skipped does not mean failed or cancelled; the work was done earlier.
+- This is separate from `cache()`. It relies on the shuffle files remaining on executors, and it ends if those executors are lost.
+## Hierarchy recap
+Application -> jobs (one per action) -> stages (cut at shuffles) -> tasks (one per partition).
+W: Shuffle files from the first job are still on the executors, so the second job reuses that map-side output and shows the stage as skipped.
+X: B=Cancelled job: the second job runs and produces output; skipped refers to one stage inside a successful job.
+C=AQE removed the stage: AQE re-optimizes plans from runtime statistics but does not skip a stage merely because of an empty result, and the cause here is reuse of shuffle files.
+D=Replicated tasks: tasks are not replicated automatically; a stage is skipped because its output already exists.
+T: A skipped stage means its shuffle output from an earlier job was reused instead of recomputed.
+
+@ DBX-ASD D1 T1.4 applied definition
+S: Which ordering lists Spark execution units from the smallest to the largest?
+A: Stage, task, job, application
+B: Job, stage, task, application
+C: Task, stage, job, application
+D: Task, job, stage, application
+K: C
+G: ## The execution hierarchy
+- A **task** is the unit of work sent to one executor; it processes one partition.
+- A **stage** is a set of tasks that can run the same code in parallel on different partitions, with stage boundaries at shuffles.
+- A **job** is created by an action and consists of one or more stages that depend on each other.
+- An **application** is one `SparkContext` (a driver and its executors) and runs many jobs over its lifetime.
+## Reading the Spark UI
+The Jobs tab lists jobs, each job page lists its stages, and each stage page lists its tasks with durations and metrics.
+W: A task is part of a stage, a stage is part of a job, and a job is part of an application, so smallest to largest is task, stage, job, application.
+X: A=Stage before task: a stage consists of tasks, so a task is the smaller unit.
+B=Job before stage: a job is made of stages and so is larger than a stage; an application is larger than both but the first three are in the wrong order.
+D=Job before stage: a job is the larger container of stages, so it must come after stage and not before it.
+T: Application contains jobs, jobs contain stages, stages contain tasks.
