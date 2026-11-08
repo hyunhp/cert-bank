@@ -7,21 +7,15 @@
 - The stats never leave the browser: the bookmark backup contains bookmarks only.
     python3 tools/domain_filter_test.py
 """
-import collections, functools, http.server, json, pathlib, re, sys, threading
+import collections, json, pathlib, re, sys
 from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from testkit import serve, Checker
 
 ROOT = str(pathlib.Path(__file__).resolve().parents[1])
-class Q(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, *a): pass
-srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Q, directory=ROOT))
-threading.Thread(target=srv.serve_forever, daemon=True).start()
-BASE = f"http://127.0.0.1:{srv.server_address[1]}/"
+srv, BASE = serve(ROOT)
 def jload(*p): return json.load(open(pathlib.Path(ROOT, *p), encoding="utf-8"))
-ok = fail = 0
-def check(name, cond, info=""):
-    global ok, fail
-    if cond: ok += 1
-    else: fail += 1; print("FAIL", name, info)
+C = Checker(); check = C.check
 
 EXAM = "AIF-C01"
 qs = jload("data", f"{EXAM}.json")
@@ -179,4 +173,4 @@ with sync_playwright() as p:
     check("no page errors", not errs, errs)
     b.close()
 srv.shutdown()
-print(f"{ok}/{ok+fail} passed"); sys.exit(1 if fail else 0)
+sys.exit(C.exit())

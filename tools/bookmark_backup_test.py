@@ -1,9 +1,10 @@
-import subprocess, time, json, sys
+import json, sys
 from playwright.sync_api import sync_playwright
 import pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from testkit import serve
 ROOT = str(pathlib.Path(__file__).resolve().parents[1])
-srv = subprocess.Popen([sys.executable,"-m","http.server","8765"],cwd=ROOT,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-time.sleep(1.2)
+srv, BASE = serve(ROOT)
 ok=0; fail=0
 def check(name,cond,info=""):
     global ok,fail
@@ -15,7 +16,7 @@ try:
     ctx=b.new_context(accept_downloads=True, permissions=["clipboard-read","clipboard-write"])
     pg=ctx.new_page(); errs=[]
     pg.on("pageerror", lambda e: errs.append(str(e)))
-    pg.goto("http://localhost:8765/#exam=SAA-C03"); pg.wait_for_selector(".qcard")
+    pg.goto(BASE+"#exam=SAA-C03"); pg.wait_for_selector(".qcard")
     check("tools hidden in exam view", not pg.is_visible("#bmTools"))
     # bottom-of-card bookmark button mirrors the top star
     card=pg.locator(".qcard").first
@@ -51,7 +52,7 @@ try:
     check("toast shown", any("Restored 3" in t for t in pg2.evaluate("window.__toasts")), pg2.evaluate("window.__toasts"))
     # fresh context: import file
     ctx3=b.new_context(); pg3=ctx3.new_page(); pg3.on("pageerror", lambda e: errs.append(str(e)))
-    pg3.goto("http://localhost:8765/#bookmarks"); pg3.wait_for_function("document.querySelector('#listArea') && document.querySelector('#listArea').innerText.includes(\"haven't bookmarked\")", timeout=20000)
+    pg3.goto(BASE+"#bookmarks"); pg3.wait_for_function("document.querySelector('#listArea') && document.querySelector('#listArea').innerText.includes(\"haven't bookmarked\")", timeout=20000)
     check("empty state", "haven't bookmarked" in pg3.inner_text("#listArea"))
     check("tools visible when empty", pg3.is_visible("#bmTools"))
     pg3.set_input_files("#bmImportFile", path); pg3.wait_for_function("document.querySelectorAll('.qcard').length===3", timeout=20000)
@@ -65,12 +66,12 @@ try:
     pg3.set_input_files("#bmImportFile", "/tmp/bad.json"); pg3.wait_for_timeout(300)
     check("bad file message", "could not be read" in pg3.inner_text("body"))
     # manifest reachable
-    r=pg3.request.get("http://localhost:8765/manifest.webmanifest"); check("manifest", r.ok and "Cert QBank" in r.text())
+    r=pg3.request.get(BASE+"manifest.webmanifest"); check("manifest", r.ok and "Cert QBank" in r.text())
     # encode/decode round trip for many ids
     rt=pg3.evaluate("(()=>{const ids=['Q000001','Q004044','Q000150','Q002000'];return decodeBookmarks(encodeBookmarks(new Set(ids))).sort().join()})()")
     check("roundtrip", rt=="Q000001,Q000150,Q002000,Q004044", rt)
     check("no page errors", not errs, errs)
     b.close()
 finally:
-    srv.terminate()
+    srv.shutdown()
 print(f"{ok}/{ok+fail} passed"); sys.exit(1 if fail else 0)

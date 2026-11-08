@@ -3,14 +3,12 @@
 - every data/changes/<PR>.json is well formed."""
 import json, pathlib, re, sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+from testkit import Checker
 sys.path.insert(0, str(ROOT / "tools" / "qgen"))
 import changes
 
-ok = fail = 0
-def check(name, cond, info=""):
-    global ok, fail
-    if cond: ok += 1
-    else: fail += 1; print("FAIL", name, info)
+C = Checker(); check = C.check
 
 def q(qid, stem="S", texts=("a", "b", "c", "d"), correct=("A",), dom="D1", task="T1.1"):
     return {"id": qid, "stem": stem, "choices": [{"key": k, "text": t} for k, t in zip("ABCDE", texts)], "correctKeys": list(correct), "examDomain": dom, "examTask": task}
@@ -43,4 +41,4 @@ for f in files:
         and e["important"] == (e["change"] in changes.IMPORTANT) and (e["id"] is None) == e["change"].startswith("exam-") | (e["change"] in ("lastDay", "domains"))
         for e in data)
     check(f"{f.name} is well formed", good)
-print(f"{ok}/{ok + fail} passed"); sys.exit(1 if fail else 0)
+sys.exit(C.exit())

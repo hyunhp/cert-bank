@@ -1,14 +1,11 @@
-import functools, http.server, threading, sys
+import sys
 from playwright.sync_api import sync_playwright
 import pathlib, tempfile
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from testkit import serve, Checker
 ROOT=str(pathlib.Path(__file__).resolve().parents[2])
-class Q(http.server.SimpleHTTPRequestHandler):
-    def log_message(self,*a): pass
-srv=http.server.ThreadingHTTPServer(("127.0.0.1",0),functools.partial(Q,directory=ROOT))
-threading.Thread(target=srv.serve_forever,daemon=True).start()
-BASE=f"http://127.0.0.1:{srv.server_address[1]}/"
-res=[]
-def ok(n,c): res.append((n,bool(c))); print(("PASS " if c else "FAIL ")+n)
+srv, BASE = serve(ROOT)
+C = Checker(verbose=True); ok = C.check
 # Wait until the page stops scrolling (smooth scrolls take longer on slow machines than a fixed sleep).
 SETTLE="() => new Promise(r => { let y = scrollY, n = 0; const t = setInterval(() => { if (scrollY === y) { if (++n >= 4) { clearInterval(t); r(true); } } else { y = scrollY; n = 0; } }, 50); })"
 settle=lambda pg: pg.evaluate(SETTLE)
@@ -57,4 +54,4 @@ with sync_playwright() as p:
         ctx.close()
     b.close()
 srv.shutdown()
-f=[n for n,c in res if not c]; print(f"{len(res)-len(f)}/{len(res)} passed"); sys.exit(1 if f else 0)
+sys.exit(C.exit())

@@ -7,20 +7,14 @@
 - Reset clears the saved state of that list.
     python3 tools/resume_test.py
 """
-import functools, http.server, pathlib, sys, threading
+import pathlib, sys
 from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from testkit import serve, Checker
 
 ROOT = str(pathlib.Path(__file__).resolve().parents[1])
-class Q(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, *a): pass
-srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Q, directory=ROOT))
-threading.Thread(target=srv.serve_forever, daemon=True).start()
-BASE = f"http://127.0.0.1:{srv.server_address[1]}/"
-ok = fail = 0
-def check(name, cond, info=""):
-    global ok, fail
-    if cond: ok += 1
-    else: fail += 1; print("FAIL", name, info)
+srv, BASE = serve(ROOT)
+C = Checker(); check = C.check
 
 ORDER = "els => els.map(e => e.dataset.qid)"
 with sync_playwright() as p:
@@ -65,5 +59,4 @@ with sync_playwright() as p:
     check("no page errors", not errs, errs)
     b.close()
 
-print(f"{ok}/{ok + fail} passed")
-sys.exit(1 if fail else 0)
+sys.exit(C.exit())

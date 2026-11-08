@@ -8,20 +8,14 @@
   question bank to the day's domain. No horizontal overflow on a phone-sized viewport.
     python3 tools/study_test.py
 """
-import functools, hashlib, http.server, json, pathlib, re, sys, threading
+import hashlib, json, pathlib, re, sys
 from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from testkit import serve, Checker
 
 ROOT = str(pathlib.Path(__file__).resolve().parents[1])
-class Q(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, *a): pass
-srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Q, directory=ROOT))
-threading.Thread(target=srv.serve_forever, daemon=True).start()
-BASE = f"http://127.0.0.1:{srv.server_address[1]}/"
-ok = fail = 0
-def check(name, cond, info=""):
-    global ok, fail
-    if cond: ok += 1
-    else: fail += 1; print("FAIL", name, info)
+srv, BASE = serve(ROOT)
+C = Checker(); check = C.check
 
 specs = json.load(open(pathlib.Path(ROOT, "data", "exam-specs.json"), encoding="utf-8"))
 idx = json.load(open(pathlib.Path(ROOT, "data", "exams-index.json"), encoding="utf-8"))
@@ -222,4 +216,4 @@ with sync_playwright() as p:
     check("question bank links to study guide", pg.get_attribute(".studylink", "href") == "study.html")
     check("no page errors", not errs, errs)
     b.close()
-print(f"{ok}/{ok + fail} passed"); sys.exit(1 if fail else 0)
+sys.exit(C.exit())

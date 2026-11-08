@@ -10,11 +10,13 @@
 3. Screenshots of each rendered diagram (for visual review) when --shots is given.
 Exit code 1 if any consistency or layout error is found.
 """
-import argparse, functools, http.server, json, pathlib, re, sys, threading
+import argparse, json, pathlib, re, sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # Windows consoles default to cp949
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "tools"))
+from testkit import serve
 
 # icon -> words that must appear in the question text. None = generic icon, no check.
 ICON_TERMS = {
@@ -109,13 +111,8 @@ def consistency(ids):
 
 def layout(ids, shots):
     from playwright.sync_api import sync_playwright
-    class Quiet(http.server.SimpleHTTPRequestHandler):
-        def log_message(self, *a):
-            pass
-    handler = functools.partial(Quiet, directory=str(ROOT))
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    url = f"http://127.0.0.1:{srv.server_address[1]}/tools/diagrams/preview.html?only={','.join(ids)}"
+    srv, base = serve(ROOT)
+    url = f"{base}tools/diagrams/preview.html?only={','.join(ids)}"
     with sync_playwright() as p:
         b = p.chromium.launch()
         page = b.new_page(viewport={"width": 560, "height": 900}, device_scale_factor=2)

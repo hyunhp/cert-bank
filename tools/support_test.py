@@ -7,20 +7,14 @@
 - The header link, the bottom card and the mock exam results point to support.html.
     python3 tools/support_test.py
 """
-import functools, http.server, pathlib, sys, threading
+import pathlib, sys
 from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from testkit import serve, Checker
 
 ROOT = str(pathlib.Path(__file__).resolve().parents[1])
-class Q(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, *a): pass
-srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Q, directory=ROOT))
-threading.Thread(target=srv.serve_forever, daemon=True).start()
-BASE = f"http://127.0.0.1:{srv.server_address[1]}/"
-ok = fail = 0
-def check(name, cond, info=""):
-    global ok, fail
-    if cond: ok += 1
-    else: fail += 1; print("FAIL", name, info)
+srv, BASE = serve(ROOT)
+C = Checker(); check = C.check
 
 WIN = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 IPHONE = ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) "
@@ -103,4 +97,4 @@ with sync_playwright() as p:
         c.close()
     check("no page errors", not errs, errs)
     b.close()
-print(f"{ok}/{ok + fail} passed"); sys.exit(1 if fail else 0)
+sys.exit(C.exit())

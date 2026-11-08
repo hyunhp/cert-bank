@@ -4,16 +4,14 @@ exam keeps that exam's `domainCode`/`taskId` (the site maps them with exam-domai
 raw files must use these two fields. This checks they are present, valid for the exam, and equal to what the site computes."""
 import json, pathlib, sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+from testkit import Checker
 D = ROOT / "data"
 specs = {k: v for k, v in json.load(open(D / "exam-specs.json", encoding="utf-8")).items() if isinstance(v, dict) and "vendor" in v}
 dmap = json.load(open(D / "exam-domains.json", encoding="utf-8"))
 tmap = json.load(open(D / "exam-shared-tasks.json", encoding="utf-8"))
 
-ok = fail = 0
-def check(name, cond, info=""):
-    global ok, fail
-    if cond: ok += 1
-    else: fail += 1; print("FAIL", name, info)
+C = Checker(); check = C.check
 
 for code, spec in sorted(specs.items()):
     path = D / f"{code}.json"
@@ -38,4 +36,4 @@ for code, spec in sorted(specs.items()):
     check(f"{code}: examDomain is a domain of {code}", not bad_dom, bad_dom[:5])
     check(f"{code}: examDomain follows the site's mapping", not wrong_dom, wrong_dom[:5])
     check(f"{code}: examTask follows the site's mapping", not wrong_task, wrong_task[:5])
-print(f"{ok}/{ok + fail} passed"); sys.exit(1 if fail else 0)
+sys.exit(C.exit())
