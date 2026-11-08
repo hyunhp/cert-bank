@@ -68,7 +68,7 @@ A: `MlflowStorage`, so that all workers share one Optuna storage backed by the M
 B: `SparkTrials`, passed to `optuna.create_study` to distribute trials to workers
 C: `MlflowSparkStudy`, whose `optimize` call launches parallel Optuna studies on PySpark executors
 D: `fmin()` with `algo=tpe.suggest`, wrapped around the Optuna objective function
-E: `CrossValidator`, which replaces the Optuna sampler with a fixed parameter grid
+E: `CrossValidator`, a Spark MLlib class that replaces the Optuna sampler with a fixed parameter grid scored by k-fold validation
 K: A,C
 G: ## Why parallel Optuna needs shared storage
 Each trial needs to know about the results of other trials, so parallel workers must read and write the same study state. Optuna stores it in a storage backend. In MLflow 3, `MlflowStorage` lets Optuna use the MLflow tracking server as that backend, with batching to avoid REST API throttling.
@@ -85,8 +85,8 @@ T: Parallel Optuna on Databricks = MlflowStorage for shared state plus MlflowSpa
 
 @ DBX-MLA D3 T3.5 applied comparison
 S: Runtime upgrade planning shows that a team's distributed tuning code relies on Hyperopt `SparkTrials`. According to the Databricks documentation, what should the team move to?
-A: Plain Python loops over `fmin()`, since Databricks Runtime ML after 16.4 LTS ML includes a rewritten Hyperopt
-B: Optuna, which can run parallel studies on Spark, or Ray Tune, both recommended in place of Hyperopt's distributed tuning
+A: Plain Python loops over `fmin()`, since newer Databricks Runtime ML versions ship a rewritten and actively maintained Hyperopt
+B: Optuna, which can run parallel studies on Spark, or Ray Tune, as the documented replacements
 C: MLlib `CrossValidator` only, because it is the single supported hyperparameter tuning tool after Hyperopt
 D: AutoML only, because manual hyperparameter tuning libraries are no longer supported on Databricks
 K: B
@@ -159,7 +159,7 @@ T: Scale-type hyperparameters (regularization, learning rate, C) → sample on a
 
 @ DBX-MLA D3 T3.6 applied use-case
 S: A team tunes a random forest with three hyperparameters (number of trees: 3 values, max depth: 4 values, minimum samples per leaf: 2 values). Training takes seconds, and the team wants a result that is reproducible and tests every combination. Which strategy fits?
-A: Bayesian optimization, because it is the only method that tests every combination in the space
+A: Bayesian optimization, because it is the only method that systematically tests every possible combination in the space
 B: Random search with 5 trials, because fewer trials always generalize better
 C: Random search with one trial per hyperparameter, so each parameter is tested once
 D: Grid search, because 3 x 4 x 2 = 24 combinations is small and every combination is evaluated exactly once
@@ -176,9 +176,9 @@ T: Few hyperparameters, few values, cheap fits → grid search; large spaces →
 
 @ DBX-MLA D3 T3.7 applied use-case
 S: A data scientist wants to find good hyperparameters for a scikit-learn gradient-boosting model. The training data fits in memory on a single node, one fit takes 4 minutes, and 200 trials are planned. A cluster with 32 worker cores is available. What approach shortens the tuning time without changing the model?
-A: Convert the model to Spark MLlib's `GradientBoostedTreeClassifier` before tuning, which gives identical results with no changes
+A: Convert the model to Spark MLlib's `GBTClassifier` first, which is a drop-in replacement with identical results
 B: Run the 200 trials one after another on the driver, because a single-node model cannot use a cluster
-C: Run several trials at the same time on the workers using a tuning library that distributes trials, such as Optuna parallel studies on Spark or Ray Tune
+C: Run many trials at once on the workers with a trial-distributing tool such as Optuna on Spark or Ray Tune
 D: Increase the number of folds in cross-validation to 32, so the 32 workers are all used
 K: C
 G: ## Two ways to use a cluster
@@ -215,8 +215,8 @@ T: More parallel trials = faster but less adaptive for Bayesian search; random s
 S: A retailer must train a separate scikit-learn forecasting model for each of 3,000 stores, and each store's data is small. A Spark DataFrame holds all stores with a `store_id` column. How can the work run in parallel on the cluster?
 A: Collect the DataFrame with `toPandas()` and loop over the stores on the driver
 B: Fit one MLlib model on all rows and give `store_id` as a numeric feature
-C: Broadcast the whole DataFrame to the driver memory, then call `fit` once with `store_id` as the label
-D: Use `df.groupBy("store_id").applyInPandas(train_fn, schema)` so each store's rows go to a function that fits one model
+C: Broadcast the whole DataFrame to the driver memory, then call `fit` once with `store_id` as the label column
+D: Use `df.groupBy("store_id").applyInPandas(train_fn, schema)` so each store is fitted by `train_fn`
 K: D
 G: ## Many small models
 When each model is small but there are thousands of them, parallelism comes from the grouping, not from a distributed algorithm. `groupBy(...).applyInPandas(func, schema)` groups the Spark DataFrame, hands each group as a pandas DataFrame to the function, which can fit a scikit-learn model (and even tune it with a small search) and return a result as a DataFrame. Spark runs the groups as tasks in parallel across executors.
@@ -230,10 +230,10 @@ T: One small single-node model per group → groupBy().applyInPandas() runs the 
 
 @ DBX-MLA D3 T3.7 applied troubleshooting
 S: A team runs Optuna on Spark workers, but each trial function reads a 40 GB table with `spark.table(...)` inside the objective, and trials fail or run extremely slowly. What is the best fix?
-A: Load the training data once in a form workers can read, such as a file path in cloud storage or a broadcast of a small sample, and read it in the objective
-B: Call `spark.table(...)` inside the objective, as before, but set parallelism to the number of cells in the table
+A: Put the data where workers can read it, such as a cloud storage path or a small broadcast sample, and load it in the objective
+B: Keep calling `spark.table(...)` inside the objective, as before, but raise the parallelism to the number of cells in the table
 C: Raise the cluster's driver memory to 40 GB so that all workers can read the Spark session
-D: Move the objective function to the driver and call `spark.table(...)` there, for each worker
+D: Move the objective function to the driver and call `spark.table(...)` there once for each worker node
 K: A
 G: ## What runs where
 Parallel trials execute the objective function on worker tasks. Spark DataFrames and the SparkSession belong to the driver, so using `spark.table(...)` inside a worker task fails or triggers nested jobs. Single-node tuning code needs data in plain Python form on the worker: a pandas/NumPy array, a Parquet or Delta path it can read, or a broadcast variable.
@@ -267,8 +267,8 @@ T: Parallel trials = independent fits on task slots; capacity is capped by cores
 
 @ DBX-MLA D3 T3.8 applied tradeoff
 S: A team has 600 million labeled rows and wants to tune a Spark MLlib model with a large parameter grid on a limited compute budget. Which validation method is the better choice and why?
-A: `TrainValidationSplit`, because it fits each parameter setting once, and a single large validation set is already a reliable estimate
-B: `CrossValidator` with `numFolds=10`, because more folds are always better regardless of data size
+A: `TrainValidationSplit`, because it fits each setting once and one large validation set is a reliable estimate
+B: `CrossValidator` with `numFolds=10`, because more folds always give a better model whatever the data size
 C: No validation at all, because the final model is evaluated on the training data
 D: `CrossValidator` with `numFolds=2`, because two folds are equivalent to a train-validation split
 K: A
@@ -287,8 +287,8 @@ T: Large data + limited budget → single train-validation split; small data →
 S: A dataset has only 900 labeled rows. Two hyperparameter settings differ by one percentage point of accuracy on a single 80/20 validation split. Why is k-fold cross-validation the better choice here?
 A: It removes the need for a final test set and for any hyperparameters
 B: It trains only once, so it is faster than a single split on small data
-C: It averages the metric over k different validation sets and uses every row for validation once, which gives a steadier comparison
-D: It guarantees the model with the best average will have the best accuracy on all future data
+C: It averages the metric over k validation sets, using every row once, which gives a steadier comparison
+D: It guarantees the setting with the best average will give the best accuracy on all future data
 K: C
 G: ## Variance of a single split
 With 900 rows, an 80/20 split gives 180 validation rows. The measured accuracy depends on which rows landed there; one point of difference (about two rows of 180) can be luck. A different random split could reverse the ranking.
@@ -304,9 +304,9 @@ T: Small data → k-fold for a steadier estimate, at k times the cost; huge data
 
 @ DBX-MLA D3 T3.8 advanced use-case
 S: A forecasting team has two years of daily sales and uses random k-fold cross-validation to compare models. Offline scores are excellent, but production error is much higher. What is the most likely reason?
-A: Random folds put future rows in training data for earlier validation rows, so the score is inflated by leakage from the future
+A: Random folds put future rows in training data for earlier validation rows, which inflates the score
 B: The number of folds was too small, so the model never saw all of the rows
-C: Random k-fold always overfits the hyperparameters and cannot be used for any other data type either
+C: Random k-fold always overfits the hyperparameters, so it cannot be used for any kind of data
 D: Time series models cannot be validated at all, so the offline scores carry no information
 K: A
 G: ## Order matters in time series
@@ -322,18 +322,16 @@ T: Time-ordered data → validate on later periods (time-aware splits), not rand
 @ DBX-MLA D3 T3.8 applied use-case
 S: Which TWO statements correctly compare k-fold cross-validation with a single train-validation split? (Select TWO)
 A: k-fold cross-validation fits each hyperparameter setting k times, so it costs about k times more training than one split
-B: A single split gives a lower-variance estimate than k-fold because the validation rows never change
+B: A single split gives a lower-variance estimate than k-fold because its validation rows never change
 C: k-fold evaluates every row as validation data exactly once, so its averaged metric depends less on one lucky split
 D: k-fold cannot be combined with hyperparameter grids, which is why a single split is used for tuning
 E: A single split always selects a better model than k-fold because it keeps more rows for training
 K: A,C
 G: ## Comparing the two
-| | train-validation split | k-fold CV |
-|---|---|---|
-| fits per setting | 1 | k |
-| validation data | one fixed subset | each row once, k subsets |
-| estimate | depends on the split | averaged, steadier |
-| best for | big data, tight budgets | small or medium data |
+- **Fits per setting**: split 1, k-fold k.
+- **Validation data**: split one fixed subset, k-fold each row once across k subsets.
+- **Estimate**: split depends on the split, k-fold is averaged and steadier.
+- **Best for**: split big data and tight budgets, k-fold small or medium data.
 Both can be combined with a grid or a search, and both usually refit the best settings on the full training data.
 W: A=k times the cost: each setting is fit once per fold (the Spark docs call cross-validation over a grid "very expensive"; k of 3 or 10 are common).
 C=Every row validates once: averaging k metrics reduces the dependence on a single validation subset.
@@ -381,9 +379,9 @@ T: CrossValidator(estimator, estimatorParamMaps, evaluator, numFolds); fit retur
 @ DBX-MLA D3 T3.9 advanced use-case
 S: A pipeline chains `StandardScaler` and `LogisticRegression`. A data scientist first fits the scaler on the full training DataFrame, transforms it, then runs `CrossValidator` on the scaled data. Validation scores are slightly optimistic. What is the better design?
 A: Remove the scaler from the pipeline, since scaling never matters for logistic regression
-B: Pass a `Pipeline` containing the scaler and the classifier as the estimator, so the scaler is refit on the training part of every fold
+B: Pass a `Pipeline` of scaler and classifier as the estimator, so the scaler is refit on each fold's training part
 C: Fit the scaler on the validation fold only, so that the scaling reflects the data being scored
-D: Fit the scaler on the full dataset including the test set, to give every fold identical statistics
+D: Fit the scaler on the full dataset including the test set, to give every fold identical statistics and scaling
 K: B
 G: ## Leakage through preprocessing
 If the scaler is fit on all training rows, the mean and standard deviation of each validation fold have influenced the scaling that the model receives. The effect is usually small, but with imputers, target encoders, feature selection or PCA the leak can be large.
@@ -401,8 +399,8 @@ S: What does this scikit-learn code return?
 scores = cross_val_score(RandomForestClassifier(), X, y, cv=5, scoring="f1")
 
 A: A fitted random forest trained on the best of five hyperparameter settings
-B: One F1 score, calculated on the five folds combined into one validation set
-C: A list of five F1 scores, one per fold, usually averaged with `scores.mean()` to compare models
+B: One F1 score, calculated on all five folds pooled together into a single combined validation set
+C: An array of five F1 scores, one per fold, usually summarized with `scores.mean()`
 D: A confusion matrix for each of the five folds
 K: C
 G: ## cross_val_score
@@ -451,3 +449,20 @@ X: B=Validation folds only: the metric is the average over folds, but it is the 
 C=First fold only: all k models for each map are fitted and evaluated; the final model is a new fit.
 E=Refit on test: the test DataFrame is not passed to `fit` and must stay unseen until the final evaluation.
 T: CrossValidator averages k fold metrics per parameter map, then refits the best map on all training data.
+
+@ DBX-MLA D3 T3.6 advanced tradeoff
+S: Two tuning jobs have the same 80-trial budget for a gradient-boosted model with 10 hyperparameters, but only two of them strongly affect accuracy. One job evaluates 80 cells of a grid with 3 values per hyperparameter, the other draws 80 independent random settings. Why is plain random search usually better at finding good values of the two important hyperparameters?
+A: Random search always picks values that the grid cannot contain, so it finds exact optima
+B: Each random trial draws a new value of every hyperparameter, so 80 trials test 80 distinct values of each, not 3
+C: Random search trains each model for more epochs, which increases accuracy in every trial
+D: Random search ignores the unimportant hyperparameters, so it never needs to set a value for any of them in a trial
+K: B
+G: ## Why random search covers important dimensions better
+In a grid with 3 values per hyperparameter, every trial reuses one of only 3 values of each important hyperparameter, however many trials are run. In random search each trial draws a fresh value, so 80 trials test 80 different values of each important hyperparameter. When only a few of many hyperparameters matter, which is common, the same budget explores the influential axes far more densely.
+## When a grid is still fine
+For two or three hyperparameters with few values and fast fits, an exhaustive grid is acceptable (see the grid question). Bayesian methods such as TPE go further by using results to focus the draws.
+W: Distinct values per trial: random draws give 80 different values of each important hyperparameter, while the grid repeats 3 values.
+X: A=Exact optima: random search finds no exact optimum; it finds good values by sampling and a grid can contain good values too.
+C=More epochs: the training budget per trial is a separate setting; the search strategy does not change it.
+D=Ignore hyperparameters: every hyperparameter still gets a value in each trial, either sampled or from a default.
+T: Random search tests many distinct values per hyperparameter, which beats a grid when only a few hyperparameters matter.
