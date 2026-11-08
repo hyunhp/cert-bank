@@ -19,7 +19,7 @@ G: ## Run SQL on files directly
 Spark SQL can query a file without a read call or a view. The table identifier is the data source name, a dot, and the path in backticks:
 - `SELECT * FROM parquet.`/data/users.parquet``
 - `SELECT * FROM json.`/data/events``
-The source name before the dot (`parquet`, `json`, `csv`, `orc`, `text`, `delta`) tells Spark which reader to use, and the backticks mark the path as one identifier. `spark.sql(...)` returns a normal DataFrame, so you can keep transforming it.
+The source name before the dot (`parquet`, `json`, `csv`, `orc`, `text`) tells Spark which reader to use, and the backticks mark the path as one identifier. `spark.sql(...)` returns a normal DataFrame, so you can keep transforming it.
 ## What this form does not give you
 The files are read with the default options of that source. If you need options such as a header, a delimiter or an explicit schema, use `spark.read.option(...).schema(...)` instead.
 W: Source name plus backticked path: `json.` followed by the path in backticks is the documented "run SQL on files directly" form, and the result is a DataFrame.
@@ -116,7 +116,7 @@ The Spark guide states two warnings about save modes: they "do not utilize any l
 - Safer patterns: write to a new, dated location and switch readers to it afterwards, or use a table format with transactions (such as Delta) so a failed write leaves the last committed version intact.
 W: Delete first, no atomicity: Spark clears the target before writing, so a failure halfway through can leave the previous night's data missing or the output partial, and the documented behavior gives no rollback.
 X: A=Atomic swap: a temporary-directory swap would make overwrite atomic, which the guide says it is not. Writing happens at the target path.
-B=Rollback from a log: plain Parquet paths have no transaction log. Only table formats such as Delta provide that, not the generic `overwrite` mode on files.
+B=Rollback from a log: plain Parquet paths have no transaction log. Only transactional table formats provide that, not the generic `overwrite` mode on files.
 D=Hidden backup: Spark creates no backup copy of overwritten data. Once deleted, the old files are not recoverable through Spark.
 T: Overwrite on a file path is delete-then-write, not atomic and not locked; a mid-write failure can lose the old data.
 V: Spark SQL
@@ -127,10 +127,10 @@ S: `/out/events` is written with `partitionBy("dt")` and currently has the parti
 new_day.write.mode("overwrite").partitionBy("dt").parquet("/out/events")
 ```
 Which change makes the job replace only the partitions that appear in `new_day`?
-A: Add `.option("partitionOverwriteMode", "dynamic")` to the writer (or set `spark.sql.sources.partitionOverwriteMode` to `dynamic`)
-B: Change the mode to `append`, because append replaces partitions that already exist with the same name
+A: Add `.option("partitionOverwriteMode", "dynamic")` to the writer or set it as a session conf
+B: Change the mode to `append`, because append replaces any partition that has the same name
 C: Change the mode to `ignore`, because ignore keeps old partitions and rewrites only the matching ones
-D: Call `new_day.coalesce(1)` before the write, because a single write task only touches the one partition it writes to
+D: Call `new_day.coalesce(1)` first, because one write task only touches its own partition
 K: A
 G: ## Static and dynamic partition overwrite
 For a partitioned data source, `spark.sql.sources.partitionOverwriteMode` controls what an overwrite deletes:
@@ -191,8 +191,8 @@ V: Spark SQL
 S: A developer misremembers the writer API and calls `df.write.mode("replace").parquet("/out/x")`. Which statement describes what Spark does?
 A: It treats replace as a synonym for overwrite because the writer accepts common aliases of the four modes
 B: It treats replace as append when the path exists and as a normal write when the path does not exist
-C: It raises an error because replace is not a save mode; accepted names are append, overwrite, ignore, error/errorifexists
-D: It falls back to the default mode and carries on, writing the data if the path is empty or failing if it is not
+C: It raises an error, because replace is not a save mode name that the writer accepts at all
+D: It falls back to the default mode, writing the data if the path is empty or failing if it is not
 K: C
 G: ## Valid save mode names
 The writer accepts exactly the save modes in the Spark guide:
@@ -243,7 +243,7 @@ D: It succeeds but returns an empty dataset, because overwrite always deletes th
 K: B
 G: ## Reading and writing the same path
 DataFrames are lazy: `spark.read.parquet(path)` does not read data until an action runs, and the write is that action. Overwrite deletes the target before writing, so the reader would find its own input deleted.
-Spark detects this plan and raises an `AnalysisException` such as "Cannot overwrite a path that is also being read from". A workaround that is only safe in a table format with transactions is to read a snapshot; for plain files, write to a new path (or a staging path) and switch consumers after the job succeeds.
+In practice the analyzer refuses this plan with an `AnalysisException` along the lines of "Cannot overwrite a path that is also being read from" (the Spark SQL guide does not list this check; it only warns that overwrite deletes data first). For plain files, write to a new path (or a staging path) and switch consumers after the job succeeds.
 W: Self overwrite is refused: the query both reads and overwrites `/out/orders`, so Spark rejects it before data is lost instead of reading from files it just deleted.
 X: A=Memory buffering: Spark does not hold the whole result in memory in order to delete its own input; output is produced by distributed tasks reading the files.
 C=Filter pushdown: pushdown limits which row groups are read, not which files overwrite deletes. Overwrite removes the whole target path.
@@ -280,10 +280,10 @@ S: A developer wants the user table to be bucketed on `user_id` and writes:
 df.write.bucketBy(8, "user_id").parquet("/out/users")
 ```
 What happens?
-A: The write fails with an AnalysisException, because bucketing is supported only for persistent tables saved with `saveAsTable`
-B: The write succeeds and creates eight bucket files for each partition of the DataFrame under the output path folder
+A: The write fails with an AnalysisException, because bucketing needs a persistent table from `saveAsTable`
+B: The write succeeds and creates eight bucket files per DataFrame partition under the output path
 C: The write succeeds and ignores `bucketBy`, because bucket information cannot be stored without a table
-D: The write succeeds only if `sortBy("user_id")` is also called, since a bucketed layout needs sorted files
+D: The write succeeds only if `sortBy("user_id")` is also called, since buckets need sorted files
 K: A
 G: ## Bucketing needs a table
 The guide says that for file-based data sources "bucketing and sorting are applicable only to persistent tables". The bucket count and columns are stored as table metadata in the metastore; later queries use that metadata to avoid shuffles. A plain path write has no place to keep it, so `save`-style methods (`parquet(path)`, `save(path)`) reject `bucketBy`.
@@ -409,8 +409,8 @@ S: A team runs the line below and later executes `DROP TABLE sales_ext`. What ha
 df.write.option("path", "/lake/ext/sales").saveAsTable("sales_ext")
 ```
 A: They are deleted together with the table, because dropping a table always removes its files
-B: They stay in place, because a table with a custom path is external and DROP TABLE removes only the metastore entry
-C: They are moved to a trash folder under the warehouse directory, so that the table can be restored by name
+B: They stay in place, because a custom-path table is external and DROP TABLE removes only its metadata
+C: They are moved to a trash folder under the warehouse directory, so the table can be restored
 D: They stay in place but become unreadable, because the metastore holds the encryption layout of the files
 K: B
 G: ## Managed and external tables
