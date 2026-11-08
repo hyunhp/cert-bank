@@ -493,8 +493,8 @@ function showError(err) {
 
 // Same store as the question bank's notice: closed in either place, closed in both.
 const KEY_NOTICE = "aws_qbank_notice_closed_v1";
-function noticeClosed(exam, text) { try { return (JSON.parse(localStorage.getItem(KEY_NOTICE)) || {})[exam] === text; } catch (e) { return false; } }
-function closeNotice(exam, text) { try { const m = JSON.parse(localStorage.getItem(KEY_NOTICE)) || {}; m[exam] = text; localStorage.setItem(KEY_NOTICE, JSON.stringify(m)); } catch (e) {} }
+function noticeClosed(exam, text) { return (load(KEY_NOTICE, {}) || {})[exam] === text; }
+function closeNotice(exam, text) { const m = load(KEY_NOTICE, {}) || {}; m[exam] = text; save(KEY_NOTICE, m); }
 
 async function renderSetup(extra) {
   const spec = specs[setupExam];
