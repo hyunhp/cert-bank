@@ -44,17 +44,17 @@ T: Dynamic, stateful, compute-heavy work (simulators, RL) fits Ray's tasks and a
 
 @ DBX-MLP D1 T1.13 applied use-case
 S: A company needs a logistic regression on a 2 TB Delta table of customer events. The features already exist as columns, nothing custom is required, and the model must read the DataFrame without conversion. Which approach is the most direct on Databricks?
-A: Spark ML estimators, which train distributed over the DataFrame partitions and take the table as input
+A: A scikit-learn model on a large single-node driver after `toPandas()` collects the whole table
 B: Ray Train with a custom training loop, after exporting the table to a local directory on every worker
-C: A scikit-learn model on a large single-node driver after `toPandas()` collects the whole table
+C: Spark ML estimators, which train distributed over the DataFrame partitions and take the table as input
 D: Ray Tune running 200 single-node trials, each loading the full table in memory on its own worker
-K: A
+K: C
 G: ## Match the framework to the algorithm and data
 Databricks documents `pyspark.ml.connect` and Spark ML for distributed training of Spark ML models: the algorithm is already implemented as a data-parallel job over a DataFrame. Ray is aimed at custom compute-heavy Python (tuning, deep learning, simulations) where you bring the algorithm.
 When the algorithm exists in Spark ML and the data is large, the native estimator avoids conversion steps, copies and custom code.
 W: Spark ML trains logistic regression distributed over the partitions of the table with no data conversion and no custom training code, which satisfies all stated requirements.
-X: B=Ray Train with an export: you would write and maintain a training loop and move 2 TB onto worker disks, although a distributed estimator already exists.
-C=toPandas on the driver: 2 TB cannot be collected into driver memory; this is the failure that distributed training is meant to avoid.
+X: A=toPandas on the driver: 2 TB cannot be collected into driver memory; this is the failure that distributed training is meant to avoid.
+B=Ray Train with an export: you would write and maintain a training loop and move 2 TB onto worker disks, although a distributed estimator already exists.
 D=Ray Tune with full-table trials: each trial would need the whole 2 TB in the memory of one worker, which it does not have, and hyperparameter search was not requested.
 T: If a Spark ML estimator fits the task and the data is large, use it; bring Ray when you need custom, dynamic compute.
 
@@ -157,22 +157,24 @@ C=applyInPandas by id: it would load the model for each group (many loads) and f
 D=Driver loop: scoring 800 million rows on a single machine is exactly what distributed scoring avoids.
 T: For per-task setup such as model loading, use mapInPandas (or iterator UDFs) and load before the batch loop.
 
-@ DBX-MLP D1 T1.14 applied definition
-S: A scoring step must drop rows that fail validation and emit two output rows for each row that contains a "split shipment" flag. The team asks which pandas API on Spark allows an output with a different number of rows than the input. Which one?
-A: A Series-to-Series pandas UDF, because its output Series may be shorter or longer than the input batch it receives
-B: A scalar pandas UDF in `withColumn`, because it can append rows to the DataFrame it is applied to
-C: A Python lambda in `select`, because lambdas operate on whole columns at once
-D: `mapInPandas`, which maps an iterator of pandas DataFrames to another iterator and can return output of arbitrary length
-K: D
-G: ## Output length rules
-- Series-to-Series (scalar) pandas UDFs return exactly one value per input row; the result must have the same length as the input batch.
-- `mapInPandas` transforms an iterator of `pandas.DataFrame` into another iterator; the Databricks docs state it can return output of arbitrary length, so you can filter rows, explode rows or drop whole batches.
-- `groupBy().applyInPandas()` also returns any number of rows per group, but needs a grouping key.
-W: mapInPandas has no one-to-one constraint, so dropping invalid rows and duplicating flagged rows are both allowed in one pass without grouping.
-X: A=Series-to-Series UDF: its output must match the input length; returning more or fewer values raises an error.
-B=withColumn UDF: it produces one new column value per existing row; it cannot add or remove rows.
-C=Lambda in select: a Python lambda is not applied as a vectorized batch function here, and select keeps one output row per input row unless an explode-type expression is used.
-T: Different output length per batch means mapInPandas (or applyInPandas for keyed work); scalar pandas UDFs are one-to-one.
+@ DBX-MLP D1 T1.14 applied use-case
+S: A grouped-map function fits one gradient-boosting model per store with `applyInPandas`, and a separate nightly job must load each store's model later. The cluster is shared, and its executors are replaced between jobs. Which output design keeps the fitted models available to that later job?
+A: Pickle each model to `/tmp` on the executor and return only the file path, because the local disks of all executors form one shared volume
+B: Return a one-row `pandas.DataFrame` per store with the key, the metric and the pickled model bytes in a column declared as `binary` in the schema, and write the result to a Delta table
+C: Return the fitted estimator objects in a pandas `object` column that the schema declares as `string`, so that Spark converts them with `str()` for storage
+D: Assign each model to a module-level dictionary in the function and read that dictionary on the driver after the job has finished
+K: B
+G: ## What a grouped-map function can hand back
+The function runs in a Python worker process on an executor. Whatever it returns must be a `pandas.DataFrame` whose columns match the declared output schema (see the pandas function APIs page); Spark converts it to rows of a new DataFrame. Nothing else leaves the executor process.
+- A column declared as `binary` carries `bytes`, so a pickled or serialized model fits in an ordinary DataFrame next to the key and metrics. Saving that DataFrame as a Delta table versions the models with the data and makes them readable by any later job.
+- Python state in the worker (module globals, local files in `/tmp`) is not shared between executors, is invisible to the driver and disappears when the executor is replaced.
+- An estimator object is not a Spark SQL type, so it cannot be returned as an `object` column that is silently turned into a string.
+For models that must be registered, the usual next step is to log the bytes (or the loaded model) to MLflow from the driver or from a later job.
+W: A `binary` column in the output schema moves each serialized model through the normal result path, and the Delta table keeps it after the executors are gone.
+X: A=Executor `/tmp`: local disks belong to one executor each, are not shared and vanish when the executor is replaced, so the returned path would point to nothing.
+C=Object column declared as string: the schema must describe a convertible type; `str()` of an estimator is only a text description and cannot be loaded back as a model.
+D=Module-level dictionary: it lives in the executor's Python process and the driver never sees it, so the dictionary on the driver stays empty.
+T: To keep per-group models from `applyInPandas`, return serialized bytes in a `binary` column and persist the result.
 
 @ DBX-MLP D1 T1.14 advanced troubleshooting
 S: A grouped-map function builds its result like this and the job fails with a schema error:
@@ -223,6 +225,7 @@ K: D
 G: ## Parent and child runs
 MLflow runs can be nested: starting a run with `nested=True` while another run is active creates a child that is linked to the active run through the system tag `mlflow.parentRunId`. A child run has its own parameters, metrics and artifacts. The UI groups children under the parent, and search can filter by the parent tag.
 The Databricks Hyperopt documentation uses the same structure for tuning: the call to `fmin()` is the main (parent) run and each tried hyperparameter setting is a child run. A search that logs trials as nested runs follows this convention.
+The `nested=True` argument and the `mlflow.parentRunId` tag are standard MLflow behavior; no docs.databricks.com page spells them out, so the keys rely on MLflow semantics and the Hyperopt child-run structure above.
 W: `nested=True` is how MLflow records the parent link, so each trial becomes a child of the search run with its own parameters and metrics.
 X: A=Tag by name: a custom tag is not the parent link; the UI and `mlflow.parentRunId` searches would not group the trials, and names can collide.
 B=One experiment per trial: experiments are containers for many runs; splitting 30 trials across experiments makes comparison harder and does not model a hierarchy.
@@ -264,6 +267,7 @@ K: C
 G: ## Children are searchable by parent
 Every child created with `nested=True` carries the system tag `mlflow.parentRunId`. `mlflow.search_runs` accepts a `filter_string` (including `tags.` and `metrics.` fields) and `order_by`, so a job can select the best child programmatically and use its run id, for example to build a `runs:/<run_id>/model` URI for registration.
 Parents do not aggregate their children's metrics automatically: if you want a summary, the code that owns the parent must log it.
+`search_runs` filtering on `tags.mlflow.parentRunId` is standard MLflow, not shown on a docs.databricks.com page.
 W: Filtering on the parent tag and ordering by the metric descending returns the best child in one reproducible query that a scheduled job can run unattended.
 X: A=Manual sort: a person copying a run id is not reproducible or automatable; the requirement is for the job to find it.
 B=Parent metric: parents hold only what code logged to them; MLflow does not roll up child metrics.
@@ -293,7 +297,7 @@ C: Give the function `nested=True` in its `log_metric` call, since metrics suppo
 D: Return the metrics as rows, collect the small result on the driver, and log a nested child run per store there
 K: D
 G: ## The active run lives in one process
-The "active run" is state in the Python process that called `start_run`. An `applyInPandas` function runs in executor Python workers, which do not see the driver's active run. Only integrations built for it (such as `SparkTrials`, which the Databricks docs describe as logging to the main run and child runs from workers) wire this up for you.
+The "active run" is state in the Python process that called `start_run`. An `applyInPandas` function runs in executor Python workers, which do not see the driver's active run. The Databricks Autologging page confirms the same limit: it is enabled only on the driver, and worker code would have to call `mlflow.autolog()` itself. Only integrations built for it (such as `SparkTrials`, which the Databricks docs describe as logging to the main run and child runs from workers) wire this up for you.
 ## A robust pattern
 Treat the function as a pure computation: return `(store_id, rmse, ...)` rows. On the driver, with the parent still active, log the small result with `with mlflow.start_run(nested=True)` per store (or write it to a Delta table). Logging thousands of runs from the driver is cheap compared with training.
 W: The driver owns the parent run, so logging the returned metrics there creates correct child runs without depending on executor tracking context.
@@ -342,22 +346,23 @@ D=mlflow-skinny: the lightweight package has fewer features, and installing it d
 T: Autologging skips runs from `start_run()` unless you call `mlflow.autolog(exclusive=False)`.
 
 @ DBX-MLP D1 T1.16 advanced troubleshooting
-S: An early-stopping callback calls `mlflow.log_param("threshold", t)` each time it adjusts the decision threshold. The first adjustment works, and the second raises an exception in the same run. The team still wants the full history of thresholds. Which logging is correct?
-A: Delete the run and start a new one with the new threshold, because a run can hold only one logged value of anything
-B: Wrap each `log_param` call in `try/except` and ignore the error, since the first value stays correct
-C: Log the changing value as a metric with `step`, and keep parameters for values fixed when the run starts
-D: Use `mlflow.log_param` with the same key and `overwrite=True`, which replaces earlier values in place
-K: C
-G: ## Params, metrics and tags
-- **Parameters** describe the inputs of a run and are written once per key; logging the same key with a different value raises an error.
-- **Metrics** are numeric and may be logged repeatedly; each call adds a (value, step, timestamp) point, so a metric keeps its history and is plotted as a line.
-- **Tags** are string key-value pairs that can be updated (`set_tag`) and searched.
-A value that changes during training is a metric (or a tag if it is not numeric), not a parameter.
-W: Metrics keep a full history per step, so every adjustment is stored; parameters stay for configuration that was fixed at the start.
-X: A=New run: a run can hold many metric values over time; restarting loses the run's other results and does not give a history.
-B=try/except: ignoring the error silently drops every later threshold, so the history is lost.
-D=overwrite=True: `log_param` has no such argument; parameter values are not replaceable.
-T: A value that changes over time is a metric with a step, not a parameter.
+S: Databricks Autologging is on in an interactive notebook. A function passed to `applyInPandas` fits a scikit-learn model for each of 500 stores, but the experiment shows no runs from these fits, although fits run directly in the notebook appear as runs. Which statement explains it and gives the supported fix?
+A: Autologging patches are shared with executors through the broadcast of the function, so the missing runs come from too few shuffle partitions
+B: Only an administrator can enable autologging for executors, through a cluster restart after changing the setting on the admin page
+C: Autologging cannot record models trained with scikit-learn, so use `mlflow.sklearn.log_model` from the workers without any further setup
+D: Autologging works only on the driver, so call `mlflow.autolog()` inside the code that runs on the workers, or return results and log them from the driver
+K: D
+G: ## Where Databricks Autologging is active
+The Databricks Autologging page lists this limitation: autologging is enabled only on the driver node of the cluster. To use autologging from worker nodes, you must explicitly call `mlflow.autolog()` from within the code that executes on each worker. The function given to `applyInPandas` runs in Python workers on the executors, so the driver's setting does not reach it.
+## Options
+- Call `mlflow.autolog()` inside the function (each call then needs access to the tracking server and an experiment, and its runs are not children of a driver run by themselves).
+- Treat the function as pure computation, return the metrics, and log them from the driver (see the nested-run pattern for per-store child runs).
+The admin setting on the same page switches Databricks Autologging on or off for notebook sessions in the workspace; it does not add executors to it.
+W: The documented limitation is that autologging runs only on the driver, so worker code needs its own `mlflow.autolog()` call, or the driver logs the returned results.
+X: A=Broadcast and partitions: the function is shipped to the executors, but the autologging setup is not; shuffle partitions only change the task count and do not enable logging.
+B=Admin setting: the workspace switch turns Databricks Autologging on or off for notebooks and takes effect after a cluster restart, but it does not extend autologging to worker processes.
+C=Scikit-learn unsupported: scikit-learn is one of the listed supported frameworks, and `log_model` from the workers has the same missing-context and credential issues without further setup.
+T: Databricks Autologging is driver-only; worker code needs its own `mlflow.autolog()` call, or the driver logs the returned results.
 
 @ DBX-MLP D1 T1.16 applied use-case
 S: An evaluation step produces a matplotlib confusion-matrix figure, a Python dict of feature importances and a small pandas DataFrame of mispredicted rows. The team wants all three attached to the run without managing temporary files. Which combination fits?
@@ -372,6 +377,7 @@ MLflow has helpers that serialize Python objects and store them as artifacts of 
 - `mlflow.log_dict(d, "importances.json")` stores a dict as JSON or YAML.
 - `mlflow.log_table(data=df, artifact_file="errors.json")` stores tabular data that can be viewed in the run page.
 `log_artifact` takes a path to an existing local file; `log_metric` only accepts numbers; parameters are short strings.
+These helpers are standard MLflow (`log_figure`, `log_dict`, `log_table`) and are not described on a docs.databricks.com page; the Databricks docs only cover the general `log_*` tracking calls.
 W: The three helpers match the three object types and write artifacts directly, which satisfies "no temporary files".
 X: A=Metrics and a path param: metrics must be numbers (a figure or a DataFrame is not), and a parameter holding a path stores the string, not the figure.
 B=Dict as one param and log_artifact on an object: a parameter is a short string value, and `log_artifact` expects a file path, not a figure object.
@@ -470,6 +476,7 @@ D: Ask callers to compute the columns, because the model only has to accept nume
 K: C
 G: ## One definition of the transformation
 Skew grows when the same logic exists in two places. Put the transformation in a module that both the training notebook and the serving model import. `mlflow.pyfunc.log_model(..., code_paths=[...])` copies local modules into the model artifact, so the served `predict` imports the exact version that was used during training. The model then accepts raw columns and the signature describes raw inputs.
+`code_paths` is standard MLflow and is not shown on the Databricks pages; the Databricks custom models page only says that pyfunc can deploy additional code alongside your model.
 W: A single module used in training and in `predict`, packaged via `code_paths`, keeps the logic versioned with the model.
 X: A=Two copies: two hand-maintained copies is the drift risk described in the question.
 B=Nightly table: a nightly table is stale for request-time values (days since signup changes each day for each request) and ignores the values in the request.
@@ -493,18 +500,18 @@ T: The signature should describe what callers have (raw inputs); build features 
 
 @ DBX-MLP D1 T1.17 advanced use-case
 S: A custom pyfunc scores customers using stored features from a Unity Catalog feature table and an on-demand feature function. It must auto-join those features at serving time when callers send only keys and request fields. How should the model be logged?
-A: `fe.log_model(model, name, flavor=mlflow.pyfunc, training_set=training_set)`, so lookups travel with the model
+A: `mlflow.sklearn.log_model(model, name)` after changing the pyfunc into a scikit-learn estimator
 B: `mlflow.pyfunc.log_model(model, name)`, because Model Serving finds the feature tables from the training notebook
 C: `mlflow.pyfunc.log_model(model, name)` and a separate nightly job copying features into the request table
-D: `mlflow.sklearn.log_model(model, name)` after changing the pyfunc into a scikit-learn estimator
-K: A
+D: `fe.log_model(model, name, flavor=mlflow.pyfunc, training_set=training_set)`, so lookups travel with the model
+K: D
 G: ## Feature metadata travels with the model
 `FeatureEngineeringClient.log_model` accepts a `training_set` created by `fe.create_training_set` and a `flavor` (for example `mlflow.pyfunc`). It stores the feature lookups and function bindings next to the model, so batch scoring (`score_batch`) and Model Serving can look up and compute features from keys and request fields. The Databricks lineage page also states that features and Python UDFs used for on-demand features are tracked when the model is logged this way.
 The pyfunc then receives the assembled feature frame, as in the documented example whose `predict` reads the computed `distance` column.
 W: `fe.log_model` with the pyfunc flavor and the training set is the documented path to a custom model with automatic feature lookup and on-demand computation.
-X: B=Plain pyfunc log_model: the model would not record which feature tables and functions it needs, so the endpoint cannot find them.
+X: A=Convert to sklearn: the flavor is not the issue; logging through the feature engineering client is.
+B=Plain pyfunc log_model: the model would not record which feature tables and functions it needs, so the endpoint cannot find them.
 C=Nightly request-table copy: this bypasses online lookup and request-time values, and still would not tie the model to its feature definitions.
-D=Convert to sklearn: the flavor is not the issue; logging through the feature engineering client is.
 T: Use `fe.log_model(..., flavor=mlflow.pyfunc, training_set=...)` for custom models that need automatic feature lookup.
 
 @ DBX-MLP D1 T1.17 applied troubleshooting
