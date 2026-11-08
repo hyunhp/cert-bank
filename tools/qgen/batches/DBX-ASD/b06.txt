@@ -9,6 +9,8 @@
 # src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.functions.broadcast.html
 # src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.coalesce.html
 # src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.repartition.html
+# src: https://spark.apache.org/docs/latest/sql-ref-syntax-qry-select-hints.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.hint.html
 
 @ DBX-ASD D3 T3.8 applied troubleshooting
 S: A developer defines a Python UDF and applies it to a nullable `name` column in which some rows are `null`:
@@ -107,7 +109,7 @@ D: A function `(key, pandas.DataFrame) -> int` that returns the number of rows, 
 K: A
 G: ## Stateful grouped functions
 A grouped function without state (`applyInPandas`) sees only the data of one group of one call. A streaming job that must remember something about a key between micro-batches needs a stateful operator, where Spark stores the per-key state and restores it after a failure.
-- `applyInPandasWithState` (added in Spark 3.4, Spark Connect since 3.5) applies a function to each group while it maintains a user-defined per-group state. The function takes `(key, Iterator[pandas.DataFrame], state)`; the key is a tuple, and `state` is a `GroupState` read with `state.get` and written with `state.update(tuple)`.
+- `applyInPandasWithState` (added in Spark 3.4, Spark Connect since 3.5) applies a function to each group while it maintains a user-defined per-group state. The function takes `(key, Iterator[pandas.DataFrame], state)`; the key is a tuple, `state` is a `GroupState`, and the state value is a tuple that is updated with `state.update((value,))`.
 - The function must return an iterator of pandas DataFrames; the output schema and the state schema are declared as `outputStructType` and `stateStructType`, plus `outputMode` and `timeoutConf`.
 - The call needs a full shuffle, and the state lives in the state store, which is checkpointed.
 - Since Spark 4.0 the guide encourages the newer `transformWithState` family for new applications; the older operator remains documented.
@@ -160,25 +162,25 @@ B=compactOnCommit: this option belongs to the RocksDB provider and does nothing 
 C=cache(): caching a streaming DataFrame is not how state is held; state is managed by the state store, not by the storage memory pool.
 T: Many keys plus GC pauses in a stateful stream point to switching the state store provider to RocksDB.
 
-@ DBX-ASD D3 T3.9 applied use-case
-S: A PySpark UDF looks up each customer's region in a 50 MB Python dictionary `lookup` that is referenced directly in the function body, and the UDF is used in several stages. The team wants the dictionary delivered to each executor once instead of being shipped with every task. What do they use?
-A: `acc = sc.accumulator(lookup)` so that tasks can read the dictionary from the accumulator value
-B: `bc = sc.broadcast(lookup)` and read `bc.value` inside the UDF
-C: `df.checkpoint()` on the DataFrame so the dictionary is saved with the lineage
-D: `sc.parallelize(lookup)` so each executor owns a slice of the dictionary
+@ DBX-ASD D3 T3.9 applied comparison
+S: A PySpark job needs two shared variables: a read-only set of 50,000 valid country codes that tasks check for every row, and a count of rejected rows that the driver prints after the job. Which pairing fits the shared-variable types?
+A: An accumulator for the codes and a broadcast variable for the count, because tasks read accumulators and write broadcast variables
+B: A broadcast variable for the codes and an accumulator for the rejected-row count
+C: Two accumulators, because an accumulator can hold a read-only collection as well as a counter
+D: Two broadcast variables, because the driver reads a broadcast variable after tasks have changed it
 K: B
-G: ## Shared variables
-Normally Spark ships a copy of every variable a function uses to each task. Spark offers two kinds of shared variables for cases where that is wasteful or wrong.
-- A **broadcast variable** keeps a read-only value cached on each machine instead of sending it with tasks. It is created with `sc.broadcast(v)` and read with `.value`. Spark already broadcasts the data a stage needs automatically, so explicit broadcast variables pay off mainly when tasks in several stages need the same data, or when the data is large.
-- An **accumulator** is a variable that tasks can only add to with an associative and commutative operation; the driver reads the result.
-- The broadcast value must not be modified after broadcasting, so that all nodes see the same content.
+G: ## Two kinds of shared variables
+Normally Spark ships a copy of each variable a function uses to every task. Two shared-variable types cover the cases where that does not fit, and they move data in opposite directions.
+- A **broadcast variable** keeps a read-only value cached on each machine. The driver creates it with `sc.broadcast(v)` and tasks read it with `.value`. Do not modify `v` after broadcasting, so all nodes see the same value.
+- An **accumulator** is added to by tasks with an associative and commutative operation (`add` or `+=`); only the driver reads the result with `.value`.
+- Read-only lookup data for tasks: broadcast variable. Counters and sums collected from tasks: accumulator.
 ## Example
-`bc = spark.sparkContext.broadcast({"A1": "EU"})`, then `F.udf(lambda k: bc.value.get(k), "string")`.
-W: Broadcast variable: it caches the 50 MB dictionary once per executor and tasks read it locally through `.value`, rather than receiving a copy in every task closure.
-X: A=Accumulator: accumulators are write-only for tasks and meant for counters and sums; tasks cannot read their value.
-C=checkpoint(): this truncates the lineage of a DataFrame by saving its data; it does not distribute a Python object to executors.
-D=parallelize: this splits the data into partitions across executors, so no task would hold the full dictionary needed for any lookup.
-T: Read-only lookup data used by many tasks belongs in a broadcast variable.
+`codes = sc.broadcast(valid_codes)`; `bad = sc.accumulator(0)`; tasks use `codes.value` and call `bad.add(1)`; the driver prints `bad.value` after an action.
+W: Broadcast for the codes, accumulator for the count: the codes are read-only data that every task reads, and the rejected-row count flows from tasks to the driver.
+X: A=Swapped roles: tasks cannot read an accumulator and cannot write a broadcast variable, so both halves are reversed.
+C=Two accumulators: an accumulator is write-only for tasks, so the tasks could not check rows against the codes held in it.
+D=Two broadcast variables: a broadcast value is read-only on the executors and cannot carry task results back to the driver.
+T: Broadcast variable: driver to tasks, read-only; accumulator: tasks to driver, add-only.
 
 @ DBX-ASD D3 T3.9 applied definition
 S: A developer creates `acc = sc.accumulator(0)` and, inside a UDF running on executors, tries to read `acc.value` to decide how to proceed. Which statement describes the Spark accumulator contract?
@@ -295,25 +297,29 @@ C=Deleting value: `value` is read access to the data; it does not manage executo
 D=New broadcast of None: creating another broadcast does nothing to the earlier variable's copies; they stay until released.
 T: `unpersist()` frees executor copies but allows reuse; `destroy()` is final.
 
-@ DBX-ASD D3 T3.10 applied use-case
-S: A batch job joins `orders` (3 TB) with `countries` (2 MB) using `orders.join(F.broadcast(countries), "country_code")`. What does `F.broadcast` do here?
-A: It persists `countries` on the driver only and forces a sort-merge join on both inputs
-B: It copies the large `orders` table to every executor so that each task can filter and join it locally without any network transfer
-C: It marks `countries` as small enough to be sent to every executor, so `orders` is not shuffled
-D: It repartitions `countries` by `country_code` to match the partitioning of `orders`
+@ DBX-ASD D3 T3.10 applied definition
+S: A team's PySpark code asks for a broadcast of the small side with the function form:
+
+`orders.join(F.broadcast(countries), "country_code")`
+
+A colleague wants the same request written with the DataFrame hint API instead of the function. Which line asks for the same thing?
+A: `orders.hint("broadcast").join(countries, "country_code")`, because the hint is always written on the left input of the join
+B: `orders.join(countries, "country_code").hint("broadcast")`, because a hint on the joined result applies to both of its inputs
+C: `orders.join(countries.hint("broadcast"), "country_code")`, because the hint is attached to the relation that should be broadcast
+D: `orders.join(countries.hint("merge"), "country_code")`, because the merge hint keeps the large input from being shuffled
 K: C
-G: ## Purpose of the broadcast join
-A shuffle join (sort-merge or shuffle-hash) moves both inputs across the network so that equal keys meet. With a very large and a very small input, most of that cost is wasted on the large side.
-- In a **broadcast hash join** the small side is collected, sent to every executor and held as a hash table; each partition of the large side is joined locally. The large side is not shuffled.
-- `pyspark.sql.functions.broadcast(df)` marks a DataFrame as small enough for broadcast joins. It is the same as the SQL hint `BROADCAST`.
-- The small side must fit in driver and executor memory; sizes above that make the broadcast fail.
+G: ## Two spellings of the broadcast request
+`F.broadcast(df)` marks a DataFrame as small enough for broadcast joins. The DataFrame hint API expresses the same request: `df.hint("broadcast")`, and the performance tuning page shows `spark.table("records").hint("broadcast")` inside a join.
+- The hint is attached to the relation that should be the build side: join strategy hints "instruct Spark to use the hinted strategy on each specified relation when joining them with another relation".
+- With a broadcast join the small side is sent to every executor and the large side is joined in place, without a shuffle of the large side.
+- A hint is a request, not an order: Spark may not use the hinted strategy when it does not support the join type.
 ## Example
-`orders.join(F.broadcast(countries), "country_code")` runs as a `BroadcastHashJoin` in the plan, without an exchange on `orders`.
-W: Marks the small side for broadcast: every executor receives `countries`, so `orders` partitions are joined in place without a shuffle.
-X: A=Driver-only copy: the broadcast goes to executors, and the purpose is to avoid the sort-merge join that would shuffle `orders`.
-B=Broadcasting orders: the hint is on the small DataFrame; broadcasting a 3 TB table would exhaust memory.
-D=Repartitioning: a repartition by key is a shuffle (the cost the broadcast avoids), and `broadcast` does not partition anything.
-T: `F.broadcast(small)` sends the small side to all executors so the big side is not shuffled.
+`orders.join(countries.hint("broadcast"), "country_code")` is planned like the `F.broadcast(countries)` form.
+W: Hint on the small relation: `countries.hint("broadcast")` marks the small side as the broadcast build side, which is the request that `F.broadcast(countries)` makes.
+X: A=Hint on orders: this names the large table as the broadcast side, the opposite of the intent, and there is no rule that hints go on the left input.
+B=Hint on the join result: a hint names a relation to use as build side; placed on the joined result it does not mark the small input.
+D=merge hint: `merge` requests a sort-merge join, which shuffles and sorts both inputs, so it does not keep the large side from being shuffled.
+T: `F.broadcast(small)` and `small.hint("broadcast")` name the same build side.
 
 @ DBX-ASD D3 T3.10 applied troubleshooting
 S: A join between `facts` and a 40 MB `dim` DataFrame runs as a sort-merge join. The session uses the default `spark.sql.autoBroadcastJoinThreshold`. Without changing the data, which change makes Spark plan a broadcast join?
@@ -462,24 +468,24 @@ D=toPandas: this pulls all data into driver memory and does not help; the file i
 T: `coalesce(1)` can serialize the whole upstream stage; `repartition(1)` keeps it parallel.
 
 @ DBX-ASD D4 T4.1 applied troubleshooting
-S: A transformation stage reads a 600 GB dataset that the source delivered as 10 partitions. The cluster has 80 executor cores, and the Spark UI shows only 10 tasks running while 70 cores idle. How should the developer improve utilization?
-A: Use `coalesce(5)` so that each task gets more data and the per-task overhead is spread more efficiently
-B: Increase the driver memory so the scheduler can start more tasks at once
-C: Call `repartition(320)` before the expensive steps
-D: Call `cache()` on the DataFrame so that idle cores read it from memory
+S: A Spark SQL job with AQE enabled writes the result of `SELECT ... FROM t` to a table. The output has many tiny files and a few very large ones, because the shuffle partitions of the query are very uneven. The developer wants Spark to even out the partition sizes without choosing a partition count. Which hint fits?
+A: `/*+ COALESCE(10) */`, which merges neighbouring partitions without moving rows between executors
+B: `/*+ REPARTITION(c) */`, which hash-partitions the rows by column `c` so equal sizes result
+C: `/*+ REBALANCE */`, which lets AQE merge small partitions and split skewed ones toward a reasonable size
+D: `/*+ REBALANCE_BY_SIZE */`, written without any argument so that AQE chooses the advisory size itself
 K: C
-G: ## Partitions decide parallelism
-A stage runs one task per partition, and each task occupies one core. With 10 partitions at most 10 cores work, whatever the cluster size.
-- Aim for a multiple of the total core count (for example 2 to 4 partitions per core) so that stragglers and uneven tasks can be balanced, and for partitions of moderate size (tens to a few hundred MB).
-- `repartition(n)` raises the number of partitions at the price of a shuffle; `coalesce` can only lower it.
-- For file sources the number of input partitions depends on file sizes and split settings; a few huge non-splittable files lead to few tasks.
+G: ## REBALANCE hint
+The Spark SQL partitioning hints `COALESCE`, `REPARTITION` and `REPARTITION_BY_RANGE` are equivalent to the Dataset `coalesce`, `repartition` and `repartitionByRange`. `REBALANCE` and `REBALANCE_BY_SIZE` can only be used as hints.
+- `REBALANCE` rebalances the query result output partitions "so that every partition is of a reasonable size (not too small and not too big)". It is best effort: skewed partitions are split. It is useful before writing a table, to avoid too small or too big files.
+- The hint is ignored when AQE is not enabled.
+- `REBALANCE_BY_SIZE` works like `REBALANCE` but requires an advisory partition size as its first parameter.
 ## Example
-`df.repartition(320)` gives 4 tasks per core on 80 cores.
-W: Repartition upward: more partitions give more tasks, so all 80 cores get work, and the shuffle cost is repaid by the parallel speedup of the expensive steps.
-X: A=coalesce(5): fewer partitions mean even fewer tasks, so utilization would drop to 5 cores.
-B=Driver memory: the number of tasks is the number of partitions, not a function of driver memory.
-D=cache(): caching saves recomputation, but the number of tasks remains 10, so 70 cores still idle.
-T: Few partitions leave cores idle; repartition upward to a multiple of the cores.
+`SELECT /*+ REBALANCE */ * FROM t` or, to partition by a column as well, `SELECT /*+ REBALANCE(c) */ * FROM t`.
+W: REBALANCE: with AQE on, it evens out output partition sizes (small ones merged, skewed ones split), which avoids tiny and huge files without a fixed count.
+X: A=COALESCE: it only merges partitions and takes a partition number; it neither splits large partitions nor sizes them.
+B=REPARTITION by column: hash partitioning keeps equal values together, so a dominant value still makes one large partition.
+D=REBALANCE_BY_SIZE with no argument: this hint requires an advisory partition size as its first parameter, so the bare form is not valid.
+T: `REBALANCE` (with AQE) evens out output partition sizes before a write.
 
 @ DBX-ASD D4 T4.1 advanced troubleshooting
 S: A developer runs `df.repartition("country")` before a heavy transformation. About 70% of the rows have `country = 'US'`. One task runs far longer than the others. What is the cause?
@@ -501,25 +507,26 @@ C=One partition per value: the number of partitions is set by the count and hash
 D=Single-file input: the cause appears after the shuffle and is related to the key distribution, not to input files.
 T: Repartitioning by a skewed column concentrates the dominant value in one partition.
 
-@ DBX-ASD D4 T4.1 advanced use-case
-S: A `groupBy("customer_id").sum("amount")` stage has one straggler task: a single `customer_id` owns 60% of all rows. The query has no join. How can the developer remove the skew?
-A: Enable AQE skew join handling; it splits skewed partitions of aggregations the same way as for joins, with no code change
-B: Call `coalesce(1)` before the aggregation so that all rows of the key are in one task
-C: Increase `spark.sql.shuffle.partitions`; more partitions will split the rows of the single key
-D: Add a random salt column, aggregate by key and salt, then aggregate the partial sums by key
+@ DBX-ASD D4 T4.1 applied use-case
+S: A SQL user writes the result of `SELECT * FROM t` and wants at most 3 output files. Existing partitions should be merged the way the Dataset `coalesce` does, without a full shuffle. Which statement is correct?
+A: `/*+ COALESCE(3, c) */` is the form to use, because the hint takes a partition number and optional columns
+B: `/*+ REPARTITION_BY_RANGE(3) */` is the form to use, because a range hint needs only a partition number
+C: `/*+ REPARTITION(3) */` is the form to use, because it is the hint that merges partitions without shuffling
+D: `/*+ COALESCE(3) */` is the form to use, because the hint is equivalent to the Dataset `coalesce`
 K: D
-G: ## Salting a skewed aggregation
-All rows with the same key go to the same shuffle partition, so more partitions or a different partition count do not help a single dominant key. Adaptive skew handling is documented for sort-merge joins ("dynamically handles skew in sort-merge join"), not for aggregations.
-- **Two-stage aggregation with a salt** splits the hot key: add a column `salt = floor(rand() * N)`, aggregate by (`customer_id`, `salt`) so the hot key is spread over up to N tasks, then aggregate those partial results by `customer_id`.
-- This works for decomposable aggregates such as `sum`, `count`, `min`, `max` (and `avg` as sum and count), not for exact distinct counts.
-- The second stage handles a small number of rows (at most keys times N).
+G: ## SQL partitioning hints
+Partitioning hints let a SQL user control the number of output files. `COALESCE`, `REPARTITION` and `REPARTITION_BY_RANGE` are equivalent to the Dataset APIs `coalesce`, `repartition` and `repartitionByRange`.
+- `COALESCE` takes only a partition number, e.g. `/*+ COALESCE(3) */`.
+- `REPARTITION` takes a partition number, columns, or both or neither of them; like `repartition` it shuffles.
+- `REPARTITION_BY_RANGE` must have column names; a partition number is optional.
+- When several partitioning hints are given, the leftmost one is picked by the optimizer.
 ## Example
-`df.withColumn("salt", (F.rand()*8).cast("int")).groupBy("customer_id","salt").sum("amount").groupBy("customer_id").sum("sum(amount)")`
-W: Salted two-stage aggregation: partial sums per (key, salt) spread the hot key over several tasks, and a small second aggregation merges them.
-X: A=AQE for aggregations: the documented skew optimization applies to sort-merge joins, so a skewed aggregation key is not split by it.
-B=coalesce(1): this concentrates everything in one task, which is the opposite of removing skew.
-C=More shuffle partitions: one key still hashes to one partition, so the dominant key stays in a single task.
-T: For a skewed aggregation key, aggregate in two stages with a salt.
+`SELECT /*+ COALESCE(3) */ * FROM t` leaves at most 3 partitions, so at most 3 files are written.
+W: COALESCE(3): the hint is equivalent to `coalesce(3)`, which merges existing partitions as a narrow dependency without a full shuffle.
+X: A=COALESCE with a column: the hint accepts only a partition number, so a column argument is not part of the form.
+B=Range hint with a number only: `REPARTITION_BY_RANGE` must have column names, and it shuffles rows into ranges.
+C=REPARTITION: it is equivalent to `repartition`, which always performs a full shuffle instead of merging partitions.
+T: `COALESCE(n)` merges partitions without a shuffle; `REPARTITION` shuffles.
 
 @ DBX-ASD D4 T4.1 applied use-case
 S: A job joins `clicks` (10 billion rows, many per user) with `users` on `user_id` and then counts clicks per user and day. The shuffle of the join moves most of the data. Which restructuring reduces the shuffled volume?
