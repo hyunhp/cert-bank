@@ -70,45 +70,38 @@ D=Copying package folders: hand-copied files bypass dependency resolution and do
 T: MlflowStorage and MlflowSparkStudy need MLflow 3: use a runtime that includes it or upgrade MLflow and install Optuna with %pip.
 
 @ DBX-MLP D1 T1.9 advanced troubleshooting
-S: A team tunes a neural network for 50 epochs per trial with `MlflowSparkStudy` and the default `MedianPruner`. Poor trials still run all 50 epochs, and the log shows no pruned trials. The objective only trains the model and returns the final validation loss. What should the engineer change?
+S: A team tunes a neural network for 50 epochs per trial with `MlflowSparkStudy` and the default pruner. Poor trials still run all 50 epochs, and the log shows no pruned trials. The objective only trains the model and returns the final validation loss. What should the engineer change?
 A: Switch the storage backend from `MlflowStorage` to a local SQLite file on the driver, because MLflow storage disables every pruner in the study
-B: Replace `n_jobs` with a larger value so that Spark can interrupt long trials from outside the executor task
-C: In the training loop call `trial.report(val_loss, epoch)` and raise `optuna.TrialPruned` when `trial.should_prune()` is true
-D: Increase `n_trials` above 100, because the median pruner stays inactive until it has seen a hundred completed trials
+B: Raise `n_jobs` so that Spark can interrupt long trials from outside the executor task once enough of them run in parallel
+C: Make the objective report its validation loss to the trial after every epoch and stop the trial when the pruner marks it as unpromising
+D: Raise `n_trials` above 100, because the default pruner stays inactive until it has seen a hundred completed trials in the study
 K: C
 G: ## How pruning works in Optuna
-A pruner can only judge a trial by **intermediate values**. The objective must report them with `trial.report(value, step)` after each epoch or fold, then ask `trial.should_prune()`. If it returns true, the objective raises `optuna.TrialPruned` and the trial ends early, freeing its executor slot for a new, better-chosen trial.
-```
-for epoch in range(50):
-    val_loss = train_one_epoch(model)
-    trial.report(val_loss, epoch)
-    if trial.should_prune():
-        raise optuna.TrialPruned()
-```
+A pruner can only judge a trial by **intermediate values**. The Databricks page documents the pruner as an argument of `MlflowSparkStudy` with `MedianPruner` as the default. A pruner compares what a running trial has reached at a given step with what earlier trials had reached at that step. The objective therefore has to report a value at each epoch (or fold) and end the trial early when the pruner says so, using the pruning interface of the Optuna trial object (see the Optuna documentation).
 ## Why it matters on Spark
-Each trial occupies an executor task. Pruned trials give the slot back quickly, so the same cluster completes many more trials. Without reports, the median pruner has nothing to compare, and every trial looks like a single final value.
-W: The pruner needs per-step values. Reporting the validation loss each epoch and raising TrialPruned when told to gives the default MedianPruner what it needs to stop poor trials early.
-X: A=SQLite storage: pruning does not depend on the storage type, and a local file would not be shared by executors. The change would break the shared study rather than enable pruning.
+Each trial occupies an executor task. Pruned trials give the slot back quickly, so the same cluster completes many more trials. An objective that returns only one final number gives the pruner nothing to compare, so no trial is ever pruned.
+W: Per-epoch reporting gives the default median pruner the intermediate values it compares, and ending the trial when it signals gives the slot back to a better-chosen trial.
+X: A=SQLite storage: pruning does not depend on the storage type, and a local file on the driver would not be shared by executors. The change would break the shared study rather than enable pruning.
 B=Larger n_jobs: n_jobs sets how many trials run at once. It does not let Spark cancel a running function, and it does not produce intermediate values for the pruner.
-D=More than 100 trials: the median pruner starts working after a small number of startup trials, not a hundred. The real cause is that nothing reports intermediate values.
-T: Pruners act on intermediate values: report them with trial.report and exit with TrialPruned when should_prune is true.
+D=More than 100 trials: the pruner needs per-step values, not a large trial count. The missing reports are the real cause.
+T: Pruners act on intermediate values: report them from the training loop and stop the trial when the pruner says so.
 
 @ DBX-MLP D1 T1.9 applied use-case
-S: An objective tunes a gradient-boosting model with `lr = trial.suggest_float("lr", 1e-6, 1e-1)`. After 100 trials, nearly every sampled learning rate lies between 0.01 and 0.1, and small rates such as 1e-4 were hardly tried although they are often best. What is the best change?
-A: Add `log=True` so Optuna samples the learning rate on a logarithmic scale and spreads trials across the orders of magnitude
-B: Replace `suggest_float` with `suggest_categorical` over six learning rates, which makes TPE evaluate each one in turn
-C: Narrow the range to `0.05` through `0.1`, because TPE converges faster when the search space has fewer orders of magnitude
-D: Convert the objective to a grid search over 1e-6, 1e-4 and 1e-1 on the driver, since Optuna cannot sample small numbers
-K: A
-G: ## Scale of the search space
-A parameter such as a learning rate or a regularization strength matters in orders of magnitude, not in absolute steps. A uniform draw from `1e-6` to `1e-1` puts about 90% of the samples in the top decade (0.01 to 0.1) because that decade holds 90% of the interval's length.
-## Log sampling
-`trial.suggest_float(name, low, high, log=True)` samples uniformly in log space, so each decade gets about the same share of trials. The Databricks Optuna example uses `log=True` for the SVR `C` parameter, which spans `1e-10` to `1e10`. The same applies to `suggest_int` for sizes that cover several orders of magnitude.
-W: log=True gives each order of magnitude an equal share of the trials, so the small learning rates the team missed are tried as often as the large ones.
-X: B=Six categories: a categorical parameter has no order, so TPE cannot exploit that nearby values give similar scores. It also fixes the choices up front instead of searching a continuous range.
-C=Narrower range: it cuts away the very region the team wanted to explore and hides a good optimum instead of finding it.
-D=Three-point grid on the driver: Optuna samples small numbers without trouble. A three-point grid would give up adaptive search and distribution on executors.
-T: Use log=True for parameters that span orders of magnitude, so the search is not dominated by the largest decade.
+S: A team ports a Hyperopt job that used `hp.loguniform("C", np.log(1e-10), np.log(1e10))` and `SparkTrials(parallelism=20)` to Optuna on Databricks. Which port matches the pattern in the Databricks Optuna example?
+A: `trial.suggest_float("C", np.log(1e-10), np.log(1e10))` in the objective, with `SparkTrials(parallelism=20)` passed to `optuna.create_study`
+B: `trial.suggest_float("C", 1e-10, 1e10, log=True)` inside the objective, with the study run by `MlflowSparkStudy` on a shared `MlflowStorage`
+C: `trial.suggest_categorical("C", [1e-10, 1e-5, 1, 1e5, 1e10])` declared before the objective, with `MlflowSparkStudy` acting as the sampler
+D: `trial.suggest_float("C", 1e-10, 1e10)` on the default linear scale, because Optuna rescales very wide ranges to a log scale automatically
+K: B
+G: ## From Hyperopt to Optuna
+Hyperopt declares the search space outside the objective (`hp.*` expressions passed to `fmin`) and distributes with `SparkTrials`, which Databricks documents as no longer maintained. Optuna declares the space inside the objective, with `trial.suggest_*` calls, and the Databricks integration distributes it with `MlflowSparkStudy` on `MlflowStorage`.
+## The scale of the range
+A parameter such as `C` spans many orders of magnitude. A linear draw from `1e-10` to `1e10` puts almost every sample in the top decade. The Databricks Optuna example therefore declares `svr_c = trial.suggest_float('svr_c', 1e-10, 1e10, log=True)`: the bounds are the raw values and `log=True` makes the sampler work on the log scale. Hyperopt's `loguniform` takes the logarithm of the bounds; Optuna does not.
+W: B=Raw bounds with `log=True` plus `MlflowSparkStudy`: the suggest call keeps the search on a log scale across the 20 orders of magnitude, and the study object replaces `SparkTrials` for parallel execution on executors.
+X: A=Log bounds and SparkTrials: `SparkTrials` is a Hyperopt class and not an argument of `optuna.create_study`. Log-transformed bounds would also sample between about -23 and 23 as raw values of `C`.
+C=Categorical list: five fixed values throw away the continuous range and give the sampler nothing to model between them. `MlflowSparkStudy` runs a study and is not a sampler.
+D=Default linear scale: Optuna samples linearly unless `log=True` is given, so nearly all trials land in the largest decade.
+T: Port Hyperopt log-uniform spaces to Optuna with raw bounds and log=True inside the objective, and SparkTrials to MlflowSparkStudy.
 
 @ DBX-MLP D1 T1.9 advanced tradeoff
 S: A study runs several hundred concurrent trials on Spark. Each trial reports its parameters and metrics to the MLflow tracking server, and the team sees throttled REST calls and slow trials. A colleague proposes dropping `MlflowStorage` in favor of a custom `mlflow.log_param` call in each objective. Why is `MlflowStorage` the better design?
@@ -209,7 +202,7 @@ Alternatively use `DATABRICKS_HOST` with `DATABRICKS_CLIENT_ID` and `DATABRICKS_
 W: Environment variables for host and credentials, set before the Ray cluster is created, are passed to the Ray workers, so the tasks can talk to the tracking server.
 X: B=mlflow.autolog on the driver: autologging configures the driver session and does not transfer credentials to separate Ray worker processes.
 C=Token in tune.report: a metric report is not an authentication channel, and putting a token in each report would expose the secret in results.
-D=Head node only: restricting the job to the head would remove the distributed trials, and the head runs with zero CPUs by default. Remote tasks may call MLflow once they have credentials.
+D=Head node only: restricting the job to the head would remove the distributed trials, and on Databricks the Ray head has 0 CPUs by default. Remote tasks may call MLflow once they have credentials.
 T: Set DATABRICKS_HOST and credentials as environment variables before setup_ray_cluster so Ray tasks can log to MLflow.
 
 @ DBX-MLP D1 T1.10 advanced tradeoff
@@ -266,43 +259,42 @@ C=CPU cluster: Databricks Runtime ML includes TorchDistributor, the DeepSpeed di
 D=Convert to Spark ML: Spark ML trains classical algorithms on DataFrames; a PyTorch network is not converted into a Spark ML pipeline by a flag.
 T: Prefer one machine for neural networks; scale out only when the model or data exceed single-machine memory.
 
-@ DBX-MLP D1 T1.11 advanced use-case
-S: A scikit-learn `RandomForestRegressor` is trained on a pandas DataFrame of 1.5 TB of tabular data. Training fails with out-of-memory errors even on the largest memory-optimized node available, and the data volume grows every month. Which direction is right?
-A: Move to a still larger cluster driver by adding workers, because scikit-learn automatically uses worker memory
-B: Downsample the data to fit one node permanently, since model quality never improves with more rows
-C: Add GPU nodes, because scikit-learn random forests train on GPUs when the cluster has accelerators
-D: Move to a distributed algorithm such as a Spark ML `RandomForestRegressor`, which partitions the rows across executors
+@ DBX-MLP D1 T1.11 applied use-case
+S: A data scientist develops in a local IDE through Databricks Connect against Standard compute on Databricks Runtime 17.0 or above. The training DataFrame is far too large for the laptop, and the model is a classical Spark ML algorithm. The team wants distributed training without managing a dedicated ML cluster. What does Databricks offer?
+A: A global Ray cluster started from the IDE with `setup_global_ray_cluster`, because Standard compute supports Ray only for Spark ML algorithms
+B: `TorchDistributor` launched from the IDE, because it is the module Databricks documents for training Spark ML models on Standard compute
+C: A `toPandas()` call in the IDE session followed by a scikit-learn fit, since the Databricks Connect client sends the fit to the cluster
+D: The `pyspark.ml.connect` module, which Databricks documents for distributed training and inference of Spark ML models on Standard compute
 K: D
-G: ## When vertical scaling hits the ceiling
-A scikit-learn estimator trains in one Python process on one machine. If the data does not fit in that machine's memory, a bigger node helps only until you reach the largest node type. A growing dataset will pass that limit sooner or later.
-## Horizontal scaling for data
-Spark ML algorithms are written for data parallelism: the DataFrame is split into partitions across executors, each executor computes partial statistics, and the driver combines them. Adding workers adds memory and compute. The cost is the communication between nodes and the restricted set of algorithms and options compared with scikit-learn.
-## Decision
-Single-node models are simpler and faster while the data fits. When it can no longer fit, and sampling would lose signal, switch to the distributed implementation (Spark ML, or another framework that distributes data).
-W: A Spark ML random forest keeps the data in distributed partitions, so memory grows with the cluster. It is the horizontal option when one node cannot hold the data.
-X: A=Add workers for scikit-learn: scikit-learn runs on the driver and does not spread its data over workers, so more workers add nothing.
-B=Downsample permanently: it can be right for some problems, but the premise that quality never improves with more rows is false, and the data keeps growing anyway.
-C=GPU nodes: standard scikit-learn random forests are CPU-only and do not use GPUs, so accelerators would only add cost.
-T: When the data outgrows the biggest node, scale out with a distributed algorithm such as Spark ML.
+G: ## Distributed Spark ML from a client
+Spark ML algorithms train over partitioned DataFrames, so memory and compute grow with the cluster. The Databricks "Distributed training" page says Databricks offers distributed training for Spark ML models with the `pyspark.ml.connect` module, to train Spark ML models and run model inference. In Databricks Runtime 17.0 and above, Spark ML is enabled by default in Standard compute, so you can use Spark's distributed machine learning without managing a full cluster.
+## What the other tools are for
+- `TorchDistributor`, the DeepSpeed distributor and Ray are listed for deep learning and custom parallel code.
+- Plain scikit-learn runs in one Python process: after `toPandas()` it runs in the IDE process, on the local machine.
+W: pyspark.ml.connect is the documented route for distributed Spark ML training and inference on Standard compute with Databricks Runtime 17.0 and above, so the data stays on the cluster.
+X: A=Global Ray cluster: Ray on Spark is documented for dedicated access mode, no isolation shared access mode and jobs clusters, not for Standard compute, and Ray is not the Spark ML route.
+B=TorchDistributor: it launches PyTorch training code, not Spark ML algorithms.
+C=toPandas then scikit-learn: `toPandas()` pulls all rows into the client process, which is too small for the data, and a scikit-learn fit runs in that one process and is never sent to the cluster.
+T: For classical Spark ML at scale from a client, use pyspark.ml.connect on Standard compute (Databricks Runtime 17.0 and above).
 
 @ DBX-MLP D1 T1.11 applied troubleshooting
-S: A data scientist trains a scikit-learn model in a notebook on a Spark cluster with a driver and 10 workers. Training takes just as long after the cluster is scaled from 2 to 10 workers. What explains this, and what is a suitable remedy?
-A: The workers are in the wrong availability zone; moving the cluster to the zone of the driver makes scikit-learn use all of them
-B: scikit-learn trains on the driver only, so scale the driver up or run independent work (trials, group models) on workers
-C: scikit-learn needs the `spark.sql.shuffle.partitions` value raised to the worker count before it uses all executors
-D: The model is cached on the driver by Delta; clearing the cache with `CLEAR CACHE` lets workers take over the fit
-K: B
-G: ## Where scikit-learn code runs
-Code that is plain Python (scikit-learn, pandas, XGBoost's single-node API) runs in the driver's Python process. Spark workers only participate when a Spark API, such as a DataFrame transformation, a pandas UDF, or a distributed framework like Spark ML, Ray or Optuna on Spark, hands them tasks.
-## Two correct remedies
-- **Scale vertically**: a driver with more cores and memory, with the model's own parallelism (for example `n_jobs`) set to use them.
-- **Parallelize independent work across workers**: hyperparameter trials, one model per group (with `applyInPandas`), or cross-validation folds, each trial still a single-node fit.
-Adding workers does not speed a single scikit-learn fit, but it speeds a search over many fits.
-W: A single scikit-learn fit lives on the driver, so more workers do not help. A bigger driver (scale up) or tasks that spread many separate fits across workers does.
-X: A=Availability zone: zone placement affects latency, not which machine runs a plain Python fit. The fit would still run only on the driver.
-C=Shuffle partitions: spark.sql.shuffle.partitions affects Spark SQL shuffles and has no effect on how a scikit-learn model fits.
-D=Delta cache and CLEAR CACHE: Delta caching is a storage-read cache and does not decide where Python code executes.
-T: scikit-learn fits run on the driver: scale up the driver or spread many independent fits across workers.
+S: A multi-node GPU training job on four nodes fails at start-up with `ncclInternalError: Internal check failed`, although the same code runs on one node. The message points to a problem with network communication among the GPUs. Which fix does the Databricks documentation give?
+A: Double `num_processes` beyond the GPU count, so that NCCL opens more sockets and can pick a working network interface
+B: Set `NCCL_P2P_DISABLE` to `1` in the training code, because it forces NCCL to use the primary network interface between nodes
+C: Change the backend from `nccl` to `gloo` on the GPU nodes, because gloo is the documented replacement for NCCL on multi-node GPU clusters
+D: Add `os.environ["NCCL_SOCKET_IFNAME"] = "eth0"` to the training code so that NCCL uses the primary network interface
+K: D
+G: ## Where the error comes from
+Synchronous distributed training exchanges gradients between processes through a communication library. On GPUs this is NCCL (backend `nccl`); on CPU instances it is Gloo (backend `gloo`). Both the TorchDistributor page and the Ray on Databricks page list the same multi-node symptom: `ncclInternalError: Internal check failed` means NCCL cannot use some of the network interfaces for GPU communication.
+## Documented fixes by symptom
+- `ncclInternalError: Internal check failed`: set `NCCL_SOCKET_IFNAME` to `eth0` in the training code (primary network interface).
+- `peer access is not supported between these two devices` (on G5 GPUs on AWS): set `NCCL_P2P_DISABLE` to `1`.
+- Gloo `RuntimeError: Connection refused` on CPU instances: set `GLOO_SOCKET_IFNAME` to `eth0`.
+W: Pointing NCCL at the primary network interface with NCCL_SOCKET_IFNAME is the documented remedy for this multi-node error.
+X: A=More processes: extra processes do not change which interface NCCL uses, and a process count above the GPU count is not how NCCL selects a network path.
+B=NCCL_P2P_DISABLE: the documented use is the different error about peer access between two devices on G5 GPUs. It does not select the network interface between nodes.
+C=Gloo on GPUs: gloo appears in the documentation as the CPU backend, with its own interface variable, not as a replacement for NCCL on GPU clusters.
+T: ncclInternalError on multi-node GPU training: set NCCL_SOCKET_IFNAME to eth0 so NCCL uses the primary network interface.
 
 @ DBX-MLP D1 T1.11 advanced troubleshooting
 S: A team distributes PyTorch training over 8 GPU nodes and measures a 6x speed-up compared with 1 node. Doubling to 16 nodes gives only 1.2x more. GPU utilization on each node drops during the steps. What is the most likely cause and the right reaction?
@@ -324,23 +316,22 @@ B=GPU amount per Spark task: that setting is about Spark tasks claiming GPUs in 
 D=Autoscaling down: an autoscale removal during training would fail or stall the job rather than produce steady diminishing returns at higher node counts.
 T: Diminishing speed-up with falling GPU utilization signals communication overhead: prefer fewer, larger machines.
 
-@ DBX-MLP D1 T1.11 applied use-case
-S: A team must evaluate 400 hyperparameter combinations for a small LightGBM model. One fit takes 3 minutes on a single 16-core node and uses little memory. The team may add machines. What is the most effective use of them?
-A: Buy a node with four times the memory, since memory is the bottleneck for LightGBM fits
-B: Switch each fit to a distributed algorithm over 32 workers so that every fit uses the whole cluster
-C: Add GPU nodes and retrain, because hyperparameter search runs faster on GPUs for every model type
-D: Add worker nodes and run many single-node trials in parallel, for example with Optuna on Spark or Ray Tune
-K: D
-G: ## Two kinds of parallelism
-- **Within one fit**: split data or model across machines (distributed training). Worthwhile when one machine cannot hold the data or model.
-- **Across fits**: run independent trials at the same time. Each trial stays a simple single-node fit and no communication between trials is needed (apart from sharing results with the sampler).
-## Choosing
-A small model with a 3-minute fit and low memory use does not need to be distributed. The search is "embarrassingly parallel": 400 trials on 40 concurrent slots finish in about a tenth of the sequential time. Databricks supports this with Optuna through `MlflowSparkStudy` and with Ray Tune on a Ray-on-Spark cluster. Adding nodes is the horizontal-scaling choice that matches the workload.
-W: Independent single-node trials can run in parallel on added workers, which cuts wall time almost linearly without any communication overhead inside a fit.
-X: A=Bigger memory: the fits use little memory, so more memory does not help. The bottleneck is the number of sequential trials.
-B=Distributed fits: distributing a small model adds communication overhead to each fit and runs the 400 trials one after another over the whole cluster. It is slower for this workload.
-C=GPU nodes: gradient boosting on small data is not generally faster on GPUs, and the claim for every model type is false.
-T: Many independent small fits are scaled horizontally by running trials in parallel, not by distributing each fit.
+@ DBX-MLP D1 T1.11 advanced troubleshooting
+S: A cluster has 6 worker nodes, each with 4 GPUs and 48 cores. A team runs `setup_ray_cluster(max_worker_nodes=6)` and starts Ray Tune trials that each request one GPU. The trials never start, although the GPUs of the cluster are idle. What should the engineer change?
+A: Pass `num_cpus_worker_node=48` and `num_gpus_worker_node=4`, so that each Spark worker hosts one Ray worker owning all of its cores and GPUs
+B: Raise `max_worker_nodes` to 24, one for each GPU in the cluster, because the number of Ray workers decides how many GPUs Ray can see
+C: Set `num_gpus_head_node=4`, because the Ray head schedules every GPU trial and hands out the GPUs of the workers to the trials
+D: Set `spark.executor.memory` to a small value such as 4g, because Spark executors keep all GPUs reserved until their memory is reduced
+K: A
+G: ## Ray workers get only what you declare
+`setup_ray_cluster` starts a background Spark job, and each Spark task becomes a Ray worker node. The Databricks scaling page gives the defaults for a Ray worker node: `num_cpus_worker_node` is 1 and `num_gpus_worker_node` is 0. A Ray worker that declares zero GPUs can never run a task that requests a GPU, whatever hardware the Spark worker has.
+## Recommended sizing
+Set `num_cpus_worker_node` to the number of CPU cores per Spark worker and `num_gpus_worker_node` to the number of GPUs per Spark worker. Then each Spark worker launches one Ray worker node that fully uses the machine.
+W: Declaring the cores and GPUs per Ray worker node lets the Ray scheduler place GPU trials on them, and one Ray worker per Spark worker uses the whole node.
+X: B=24 Ray workers: each would still declare 0 GPUs by default, so GPU trials still could not be placed.
+C=GPUs on the head: the head runs on the Spark driver and by default has 0 CPUs and 0 GPUs; GPU capacity for trials comes from the Ray worker nodes.
+D=Small executor memory: this setting is recommended for hybrid Spark and Ray memory pressure and does not declare GPUs to Ray.
+T: Ray workers default to 1 CPU and 0 GPUs: set num_cpus_worker_node and num_gpus_worker_node to the per-node hardware.
 
 @ DBX-MLP D1 T1.11 advanced tradeoff
 S: A forecasting team currently fits a scikit-learn model on one large memory-optimized node. Data doubles each year. The team asks for the strongest argument for investing in a distributed Spark ML implementation now, although today's job runs fine on one node. Which argument is correct?
