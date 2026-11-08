@@ -17,8 +17,8 @@ S: A developer defines a Python UDF and applies it to a nullable `name` column i
 `df.select(up("name")).show()`
 
 What happens?
-A: Spark skips the function for null inputs and returns `null` for those rows, so the query finishes normally
-B: The query fails with a Python exception from a worker, because the lambda receives `None` and `None.upper()` is invalid
+A: Spark skips the function for null inputs and returns `null` for those rows, so the query finishes without any error
+B: The query fails with a Python exception in a worker, because the lambda receives `None` and calls `.upper()` on it
 C: Spark passes an empty string for each null, so the function returns an empty string for those rows
 D: The analyzer rejects the plan before execution, because a nullable column cannot be passed to a UDF
 K: B
@@ -62,10 +62,10 @@ T: `register` without a return type gives a string column; declare the type you 
 
 @ DBX-ASD D3 T3.8 applied use-case
 S: A UDF generates a random token per row: `tok = F.udf(lambda: str(random.random()), "string")`. A query uses the same expression `tok()` twice in one select, and the developer needs each call to be treated as an independent, non-repeatable evaluation. What should be changed?
-A: Mark the UDF with `asNondeterministic()` so the optimizer does not assume it returns the same value and can merge or reorder its calls
+A: Mark the UDF with `asNondeterministic()` so the optimizer does not assume the same output for repeated calls
 B: Wrap the UDF in `F.broadcast` so every executor receives the same random seed before running it
 C: Register it with `useArrow=False` so each row is serialized through pickle and evaluated exactly once
-D: Call `cache()` on the DataFrame afterwards so that the optimizer can no longer merge identical expressions
+D: Call `cache()` on the DataFrame afterwards so that the optimizer can no longer merge identical UDF expressions in the plan
 K: A
 G: ## Determinism is an assumption the optimizer makes
 User-defined functions are considered deterministic by default: the same input gives the same output. Because of this, the optimizer may eliminate duplicate invocations, reuse a result, or call the function more times than it appears in the query.
@@ -207,8 +207,8 @@ S: What does this code print?
 `rdd = sc.parallelize([1, 2, 3, 4])`
 `mapped = rdd.map(lambda x: acc.add(x) or x)`
 `print(acc.value)`
-A: `0`, because `map` is lazy and no action has run, so no task has added to the accumulator yet
-B: `10`, because the four elements are added as the `map` call is submitted
+A: `0`, because `map` is lazy and no action has run, so no task has added yet
+B: `10`, because the four elements are added to the accumulator as soon as the `map` call is submitted
 C: An error, because an accumulator cannot be updated inside `map`
 D: `4`, because `map` runs once per partition and adds one per partition
 K: A
@@ -229,8 +229,8 @@ T: An accumulator changed in a transformation has no new value until an action r
 S: A job counts malformed rows in an accumulator that a UDF inside `withColumn` increments. After an executor was lost and a stage re-executed, the accumulator total is larger than the real number of malformed rows. What explains this?
 A: Accumulators are not thread-safe, so concurrent adds from several tasks are counted twice
 B: Spark applies each accumulator update twice when a DataFrame is written with `mode("overwrite")`
-C: The accumulator value is read on the driver before the tasks finish, so it contains partial results from retried attempts
-D: Updates made inside a transformation can be applied more than once when tasks or stages are re-executed, unlike updates inside actions
+C: The accumulator value is read on the driver while the tasks are still running, so it holds partial results of retried attempts
+D: Updates made inside a transformation can be applied again when tasks or stages are re-executed, unlike updates in actions
 K: D
 G: ## When accumulators can overcount
 Spark guarantees exactly-once accumulator updates only for updates performed inside **actions** such as `foreach`: a restarted task does not add again. For updates in **transformations** (the map-like functions behind `withColumn` and UDFs) each task's update may be applied more than once if a task or a stage is re-executed, for example after executor loss, speculative execution or recomputation of a non-cached DataFrame.
@@ -257,8 +257,8 @@ S: A developer counts rows with a Python global and runs the job on a cluster:
 
 On the driver, `counter` is still `0`. Which explanation and fix are correct?
 A: `foreach` is not an action, so the function never ran; add `.collect()` to start the job
-B: Each executor mutated its own copy of `counter`; Spark does not propagate such changes, so an accumulator should be used
-C: Spark sums the copies only when `spark.sql.shuffle.partitions` is larger than the partition count; raise it
+B: Each executor changed its own copy of `counter`; Spark does not send it back, so an accumulator should be used
+C: Spark sums the executor copies back into the driver variable only when `spark.sql.shuffle.partitions` is larger than the partition count; raise it
 D: The global must be declared with `broadcast` first so that executors can write back to the driver
 K: B
 G: ## Closures and shared state
@@ -276,8 +276,8 @@ T: Never mutate driver variables in tasks; use an accumulator.
 
 @ DBX-ASD D3 T3.9 applied comparison
 S: A job reuses a broadcast variable `bc` in several stages. After the last use, the developer wants to free its memory on the executors but might use `bc` again in a later job and accept that it would be sent again. Which call fits?
-A: `bc.unpersist()`, which releases the executor copies and re-broadcasts the value if `bc` is used afterwards
-B: `bc.destroy()`, which releases the executor copies and lets `bc` be used again afterwards
+A: `bc.unpersist()`, which releases executor copies and re-broadcasts the value on next use
+B: `bc.destroy()`, which releases the executor copies permanently and lets `bc` be reused in later jobs with a fresh broadcast
 C: `del bc.value`, which removes the data from the executors and keeps the handle valid
 D: `sc.broadcast(None)`, which replaces the executor copies and clears the old value
 K: A
@@ -298,8 +298,8 @@ T: `unpersist()` frees executor copies but allows reuse; `destroy()` is final.
 @ DBX-ASD D3 T3.10 applied use-case
 S: A batch job joins `orders` (3 TB) with `countries` (2 MB) using `orders.join(F.broadcast(countries), "country_code")`. What does `F.broadcast` do here?
 A: It persists `countries` on the driver only and forces a sort-merge join on both inputs
-B: It copies the large `orders` table to every executor so that each task can filter it locally
-C: It marks `countries` as small enough to be sent to every executor, so `orders` is joined without being shuffled
+B: It copies the large `orders` table to every executor so that each task can filter and join it locally without any network transfer
+C: It marks `countries` as small enough to be sent to every executor, so `orders` is not shuffled
 D: It repartitions `countries` by `country_code` to match the partitioning of `orders`
 K: C
 G: ## Purpose of the broadcast join
@@ -382,9 +382,9 @@ S: A developer joins events with a small table of time ranges:
 `e.join(F.broadcast(r), (e.ts >= r.start) & (e.ts < r.end))`
 
 There is no equality condition. What join does Spark use for this hint?
-A: Broadcast nested loop join, because the broadcast join without an equi-join key is a nested loop join
+A: Broadcast nested loop join, because there is no equi-join key
 B: Broadcast hash join, because the hint always builds a hash table on the small side
-C: An `AnalysisException`, because broadcast joins require at least one equality condition
+C: An `AnalysisException` is raised at planning time, because broadcast joins require at least one equality condition
 D: Sort-merge join, because range conditions can be sorted on both sides
 K: A
 G: ## Equi-joins and non-equi joins
@@ -443,9 +443,9 @@ T: To reduce the partition count cheaply use `coalesce`; `repartition` always sh
 
 @ DBX-ASD D4 T4.1 advanced troubleshooting
 S: A job runs expensive transformations on a large DataFrame and then calls `df.coalesce(1).write.parquet(path)` to produce a single file. The transformations, which used to run on many tasks, now seem slow. Why, and what is the alternative?
-A: The whole computation upstream of `coalesce(1)` can run in a single task; `repartition(1)` adds a shuffle but keeps the upstream stage parallel
-B: `coalesce(1)` triggers an extra shuffle; replacing it with `repartition(1)` removes the shuffle
-C: `coalesce(1)` makes Spark skip Catalyst optimization; setting `spark.sql.adaptive.enabled` to `true` fixes it
+A: The upstream work collapses into one task; `repartition(1)` adds a shuffle but keeps that work parallel
+B: `coalesce(1)` triggers an extra full shuffle of all rows; replacing it with `repartition(1)` removes that shuffle
+C: `coalesce(1)` makes Spark skip Catalyst optimization; setting AQE on fixes it
 D: Writing one file forces the driver to collect all rows; `toPandas()` would be faster
 K: A
 G: ## A drastic coalesce
@@ -463,9 +463,9 @@ T: `coalesce(1)` can serialize the whole upstream stage; `repartition(1)` keeps 
 
 @ DBX-ASD D4 T4.1 applied troubleshooting
 S: A transformation stage reads a 600 GB dataset that the source delivered as 10 partitions. The cluster has 80 executor cores, and the Spark UI shows only 10 tasks running while 70 cores idle. How should the developer improve utilization?
-A: Use `coalesce(5)` so that each task gets more data and runs more efficiently
+A: Use `coalesce(5)` so that each task gets more data and the per-task overhead is spread more efficiently
 B: Increase the driver memory so the scheduler can start more tasks at once
-C: Call `repartition(320)` (a few partitions per core) before the expensive transformations
+C: Call `repartition(320)` before the expensive steps
 D: Call `cache()` on the DataFrame so that idle cores read it from memory
 K: C
 G: ## Partitions decide parallelism
@@ -484,8 +484,8 @@ T: Few partitions leave cores idle; repartition upward to a multiple of the core
 @ DBX-ASD D4 T4.1 advanced troubleshooting
 S: A developer runs `df.repartition("country")` before a heavy transformation. About 70% of the rows have `country = 'US'`. One task runs far longer than the others. What is the cause?
 A: The shuffle uses range partitioning, so rows are sorted and the last partition is largest
-B: Hash partitioning on the column sends all rows with the same value to one partition, so the `US` partition receives most of the data
-C: `repartition` with columns always creates exactly one partition per distinct value, and `US` is processed first
+B: Hash partitioning sends all rows with the same value to one partition, so the `US` partition gets most data
+C: `repartition` with columns creates exactly one partition per distinct value, and `US` happens to be scheduled first
 D: The `US` rows are read from a single file, so the input task cannot be split by the repartition
 K: B
 G: ## Partitioning by column and data skew
@@ -503,10 +503,10 @@ T: Repartitioning by a skewed column concentrates the dominant value in one part
 
 @ DBX-ASD D4 T4.1 advanced use-case
 S: A `groupBy("customer_id").sum("amount")` stage has one straggler task: a single `customer_id` owns 60% of all rows. The query has no join. How can the developer remove the skew?
-A: Enable AQE skew join handling; it splits skewed partitions of aggregations the same way as for joins
+A: Enable AQE skew join handling; it splits skewed partitions of aggregations the same way as for joins, with no code change
 B: Call `coalesce(1)` before the aggregation so that all rows of the key are in one task
 C: Increase `spark.sql.shuffle.partitions`; more partitions will split the rows of the single key
-D: Add a random salt column, aggregate by `customer_id` and salt first, then aggregate the partial sums by `customer_id`
+D: Add a random salt column, aggregate by key and salt, then aggregate the partial sums by key
 K: D
 G: ## Salting a skewed aggregation
 All rows with the same key go to the same shuffle partition, so more partitions or a different partition count do not help a single dominant key. Adaptive skew handling is documented for sort-merge joins ("dynamically handles skew in sort-merge join"), not for aggregations.
@@ -564,8 +564,8 @@ T: Without AQE, size `spark.sql.shuffle.partitions` to the data volume.
 @ DBX-ASD D4 T4.1 applied definition
 S: A DataFrame has 100 partitions. What does `df.coalesce(500)` return?
 A: A DataFrame with 500 partitions, created by splitting each partition into five
-B: A DataFrame with 100 partitions, because `coalesce` cannot increase the number of partitions
-C: A DataFrame with 500 partitions, created by a full shuffle like `repartition(500)`
+B: A DataFrame with 100 partitions, since `coalesce` cannot increase the count
+C: A DataFrame with 500 partitions, created by a full shuffle just like `repartition(500)` would do
 D: An error, because the argument must not exceed the current number of partitions
 K: B
 G: ## coalesce only decreases
@@ -585,8 +585,8 @@ T: `coalesce` cannot increase partitions; ask for more with `repartition`.
 S: With AQE on, `spark.sql.adaptive.skewJoin.skewedPartitionFactor` is 5 and `skewedPartitionThresholdInBytes` is 256 MB. After a shuffle for a sort-merge join, the median partition is 100 MB, and three other partitions are 240 MB, 400 MB and 620 MB. Which partitions are treated as skewed?
 A: 400 MB and 620 MB, because both exceed 256 MB
 B: 240 MB, 400 MB and 620 MB, because all are above twice the median
-C: None of them, because skew handling needs a partition larger than 1 GB
-D: Only 620 MB, because it is larger than both 5 times the median (500 MB) and 256 MB
+C: None of them, because skew handling needs a partition that is larger than 1 GB in total size
+D: Only 620 MB, since it is above 5 times the median and above 256 MB
 K: D
 G: ## Skew join detection in AQE
 AQE optimizes skewed sort-merge joins by splitting (and replicating the other side if needed) skewed partitions into roughly even tasks. It is on when `spark.sql.adaptive.enabled` and `spark.sql.adaptive.skewJoin.enabled` are true, which are the defaults.
@@ -595,7 +595,7 @@ AQE optimizes skewed sort-merge joins by splitting (and replicating the other si
 - Here: factor limit = 5 x 100 MB = 500 MB, absolute limit = 256 MB, so the bigger of the two (500 MB) decides.
 ## Example
 400 MB passes the 256 MB test and fails the 500 MB test, so it is not skewed.
-W: Both conditions: only 620 MB is above 500 MB (5 x median) and above 256 MB.
+W: Both conditions must hold: only the 620 MB partition is above 500 MB (5 x the 100 MB median) and also above the 256 MB byte threshold, so AQE splits it.
 X: A=Threshold only: the absolute threshold is a necessary condition, not a sufficient one; 400 MB is below 5 times the median.
 B=Twice the median: the factor is 5 by default and a size must also exceed the byte threshold, so 240 MB does not qualify.
 C=1 GB rule: no such fixed limit exists; the limits come from the factor and threshold settings.
@@ -603,9 +603,9 @@ T: Skewed means above factor x median and above the byte threshold.
 
 @ DBX-ASD D4 T4.2 advanced use-case
 S: A team sets `spark.sql.autoBroadcastJoinThreshold` to `-1` to stop broadcast joins. AQE is enabled, and `spark.sql.adaptive.autoBroadcastJoinThreshold` is not set. A runtime statistic shows one join side is only 3 MB after filtering. What does AQE do?
-A: It converts the sort-merge join to a broadcast hash join, because AQE ignores the static threshold
+A: It converts the sort-merge join to a broadcast hash join, because AQE ignores the static threshold and uses a built-in limit
 B: It fails the query, because the two broadcast thresholds disagree
-C: It keeps the sort-merge join, because the adaptive threshold defaults to the static value, so `-1` disables conversion too
+C: It keeps the sort-merge join, since the adaptive threshold defaults to the static `-1`
 D: It converts the join only if `spark.sql.adaptive.localShuffleReader.enabled` is set to false
 K: C
 G: ## AQE and the broadcast thresholds
