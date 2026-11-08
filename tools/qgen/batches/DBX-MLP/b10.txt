@@ -38,7 +38,7 @@ V: Data profiling, Unity Catalog
 S: An inference profile for a regression model should track the share of rows where the absolute error exceeds 5 units in every window. An engineer proposes a derived metric built from the existing `avg` and `count` statistics of the prediction and label columns. Why does this not work, and what is the correct definition?
 A: Derived metrics only accept one input column; the engineer should define two derived metrics, one per column, and subtract them in the dashboard query
 B: Drift metrics hold all per-row results of the windows; define a drift metric over `{{current_df}}` and `{{base_df}}` that counts the rows above 5 units
-C: Averages cannot recover per-row errors; define an aggregate metric with `input_columns=[":table"]` and `avg(CASE WHEN abs({{prediction_col}} - {{label_col}}) > 5 THEN 1 ELSE 0 END)`
+C: Averages cannot show row errors; use an aggregate metric on `[":table"]` with `avg(CASE WHEN abs({{prediction_col}} - {{label_col}}) > 5 THEN 1 ELSE 0 END)`
 D: Averages of prediction and label give the exact error share; the engineer only has to set a different `output_data_type`, such as an integer type
 K: C
 G: ## Which metric type can see rows
@@ -223,22 +223,26 @@ D=User as model id: the model id exists to compare model versions, creating a sl
 T: Slice on low-cardinality or bucketed expressions; hunt single users with a query instead.
 V: Data profiling
 
-@ DBX-MLP D2 T2.19 applied troubleshooting
-S: A time series profile with a monthly granularity was created on 8 November. In the profile metrics table, the first monthly window shows row counts that are only about a quarter of the later months, although the source receives steady traffic. The pipeline runs without errors. What explains the first window?
-A: The slicing expression filtered out three quarters of the first month, so the slice key must be dropped to restore the counts
-B: Late-arriving rows are blocked by the profile, so the first window needs to be backfilled by setting a data retention period
-C: The first window is partial because a new time series or inference profile looks back 30 days from creation
-D: The monthly window is calculated from the baseline table; the first value of the baseline is always empty
+@ DBX-MLP D2 T2.19 applied use-case
+S: An inference profile uses `slicing_exprs=["amount > 1000"]`. An analyst wants the accuracy of only the orders above 1000 from the profile metrics table. Which filter selects exactly those rows?
+A: `slice_key = 'amount' AND slice_value > 1000`, because the slice key is the column name and the value is the threshold
+B: `slice_key IS NULL AND amount > 1000`, because the whole-table rows keep the original columns and can be filtered by them
+C: `slice_key = 'amount > 1000' AND slice_value = 'true'`, because a Boolean expression forms one key with true and false slices
+D: `column_name = 'amount > 1000'`, because the slice expression is stored in the column that names the monitored column
 K: C
-G: ## Look-back at creation
-For time series and inference profiles, the first analysis looks back 30 days from the time of profile creation. The cut-off can fall in the middle of a week or month, so the first window may contain only part of the period. The effect is limited to the first window; later windows are complete.
-## What to do
-Treat the first window of a weekly or longer granularity as incomplete: exclude it from charts or alerts (for example by the window start), instead of searching for a pipeline fault.
-W: Partial first window: the profile reads only the last 30 days at creation, so a monthly window that starts earlier is cut.
-X: A=Slicing: a slice adds rows keyed by `slice_key`; the whole-table rows with a NULL key would still be partial.
-B=Blocked late data: there is no such blocking; the shortfall exists only in the first window and is caused by the 30-day cut.
-D=Baseline: a baseline table feeds drift metrics; it does not change the window counts of the profile metrics table.
-T: The first window of a new time series or inference profile can be partial because creation reads only 30 days back.
+G: ## Reading a slice
+Every slice is identified in the metric tables by `slice_key` and `slice_value`. For a Boolean expression such as `col_2 > 10`, the slice key is the expression text and the values are `true` and `false`; for a plain column the key is the column name and the values are its distinct values. The whole table is `slice_key` NULL and `slice_value` NULL.
+```sql
+SELECT window.start, accuracy_score FROM main.ml.t_profile_metrics
+WHERE slice_key = 'amount > 1000' AND slice_value = 'true'
+```
+## Pitfall
+The metric tables hold statistics, not the monitored rows, so no filter on the raw column can be applied to them. Also filter on `granularity` and `model_id` when several exist.
+W: Key plus value: the expression text is the key and `true` marks the large orders, so the filter returns only their statistics.
+X: A=Column name as key: the key of a Boolean slice is the expression `amount > 1000`, and the value is true or false, not a number.
+B=Raw column filter: the metric tables hold computed statistics and have no `amount` column; NULL slice rows are the whole table.
+D=Column name field: `column_name` holds the monitored column or `:table`, never a slicing expression.
+T: A Boolean slicing expression is the slice key, with slice values true and false.
 V: Data profiling
 
 @ DBX-MLP D2 T2.20 applied troubleshooting
@@ -302,44 +306,46 @@ C=Build logs: they cover environment creation after deployment, not request hand
 T: The health metric shows that errors rise; split 4xx from 5xx in the inference table and read the service logs.
 V: Model Serving, Inference tables
 
-@ DBX-MLP D2 T2.20 advanced use-case
-S: Load tests show an average latency of 160 ms per request. The endpoint must serve a steady 250 requests per second without queueing. Using the documented sizing rule, what minimum provisioned concurrency should the scale-out range have?
-A: 250, one unit per request per second, regardless of how long a request takes
-B: 40, because required concurrency is the request rate multiplied by the average latency in seconds
-C: 1,563, because required concurrency is the request rate divided by the latency in seconds
-D: 6, because required concurrency is the latency in milliseconds divided by the request rate per second
+@ DBX-MLP D2 T2.20 advanced troubleshooting
+S: A client library records a P99 of 480 ms for calls to a custom model endpoint, while the Latency (ms) P99 chart of the endpoint shows 350 ms. Request queue time is low and model inference latency P99 is 120 ms. How should the gap be read?
+A: The chart averages the replicas while the client reports the slowest one, so the gap proves an unbalanced load that needs a larger maximum scale-out
+B: The chart covers the round trip inside Databricks without extra delays such as authentication and rate limiting, so a client sees more than the chart
+C: Inference latency is included in the chart, so subtracting 120 ms from the client value leaves 360 ms, which is purely the client's network time
+D: Client and endpoint P99 values must always match, so the difference shows that the metric is sampled and should be ignored in alerts
 K: B
-G: ## Provisioned concurrency
-Provisioned concurrency is the maximum number of parallel requests the endpoint can handle; it moves between the minimum and maximum of the compute scale-out range as traffic changes. The documentation gives the sizing rule
-`required concurrency = target QPS x average latency (seconds)`
-which is Little's law: requests in flight equal arrival rate times time in the system. Here `250 x 0.16 = 40`.
+G: ## What Latency measures
+The Latency (ms) metric is the median (P50) and 99th percentile (P99) round-trip time within Databricks. It does not include additional Databricks-related latencies such as authentication and rate limiting. Model inference latency is the part spent computing the prediction (including feature lookups), and request queue time is the wait for a replica; both are inside the total.
 ## Practice
-Set the minimum high enough for baseline traffic without queueing, the maximum for spikes while keeping cost under control, and check the result with load tests and the queue time metric.
-W: 250 x 0.16 = 40 requests in flight on average; that is the concurrency that avoids queueing at steady load.
-X: A=250: that would hold if each request lasted one second; at 160 ms the number in flight is much smaller.
-C=Dividing: division by the latency gives a larger number for faster models, which is the reverse of the relationship.
-D=Latency over rate: the result has no unit of concurrency, and it falls as traffic rises.
-T: Required concurrency is QPS times average latency in seconds; size the minimum for baseline load.
+Use the chart to find where time goes inside the endpoint and client-side timing for what the chart leaves out. A client number above the chart is expected and is not a fault by itself.
+W: Scope of the metric: the chart leaves out authentication and rate limiting, so the client legitimately measures more.
+X: A=Unbalanced replicas: the percentiles are computed over requests, queue time is low, and nothing points to uneven load or to a capacity shortage.
+C=Subtraction: the remainder holds authentication, rate limiting and network time together, and there is no basis to call it all client network.
+D=Must match: the chart and a client measure different spans, so differences are normal; the metric is not sampled away.
+T: Endpoint Latency excludes authentication and rate limiting, so client-measured latency is higher by design.
 V: Model Serving
 
 @ DBX-MLP D2 T2.20 applied use-case
-S: A compliance review needs 90 days of endpoint latency, error rate, CPU and memory history for a custom model endpoint. The Serving UI shows only the last 14 days. Which approach delivers the history?
-A: Create a data profile on the inference table, which stores the CPU and memory of the replicas as columns
-B: Raise the retention setting of the Metrics tab to 90 days in the endpoint configuration
-C: Export the service logs from the Logs tab once a month, since ephemeral logs keep every metric value for as long as the endpoint exists
-D: Scrape the metrics export API with Prometheus or Datadog (or persist OpenTelemetry telemetry to Unity Catalog tables) for long-term storage
+S: An SRE team runs its own Prometheus server and wants CPU and memory usage of a custom model endpoint scraped every minute for alert rules. Which scrape configuration matches the documented approach?
+A: Enable remote write on the endpoint so that it pushes its metrics to the Prometheus server, using an endpoint-side setting for the target address
+B: Scrape the `/serving-endpoints/<name>/invocations` path with a sample payload, because every response header carries the replica CPU and memory
+C: Scrape each replica directly on port 9090, because every replica exposes its own Prometheus listener inside the workspace network
+D: Scrape `/api/2.0/serving-endpoints/<name>/metrics` over https on the workspace host, with a bearer token in the `authorization` block
 K: D
-G: ## Retention of health data
-Endpoint health metrics are available by default in the Serving UI for the last 14 days. For longer history the data has to be taken out:
-- Metrics export: the endpoint serves its health metrics at `/api/2.0/serving-endpoints/<name>/metrics`; Prometheus or Datadog scrape it (for example every minute), and the observability tool keeps the history.
-- OpenTelemetry for custom model endpoints: persists system logs, application logs, metrics and traces to Unity Catalog Delta tables for long-term retention, queryable with SQL.
-## Not suitable
-An inference table logs requests and responses, and a data profile on it describes data and model quality, not replica CPU or memory.
-W: Metrics export or OpenTelemetry persistence both move the infrastructure metrics into a store with the retention that the review needs.
-X: A=Profile on the inference table: it profiles payload data and predictions; replica CPU and memory are not columns of that table.
-B=Retention setting: the 14 days are fixed for the UI; there is no endpoint option that extends them.
-C=Ephemeral logs: they carry `stdout` and `stderr` streams for debugging and are not a metric store.
-T: For history beyond 14 days, export health metrics to Prometheus or Datadog or persist OpenTelemetry data to Unity Catalog.
+G: ## Metrics export
+Endpoint health metrics (latency, request rate, error rate, CPU, memory, provisioned concurrency) are shown in the Serving UI and are also served in a scrapable format. The endpoint exposes them at `/api/2.0/serving-endpoints/<name>/metrics`, and Prometheus pulls them with a normal scrape job; Datadog reads the same path with its OpenMetrics integration.
+```yaml
+scrape_interval: 1m
+metrics_path: '/api/2.0/serving-endpoints/<name>/metrics'
+scheme: 'https'
+authorization: {type: 'Bearer', credentials: '<token>'}
+```
+## Why export
+The UI keeps 14 days; an external tool keeps its own history and alert rules. Metric names such as `cpu_usage_percentage` and `mem_usage_percentage` are then queried there.
+W: Pull from the metrics path: the endpoint is a scrape target with token authentication, so the Prometheus server collects it on its own schedule.
+X: A=Remote write: the endpoint does not push; the observability tool pulls from the metrics path.
+B=Invocations path: that path scores requests; health metrics are not returned in its responses.
+C=Replica port: replicas are not scrape targets; the metrics come from one workspace path.
+T: Health metrics are pulled from the endpoint metrics path with a bearer token by Prometheus or Datadog.
 V: Model Serving
 
 @ DBX-MLP D2 T2.20 advanced troubleshooting
@@ -419,28 +425,26 @@ T: Keep the blue environment until quality evidence arrives; fast rollback is wh
 V: Model Serving
 
 @ DBX-MLP D3 T3.1 advanced troubleshooting
-S: A canary sends 10 percent of 400 requests per second to the `challenger` served entity, sized for that share. The checks pass, and the team sets the split to 100 percent challenger. Minutes later P99 latency and request queue time of the endpoint jump and some requests are rejected. What was missed?
-A: The traffic split must be changed in steps of 1 percent, since larger changes are rejected by the traffic configuration
-B: A fully promoted entity must be re-registered under a new alias, because the canary alias is limited to 10 percent
-C: Request queue time is not affected by a traffic change, so a client-side network fault must have occurred at the same time
-D: The challenger was sized for 10 percent; before raising its share, its scale-out range had to cover full traffic (QPS x latency)
-K: D
-G: ## Capacity follows the share
-Each served entity has its own compute scale-out range. A challenger sized for 10 percent of 400 requests per second handles about 40 requests per second. With 160 ms average latency, `40 x 0.16 = 6.4` concurrent requests; at full traffic `400 x 0.16 = 64`. Autoscaling needs time to detect load and add capacity, and meanwhile requests queue and can be rejected.
-## Safer promotion
-- Raise the challenger's minimum and maximum concurrency before moving the split, using required concurrency = QPS x average latency in seconds.
-- Move the split in stages and watch request queue time and error rate between steps.
-- Keep the former entity until the new one is stable.
-W: Capacity of the promoted entity: sizing was for the canary share, so a full switch sends 10 times the load into an entity that has not scaled yet.
-X: A=Step size: the traffic configuration accepts any split that adds up; the problem is capacity, not the size of the step.
-B=Alias limit: an alias on a registered model version has no traffic limit, and the served entity configuration decides the share.
-C=Ignoring queue time: queue time grows exactly when requests arrive faster than replicas take them, so the traffic change explains it.
-T: Resize the challenger for the full load (QPS x latency) before the split is raised, and promote in stages.
+S: A canary sends 20 percent of requests to the `challenger` served entity of an endpoint. Its error rate climbs while `current` is healthy. The team wants users off the challenger quickly and without an outage. What should it do?
+A: Submit one configuration update that sets `current` to 100 percent and removes `challenger`; the old configuration keeps serving until the new one is ready
+B: Delete the endpoint and recreate it with `current` only, because a traffic split cannot be changed after an endpoint exists
+C: Register the previous model version under a new alias, since served entities follow the alias and the split is then ignored for the challenger
+D: Wait for the next scheduled refresh of the profile, which shifts traffic toward the entity with the lower error rate automatically
+K: A
+G: ## Canary rollback
+In Model Serving the split lives in the endpoint configuration (`served_entities` and `traffic_config`). Changing it is a configuration update: the old configuration keeps serving prediction traffic until the new one is ready, so the endpoint stays available while the challenger is taken out. Only one update can run at a time, so the rollback is a single update.
+## What does not roll back
+Monitoring never changes traffic by itself, and a served entity names a model version; moving an alias does not rewire a running entity.
+W: One update that restores `current` to 100 percent: this is the supported way to change a split, and the platform keeps serving until it is applied.
+X: B=Recreate the endpoint: splits are changed with an update, and recreating adds downtime and changes nothing that an update cannot do.
+C=New alias: a served entity is configured with a model version; an alias change does not remove the challenger from the split.
+D=Profile refresh: monitoring reports and alerts; it never re-routes traffic.
+T: Roll a canary back with one configuration update that restores the old entity to 100 percent.
 V: Model Serving
 
 @ DBX-MLP D3 T3.1 advanced use-case
 S: A low-traffic internal endpoint receives about 30 requests per minute, from a few batch clients. A new version should go live, and a canary at 5 percent would deliver about 1.5 requests per minute to it. How should the team validate the new version?
-A: Use a 1 percent canary for several weeks, since a longer observation period always collects enough requests for a reliable quality decision
+A: Use a 1 percent canary for several weeks, since a longer observation period always collects enough requests for a reliable decision on quality
 B: Add the version as a served entity, replay recorded production requests through its own served-model path, compare results, then switch all traffic and keep the old entity
 C: Skip validation because low traffic means low risk, and replace the version directly with one configuration update
 D: Raise the canary to 50 percent so that statistics converge faster, accepting that half of the clients see the new model
@@ -475,20 +479,23 @@ T: High-traffic endpoints can learn from a 1 to 5 percent canary quickly, so sta
 V: Model Serving
 
 @ DBX-MLP D3 T3.1 advanced troubleshooting
-S: A blue-green switch is done inside one endpoint: the new entity `green` was set to 100 percent and the old entity `blue` to none of the requests, with `scale_to_zero_enabled: true` on both to save cost. A defect appears and the team moves 100 percent back to `blue`. The first requests then take far longer than usual and some time out. What was the design flaw?
-A: Zero traffic on `blue` caused the platform to delete the entity, which is why it had to be created again during the incident
-B: Traffic percentages can only be changed once a day, so the rollback was queued behind the earlier change and delayed
-C: Rollback to a previous entity always rebuilds its Python environment from the registered model version before serving
-D: The standby `blue` entity had scaled to zero, so rollback met a cold start; keep a minimum capacity on the standby while it is the rollback target
+S: A blue-green cutover uses two endpoints, `score-blue` and `score-green`. Data scientists validated green with their own accounts. At cutover the production gateway, which runs as a service principal, gets HTTP 403 from `score-green`, and the team switches back to blue. What was missed?
+A: Green still had 0 percent in its traffic configuration, which must be set to 100 before it accepts calls from any gateway
+B: The gateway needed a registered model alias named after its service principal before green could be called
+C: HTTP 403 is the signal for rate limiting, so green needed a larger scale-out before the first production calls
+D: Permissions are set per endpoint, so the service principal needed query access on green, which a pre-cutover test with the production identity would have shown
 K: D
-G: ## Standby capacity
-With scale to zero enabled, an entity that receives no traffic releases its compute after a period and needs a cold start (compute allocation and model load) when requests return. A blue-green rollback exists for the moment when speed matters, so the standby must be able to answer at once. Keep a non-zero minimum scale-out for the standby while it is the rollback target, and accept the cost; remove it when the old version is retired.
-## Related points
-- Updates of the traffic split on an existing endpoint apply to existing served entities; they do not rebuild them.
-- Scale to zero suits entities that tolerate a first slow request.
-W: Cold standby: scale to zero removed the compute, so the rollback had to start it again under load.
-X: B=Daily limit: the documented update is an ordinary configuration change with no once-a-day rule.
-C=Rebuild on rollback: the environment of an entity exists as long as the entity does; shifting percentages does not rebuild it.
-A=Deleted entity: an entity with 0 percent still exists in the configuration; the delay was compute start, not recreation.
-T: Keep the rollback target warm; a standby with scale to zero turns a quick switch back into a cold start.
+G: ## Blue-green with two endpoints
+A second endpoint is a separate resource with its own access control list: Can Query lets a user or service principal call it, Can Manage changes it. Nothing is inherited from the blue endpoint, so the identity of the real client must be granted access before the switch.
+## Pre-cutover checklist
+- Grant the production identity query access on green and test with that identity.
+- Check the scale-out range of green for full traffic.
+- Keep blue deployed until the new version is confirmed.
+Validation done with personal accounts proves the model, not the production path.
+W: Endpoint permissions: green was tested by users who had access, but the service principal was never granted it, so the cutover failed on authorization.
+X: A=Traffic at 0 percent: a single served entity of a new endpoint has its own configuration; the 403 is an authorization response, not a routing one.
+B=Alias per principal: aliases name model versions and have nothing to do with caller identity.
+C=Rate limiting: that situation returns a 429-type response; 403 means the caller is not allowed.
+T: Each endpoint has its own permissions: test the cutover with the production identity before switching.
 V: Model Serving
+
