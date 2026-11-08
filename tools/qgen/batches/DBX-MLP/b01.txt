@@ -45,7 +45,7 @@ C=Linear regression only: Spark ML has many families (trees, ensembles, GBT, ALS
 T: When the data fits on one node and the single-node algorithm is better, use Spark for data preparation and train on a single node.
 V: Spark ML, scikit-learn
 
-@ DBX-MLP D1 T1.1 troubleshooting
+@ DBX-MLP D1 T1.1 applied troubleshooting
 S: A Spark ML `RandomForestClassifier` is fitted on a 60 GB Delta table on a cluster with 10 workers of 16 cores. The Spark UI shows only 8 tasks in the training stages while 152 cores are idle, and the fit takes far longer than the team expected. The DataFrame was read from a table stored in 8 large files. What is the most effective change?
 A: Switch to scikit-learn on the driver, because Spark ML cannot use more cores than the number of input files in a Delta table
 B: Raise `spark.driver.memory` so that the driver can hold the partitions that the 8 tasks are processing, which frees the other cores
@@ -128,9 +128,9 @@ V: Spark ML, scikit-learn
 
 @ DBX-MLP D1 T1.2 applied use-case
 S: A 200-million-row churn table has nulls in `income` and `tenure_months`. The `VectorAssembler` stage fails on them, and the first fix, filtering the null rows before training, would also drop a large share of new customers. Scoring batches contain nulls as well. How should the pipeline be changed?
-A: Add an `Imputer` stage with `strategy="median"` before `VectorAssembler`, so the medians learned at `fit` are stored and applied at scoring
+A: Add an `Imputer(strategy="median")` stage before `VectorAssembler`, so medians learned at `fit` are stored in the model
 B: Fill the nulls with `df.fillna(0)` in the training notebook, then repeat the same call in each scoring job
-C: Set the `VectorAssembler` option to skip invalid rows, and accept that scoring batches return fewer rows than were sent in
+C: Set the `VectorAssembler` option `handleInvalid` to skip, then accept that scoring batches return fewer rows than were sent in and rejoin them
 D: Compute the mean of each column with `agg` on the training table and write it into a SQL expression in every consumer
 K: A
 G: ## Missing values are learned state
@@ -150,15 +150,16 @@ V: Spark ML
 @ DBX-MLP D1 T1.2 applied use-case
 S: The feature `ctr = clicks / impressions` is added with `df.withColumn("ctr", ...)` in the training notebook, and the logistic regression pipeline is fitted on the result. The scoring team receives the saved `PipelineModel` and finds the model fails because `ctr` is missing from the raw tables. How should the training code be changed so the logic travels with the model?
 A: Document the formula in the model description so that each consuming team can add the column before scoring
-B: Write `ctr` to the raw table in a nightly job so that all consumers read it, and keep the notebook step unchanged for training runs
+B: Write `ctr` to the raw table in a nightly job for all consumers
 C: Create a Python UDF in the scoring job that computes `ctr`, and register it under the same name as the column
-D: Add a `SQLTransformer` stage (`SELECT *, clicks / impressions AS ctr FROM __THIS__`) as the first stage, so the saved `PipelineModel` computes it
+D: Add a first `SQLTransformer` stage (`SELECT *, clicks / impressions AS ctr FROM __THIS__`) so the model computes it
 K: D
 G: ## Keep feature logic inside the pipeline
 Anything computed outside the pipeline must be repeated by hand at scoring, and the two copies drift. Spark ML offers stateless `Transformer` stages for row-level logic. `SQLTransformer` runs a SQL statement in which `__THIS__` stands for the input DataFrame, so a derived column becomes a stage of the `Pipeline`. It is saved and loaded with the `PipelineModel`.
 ## Rules of thumb
 - Row-level derived columns (ratios, flags, date parts): `SQLTransformer`.
 - Anything that has to learn from the data (scaling, indexing, imputing): an Estimator stage whose fitted state is stored in the model.
+- With ANSI mode on (the default in Spark 4), `clicks / impressions` raises an error when `impressions` is 0: write `try_divide(clicks, impressions)` in the stage to get NULL instead.
 - Logic that cannot be expressed in a stage belongs in a documented, versioned feature pipeline, not in an ad hoc notebook cell.
 W: The `SQLTransformer` stage makes `ctr` part of the saved `PipelineModel`, so training and scoring run the same formula from the same artifact.
 X: A=Documenting the formula: it relies on every consumer to reimplement it exactly, which is the training-serving mismatch the artifact is meant to avoid.
@@ -232,9 +233,9 @@ V: Spark ML
 
 @ DBX-MLP D1 T1.2 advanced tradeoff
 S: A weekly job refits a whole `Pipeline` (`StringIndexer` on `merchant_category`, then a model) and also writes the indexed column to a Delta feature table that other teams read. After a refit, an older downstream model started producing wrong predictions, although the indexer code did not change. What is the most robust fix?
-A: Set `stringOrderType="alphabetAsc"` on the indexer, which keeps the indices identical across refits even when new categories appear
+A: Set `stringOrderType="alphabetAsc"` on the indexer, which keeps indices identical across refits even when new categories appear in the data
 B: Increase `maxCategories` on the indexer so that it learns every category and keeps the old indices stable
-C: Store the raw category in the shared table and apply each model's fitted `PipelineModel` at read time, so the index mapping matches that model
+C: Store the raw category in the shared table and apply each model's own fitted `PipelineModel` at read time, so the mapping matches
 D: Refit the indexer on 10% of the data, because indices only depend on the sample size, not on the content
 K: C
 G: ## Indices are learned state
@@ -252,9 +253,9 @@ V: Spark ML
 
 @ DBX-MLP D1 T1.3 applied use-case
 S: A support-ticket model must predict the priority labels "low", "medium" and "high" stored as strings. Fitting a `LogisticRegression` on the string label column fails, and downstream reports need the original strings in the prediction output. Which stages solve both needs?
-A: A `StringIndexer` on the label before the classifier, and an `IndexToString` stage after it that maps `prediction` back with the indexer's labels
+A: A `StringIndexer` on the label, then an `IndexToString` stage after the classifier that maps `prediction` back
 B: A `OneHotEncoder` on the label column, then reading the largest element of its vector as the prediction
-C: A `Bucketizer` with splits at 1 and 2 on the label column, then a Python dictionary applied in the reporting job for the strings
+C: A `Bucketizer` with splits at 1 and 2 on the label column, then a Python dictionary applied in the reporting job for the strings and a manual check
 D: A `cast("int")` on the label column, and a stored lookup table maintained by hand for the report
 K: A
 G: ## Labels must be numeric
@@ -274,7 +275,7 @@ V: Spark ML
 S: A feature `age` must become five bins. The business wants bins with roughly equal numbers of customers in the training data, learned once and reused unchanged when scoring later batches. Which stage fits?
 A: `Bucketizer` with splits computed again on each scoring batch, so the bins always follow the current customer population
 B: `Binarizer` applied five times with different thresholds, each producing one bin indicator
-C: `QuantileDiscretizer(numBuckets=5)` in the pipeline, which learns quantile splits and returns a `Bucketizer` with those fixed splits
+C: `QuantileDiscretizer(numBuckets=5)`, which learns quantile splits and returns a fixed `Bucketizer`
 D: `StandardScaler`, because z-scores split in the same way as quantiles
 K: C
 G: ## Estimator that learns, Transformer that applies
@@ -374,8 +375,8 @@ V: Spark ML
 S: A fraud model is tuned with `CrossValidator(numFolds=5)`. Each customer has many transactions, and cross-validation scores are far higher than the scores on later customers. The team suspects the folds. What change is the best fix?
 A: Raise `numFolds` to 20 so that each validation fold is smaller
 B: Switch to `TrainValidationSplit(trainRatio=0.8)`, which splits at random and so avoids sharing customers
-C: Add an integer column giving each customer one fold, such as `abs(hash(customer_id)) % 5`, and pass it with `setFoldCol("fold")`
-D: Set the seed of the `CrossValidator` so that the same random folds are used for every parameter combination and run
+C: Add a fold column such as `abs(hash(customer_id)) % 5` and pass it with `setFoldCol("fold")`
+D: Set the seed of the `CrossValidator` so the same random folds are used for every parameter combination and run
 K: C
 G: ## Random folds leak groups
 `CrossValidator` splits rows at random. If one customer's transactions are spread over the folds, the model sees that customer in training and is then validated on the same customer, memorizing customer-specific patterns. Scores are optimistic for new customers, which is the production situation.
