@@ -134,12 +134,15 @@ function parseHash() {
   return { exam: STUDY_EXAMS.some(([c]) => c === exam) ? exam : null, day: day > 0 ? day : null };
 }
 
+// Versioned data URL when v is known (browser default caching otherwise).
+const fetchData = (url, v) => fetch(url + (v ? "?v=" + v : ""));
+
 async function loadIndex() {
   const res = await fetch("./data/exams-index.json", { cache: "no-cache" });
   if (!res.ok) throw new Error("exams-index.json " + res.status);
   dataIndex = await res.json();
   const v = dataIndex.files && dataIndex.files["exam-specs.json"];
-  const sres = await fetch(`./data/exam-specs.json${v ? "?v=" + v : ""}`);
+  const sres = await fetchData("./data/exam-specs.json", v);
   if (!sres.ok) throw new Error("exam-specs.json " + sres.status);
   specs = await sres.json();
 }
@@ -147,7 +150,7 @@ async function loadIndex() {
 async function loadGlossary() {
   const v = dataIndex && dataIndex.files && dataIndex.files["glossary.json"];
   try {
-    const res = await fetch(`./data/glossary.json${v ? "?v=" + v : ""}`);
+    const res = await fetchData("./data/glossary.json", v);
     if (res.ok) glossary = await res.json();
   } catch (e) { /* no glossary: text renders unmarked */ }
 }
@@ -155,7 +158,7 @@ async function loadGlossary() {
 async function loadGuide(exam) {
   if (!guides[exam]) {
     const v = dataIndex && dataIndex.study && dataIndex.study[exam];
-    const res = await fetch(`./data/study/${exam}.json${v ? "?v=" + v : ""}`);
+    const res = await fetchData(`./data/study/${exam}.json`, v);
     if (!res.ok) throw new Error(`study data for ${exam}: HTTP ${res.status}`);
     guides[exam] = await res.json();
   }
