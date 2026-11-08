@@ -1,0 +1,284 @@
+[
+ {
+  "day": 15,
+  "domain": "D2",
+  "title": "Alerting on Drift, Choosing Baselines and Reading Performance Trends",
+  "services": [
+   "Data profiling (formerly Lakehouse Monitoring)",
+   "Databricks SQL alerts",
+   "Drift metrics table",
+   "Profile metrics table",
+   "Inference tables"
+  ],
+  "concepts": [
+   {
+    "heading": "Drift Alerts Are Databricks SQL Alerts",
+    "body": "Data profiling writes a profile metrics table and a drift metrics table, but it does not watch thresholds on its own. A profile alert is an ordinary Databricks SQL alert: you write a query on the profile or drift metrics table, create an alert on that query, set how often it is evaluated and choose where it notifies. Email is the default; a webhook, Slack or PagerDuty can also receive it. The profile's own notification settings are a different thing: they report refresh events such as a failed or timed-out refresh, never drift values. If the query has parameters, the alert runs with their default values, so a default model id or window silently pins the alert to the wrong version. For many features, one alert whose query returns every column over the threshold in the latest window is easier to own than one alert per column; this is general design practice, not a documented pattern. Add a freshness alert on the latest window end so a profile that stopped refreshing cannot make the drift alert look quiet."
+   },
+   {
+    "heading": "Baseline Drift versus Consecutive Drift",
+    "body": "The drift metrics table has a `drift_type` column with two values. `CONSECUTIVE` compares a window with the previous window and exists only when a consecutive window exists for the chosen granularities. `BASELINE` compares a window with the baseline table and exists only if a baseline table was provided, so a table with only consecutive rows means no baseline was configured. The baseline should match the schema of the profiled table, except the timestamp column, and for an inference profile it should also carry the same model id column. Good choices: training or validation data for an inference profile, a healthy copy for a snapshot profile, and a window of acceptable behavior for a time series profile, such as the previous holiday period when traffic is seasonal. A baseline that is overwritten with the latest data after every retrain only measures drift since the last retrain and hides slow change. Numeric columns use statistics such as the population stability index (below 0.1 no significant change, 0.2 or above significant); categorical columns use distances and the chi-squared test. The delta columns are differences between the two windows."
+   },
+   {
+    "heading": "Performance Trends from the Inference Workflow",
+    "body": "Model quality needs predictions joined with ground truth over time. The documented workflow around inference tables is: log requests and responses, unpack the JSON payloads on a schedule according to the endpoint schema, optionally join the labels once they arrive, create an inference profile over the resulting Delta table and refresh it. Legacy endpoint inference tables are retired; Unity Gateway inference tables are the current feature, and their schemas differ, so unpacking code must match the one in use. To read a trend, query the profile metrics table with `column_name = ':table'`, `slice_key IS NULL` and the model id of interest, ordered by `window.start`. Slices per model id are created automatically, so two versions served in parallel can be compared. Accuracy, precision, recall and F1 need the label and prediction columns; log loss and ROC AUC also need `prediction_proba_col`; per-class F1 sits in the `one_vs_all` map of the `f1_score` struct. Logged `sampling_fraction` values below 1 mean down-sampling, so volume trends use the sum of `1 / sampling_fraction`, not a plain count."
+   }
+  ],
+  "examPoints": [
+   "Drift alerts are SQL alerts on the profile or drift metrics table; profile notification settings only cover refresh events and never check drift values.",
+   "No baseline table means no BASELINE rows in the drift metrics table; a baseline that is replaced by recent data after each retrain cannot show change since validation.",
+   "Quality trends: filter the metrics table on `:table`, `slice_key IS NULL` and a model id; log loss and ROC AUC need the probability column."
+  ],
+  "quiz": [
+   {
+    "q": "A team set email addresses in the profile's notification settings and expects a message when the population stability index of a feature passes 0.2. Drift is visible in the drift metrics table, but nobody is notified. What closes the gap?",
+    "choices": [
+     "Raise the refresh frequency of the profile so that the notification settings re-check the drift values after every window",
+     "Enable the baseline table option in the notification settings so drift rows are compared with a threshold",
+     "Create a Databricks SQL query on the drift metrics table and an alert on it that sends to the team's chat destination",
+     "Add the address to the endpoint's permissions so that rows of the drift metrics table are mailed on arrival"
+    ],
+    "answer": 2,
+    "explain": "Notification settings of a profile report events such as a failed or timed-out refresh and never evaluate drift values. A drift threshold needs a query on the drift metrics table with a SQL alert and a notification destination. A faster refresh only produces data sooner, a baseline table is not a notification option, and endpoint permissions do not send mail."
+   },
+   {
+    "q": "The drift metrics table of a time series profile contains only rows with `drift_type = 'CONSECUTIVE'`, yet the team wants to compare current traffic with the data the model was validated on. What is missing?",
+    "choices": [
+     "A baseline table holding the validation data, set in the profile configuration with a matching schema",
+     "A second granularity, because baseline rows appear only when the profile uses two granularities",
+     "A custom drift metric, since the built-in drift table never contains comparisons with reference data",
+     "A larger slicing expression list, because slices are what create comparison rows against the training set"
+    ],
+    "answer": 0,
+    "explain": "Baseline drift is calculated only if a baseline table is provided, so a table with only consecutive rows means none was set. Granularities decide the windows and slices decide subsets; neither creates a reference comparison. The built-in drift table does hold baseline rows once a baseline exists, so no custom metric is needed."
+   }
+  ],
+  "recap": "Drift alerting is a SQL alert on the drift table plus a freshness alert; baseline drift needs a baseline table with the profiled schema that does not move with the data; quality trends come from the `:table` rows of the inference profile, per model id, with the probability column for log loss and ROC AUC."
+ },
+ {
+  "day": 16,
+  "domain": "D2",
+  "title": "Custom Metrics, Granularity, Slicing and Endpoint Health Metrics",
+  "services": [
+   "Data profiling (formerly Lakehouse Monitoring)",
+   "Custom metrics",
+   "Profile metrics table",
+   "Model Serving metrics tab",
+   "Prometheus metrics export"
+  ],
+  "concepts": [
+   {
+    "heading": "Aggregate, Derived and Drift Custom Metrics",
+    "body": "Custom metrics extend the built-in statistics and come in three kinds. An aggregate metric reads the profiled table and is stored in the profile metrics table, for example the share of rows whose absolute prediction error exceeds a limit. A derived metric is computed from aggregate values that already exist, such as the square root of a stored squared average, so it needs no new scan of the table. A drift metric compares an aggregate or derived metric between two windows with `{{current_df}}` and `{{base_df}}`, and it is stored in the drift metrics table. The `definition` is one SQL expression written as a Jinja template; it cannot contain joins or subqueries, so a value from another table must first become a column of the monitored table or of a view. Use `input_columns=[\":table\"]` for a metric that uses several columns, and the `{{prediction_col}}` and `{{label_col}}` parameters only in inference profiles; in other profile types name the real columns. A metric with `input_columns=[\"f1\", \"f2\"]` appears on the rows of those columns, and a `:table` metric on the `:table` row."
+   },
+   {
+    "heading": "Granularity and Slicing Change the Row Count",
+    "body": "Every metric is computed for each combination of window, slice and, for inference profiles, model id. Granularities (five minutes up to one year) set the window length; with two granularities the metric tables hold rows for both, so a chart or a sum must first filter the `granularity` column. The whole table is the slice with `slice_key IS NULL`; each entry of `slicing_exprs` adds slices next to it, so summing counts without filtering `slice_key` multiplies the total. A slice is defined by a single key, which means a combination such as region and device needs one expression or one column that combines them. A Boolean expression such as `amount > 1000` gives one key with the values true and false, read with `slice_key = 'amount > 1000' AND slice_value = 'true'`. For classification, Boolean slices also receive fairness and bias statistics. Slicing on a column with millions of distinct values creates a huge number of slices and slow refreshes; slice on bounded segments or buckets and look for single users with a query on the inference table."
+   },
+   {
+    "heading": "Reading Endpoint Health Metrics",
+    "body": "Endpoint health metrics describe the serving infrastructure, not the model's quality: latency, request rate, request error rate (4xx and 5xx together), CPU usage, memory usage, request queue time and model inference latency. The Metrics tab shows the last 14 days, and `/api/2.0/serving-endpoints/<name>/metrics` can be scraped by Prometheus over https with a bearer token; Datadog has an integration. The latency chart is the round trip inside Databricks, so a client also sees authentication and rate limiting. Read the metrics as a set: high queue time with low model inference latency and high CPU means the endpoint is under-provisioned, so widen the compute scale-out range. Doubled inference latency with an idle queue means the time is spent in the model call, which includes feature lookups, so more replicas will not help. Memory that climbs while the request rate is flat points to a leak, such as an unbounded cache. To split the error rate into client and server faults, group the inference table by `status_code`; raising `MlflowException` in model code maps to 4xx."
+   }
+  ],
+  "examPoints": [
+   "Aggregate metrics scan the table, derived metrics reuse stored aggregates, drift metrics compare two windows; definitions have no joins or subqueries.",
+   "Filter `slice_key IS NULL` for totals and the `granularity` column before charting; one slice key per slice, so combine columns first.",
+   "Queue time high and inference latency flat means add capacity; inference latency high and queue idle means fix the model call; the error split comes from `status_code`."
+  ],
+  "quiz": [
+   {
+    "q": "A team wants a metric that multiplies each row's churn probability by a margin stored in a separate dimension table. A custom metric definition with a join is rejected. What is the supported design?",
+    "choices": [
+     "Register the join as a derived metric, so that the lookup runs against the stored aggregate values only",
+     "Make the margin a column of the monitored table or a view, then use an aggregate metric",
+     "Move the expression into a drift metric, because drift definitions are allowed to contain subqueries",
+     "Put the dimension table into the baseline table, which lets every metric read it directly at refresh"
+    ],
+    "answer": 1,
+    "explain": "A definition is a single SQL expression without joins or subqueries, so the value must become a column of the monitored table or a view that contains it, and the metric is then an aggregate over the raw columns. A derived metric only uses stored aggregates, drift definitions have the same restriction, and a baseline table is a reference for drift, not a lookup source."
+   },
+   {
+    "q": "During the daily peak a custom endpoint answers slowly. Total latency P99 and request queue time P99 climb, model inference latency P99 stays low and CPU is high on every replica. What is the best action?",
+    "choices": [
+     "Compare the new model code with the previous version for slower feature lookups",
+     "Move the clients to the inference table and read predictions from there instead of querying",
+     "Add an alert on the error rate, since 4xx responses are the cause of queued requests",
+     "Widen the compute scale-out range so that more requests are processed in parallel"
+    ],
+    "answer": 3,
+    "explain": "High queue time with flat model inference latency and saturated CPU shows that requests wait for a free replica, which is a capacity problem, so more scale-out helps. Slow code or lookups would raise the inference latency instead, an inference table is a log and not a serving path, and an error alert measures failures, not waiting time."
+   }
+  ],
+  "recap": "Pick the metric type by what it reads (table, stored aggregates or two windows), filter `slice_key` and `granularity` before summing, and diagnose an endpoint by comparing queue time, model inference latency, CPU and memory before changing capacity or code."
+ },
+ {
+  "day": 17,
+  "domain": "D3",
+  "title": "Deployment Strategies and Rollouts with Model Serving",
+  "services": [
+   "Model Serving",
+   "Served entities",
+   "traffic_config",
+   "Route optimization",
+   "Endpoint permissions"
+  ],
+  "concepts": [
+   {
+    "heading": "Canary, Blue-Green and Shadow Compared",
+    "body": "These strategies are general release practice, not Databricks features with their own documentation page; on Databricks you build them from served entities, traffic routes and endpoints. A canary sends a small share of live requests to the new version and raises it in steps while error rate, latency and a quality signal stay healthy. It fits high-traffic applications because even a few percent gives enough requests to judge, and it limits the damage of a bad version. Blue-green prepares a complete second environment, tests it and switches all callers at once, keeping the old one for rollback; it fits a change that cannot run next to the old version, for example a new required input column, but it pays for two environments until the old one is retired. A shadow run copies each request to the candidate whose answers no caller sees. At low traffic a canary yields too few requests to prove anything, so replay recorded requests against the new version and then switch."
+   },
+   {
+    "heading": "Implementing a Canary with Served Entities",
+    "body": "One endpoint can serve several models: each served entity has a name such as `current` or `challenger`, and `traffic_config` lists routes with `served_model_name` and `traffic_percentage`. The documented example splits 90 and 10, and the split is changed by submitting an updated configuration. A single served entity can still be queried directly at `/serving-endpoints/<endpoint>/served-models/<name>/invocations`, and the traffic settings are then ignored, which allows tests without exposing users. Until a new configuration is ready the old one keeps serving, only one update can run at a time, and an update that is under way can be cancelled from the endpoint page; if an update fails, the active configuration stays effective, so a pipeline must poll the endpoint state instead of trusting the call that returned. Roll back by one update that gives `current` all the traffic and removes `challenger`. Size each served entity from its own share, because concurrency is roughly requests per second times run time, and avoid scale to zero for a canary, since a cold start distorts its latency."
+   },
+   {
+    "heading": "Blue-Green and Route Optimization with Two Endpoints",
+    "body": "A blue-green rollout uses two endpoints, so the switch happens in the client or gateway that holds the endpoint name, not inside one traffic split. Permissions are set per endpoint, and the identity that will call green, often a service principal, needs query access on it; validating with that identity before cutover catches a 403 early. The recorded creator of an endpoint needs `USE CATALOG`, `USE SCHEMA` and `EXECUTE` on the model, and updates re-check it, so a long-lived service principal is the safer creator. Route optimization can be enabled only when an endpoint is created, never on an existing one, so moving a busy endpoint to it is also a blue-green move: create a new route-optimized endpoint for the same model version, test it at its own URL with an OAuth token that carries `authorization_details`, move clients and keep the old endpoint. Keep blue until the labeled results of the new version are checked, which may take days."
+   }
+  ],
+  "examPoints": [
+   "Canary raises a share on live traffic and needs enough requests; blue-green switches a whole second environment and suits breaking input changes; both have no docs page.",
+   "Splits live in `traffic_config` routes of served entities; one update at a time, the old configuration serves until the new one is ready, and rollback is one update.",
+   "Permissions are per endpoint, route optimization is chosen at creation only, and the old environment stays until the new version is verified."
+  ],
+  "quiz": [
+   {
+    "q": "A recommendation model is retrained and will serve a sustained 2,000 requests per second. Offline tests look good, but the team fears subtle quality regressions in production. Which rollout fits best?",
+    "choices": [
+     "Blue-green with a full second endpoint and one cutover for all users once the offline tests pass",
+     "Canary at a small share, watching errors, latency and quality, then raising the share in steps",
+     "Shadow evaluation for one hour and then deleting the old served entity to save the compute cost",
+     "A scale-to-zero challenger that receives live traffic only at the moments when the current model is idle"
+    ],
+    "answer": 1,
+    "explain": "With high traffic a small canary share yields enough requests to compare error rate, latency and quality while limiting the effect of a regression, and the share rises as evidence grows. A single blue-green cutover exposes all users at once, deleting the old entity removes the rollback path, and a scale-to-zero entity would add cold-start latency that distorts the comparison."
+   },
+   {
+    "q": "An endpoint serves `current` at 80 percent and `challenger` at 20 percent. The challenger's error rate climbs while `current` is healthy. The team wants users off the challenger quickly without an outage. What should it do?",
+    "choices": [
+     "Submit one update that gives `current` all traffic and removes `challenger`",
+     "Delete the endpoint and create it again with only `current`, because routes of a live endpoint cannot be edited",
+     "Submit separate updates in parallel, one for the percentages and one for removing the entity",
+     "Set the challenger's workload size to zero so that its routes stop receiving any requests"
+    ],
+    "answer": 0,
+    "explain": "A configuration update can change the routes and remove the entity at once, and the old configuration serves until the new one is ready, so there is no outage. Deleting the endpoint causes downtime, only one update can run at a time so parallel updates fail, and a workload size is a compute setting, not a way to stop routing."
+   }
+  ],
+  "recap": "Choose canary for subtle regressions on enough traffic and blue-green for breaking changes or a clean rollback; implement a canary with named served entities and `traffic_config`, change it with a single update, and keep the old version until its results are verified."
+ },
+ {
+  "day": 18,
+  "domain": "D3",
+  "title": "Custom PyFunc Models, Querying and Deploying with the Deployments SDK",
+  "services": [
+   "MLflow PyFunc",
+   "Models in Unity Catalog",
+   "MLflow Deployments SDK",
+   "Serving REST API",
+   "Databricks secrets"
+  ],
+  "concepts": [
+   {
+    "heading": "Packaging a Custom PyFunc Model",
+    "body": "A custom PyFunc model wraps preprocessing, postprocessing or an unsupported framework in a class with two methods. `load_context` runs once and holds everything expensive: read weights, build tokenizers. `predict` holds the per-request logic only, so loading a file inside it makes every call slow. Files the model needs at serving time must be packaged with the `artifacts` argument of `log_model`; the documented reason is that Model Serving requires Unity Catalog volume files to be packaged into the model, and the code then reads them from `context.artifacts`. A tokenizer fetched from the internet at load time breaks when network access is blocked, so download it when logging and load it with `local_files_only=True`. Shared code folders are logged with the `code_path` parameter shown in the docs. Registration in Unity Catalog requires a model signature, which an `input_example` or `infer_signature` provides. On Databricks Runtime ML, name `mlflow` in `pip_requirements`, because the default `mlflow-skinny` stops the container build."
+   },
+   {
+    "heading": "Querying an Endpoint: REST and Deployments SDK",
+    "body": "Custom model endpoints accept pandas DataFrame JSON as `dataframe_split` (recommended) or `dataframe_records`, and tensor input as `instances` or `inputs`. The records format does not guarantee column order, so a model that reads columns by position can return different results than in the notebook; send the split format with explicit columns and select columns by name. The response wraps results in a `predictions` key. From Python the MLflow Deployments SDK `predict()` queries the endpoint; any other client posts JSON to `/serving-endpoints/<name>/invocations`; `ai_query` is the SQL option. Databricks recommends machine-to-machine OAuth tokens for production. A route-optimized endpoint is different: it accepts only OAuth tokens, must be queried at its dedicated URL, and the token needs `authorization_details` that name the endpoint and the `query_inference_endpoint` action, otherwise the call returns 401. Protobuf tensor input is Public Preview, so JSON stays the answer. Input errors raised as `MlflowException` return 4xx, so malformed requests do not look like platform faults."
+   },
+   {
+    "heading": "Deploying and Debugging a Custom Model Endpoint",
+    "body": "Create the endpoint with the Deployments SDK client (`get_deploy_client(\"databricks\")` and `create_endpoint`), the REST API or the UI, giving each served entity the model name, version, workload size and scale-out. Endpoint names cannot start with `databricks-`, which is reserved. The recorded creator needs `USE CATALOG`, `USE SCHEMA` and `EXECUTE` on the model, checked at creation and update. Dependencies come from the model's requirements: a private mirror configured as the workspace default repository is used during the build, and an internal wheel is passed through `extra_pip_requirements`. A missing module at startup means a new model version with the dependency, then an endpoint update. Keys belong in a Databricks secret, referenced as `{{secrets/scope/key}}` in the served entity's environment variables; the creator needs READ on the secret. Before deploying, `mlflow.models.predict` reproduces the environment and catches errors early. Express deployments shorten builds and keep the environment equal to training, at the cost of a longer registration step. A 429 about concurrency means raising scale-out toward QPS times run time."
+   }
+  ],
+  "examPoints": [
+   "`load_context` loads once, `predict` runs per request; package files with `artifacts`, a signature is required in Unity Catalog, and `mlflow` (not `mlflow-skinny`) goes into `pip_requirements`.",
+   "Send `dataframe_split` with explicit columns; route-optimized endpoints need OAuth tokens with `authorization_details` and their own URL.",
+   "Endpoint names cannot start with `databricks-`; creator grants are `USE CATALOG`, `USE SCHEMA`, `EXECUTE`; secrets use `{{secrets/scope/key}}`."
+  ],
+  "quiz": [
+   {
+    "q": "A pyfunc model loads its weights with `torch.load(\"/Volumes/ml/prod/weights/model.pt\")` inside `predict`. It works in a notebook but is slow and fails when served. Which change fixes both problems?",
+    "choices": [
+     "Log the file with `artifacts` and read it once in `load_context`",
+     "Copy the volume path into an environment variable and keep loading the file inside `predict`",
+     "Register the model without a signature so that Unity Catalog skips the file check on registration",
+     "Wrap `torch.load` in a retry loop inside `predict` until the volume is mounted for the endpoint"
+    ],
+    "answer": 0,
+    "explain": "Model Serving needs the files packaged into the model with the artifacts argument, and loading once in the context method keeps per-request work small. An environment variable still points to a path the endpoint cannot read, a missing signature breaks Unity Catalog registration, and retries inside the request path only add latency."
+   },
+   {
+    "q": "A service principal queries a route-optimized endpoint at its dedicated URL with a token minted using `scope=all-apis` only. Every call returns 401. What must change?",
+    "choices": [
+     "Switch to a personal access token, because route-optimized endpoints accept only those tokens",
+     "Send the request to the workspace invocation URL, which every endpoint keeps after creation",
+     "Grant the principal EXECUTE on the model, which unblocks the authentication of its requests",
+     "Mint the token with `authorization_details` for the endpoint and its query action"
+    ],
+    "answer": 3,
+    "explain": "A route-optimized endpoint needs an endpoint-scoped OAuth token, so the token request must carry authorization details with the query action. Personal access tokens are not supported there, the workspace URL does not apply to such endpoints, and EXECUTE on the model is an endpoint creation grant, not a query authentication fix."
+   }
+  ],
+  "recap": "Package files and dependencies at logging time, load once in `load_context`, send column-safe requests, use endpoint-scoped OAuth for route optimization, and fix deploy failures by logging a new model version and updating the endpoint."
+ },
+ {
+  "day": 19,
+  "domain": null,
+  "title": "Final Review: Decision Cheat-Sheet Across the Three Domains",
+  "services": [
+   "Spark ML",
+   "Optuna and Ray",
+   "MLflow",
+   "Feature Store",
+   "Data profiling",
+   "Declarative Automation Bundles",
+   "Model Serving"
+  ],
+  "concepts": [
+   {
+    "heading": "Domain 1, Model Development (44 percent)",
+    "body": "Choose the engine first. Spark ML fits data that does not fit one machine, with pipelines of estimators and transformers; single-node libraries fit data that fits in memory, and a trained single-node model can be scored in parallel with a pandas function or a UDF. For tuning, teach Optuna with the MLflow storage or Ray; open-source Hyperopt is unmaintained and is only a legacy comparison, and `xgboost.spark` is Public Preview, so it is not the answer. Parallelism: data parallelism splits the data across workers, model parallelism splits one model, and a vertical upgrade fits a task that is limited by one machine. In MLflow, nested runs group a tuning parent with child trials. Features: Unity Catalog feature tables with point-in-time joins on timeseries keys prevent leakage; Online Feature Stores (formerly online tables, Lakebase-backed) serve low-latency lookups; on-demand features are Python functions registered in Unity Catalog that compute at request time. The workspace Feature Store is deprecated."
+   },
+   {
+    "heading": "Domain 2, MLOps (44 percent)",
+    "body": "Prefer deploy code over deploy models: the training code is promoted through environments and retrains on production data, and aliases such as `Champion` replace stages. Test at two levels, unit tests for functions and integration tests that run the pipeline per environment, and keep functions in importable modules. Declarative Automation Bundles (formerly Databricks Asset Bundles) define experiments, registered models and serving endpoints as code. Retraining is triggered by schedule, by new data or by a monitor signal, and the top model is chosen by comparing a metric across runs. Monitoring: pick the profile type by the question, snapshot for a table's state, time series for windows over time, inference for models with predictions and labels. Data profiling (formerly Lakehouse Monitoring) writes metric and drift tables; the PSI bands are 0.1 and 0.2; alerts are Databricks SQL alerts. Use a baseline for change since validation, consecutive windows for change since yesterday, custom metrics for business rules, and slices for subgroups."
+   },
+   {
+    "heading": "Domain 3, Model Deployment (12 percent) and Exam Tactics",
+    "body": "Deployment questions test strategy and mechanics. Canary suits subtle regressions on high traffic and blue-green suits breaking input changes or an instant rollback; both are implemented with served entities and `traffic_config` or with two endpoints, and neither has its own docs page. One update runs at a time, and the old configuration serves until the new one is ready. Custom pyfunc models load heavy objects once, package files with `artifacts`, need a signature in Unity Catalog, and are queried with `dataframe_split` through the Deployments SDK `predict()` or REST; route-optimized endpoints need endpoint-scoped OAuth. Creating a registered model needs `USE CATALOG`, `USE SCHEMA` and `CREATE MODEL`; adding a version needs ownership or `CREATE MODEL VERSION`. Inference tables are legacy; Unity Gateway inference tables are current. The exam has 59 scored questions in 120 minutes and a pass mark that is not published. Weight your time 44, 44 and 12 percent, eliminate options that rely on Preview features or hand-written code for what the platform does, and read the stem for the decision being asked."
+   }
+  ],
+  "examPoints": [
+   "Weights: D1 Model Development 44 percent, D2 MLOps 44 percent, D3 Model Deployment 12 percent; 59 scored questions in 120 minutes, pass mark unpublished.",
+   "Pick the design the stem asks for: Spark ML vs single node, Optuna vs Ray, deploy code vs deploy models, snapshot vs time series vs inference profile, baseline vs consecutive drift, canary vs blue-green.",
+   "Treat Hyperopt, `xgboost.spark`, protobuf tensor input and legacy inference tables as distractors, and use the current names: data profiling, Online Feature Stores, Declarative Automation Bundles."
+  ],
+  "quiz": [
+   {
+    "q": "A team must choose how to learn about slow quality decay of a deployed classifier whose labels arrive a week late. Which design uses the platform instead of custom code?",
+    "choices": [
+     "A notebook that reads dashboard widgets every hour and posts a message to the team by webhook, written and run by the team",
+     "An inference profile with label and prediction columns, plus a SQL alert on its metrics",
+     "A canary that sends all traffic to the new model and compares only the first hour of results",
+     "A snapshot profile on the model registry table, refreshed after every single request that the endpoint serves"
+    ],
+    "answer": 1,
+    "explain": "An inference profile computes quality metrics per window and model id once labels are joined, and a SQL alert on the metric tables notifies the team without custom polling code. Reading dashboard widgets replaces a built-in mechanism, a canary is a rollout tool and not a monitor, and a snapshot of a registry table says nothing about predictions."
+   },
+   {
+    "q": "A retailer will serve a retrained model whose new required input column breaks the old version. Which statement describes the right rollout and its cost?",
+    "choices": [
+     "Canary at 5 percent on the same endpoint, because both versions accept the same kind of requests",
+     "Replace the served entity in place during the daily peak so that no second environment is paid for at all",
+     "Blue-green on a new endpoint: clients switch at cutover and two endpoints are paid for until the old one retires",
+     "Shadow evaluation that returns the new model's answers to callers while the old one is only logged in the background"
+    ],
+    "answer": 2,
+    "explain": "A new required input column means the old version rejects the new requests, so both versions cannot share one split; a separate endpoint is tested first, clients switch at cutover and the old endpoint stays for rollback, at the cost of two environments for a while. A canary would send incompatible requests to one version, an in-place replacement removes the rollback path, and shadow evaluation by definition hides the new answers."
+   }
+  ],
+  "recap": "Weights are 44 percent Model Development, 44 percent MLOps and 12 percent Model Deployment. Choose the engine and tuning approach, then the lifecycle and monitoring design, then the rollout; reject Preview and legacy answers and prefer the platform feature over custom polling code."
+ }
+]

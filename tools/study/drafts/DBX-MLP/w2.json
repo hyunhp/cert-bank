@@ -1,0 +1,243 @@
+[
+ {
+  "day": 6,
+  "domain": "D1",
+  "title": "Nested Runs, Custom Logging and Custom Models with Real-Time Feature Engineering",
+  "services": [
+   "MLflow Tracking",
+   "Databricks Autologging",
+   "MLflow pyfunc",
+   "Feature Engineering client",
+   "Model Serving"
+  ],
+  "concepts": [
+   {
+    "heading": "Nested Runs for Searches and Cross-Validation",
+    "body": "A tuning job or a cross-validation produces many pieces of work that belong to one candidate. MLflow models this with parent and child runs: starting a run with `nested=True` while another run is active creates a child linked to the active run, and the parent holds the summary, such as `cv_mean_auc`. Without `nested=True`, a second `start_run()` inside an active run raises an error, and ending the parent first would break the hierarchy. The documented Hyperopt `SparkTrials` integration uses the same layout: the main run for the search and one child run per trial. The argument `nested=True`, the system tag `mlflow.parentRunId` and a `search_runs` filter such as `tags.mlflow.parentRunId = '<id>'` are standard MLflow behavior that no docs.databricks.com page spells out. Two traps follow. Parameters cannot be overwritten inside a run, so an autologged loop of fits needs one child run per fit. And the active run lives in the driver Python process: code inside `applyInPandas` cannot attach to it, so return the metrics as rows and log child runs on the driver."
+   },
+   {
+    "heading": "Custom Metrics, Parameters, Tags and Artifacts",
+    "body": "Choose the logging slot by data type. Metrics are numbers and can carry a `step`; parameters and tags are strings that `search_runs` can filter, with tags the usual home for labels such as a dataset snapshot date or a Git commit; artifacts are files. A runs table shows the latest value of a metric, so a curve logged per epoch ranks runs by the last epoch. Log a deliberate summary such as `best_val_loss` once at the end and sort by it. For in-memory objects, `mlflow.log_figure`, `mlflow.log_dict` and `mlflow.log_table` write an artifact without a temporary file (standard MLflow, not described on the Databricks pages). Autologging adds traps. On classic compute an interactive notebook calls `mlflow.autolog()` for you, but the docs say it is not applied to runs created with `mlflow.start_run()` unless you call `mlflow.autolog(exclusive=False)` first. It is not enabled automatically on serverless compute, and it is active only on the driver node, so worker code must call `mlflow.autolog()` itself."
+   },
+   {
+    "heading": "Custom Model Objects with a pyfunc Wrapper",
+    "body": "Built-in flavors log one library object. When a model is an XGBoost booster plus a fitted calibrator plus a business rule, wrap everything in a subclass of `mlflow.pyfunc.PythonModel`. Pass the fitted files through the `artifacts` argument of `mlflow.pyfunc.log_model`; the Databricks page on packaging artifacts shows them arriving in `context.artifacts` inside `load_context`, which runs once at load, while `predict(self, context, model_input)` runs per request. For plain scikit-learn preprocessing, fit one `Pipeline` (encoder, scaler, estimator) and log it as one model, so fitted statistics travel with the version. Learned preprocessing is part of the model: fit imputers and scalers on the training split only, because fitting before the split leaks held-out rows, and never recompute them on each scoring batch. A signature is required for models registered in Unity Catalog, and it should describe what callers actually send, which means raw columns, not engineered ones."
+   },
+   {
+    "heading": "Real-Time Feature Engineering Inside the Model",
+    "body": "Request-time logic must exist once. If `make_features(df)` derives `days_since_signup` in training and a copy lives in the serving code, the two drift and predictions skew. Put the function in a module, import it in the training notebook and in `predict`, and ship it with the model through the `code_paths` argument of `log_model`. The Databricks docs show `code_paths` only for packaging a wheel dependency; using it for a shared feature module is standard MLflow behavior. Then infer the signature from the raw input so clients send raw rows. When some inputs are stored features, log through the Feature Engineering client instead: `fe.log_model(model, name, flavor=mlflow.pyfunc, training_set=training_set)`. The lineage page documents this pyfunc flavor, and the model then records which feature tables and functions it needs, so Model Serving looks up keys and computes on-demand features before `predict` receives the assembled frame. A plain `mlflow.pyfunc.log_model` call records no feature dependencies."
+   }
+  ],
+  "examPoints": [
+   "A hierarchical experiment, a search that writes one run per trial, or an error about an active run is testing `mlflow.start_run(nested=True)`, a summary metric on the parent and the best child found with `search_runs` on `tags.mlflow.parentRunId`.",
+   "Missing parameters or models after wrapping training in `start_run()`, on serverless compute, or inside `applyInPandas` points to the autologging limits: `exclusive=False`, an explicit `mlflow.autolog()` call, and logging from the driver.",
+   "A model with several fitted objects, rules or request-time feature code is a custom `PythonModel` with `artifacts`, `code_paths` and a raw-input signature; stored features that must be joined at serving time add `fe.log_model` with the training set."
+  ],
+  "quiz": [
+   {
+    "q": "A grouped-map job trains one model per store with `applyInPandas`. The notebook driver has an active parent run, and the function calls `mlflow.log_metric(\"rmse\", e)`, but no per-store child runs appear. What is the most reliable fix?",
+    "choices": [
+     "Call `mlflow.autolog(exclusive=False)` on the driver before the grouped call, so that every executor inherits the parent run and its tracking context",
+     "Pass `nested=True` to the `log_metric` call inside the function, so that the executor process attaches each metric to the parent run on the driver as a child",
+     "Return one row per store with its metric, collect the small result and log a nested child run for each store on the driver",
+     "Increase the number of shuffle partitions so that more executors share the driver's active run state while the grouped function is running"
+    ],
+    "answer": 2,
+    "explain": "The active run is state in the driver process, and executor Python workers do not see it. Driver-side logging of the returned rows creates correct children. Autologging is enabled only on the driver, `log_metric` has no `nested` argument, and more partitions change task count, not run context."
+   },
+   {
+    "q": "A custom pyfunc's `predict` expects engineered columns `age_bucket` and `spend_ratio`, and its signature was inferred from the engineered training frame. Clients that send raw `age` and `spend` receive a schema error. Which change is correct?",
+    "choices": [
+     "Build the features inside `predict`, share the helper through `code_paths`, and log with a signature inferred from raw input",
+     "Turn off signature enforcement on the endpoint, so that the missing engineered columns are ignored when the request reaches the model code",
+     "Ask every client team to reproduce the bucketing and the ratio exactly, because the signature has to describe the features used in training runs",
+     "Log the model again without any signature and add the engineered columns to every request payload through a default value in the endpoint settings"
+    ],
+    "answer": 0,
+    "explain": "The signature is the contract with callers, so it should list raw inputs, and the feature logic belongs inside the model version. Disabling validation does not create the columns, client-side engineering recreates skew, and removing the signature also blocks Unity Catalog registration."
+   }
+  ],
+  "recap": "Nest one child run per trial, fold or fit under a parent that carries the summary metric, and log from the driver. Pick the logging slot by type, remember the autologging limits, and ship custom models as pyfunc wrappers that bundle fitted objects and shared feature code behind a raw-input signature."
+ },
+ {
+  "day": 7,
+  "domain": "D1",
+  "title": "Point-in-Time Correctness and Automated Feature Pipelines",
+  "services": [
+   "Feature Engineering client",
+   "Time series feature tables",
+   "Unity Catalog",
+   "Structured Streaming",
+   "Lakeflow Jobs"
+  ],
+  "concepts": [
+   {
+    "heading": "Why Plain Feature Tables Leak and How an As-Of Join Fixes It",
+    "body": "A feature table that a nightly job overwrites keeps one row per entity, the newest. Joining twelve months of labels to it gives every old label today's feature values, some of which describe behavior after the label event. The model learns from the future, offline AUC looks excellent and production quality collapses. The fix is a time series feature table: a Unity Catalog Delta table whose primary key includes one `DATE` or `TIMESTAMP` column declared `TIMESERIES` (`timeseries_columns` in `FeatureEngineeringClient.create_table`, or `PRIMARY KEY (customer_id, ts TIMESERIES)` in SQL on Databricks Runtime 13.3 LTS or above). In `create_training_set`, a `FeatureLookup` names a `timestamp_lookup_key`, a column of the label DataFrame. For each label the join returns the latest feature row at or before that timestamp, or `null` if none exists. The docs state this is unrelated to Delta Lake time travel, which reads one snapshot of the whole table. A date key not declared as timeseries makes `create_training_set` and `publish_table` fail; change it to `STRING` only when exact matching is wanted."
+   },
+   {
+    "heading": "Behavior and Pitfalls of Point-in-Time Lookups",
+    "body": "The lookup takes a whole row and keeps its nulls, so it does not fall back to an earlier non-null value. That is why a write to a time series feature table must supply values for all features, unlike partial merges into regular feature tables, and why a job writing only `temp` can mask an earlier `co2`. The optional `lookback_window` (a `datetime.timedelta`, default `None`) drops values older than the window during training and batch inference, but online inference always uses the latest value, so training and serving can disagree for dormant entities; add a feature that carries its own age if staleness matters. When you call `score_batch`, the DataFrame needs a timestamp column with the same name and data type as the training `timestamp_lookup_key`. Different tables may use different `timestamp_lookup_key` values in one training set. For speed, the docs recommend liquid clustering, `use_spark_native_join=True` on Photon, one timestamp key, no partition columns and at most two primary key columns."
+   },
+   {
+    "heading": "Creating and Converting Feature Tables",
+    "body": "With `FeatureEngineeringClient`, `create_table` takes `primary_keys`, optional `timeseries_columns` and a DataFrame or schema, and `write_table` fills it, with `mode=\"merge\"` updating rows by primary key, so a retried batch for the same `(store_id, hour_ts)` replaces rather than duplicates. An existing Delta table becomes a feature table in place: only the owner can declare the constraint, each key column is set `NOT NULL` first, then `ALTER TABLE ... ADD CONSTRAINT ... PRIMARY KEY (store_id, snap_ts TIMESERIES)`. A streaming table or materialized view from Lakeflow pipelines works the same way once its definition includes the key. A simple SELECT view over one feature-capable Delta table qualifies for offline training, with `databricks-feature-engineering` 0.7.0 or later, but it cannot be published to an online store, and joins or aggregations are outside that rule. Materialize an aggregate into a keyed table instead. Do not change the primary key, partition key, or name and type of an existing feature, which would break downstream pipelines."
+   },
+   {
+    "heading": "Automating the Feature Pipeline",
+    "body": "A feature pipeline is ordinary code that computes a DataFrame and calls `write_table`. Schedule it as a Lakeflow Jobs task, keep the computation in a function that Git and tests cover, and have it merge by primary key so reruns are safe. To add features, update the computation and run `write_table`: the docs say this updates the schema and merges the new values. Streaming sources can feed the same table through a streaming `write_table`, which the docs support for time series tables too. At training time `create_training_set` joins the lookups and `load_df` returns the frame to train on; modifying that frame before training means the changes are not applied at inference. Log the model with `fe.log_model(..., training_set=training_set)` so `score_batch` and Model Serving repeat the lookups. For new projects the docs recommend Feature Views, where Databricks builds and runs the pipelines; hand-written feature tables remain the fit for Delta Sharing or third-party online stores, and this exam's tasks use the `FeatureEngineeringClient` table API."
+   }
+  ],
+  "examPoints": [
+   "A large gap between offline and production quality with an overwritten feature table is leakage; the answer is a time series feature table with `TIMESERIES` in the key and `timestamp_lookup_key` in the `FeatureLookup`, not Delta time travel and not more cross-validation.",
+   "Nulls from a time series lookup, stale values online, or a `score_batch` error point to the row-as-a-unit rule (write all features), `lookback_window` applying only offline, and the matching timestamp column name and type in the scored DataFrame.",
+   "Converting an existing table means `NOT NULL` on key columns, then a primary key with `TIMESERIES`; views qualify only if they are simple SELECT views and never publish online, so joins and aggregations are materialized into a keyed Delta table."
+  ],
+  "quiz": [
+   {
+    "q": "`ml.sales.store_daily` has primary key `(store_id, snap_date DATE)`, created without the `TIMESERIES` keyword, and `create_training_set` now raises an error about the `DATE` key column. Each label must receive the latest snapshot on or before its own date. What is the fix?",
+    "choices": [
+     "Cast `snap_date` to `STRING`, which keeps all the history and returns the most recent earlier snapshot for each label",
+     "Remove `snap_date` from the key and overwrite the table every night, so that each label joins to the one newest row",
+     "Upgrade `databricks-feature-engineering`, because newer releases treat any `DATE` key column as timeseries without any declaration at all",
+     "Declare `snap_date` as the `TIMESERIES` key and set `timestamp_lookup_key` in the `FeatureLookup` to the label date column"
+    ],
+    "answer": 3,
+    "explain": "As-of semantics come from the table key plus the lookup's timestamp column. A string key gives exact matching only, overwriting brings back leakage, and no client version infers the declaration."
+   },
+   {
+    "q": "A fraud model trained with `lookback_window=timedelta(days=7)` on a time series feature table returns 40-day-old values for dormant accounts from the online endpoint, while training saw `null`. What explains this, and what should the team do?",
+    "choices": [
+     "The endpoint applies the window only when each request carries its own timestamp field, so add the transaction time to every request",
+     "Online inference always uses the latest value, so add an explicit staleness signal such as a last-updated feature",
+     "The online store keeps every historical row, so add the current date to the lookup key and send today's date with each request",
+     "The window takes effect online after the table is republished in `SNAPSHOT` mode, so schedule a nightly snapshot publish to apply it"
+    ],
+    "answer": 1,
+    "explain": "The docs say the lookback window applies to training and batch inference, while online inference always returns the latest value. The pipeline must therefore expose staleness itself. Request timestamps, date keys and publish modes do not change which stored value is returned."
+   }
+  ],
+  "recap": "Point-in-time correctness comes from a time series feature table and a per-label as-of join, and its rules follow from that: whole rows with nulls, complete writes, offline-only lookback windows, matching timestamp columns at scoring. Build and convert tables with the Feature Engineering client, run merge writes from scheduled jobs, and log the model with its training set."
+ },
+ {
+  "day": 8,
+  "domain": "D1",
+  "title": "Online Feature Stores, Streaming Features and On-Demand Features",
+  "services": [
+   "Databricks Online Feature Stores",
+   "Lakebase",
+   "Structured Streaming",
+   "Feature Serving",
+   "Model Serving",
+   "Unity Catalog functions"
+  ],
+  "concepts": [
+   {
+    "heading": "Publishing to an Online Feature Store",
+    "body": "Online Feature Stores replace the earlier online tables; they are powered by Lakebase and new stores are created as Lakebase Autoscaling projects. With the Feature Engineering client you call `fe.create_online_store(name=..., capacity=...)`, wait for the `AVAILABLE` state, then `fe.publish_table(online_store=store, source_table_name=..., online_table_name=...)`. The source needs a primary key with non-null columns, and the `TRIGGERED` and `CONTINUOUS` modes need Change Data Feed. `TRIGGERED` (the default) syncs increments on a schedule or API call; `CONTINUOUS` keeps a streaming pipeline running for immediate updates; `SNAPSHOT` copies everything once and is efficient when many existing rows change between syncs, for example a nightly recompute of most customers. For a time series table the online store holds only the latest row per entity, deduplicated during publish. Views cannot be published. Only one sync can run per online table at a time, so publish from a single final task or wait with `get_status()`; a second call is skipped with a message that the pipeline is already running."
+   },
+   {
+    "heading": "Operating Online Stores Safely",
+    "body": "Serving endpoints look up an online table through its offline feature table, and with several online tables the docs say they always resolve to the oldest one, so publishing a second copy does not move traffic; version the feature table and create a new FeatureSpec and endpoint instead. Delete an online table with `WorkspaceClient().feature_store.delete_online_table(...)`, the only recommended method: a SQL `DROP TABLE` leaves the data in the database and the cost with it. Recreating a table, even with the same name, is a new Unity Catalog securable, so the endpoint's service principal loses its `SELECT` grant and lookups fail with `password authentication failed` while the endpoint still reports Ready; rebuilding means serving a changed model version or FeatureSpec so that permissions are set up again. For read-heavy latency problems add read replicas through `read_replica_count`, which also give availability; changing high availability on a live store breaks connected endpoints, so build a new store, publish, point new endpoints at it, validate, then retire the old ones. Scale-to-zero is not supported."
+   },
+   {
+    "heading": "Computing Features from Streams",
+    "body": "Real-time features follow one path: a Structured Streaming query turns events into feature rows, `write_table` accepts the streaming DataFrame and keeps the offline table current for training and lineage, and `publish_table` with `CONTINUOUS` pushes each change online where the logged model looks features up from keys. Event time belongs in the design. If late events upsert into a plain table, an old event can overwrite a newer one; a time series table keyed `(user_id, event_ts TIMESERIES)` turns each event into its own row and online publishing keeps the latest by timestamp. State must stay bounded: `withWatermark` plus `dropDuplicates` on an id and the event-time column removes replays, as the Spark guide describes, and deduplication belongs before the windowed count because an inflated aggregate cannot be repaired afterward. Windowed aggregates such as a ten-minute card count depend on history, so precompute them in the stream. The docs also describe Feature Views, which include streaming features and are recommended for new projects."
+   },
+   {
+    "heading": "On-Demand Features and Feature Serving",
+    "body": "A value that depends on the request, such as `amount / avg_amount_30d` where the amount arrives only in the call, cannot be precomputed. Register a Python UDF in Unity Catalog, bind it with `FeatureFunction(udf_name=..., input_bindings=..., output_name=...)` next to the `FeatureLookup`s in `create_training_set`, and log with `fe.log_model(..., training_set=training_set)`. Then `score_batch` and Model Serving evaluate the same function, which removes training-serving skew. When a UDF input comes from a lookup that finds no key, it is `None` in `score_batch` but `float(\"nan\")` online, so test both or set `default_values` on the lookup. A UDF that imports packages needs `extra_pip_requirements`, in `fe.log_model` or in `create_feature_spec`. An application that wants feature values but no prediction deploys a `FeatureSpec` to a Feature Serving endpoint; the tables it references must be published online. To use a fresher value of a stored feature for one call, include it in the request payload and match the model's data type."
+   }
+  ],
+  "examPoints": [
+   "A choice among `TRIGGERED`, `CONTINUOUS` and `SNAPSHOT` is decided by change pattern: small frequent changes need an incremental mode, immediate freshness needs `CONTINUOUS` with Change Data Feed, and mostly changed rows between syncs fit `SNAPSHOT`.",
+   "Cost that does not fall after `DROP TABLE`, an endpoint that ignores a new online table, or lookups failing after a table was recreated are the delete method, the oldest-table rule and the lost grant; high availability changes use a parallel store.",
+   "A feature that needs a value from the request is an on-demand Python UDF in Unity Catalog with `FeatureFunction`; handle `None` and `nan`, declare packages in `extra_pip_requirements`, and use Feature Serving with a `FeatureSpec` when no model is needed."
+  ],
+  "quiz": [
+   {
+    "q": "To cut cost, an engineer drops an unused online table with a SQL `DROP TABLE` and sees no savings on the Lakebase side. What is correct and what should be done?",
+    "choices": [
+     "Call `WorkspaceClient().feature_store.delete_online_table(...)`; a SQL drop leaves the stored data in the database",
+     "Delete the source offline feature table, because an online table disappears when the table it was published from is removed",
+     "Set the store to scale to zero, which releases the data of unused online tables while the store itself stays available",
+     "Keep the SQL drop, since the storage pages are cleared after the next sync cycle and the savings then appear on the next invoice"
+    ],
+    "answer": 0,
+    "explain": "The docs name the SDK method as the only recommended deletion because it removes the table from Unity Catalog and from the database. Removing the source destroys training data, scale-to-zero is unsupported for online feature stores, and no sync cycle clears the leftover storage."
+   },
+   {
+    "q": "An on-demand UDF squares a value that comes from a `FeatureLookup`. Batch scoring works, but the online endpoint errors for brand-new users whose keys are not in the store. What is the likely cause and fix?",
+    "choices": [
+     "Online serving accepts only UDFs written in SQL, so rewrite the function as a SQL expression and register it again",
+     "The online store rejects new users until `publish_table` is rerun in `SNAPSHOT` mode, so republish before the next request",
+     "A missing lookup is `None` in `score_batch` but `float(\"nan\")` online, so handle both values or set `default_values`",
+     "Python UDFs cannot read lookup results, so send the stored value in the request payload as a raw input for every call"
+    ],
+    "answer": 2,
+    "explain": "The documented behavior is `None` in batch and `nan` online for unknown keys, so a function that tests only for `None` fails online. Python UDFs are the supported on-demand mechanism, snapshot republishing adds no keys, and UDFs can take lookup results as input bindings."
+   }
+  ],
+  "recap": "Publish with the mode that matches the change pattern, publish from one place, delete with the SDK, and remember the oldest-table and grant rules when migrating. Stream features into the offline table with event time and bounded state, and compute request-dependent values with Unity Catalog UDFs shared by training, batch and serving."
+ },
+ {
+  "day": 9,
+  "domain": "D2",
+  "title": "Deploy-Code Lifecycle Pipelines and Mapping Databricks Features to Activities",
+  "services": [
+   "Lakeflow Jobs",
+   "Models in Unity Catalog",
+   "MLflow Tracking",
+   "Databricks Git folders",
+   "Model Serving"
+  ],
+  "concepts": [
+   {
+    "heading": "Deploy Code Versus Deploy Models",
+    "body": "Databricks recommends promoting code, not models, in most situations. In deploy code, the training code moves from development to staging to production and trains the model in each environment: on a small subset in staging as an integration test, on full production data in production. Supporting code for features, inference and monitoring follows the same path through review and integration tests, retraining is safer because the code was approved, and models can be trained on production data that developers cannot read. In deploy models, the artifact trained in development is tested in staging and promoted. It fits when training is very expensive or hard to reproduce, all work happens in one workspace, or there is no external repository or CI/CD. Its costs are that supporting code needs a separate deployment path, which invites skew, that automated retraining is tricky, and that the pattern may not be viable when production data is not accessible from development. A hybrid trains in staging over full data and deploys that model to production. Environments usually map to catalogs: dev, staging and prod."
+   },
+   {
+    "heading": "The Pipelines That Move a Model Between Environments",
+    "body": "The recommended architecture is a multitask job with training, validation and deployment tasks. Training evaluates on held-out data with the metrics chosen in development, logs to MLflow, registers a version in the catalog of the environment where the pipeline runs, and passes the model URI downstream with task values (`dbutils.jobs.taskValues.set`, then `.get(taskKey=..., key=...)`). Resolving the latest version instead can pick up another run's model. Validation loads that URI from Unity Catalog and checks format and metadata, selected data slices and compliance. A pass earns the `Challenger` alias; a failure records tags such as `model_validation_status`, annotations on the version, ends the run and notifies users. Deployment first compares `Challenger` with `Champion`, offline on held-out data tracked in MLflow or online by A/B test or gradual rollout, and moves `Champion` only if the challenger is at least as good. With no champion yet, use a business heuristic or threshold as baseline. Manual approval uses workflow notifications or CI/CD callbacks."
+   },
+   {
+    "heading": "From Pull Request to Production Jobs",
+    "body": "Staging tests the pipeline code, not just the model. A pull request against the main branch builds the source and runs unit tests; a failure rejects the request. Integration tests then run all pipelines together (feature engineering, training, inference, monitoring), and for real-time use they create and test a serving endpoint in staging. To save time, tests may trade fidelity for speed with data subsets or fewer iterations. If everything passes, the code is merged, and creating a release branch triggers the CI/CD system to update production jobs. Databricks Git folders connect each workspace to the repository, so reviewed branches are the code that runs in each stage. Data scientists typically have no write or compute access in production, but read-only access to test results, logs, model artifacts and monitoring tables lets them diagnose problems and compare new models with the current one. Production inference reads the model by alias, so moving `Champion` changes what the next batch run loads without editing the inference job."
+   },
+   {
+    "heading": "Mapping Features to Lifecycle Activities",
+    "body": "Match the activity to the feature that carries it. Recording how a version was built, with parameters, metrics, code snapshots and a link to the training data, is MLflow Tracking. Governed versions, per-environment permissions through catalogs and deployment status through aliases are Models in Unity Catalog, which replace stages. Ordering train, validate and deploy with dependencies, failure notifications and task values is Lakeflow Jobs. Code review and promotion between stages is Git with Git folders. Packaging feature lookups so callers send only keys is logging with the Feature Engineering client. Serving a version, updating an endpoint without downtime and splitting traffic for online comparison is Model Serving. Watching drift and quality of inputs and predictions is data profiling, formerly Lakehouse Monitoring. Retraining starts with scheduled jobs and moves to triggered retraining, where a SQL alert on a drift or quality metric calls a webhook that starts the training workflow. Tags record state but do not stop a pipeline, and traffic splits do not run offline evaluation."
+   }
+  ],
+  "examPoints": [
+   "A scenario where supporting code diverged, production data is unreadable in development, or retraining must be trusted points to deploy code; deploy models is chosen for expensive training, a single workspace or no CI/CD.",
+   "Between pipeline tasks, the model URI travels in task values and never through a latest-version lookup; a version earns Challenger by passing validation, and Champion moves only after a comparison, against a baseline when none exists.",
+   "A mapping question is answered by the activity: tracking records lineage, Unity Catalog versions and aliases, Jobs orchestrate and notify, Git folders promote code, Model Serving serves and splits traffic, data profiling monitors."
+  ],
+  "quiz": [
+   {
+    "q": "Security policy blocks the development workspace from reading production data, so a team that promotes only trained models trains on synthetic samples in development. Which statement is correct, and what does Databricks recommend in most situations?",
+    "choices": [
+     "Unity Catalog cannot register models from a development workspace, so the team must register each model from production after training",
+     "The pattern may not be viable without production data in development, so promote the training code instead",
+     "Synthetic samples are forbidden in every pattern, so copy the production data into development for training",
+     "The pattern forbids Git, so move exported notebooks by hand between the two workspaces after each approval"
+    ],
+    "answer": 1,
+    "explain": "The docs list inaccessible production data as a disadvantage of deploy models, and deploy code trains the final model in production on production data. Registration is not the limit, copying data breaks the policy, and Git is expected in both patterns."
+   },
+   {
+    "q": "A multitask job runs training, validation and deployment. Two runs can overlap, and validation must evaluate exactly the version that its own run's training task registered. How should the version reach the validation task?",
+    "choices": [
+     "Training writes the model URI to a file under `/tmp` and validation reads that file from its own compute",
+     "Validation loads `models:/prod.ml.churn@champion`, because the alias always names the newest candidate",
+     "Validation calls `get_latest_versions` on the model name, because the highest number is always the current run's",
+     "Training sets a task value with the model URI, and validation reads it from the upstream task by task key"
+    ],
+    "answer": 3,
+    "explain": "A task value is scoped to the job run, so each validation task gets the URI its own training task produced. Local files are not shared between tasks, the champion alias points at the model already serving, and the highest version can belong to the other run."
+   }
+  ],
+  "recap": "Promote code through dev, staging and prod, and let each environment train and test with its own catalog. Pass the model URI by task value, gate Challenger on validation and Champion on a comparison, and match each lifecycle activity to the feature that owns it."
+ }
+]
