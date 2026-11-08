@@ -13,7 +13,7 @@ S: A streaming job removes repeated events with the code below. No watermark is 
 events = spark.readStream.table("raw_events")
 deduped = events.dropDuplicates(["guid"])
 ```
-A: Spark keeps state only for the current micro-batch, so a duplicate that arrives in a later micro-batch is written again
+A: Spark keeps state for the current micro-batch only, so a repeat in a later micro-batch is written again
 B: Spark stores every `guid` it has seen as state with no time-based cleanup, so the state keeps growing for as long as the query runs
 C: Spark drops state older than the longest trigger interval that was configured, which makes the state size level off
 D: Spark spills the seen `guid` values to the checkpoint and removes them once the sink has acknowledged the write
@@ -35,10 +35,10 @@ V: Structured Streaming
 
 @ DBX-ASD D5 T5.4 applied use-case
 S: A team wants exact deduplication of a stream of events that carry `guid` and `event_time`. Duplicates always have the same `event_time` as the original and arrive at most 10 minutes late. They want the state to stop growing. Which query fits?
-A: `events.dropDuplicates(["guid"]).withWatermark("event_time", "10 minutes")`, because the watermark added after the deduplication trims its state
+A: `events.dropDuplicates(["guid"]).withWatermark("event_time", "10 minutes")`, because a later watermark trims the state
 B: `events.withWatermark("event_time", "10 minutes").dropDuplicates(["guid"])`, because a watermark alone is enough to bound the state of any key
 C: `events.dropDuplicatesWithinWatermark(["event_time"])`, because the event time is the column that the watermark bounds
-D: `events.withWatermark("event_time", "10 minutes").dropDuplicates(["guid", "event_time"])`, because the event time column in the key lets old state be dropped
+D: `events.withWatermark("event_time", "10 minutes").dropDuplicates(["guid", "event_time"])`, because the event time in the key lets old state be dropped
 K: D
 G: ## Bounding the state of dropDuplicates
 Spark documents streaming deduplication with a watermark as: define the watermark on the event-time column, then call `dropDuplicates` with the unique identifier and the event-time column.
@@ -60,24 +60,25 @@ C=Key on event_time only: that treats different events with the same timestamp a
 T: Streaming dropDuplicates with a watermark must include the event-time column in the key columns so old state can expire.
 V: Structured Streaming
 
-@ DBX-ASD D5 T5.4 advanced comparison
-S: A producer retries failed writes. Each retry gets a new `event_time` stamped at write time, but keeps the same `guid`. Retries arrive within 2 hours of the first write. Which approach removes the duplicates and keeps state bounded?
-A: Define a 2-hour watermark on `event_time` and call `dropDuplicatesWithinWatermark(["guid"])`, which ignores event time when matching rows
-B: Define a 2-hour watermark on `event_time` and call `dropDuplicates(["guid", "event_time"])`, which treats each retry as the same row
-C: Call `dropDuplicates(["guid"])` and set the checkpoint retention to 2 hours so that older keys leave the state
-D: Call `distinct()` on the stream, because Spark compares whole rows and then removes the retries after 2 hours
-K: A
-G: ## Two streaming deduplication APIs
-- `dropDuplicates(cols)` with a watermark: the event-time column belongs in `cols`, so rows are duplicates only when both the identifier and the event time are equal.
-- `dropDuplicatesWithinWatermark(cols)` (added in Spark 3.5): requires a watermark with a delay threshold, but the event time does not have to be in `cols`. Duplicates are removed when they arrive within the watermark delay of the first copy.
-## When to use which
-Spark's guide names the second as the answer for cases where the event time cannot be part of the unique identifier, for example a non-idempotent writer that issues the event time at write. Retries then carry different timestamps for the same logical event.
-The guide also advises setting the delay threshold longer than the maximum timestamp difference among duplicated events.
-W: Within-watermark deduplication: the guid alone identifies the event, the retry timestamps differ, and a 2-hour watermark gives the state a cutoff to expire guids.
-X: B=Event time in the key: retries have different `event_time` values, so rows with equal `guid` but different timestamps are not duplicates under that key and all pass through.
-C=Checkpoint retention: checkpoint files are not a state expiry mechanism for deduplication keys. Only the watermark lets Spark drop old keys.
-D=distinct: `distinct()` compares whole rows, so retries with a new timestamp are not equal. A plain distinct on a stream also has no time-based cleanup without a watermark.
-T: Use dropDuplicatesWithinWatermark when duplicates share an id but not an event time; it needs a watermark delay.
+@ DBX-ASD D5 T5.4 advanced troubleshooting
+S: A query runs `df.withWatermark("event_time", "10 minutes").dropDuplicatesWithinWatermark(["guid"])`. The largest `event_time` seen so far is 12:00. A row with a `guid` that was never seen arrives with `event_time` 10:30, and it is missing from the output. What explains this?
+A: Spark keeps the `guid` of the earlier row from the same hour in state, so the new row is treated as a repeat of it
+B: The row is older than the current watermark (11:50), and Spark drops data that is too late, even when its `guid` is new
+C: Spark holds the row back until the watermark moves below 10:30, and then emits it in a later micro-batch
+D: Spark moves the watermark back to 10:20 so that the row is accepted, and it is emitted with the next batch
+K: B
+G: ## Late data and the watermark
+The watermark is the largest event time seen so far minus the delay threshold: 12:00 minus 10 minutes is 11:50. It only moves forward.
+- The API documentation of `dropDuplicatesWithinWatermark` (added in Spark 3.5) notes that data too late, older than the watermark, is dropped.
+- The decision is made on the event time of the row, not on whether its `guid` is already in state.
+- The same watermark logic also bounds the state: keys older than the watermark are released.
+## Consequence for design
+The delay threshold decides two things at once: how long copies are recognized and how late a first copy may be before it is lost. A source with delayed or replayed data needs a threshold above that lateness, at the price of more state.
+W: Too-late data: 10:30 is older than the 11:50 watermark, so the row is discarded before it can be emitted, although its `guid` is new.
+X: A=Hour-level match: deduplication compares the `guid` values given in the key list, not the hour of the event time, so no earlier row makes this one a repeat.
+C=Held back: Spark does not buffer too-late rows until the watermark falls. The watermark never moves backwards, so the row would never be released.
+D=Watermark moves back: a watermark is monotonic and only advances; a late row cannot lower it.
+T: Rows older than the watermark are dropped by dropDuplicatesWithinWatermark even when their key is new.
 V: Structured Streaming
 
 @ DBX-ASD D5 T5.4 applied troubleshooting
@@ -113,8 +114,8 @@ V: Structured Streaming
 
 @ DBX-ASD D5 T5.4 advanced tradeoff
 S: A job uses `withWatermark("event_time", "1 hour").dropDuplicatesWithinWatermark(["guid"])`. Some duplicates are produced by a batch replay and carry the same `guid` up to 3 hours after the first copy. Some of them still appear in the output. What explains this, and what is the fix?
-A: Spark forgets a `guid` once the watermark passes it, so copies later than the delay can pass; the delay must exceed the largest gap between copies
-B: Spark deduplicates only within one micro-batch for this method, so every copy in a later batch passes; use `dropDuplicates` instead
+A: Spark forgets a `guid` after the watermark passes it, so late copies pass; raise the delay above the largest gap
+B: Spark deduplicates only inside a single micro-batch for this method, so every copy in a later batch passes; switch to `dropDuplicates`
 C: Spark keeps the first copy only until the executor restarts, so replays are not caught; a larger executor memory setting fixes this
 D: Spark matches the event time as well as the `guid`, so replayed copies with other timestamps differ; add the event time to the key
 K: A
@@ -135,7 +136,7 @@ V: Structured Streaming
 @ DBX-ASD D6 T6.1 applied definition
 S: A PySpark script in a web service uses Spark Connect. What does the client send to the Spark server, and how do results come back?
 A: Serialized Python bytecode of the whole script over Py4J, with results returned as pickled rows
-B: Optimized physical plans compiled on the client, with results returned as files in a shared directory
+B: Optimized physical plans compiled on the client, with results returned as files in a shared directory that the server writes
 C: Unresolved logical plans encoded as protocol buffers over gRPC, with results streamed back as Arrow-encoded batches
 D: SQL strings only over JDBC, with results returned as JSON documents that the client parses
 K: C
@@ -431,11 +432,11 @@ V: Pandas API on Spark
 
 @ DBX-ASD D7 T7.1 applied comparison
 S: A team has a Spark DataFrame `sdf` and wants pandas-style APIs on it while the data stays distributed. Which call does that, and how does it differ from `toPandas()`?
-A: `sdf.toPandas()` returns a distributed object, while `sdf.pandas_api()` collects every row to the driver
-B: `sdf.pandas_api()` returns a distributed pandas-on-Spark DataFrame, while `toPandas()` collects every row to the driver
-C: Both return the same distributed object type, and they differ only in how the index column is named
+A: `sdf.toPandas()` returns a distributed object, while `sdf.pandas_api()` collects every row to the driver node and converts it there
+B: Both return the same distributed object type, and they differ only in how the index column is named
+C: `sdf.pandas_api()` returns a distributed pandas-on-Spark DataFrame, while `toPandas()` collects every row to the driver
 D: `sdf.pandas_api()` writes the data to a local file on the driver and reads it back as plain pandas
-K: B
+K: C
 G: ## Moving between APIs
 - `DataFrame.pandas_api()` converts a Spark DataFrame to a pandas-on-Spark DataFrame. The data remains distributed across the cluster.
 - `DataFrame.toPandas()` collects all rows to the driver as a regular pandas DataFrame, which can fail with out-of-memory errors for large data.
@@ -444,7 +445,7 @@ G: ## Moving between APIs
 A Spark DataFrame has no index, so a default index is attached on conversion. Naming an index column explicitly is more efficient than relying on the default.
 W: pandas_api: the result is a pandas-on-Spark DataFrame that stays distributed, in contrast to the driver-side collect of `toPandas()`.
 X: A=Reversed roles: the description swaps the two calls; `toPandas()` is the one that gathers all data in the driver.
-C=Same object: they return different types, a pandas-on-Spark DataFrame in one case and a regular pandas DataFrame in the other.
+B=Same object: they return different types, a pandas-on-Spark DataFrame in one case and a regular pandas DataFrame in the other.
 D=Local file: neither call writes a file; the conversion is a change of API wrapper over the same distributed plan.
 T: pandas_api keeps data distributed; toPandas collects it on the driver.
 V: Pandas API on Spark
@@ -473,7 +474,7 @@ V: Pandas API on Spark
 @ DBX-ASD D7 T7.1 applied comparison
 S: A developer calls `psdf.rank()` on a large pandas-on-Spark DataFrame and the plan shows `Exchange SinglePartition`. What do the best practices recommend?
 A: Convert to pandas first, because ranking is not supported by the distributed engine
-B: Add more executors, because the exchange spreads the ranking work across all of them
+B: Add more executors, because the exchange spreads the whole ranking work across all of the executors
 C: Cache the DataFrame, because cached data skips the exchange in the next action
 D: Use `GroupBy.rank` where possible, because the data can then be computed per group in parallel
 K: D
@@ -512,29 +513,29 @@ T: Series to Series pandas UDFs must return as many values as they receive.
 V: pandas UDF
 
 @ DBX-ASD D7 T7.2 applied use-case
-S: A pandas UDF must load a 500 MB model before scoring. Loading it again for every batch is too slow. Which pandas UDF type fits this need?
-A: Series to Scalar, because aggregate UDFs initialize their state a single time for the whole query
-B: Grouped map with `applyInPandas`, because it loads a state once per group and reuses it for all groups
-C: Iterator of Series to Iterator of Series, because state is set up once and reused for each batch
-D: Series to Series, because the function runs a single time per executor and keeps its variables
+S: A developer wants to write the filter logic in pandas for a whole DataFrame, with no grouping, and the function may return fewer rows than it receives. Which API fits?
+A: A Series to Series `pandas_udf` used in `withColumn`, because it receives batches and returns a Series
+B: A Series to Scalar `pandas_udf` used in `select`, because it reduces each batch to the rows that remain
+C: `DataFrame.mapInPandas`, whose function takes an iterator of pandas DataFrames and yields DataFrames of any length
+D: A Python UDF made with `udf()` that returns `None` for the rows to remove, because null results are dropped by Spark
 K: C
-G: ## Iterator pandas UDF
-The type hint `Iterator[pd.Series] -> Iterator[pd.Series]` creates an iterator pandas UDF.
+G: ## Pandas Function API: map
+`DataFrame.mapInPandas(func, schema)` maps an iterator of `pandas.DataFrame` to another iterator of `pandas.DataFrame`, and the result is a Spark DataFrame.
 ```
-def score(it: Iterator[pd.Series]) -> Iterator[pd.Series]:
-    model = load_model()
-    for x in it:
-        yield model.predict(x)
-udf = pandas_udf(score, "double")
+def keep_id_1(it):
+    for pdf in it:
+        yield pdf[pdf.id == 1]
+df.mapInPandas(keep_id_1, schema=df.schema)
 ```
-- The function receives an iterator of batches and yields an iterator of results; the total output length equals the total input length.
-- Spark's guide says it is useful when execution requires initializing some state.
-- A multi-column variant takes `Iterator[Tuple[pd.Series, ...]]`.
-W: Iterator form: the initialization before the loop runs once, and the loop reuses the model for every batch that arrives.
-X: A=Series to Scalar: it defines an aggregation per group or window and has no per-query initialization step.
-B=Grouped map: it is a function API over groups, and it would load the model per group, which makes the problem worse.
-D=Series to Series: the function is called once per batch, so a model loaded inside is loaded again for each batch.
-T: Use the Iterator form of pandas UDF to initialize expensive state once and reuse it.
+- Spark's guide says it can return output of arbitrary length, in contrast to some pandas UDFs.
+- The output schema is required, and the function works on batches of rows, not on groups.
+## Comparison
+Series to Series and iterator UDFs must keep the output length equal to the input length. Series to Scalar is an aggregation.
+W: mapInPandas: it takes whole pandas DataFrames per batch and may yield any number of rows, so a pandas filter can run without grouping.
+X: A=Series to Series: the output must be as long as the input, so a filter that removes rows is an error.
+B=Series to Scalar: it returns one value per group or window, and it is an aggregation, not a row filter.
+D=Python UDF returning None: the UDF yields a null value in a column; the row stays in the DataFrame.
+T: Use mapInPandas when a pandas function must return a different number of rows than it receives.
 V: pandas UDF
 
 @ DBX-ASD D7 T7.2 applied definition
