@@ -1,0 +1,494 @@
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/custom-metrics
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/monitor-output
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/create-monitor-api
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/monitor-diagnose-endpoints
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/metrics-export-serving-endpoint
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/production-optimization
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/serve-multiple-models-to-serving-endpoint
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/create-manage-serving-endpoints
+
+@ DBX-MLP D2 T2.18 applied use-case
+S: A profile already stores the custom aggregate metric `squared_avg` (the mean of squared values of `f1` and `f2`). The team now wants the root mean square of the same columns in the metric tables, without scanning the monitored table again. How should the metric be defined?
+A: As another aggregate metric with `sqrt(avg(f1*f1))`, stored in the drift metrics table because it is a transformation of a value
+B: As a derived metric with `sqrt(squared_avg)`, stored in the profile metrics table and computed from the existing aggregate values
+C: As a drift metric with `sqrt({{current_df}}.squared_avg)`, stored in the drift metrics table next to the other drift statistics
+D: As a derived metric that reads `f1` and `f2` from the primary table, because derived metrics may use both columns and earlier metrics
+K: B
+G: ## Three kinds of custom metric
+Data profiling (documented earlier as Lakehouse Monitoring, which the exam guide still calls it) adds your own metrics to the two metric tables it writes. A metric is a `MonitorMetric` whose `type` decides where it reads and where it is stored.
+- Aggregate: computed from columns of the monitored (primary) table; stored in the profile metrics table.
+- Derived: computed from aggregate or derived metrics that already exist; it does not read the primary table; stored in the profile metrics table.
+- Drift: compares aggregate or derived values of two windows, or of the primary table and the baseline; stored in the drift metrics table.
+## Why it matters
+Only aggregate metrics touch the primary table. Documentation recommends derived and drift metrics where possible, since they reuse values that are already computed and avoid another pass over a large table.
+```python
+MonitorMetric(type=MonitorMetricType.CUSTOM_METRIC_TYPE_DERIVED,
+  name="root_mean_square", input_columns=["f1", "f2"],
+  definition="sqrt(squared_avg)",
+  output_data_type=T.StructField("output", T.DoubleType()).json())
+```
+W: Derived metric: the definition names the stored aggregate `squared_avg`, so no data of the primary table is read, and the result lands in the profile metrics table.
+X: A=Second aggregate: it would work, but it rescans the primary table, and aggregate results are stored in the profile metrics table, not the drift metrics table.
+C=Drift metric: drift metrics compare two windows or a baseline; a square root of one window is not a comparison and would belong in the profile metrics table.
+D=Derived on raw columns: a derived metric does not use primary table data; a definition that reads raw columns is an aggregate.
+T: Derived metrics build on stored aggregates (profile metrics table), drift metrics compare windows (drift metrics table), aggregates alone scan the table.
+V: Data profiling, Unity Catalog
+
+@ DBX-MLP D2 T2.18 advanced troubleshooting
+S: An inference profile for a regression model should track the share of rows where the absolute error exceeds 5 units in every window. An engineer proposes a derived metric built from the existing `avg` and `count` statistics of the prediction and label columns. Why does this not work, and what is the correct definition?
+A: Derived metrics only accept one input column; the engineer should define two derived metrics, one per column, and subtract them in the dashboard query
+B: Drift metrics hold all per-row results of the windows; define a drift metric over `{{current_df}}` and `{{base_df}}` that counts the rows above 5 units
+C: Averages cannot recover per-row errors; define an aggregate metric with `input_columns=[":table"]` and `avg(CASE WHEN abs({{prediction_col}} - {{label_col}}) > 5 THEN 1 ELSE 0 END)`
+D: Averages of prediction and label give the exact error share; the engineer only has to set a different `output_data_type`, such as an integer type
+K: C
+G: ## Which metric type can see rows
+A derived metric is a function of numbers that were already computed per window. The mean of predictions and the mean of labels cannot tell how many individual rows had a large difference, because many different row-level errors share the same two means.
+## Multi-column aggregates
+A metric that needs several columns uses `input_columns=[":table"]`, and in an inference profile the Jinja parameters `{{prediction_col}}` and `{{label_col}}` are replaced with the profile's prediction and label column names. The result is a column in the profile metrics table on the row where `column_name` is `:table`.
+W: Aggregate over the table: only an aggregate metric evaluates a row-level condition, and the Jinja parameters keep the definition independent of the real column names.
+X: A=Two derived metrics: nothing limits derived metrics to one column, and subtracting two means still would not give a share of rows above a threshold.
+B=Drift metric: drift metrics compare values of two windows or the baseline and are stored in the drift metrics table; they do not hold per-row results.
+D=Output data type: the type only describes the stored value; the means cannot reproduce a row-level count, whatever type is chosen.
+T: A row-level condition needs an aggregate metric; derived metrics can only recombine numbers that already exist.
+V: Data profiling
+
+@ DBX-MLP D2 T2.18 advanced troubleshooting
+S: A team wants a custom metric that multiplies each row's churn probability by `margin` from the table `finance.dim_margin`. The definition below is rejected. What is the supported fix?
+`definition="avg(p.churn_prob * m.margin) FROM main.ml.scores p JOIN finance.dim_margin m USING (cust_id)"`
+A: Make `margin` a column of the monitored table (join upstream or monitor a view that contains it) and write `avg(churn_prob * margin)`
+B: Move the join into the Jinja template with `{{base_df}}`, which can read a second table because it stands for the baseline data
+C: Keep the join, but declare the metric as derived so that the second table is read at refresh time rather than the monitored table of the profile
+D: Split the expression into two metrics on each table and subtract them, because each metric may read one table without joining
+K: A
+G: ## What a definition can contain
+The `definition` of a custom metric is a Jinja template for a single SQL column expression over the monitored table. It cannot contain joins or subqueries. Data that lives in another table therefore has to be present in the monitored table, or in a view over it, before the refresh.
+## Design choice
+Joining upstream (or using a view) keeps the metric an ordinary aggregate that is cheap to evaluate, and keeps the logic of the join in a pipeline that can be tested, instead of inside a metric string.
+W: Add the column to the monitored data: the expression stays a plain column expression, which is what the definition format allows.
+X: B=Baseline template parameter: `{{base_df}}` stands for the baseline data in drift definitions; it does not open access to other tables.
+C=Derived metric: a derived metric is computed from existing metrics and cannot read tables at all, so the join would not be allowed there either.
+D=Two metrics subtracted: each metric still sees only the monitored table, and a difference of two averages is not the average of products.
+T: A custom metric is a join-free column expression; bring other tables in through the monitored table or a view.
+V: Data profiling, Unity Catalog
+
+@ DBX-MLP D2 T2.18 advanced use-case
+S: A profile has the custom aggregate metric `weighted_error`. The team needs to know how much it moved against the previous window and against the baseline table, and to alert on both. Which implementation fits?
+A: A second aggregate metric that subtracts `weighted_error` from itself, stored in the profile metrics table with one row per window
+B: A derived metric with `{{current_df}}.weighted_error - {{base_df}}.weighted_error`, stored in the profile metrics table
+C: A drift metric that uses `{{current_df}}` and `{{base_df}}` with `weighted_error`, stored in the drift metrics table for both comparison types
+D: A job that reads the profile metrics table and writes differences to a separate Delta table, since profiles cannot compute differences of custom values
+K: C
+G: ## Custom drift metrics
+A drift-type custom metric compares an aggregate or derived metric between two windows, or between the primary table and the baseline table. In the definition, `{{current_df}}` and `{{base_df}}` refer to the current window and to the comparison window, which is the baseline or the previous window.
+```python
+MonitorMetric(type=MonitorMetricType.CUSTOM_METRIC_TYPE_DRIFT,
+  name="error_rate_delta", input_columns=[":table"],
+  definition="{{current_df}}.weighted_error - {{base_df}}.weighted_error",
+  output_data_type=T.StructField("output", T.DoubleType()).json())
+```
+Drift metrics are stored in the drift metrics table, where `drift_type` says whether a row compares to the baseline or to the previous window, and the alert on it can read that table.
+W: Drift metric: the platform evaluates it for every comparison it already makes and stores the value in the drift metrics table, so one definition serves both comparisons.
+X: A=Aggregate subtraction: an aggregate sees one window of the primary table and cannot subtract another window; its results would also be in the profile metrics table.
+B=Derived with window references: derived metrics are computed inside one row of the profile metrics table and cannot refer to a comparison window.
+D=External job: it would work as a workaround, but profiles do compute custom differences natively, and a job adds a pipeline to maintain.
+T: A change of a metric between windows or against the baseline is a drift-type custom metric in the drift metrics table.
+V: Data profiling
+
+@ DBX-MLP D2 T2.18 applied definition
+S: A profile defines `squared_avg` with `input_columns=["f1", "f2"]` and `avg_diff_f1_f2` with `input_columns=[":table"]`. An analyst queries the profile metrics table. Where does each metric show a value?
+A: Both appear as separate rows, with `column_name` set to the metric name, so a filter on `column_name` is required
+B: Both appear only on the rows of columns `f1` and `f2`, since `:table` is not allowed for custom metrics
+C: Both appear as columns that are filled only in the `:table` row, as every custom metric describes the whole table
+D: Both are columns of the table; `squared_avg` is filled on the `f1` and `f2` rows, and `avg_diff_f1_f2` on the `:table` row
+K: D
+G: ## Where custom metrics land
+The `name` of a custom metric becomes a column in the metric table. The `input_columns` list says for which rows (`column_name` values) the metric is computed. A list of column names gives one value on each of those column rows. The special value `:table` means the metric uses several columns together, and it is computed once per window and slice on the row whose `column_name` is `:table`. Model quality metrics use the same row.
+## Query
+```sql
+SELECT window.start, column_name, squared_avg, avg_diff_f1_f2
+FROM main.ml.t_profile_metrics WHERE slice_key IS NULL
+```
+W: Metric names are columns, and `input_columns` selects the rows: per-column metrics on their column rows, multi-column metrics on the `:table` row.
+X: A=Metric name as a row: names are columns of the table; `column_name` holds the monitored column or `:table`.
+B=Only column rows: `:table` is a documented value of `input_columns`, used for metrics over more than one column.
+C=Everything on the table row: a metric over listed columns is computed for each of them, so it has a value on each listed column's row.
+T: The metric name is the column; `input_columns` picks the row (`f1`, `f2`, or `:table` for multi-column metrics).
+V: Data profiling
+
+@ DBX-MLP D2 T2.18 advanced troubleshooting
+S: A snapshot profile for the table `main.ml.loans` has the custom metric below. The refresh reports an error for it, while all built-in statistics are fine. What is the most likely cause and the fix?
+`definition="avg(CASE WHEN {{prediction_col}} = {{label_col}} THEN 0 ELSE 1 END)"`
+A: The Jinja parameters belong to inference profiles; in a snapshot profile name the real columns (`pred_default`, `actual_default`) and keep `[":table"]`
+B: Snapshot profiles accept only derived metrics, so the metric must be rebuilt from the built-in `count` and `num_nulls` statistics at refresh
+C: The `CASE` expression is not valid in a definition; only plain aggregate functions such as `avg` or `sum` can be used
+D: The metric needs `CUSTOM_METRIC_TYPE_DRIFT`, because comparing two columns means comparing two data sets
+K: A
+G: ## Prediction and label parameters
+`{{prediction_col}}` and `{{label_col}}` are filled from the prediction and label columns that are configured for an inference profile. A snapshot or time series profile has no such configuration, so the placeholders have nothing to resolve to. The same logic can still be written against ordinary column names, because a definition is plain SQL over the monitored table.
+W: Use real column names: without an inference configuration the placeholders cannot be substituted, and a `:table` aggregate over named columns gives the same result.
+X: B=Derived only: snapshot profiles accept aggregate, derived and drift metrics like the other types.
+C=CASE not allowed: the documented weighted-error example uses a `CASE` expression inside `avg`.
+D=Drift type: a comparison of two columns of the same row is an ordinary aggregate; drift metrics compare windows or the baseline.
+T: `{{prediction_col}}` and `{{label_col}}` need an inference profile; elsewhere write the column names.
+V: Data profiling
+
+@ DBX-MLP D2 T2.19 applied use-case
+S: An inference profile should report quality for each combination of `region` and `device_type` (EU/mobile, EU/web, US/mobile, ...). The engineer sets `slicing_exprs=["region", "device_type"]`. The result only shows slices for single regions and single device types. What is needed?
+A: Increase the granularity to one hour, which forces slices of more than one column to be formed from smaller time windows
+B: Add a second profile for the same table, because one profile can only evaluate one slicing expression in a refresh
+C: Add a column such as `region_device` (or a single expression that combines both) to the data and list it in `slicing_exprs`
+D: Set the model id column to `region`, so that an inference profile slices on the second expression within each model id
+K: C
+G: ## How slicing works
+Each expression in `slicing_exprs` defines slices through a single slice key: `["col_1", "col_2 > 10"]` gives one slice per distinct value of `col_1` and one for each outcome of `col_2 > 10`. Two separate expressions therefore never form a cross product. In the metric tables a slice is identified by `slice_key` and `slice_value`, and the whole table is `slice_key` NULL.
+## Combinations
+A combination is one more expression: a derived column such as `concat(region, '-', device_type)` in the monitored data, or an expression of that kind, becomes its own slice key with one slice per combination.
+W: Single combined key: because each slice has one key, a combined column is the way to get region and device slices together.
+X: A=Hourly granularity: granularity cuts the time axis and has no influence on how slices are formed.
+B=Second profile: one profile accepts a list of expressions; the limit is that each defines its own single key, not a refresh limit.
+D=Model id column: the model id adds slices per model; it does not combine the other expressions.
+T: A slice has one key, so a combination of columns needs a combined column or expression.
+V: Data profiling
+
+@ DBX-MLP D2 T2.19 applied troubleshooting
+S: A time series profile on `main.ml.orders` uses `slicing_exprs=["region"]` with three regions and a daily granularity. An analyst sums `count` of the column `amount` over one week from the profile metrics table and gets about twice the real number of rows. What explains this and how is it avoided?
+A: Slices add rows next to the whole-table rows; filter `slice_key IS NULL` for the total, or one `slice_key` for the regional view
+B: The daily granularity duplicates each day once for the profile and once for the baseline, so the baseline rows must be removed
+C: Each refresh appends the full week again; the analyst should select only the most recent refresh of the table
+D: Slices overlap by definition, so the counts of the three regions should be divided by the number of slices
+K: A
+G: ## Rows in the profile metrics table
+Metrics are always computed for the entire table. If slicing expressions are present, metrics are computed again for each slice. The whole table has `slice_key` NULL and `slice_value` NULL; each slice has its key and value. The statistics of one window are therefore stored once for the total and once more for the slices.
+- Summing across all rows adds the total and the slice rows: with three regions that cover all data, the sum is about double.
+- To read the total, filter `slice_key IS NULL`.
+- To read regions, filter one `slice_key` and group by `slice_value`.
+W: Total plus slice rows: both are in the same table, so a plain sum counts the data twice; the filter on `slice_key` selects one view.
+X: B=Baseline duplicates: a baseline table is compared in the drift metrics table; it does not write extra rows into the profile metrics table.
+C=Repeated refresh: windows are recalculated per window and are identified by `window`, not appended as extra copies of the week.
+D=Dividing by slice count: slices of a column with three values do not overlap, and the doubling comes from the whole-table rows.
+T: Always filter `slice_key` (NULL for the total) before summing profile metric rows.
+V: Data profiling
+
+@ DBX-MLP D2 T2.19 advanced use-case
+S: A lender wants group fairness statistics of its classification model, for applicants flagged by the `is_female` Boolean column and for older applicants (`age >= 60`), next to the usual accuracy. Which setup lets the inference profile compute the fairness and bias statistics?
+A: Add `slicing_exprs=["is_female", "age >= 60"]`, as slices that have a Boolean value are the ones that receive fairness and bias statistics
+B: Add a custom aggregate metric per group, because fairness measures are never part of the built-in statistics
+C: Use `age` and `is_female` as the model id column so that each group becomes a separate model with its own quality metrics
+D: Slice on the string column `applicant_group` that holds the values `female`, `male` and `other`, which creates a fairness row for each value
+K: A
+G: ## Fairness slices
+In an inference profile, model quality is calculated when both prediction and label columns exist. Slices are automatically created for each distinct value of the model id column. For classification models, fairness and bias statistics are calculated for slices that have a Boolean value. A Boolean slicing expression such as `age >= 60` gives true and false slices, so the two groups are compared.
+## Design hint
+Express the protected group as a Boolean column or expression. A multi-valued string slice still gives accuracy per value, but is not a Boolean slice, so no fairness statistics are computed for it.
+W: Boolean slicing expressions: they are the slices on which fairness and bias statistics are produced for classification models.
+X: B=Custom metrics only: built-in fairness statistics exist for Boolean slices, so custom metrics are not required.
+C=Groups as model ids: model id slices compare model versions, not populations, and a group id is not a model.
+D=String group column: a string slice gets per-value metrics, but only Boolean slices get fairness statistics.
+T: Make the group a Boolean slicing expression to receive fairness and bias statistics in an inference profile.
+V: Data profiling
+
+@ DBX-MLP D2 T2.19 applied troubleshooting
+S: A profile on a request log was created with granularities of 1 hour and 1 day. A dashboard chart of daily request counts, built from the profile metrics table, shows spikes that are about double the true traffic on some days. What is the likely cause and fix?
+A: The hourly windows are a sampled copy of the data, so each daily count has to be multiplied by 0.5
+B: The daily window is repeated after a drift check, so rows with a non-null `window_cmp` must be removed from the chart query
+C: The profile counts requests twice when a baseline table exists, so the baseline should be dropped
+D: Rows exist for both granularities; the query must filter on the `granularity` column to one value before charting
+K: D
+G: ## One row per window and granularity
+Granularities set the window duration (from 5 minutes up to a year). When several are configured, the profile metrics table holds a row for each window of each granularity, and a `granularity` column says which one. Charting without a filter mixes the hourly rows with the daily rows of the same period.
+## Choosing granularities
+Short windows find spikes quickly but give few rows per window and noisy statistics; long windows are stable but slow to show change. Several can be kept when the dashboards filter on the one they need.
+W: Filter on granularity: both granularities cover the same period, so a chart without that filter adds the two.
+X: A=Sampling: the profile processes the table; hourly windows are not a sample and no factor of 0.5 is meaningful.
+B=Comparison window: `window_cmp` belongs to the drift metrics table, which is not the table behind this chart.
+C=Baseline: a baseline table affects drift metrics only and does not duplicate profile rows.
+T: When a profile has several granularities, always filter on `granularity` before summing or charting windows.
+V: Data profiling
+
+@ DBX-MLP D2 T2.19 advanced tradeoff
+S: A profile on 300 million rows per day uses `slicing_exprs=["user_id"]` to find users with poor predictions. There are 20 million distinct users. Refreshes became very slow and the metric tables grew enormously. Which redesign keeps the intent?
+A: Keep the slice but run refreshes more often, so each window contains fewer users and the tables stay small
+B: Slice on bounded expressions (a segment, a tenure bucket or a hash bucket of the id); find single users with a query on the inference table
+C: Drop slicing and rely on the whole-table metrics, since a model that works well overall cannot hurt any individual user or group of users
+D: Move `user_id` to the model id column so that each user's slice is stored in a separate metrics schema
+K: B
+G: ## Slice cost
+Each distinct value of a slice key becomes its own slice, with a full set of statistics for every column in every window. A key with millions of distinct values multiplies the size of the metric tables and the time of each refresh by about that number. Slices pay off when they are few, stable and meaningful: customer segment, region, device, a threshold such as `amount > 1000`.
+## Finding individuals
+A small group of bad cases is a query on the logged request data (for example by label error), not a profile slice.
+W: Bounded slices: they keep the group structure that explains quality differences, and individual bad cases come from queries on the request log.
+X: A=More frequent refreshes: the number of slices stays 20 million per window, so the tables only grow faster.
+C=No slicing: whole-table metrics hide groups with bad results, which is the reason for slicing.
+D=User as model id: the model id exists to compare model versions, creating a slice for each distinct value in the same way.
+T: Slice on low-cardinality or bucketed expressions; hunt single users with a query instead.
+V: Data profiling
+
+@ DBX-MLP D2 T2.19 applied troubleshooting
+S: A time series profile with a monthly granularity was created on 8 November. In the profile metrics table, the first monthly window shows row counts that are only about a quarter of the later months, although the source receives steady traffic. The pipeline runs without errors. What explains the first window?
+A: The slicing expression filtered out three quarters of the first month, so the slice key must be dropped to restore the counts
+B: Late-arriving rows are blocked by the profile, so the first window needs to be backfilled by setting a data retention period
+C: The first window is partial because a new time series or inference profile looks back 30 days from creation
+D: The monthly window is calculated from the baseline table; the first value of the baseline is always empty
+K: C
+G: ## Look-back at creation
+For time series and inference profiles, the first analysis looks back 30 days from the time of profile creation. The cut-off can fall in the middle of a week or month, so the first window may contain only part of the period. The effect is limited to the first window; later windows are complete.
+## What to do
+Treat the first window of a weekly or longer granularity as incomplete: exclude it from charts or alerts (for example by the window start), instead of searching for a pipeline fault.
+W: Partial first window: the profile reads only the last 30 days at creation, so a monthly window that starts earlier is cut.
+X: A=Slicing: a slice adds rows keyed by `slice_key`; the whole-table rows with a NULL key would still be partial.
+B=Blocked late data: there is no such blocking; the shortfall exists only in the first window and is caused by the 30-day cut.
+D=Baseline: a baseline table feeds drift metrics; it does not change the window counts of the profile metrics table.
+T: The first window of a new time series or inference profile can be partial because creation reads only 30 days back.
+V: Data profiling
+
+@ DBX-MLP D2 T2.20 applied troubleshooting
+S: Users of a custom model endpoint report slow answers during the daily peak. In the Metrics tab, total latency (P99) rises sharply, request queue time (P99) is high, and model inference latency (P99) is flat and low. CPU usage is high on all replicas. What is the best action?
+A: Widen the compute scale-out range (raise the maximum, and the minimum if baseline traffic already queues) so that more requests are processed in parallel
+B: Rewrite the model code with a faster algorithm, as the time spent inside the model dominates the response time
+C: Move the feature lookups to an online feature store, because lookup time is the part of the latency that request queue time measures in the metrics
+D: Switch the endpoint to a smaller workload size, which will shorten the queue because each replica starts faster
+K: A
+G: ## Reading the metrics together
+Endpoint health metrics are infrastructure metrics: latency, request rate, request error rate, CPU and memory usage (plus provisioned concurrency, queue time, GPU metrics). They are most useful in combination.
+- Latency (ms): P50 and P99 round-trip time within Databricks (without authentication and rate limiting).
+- Model inference latency: time the model spends computing a prediction, including feature store lookups.
+- Request queue time: how long a request waits for a replica to start working on it. High queue time indicates the endpoint is under-provisioned, and widening the compute scale-out range can reduce it.
+## Diagnosis
+High total latency with high queue time and flat inference latency means requests wait, not that the model is slow.
+W: Scale-out range: queued requests wait for a free replica, so more provisioned concurrency removes the waiting.
+X: B=Faster algorithm: the model's own time (inference latency) is flat, so changing it would not touch the cause.
+C=Online feature store: feature lookups are counted in model inference latency, which is flat; queue time measures waiting for a replica.
+D=Smaller workload: less capacity per replica would add more queuing, and replica start time is not what queue time measures.
+T: High queue time with flat inference latency means too little capacity; widen the scale-out range.
+V: Model Serving
+
+@ DBX-MLP D2 T2.20 advanced troubleshooting
+S: After a release, P99 latency of a custom endpoint doubled. Request queue time is near zero, CPU and memory are low, and request rate is unchanged. Model inference latency (P99) doubled. The model also looks up features from an online store inside the endpoint. Which conclusion and next step fit?
+A: Replicas are saturated; raise the maximum of the scale-out range until the CPU usage on the replicas matches the level seen at the earlier peak
+B: Clients are sending larger payloads, so the endpoint's request rate limit needs to be increased by workspace admins
+C: Time is spent inside the model call, including lookups; compare the code and lookup latency of the new version, as more replicas will not help
+D: The platform's authentication and rate limiting add the delay, because latency includes both for custom models
+K: C
+G: ## Where the time goes
+Model inference latency includes the model computation and any feature store lookups, and isolates it from the waiting in the queue and from the Databricks infrastructure. When it doubles while queue time, CPU and memory stay low, replicas have spare capacity and each request is simply slower.
+- Candidate causes: a heavier model or preprocessing in the new version, lookups that became slower (for example a different online store configuration or more features), or a dependency call.
+- Scaling out helps queueing, not the duration of one request.
+The latency metric also excludes authentication and rate limiting.
+W: Slow work inside the call: with an empty queue and idle replicas, extra replicas cannot help; the model code and lookups of the new release are the place to look.
+X: A=Raise the maximum: replicas are not busy (low CPU, no queue), so more of them leaves per-request time unchanged.
+B=Payload and limits: request rate is unchanged, and a rate limit would show as errors, not as longer model time.
+D=Authentication and rate limiting: the latency metric does not include them, so they cannot explain a change in it.
+T: Doubling of model inference latency with an empty queue points to the model or its lookups, not to capacity.
+V: Model Serving, Feature Store
+
+@ DBX-MLP D2 T2.20 applied use-case
+S: An endpoint shows a rising request error rate. The metric combines 4xx and 5xx responses per second, and the team needs to know whether clients send bad requests or the service fails. Where does the split come from?
+A: The request error rate chart itself, because it shows 4xx and 5xx as separate lines of the same panel
+B: The CPU and memory charts, since high usage always means 5xx errors and low usage means 4xx errors
+C: The build logs of the endpoint, which list every failed request with its response code for 30 days
+D: The inference table, grouped by `status_code` (together with the service logs for the failing requests)
+K: D
+G: ## What the error metric tells
+The request error rate is the number of 4xx and 5xx HTTP responses per second, computed by totalling the failed requests in a minute and dividing by 60. It is one number, so it says that errors rose, not which kind.
+## Finding the cause
+- Inference table (AI Gateway-enabled): records each request and response, including the status code, in a Unity Catalog Delta table, so a query can count 4xx against 5xx per hour or per client.
+- Ephemeral service logs: `stdout` and `stderr` of the model server, useful for the tracebacks behind 5xx.
+- Build logs only describe the build of the environment at deployment.
+4xx usually points at the clients (payload shape, authentication, schema); 5xx at the model or platform.
+W: Inference table by status code: it keeps one row per request with the response status, so the error classes can be counted, and logs explain 5xx.
+X: A=Separate lines: the health metric is a single combined rate of 4xx and 5xx.
+B=CPU and memory: usage does not map to error classes; a 4xx caused by a wrong payload happens at any load.
+C=Build logs: they cover environment creation after deployment, not request handling.
+T: The health metric shows that errors rise; split 4xx from 5xx in the inference table and read the service logs.
+V: Model Serving, Inference tables
+
+@ DBX-MLP D2 T2.20 advanced use-case
+S: Load tests show an average latency of 160 ms per request. The endpoint must serve a steady 250 requests per second without queueing. Using the documented sizing rule, what minimum provisioned concurrency should the scale-out range have?
+A: 250, one unit per request per second, regardless of how long a request takes
+B: 40, because required concurrency is the request rate multiplied by the average latency in seconds
+C: 1,563, because required concurrency is the request rate divided by the latency in seconds
+D: 6, because required concurrency is the latency in milliseconds divided by the request rate per second
+K: B
+G: ## Provisioned concurrency
+Provisioned concurrency is the maximum number of parallel requests the endpoint can handle; it moves between the minimum and maximum of the compute scale-out range as traffic changes. The documentation gives the sizing rule
+`required concurrency = target QPS x average latency (seconds)`
+which is Little's law: requests in flight equal arrival rate times time in the system. Here `250 x 0.16 = 40`.
+## Practice
+Set the minimum high enough for baseline traffic without queueing, the maximum for spikes while keeping cost under control, and check the result with load tests and the queue time metric.
+W: 250 x 0.16 = 40 requests in flight on average; that is the concurrency that avoids queueing at steady load.
+X: A=250: that would hold if each request lasted one second; at 160 ms the number in flight is much smaller.
+C=Dividing: division by the latency gives a larger number for faster models, which is the reverse of the relationship.
+D=Latency over rate: the result has no unit of concurrency, and it falls as traffic rises.
+T: Required concurrency is QPS times average latency in seconds; size the minimum for baseline load.
+V: Model Serving
+
+@ DBX-MLP D2 T2.20 applied use-case
+S: A compliance review needs 90 days of endpoint latency, error rate, CPU and memory history for a custom model endpoint. The Serving UI shows only the last 14 days. Which approach delivers the history?
+A: Create a data profile on the inference table, which stores the CPU and memory of the replicas as columns
+B: Raise the retention setting of the Metrics tab to 90 days in the endpoint configuration
+C: Export the service logs from the Logs tab once a month, since ephemeral logs keep every metric value for as long as the endpoint exists
+D: Scrape the metrics export API with Prometheus or Datadog (or persist OpenTelemetry telemetry to Unity Catalog tables) for long-term storage
+K: D
+G: ## Retention of health data
+Endpoint health metrics are available by default in the Serving UI for the last 14 days. For longer history the data has to be taken out:
+- Metrics export: the endpoint serves its health metrics at `/api/2.0/serving-endpoints/<name>/metrics`; Prometheus or Datadog scrape it (for example every minute), and the observability tool keeps the history.
+- OpenTelemetry for custom model endpoints: persists system logs, application logs, metrics and traces to Unity Catalog Delta tables for long-term retention, queryable with SQL.
+## Not suitable
+An inference table logs requests and responses, and a data profile on it describes data and model quality, not replica CPU or memory.
+W: Metrics export or OpenTelemetry persistence both move the infrastructure metrics into a store with the retention that the review needs.
+X: A=Profile on the inference table: it profiles payload data and predictions; replica CPU and memory are not columns of that table.
+B=Retention setting: the 14 days are fixed for the UI; there is no endpoint option that extends them.
+C=Ephemeral logs: they carry `stdout` and `stderr` streams for debugging and are not a metric store.
+T: For history beyond 14 days, export health metrics to Prometheus or Datadog or persist OpenTelemetry data to Unity Catalog.
+V: Model Serving
+
+@ DBX-MLP D2 T2.20 advanced troubleshooting
+S: Over four days, memory usage of an endpoint's replicas rises steadily to near 100 percent while request rate is flat, and P99 latency worsens until a configuration update resets everything. The model keeps every processed text in a Python dictionary for reuse. What is the right response?
+A: Bound the cache (an LRU or maximum size) in the model code, release the memory, and confirm with the memory usage chart after the redeploy
+B: Raise the maximum scale-out so that traffic is spread over more replicas, which removes the per-replica growth
+C: Disable the memory usage chart and alert on CPU only, because memory is shared with the platform
+D: Raise the minimum provisioned concurrency to the maximum, so that replicas are restarted by the autoscaler every hour and release their memory
+K: A
+G: ## Reading CPU and memory
+CPU usage and memory usage are the average utilization across all server replicas. A steady climb of memory with a flat request rate is a sign of state kept in the process, such as an unbounded cache, rather than of load.
+## Responses
+- More replicas lower the load per replica, but each replica still grows without limit, so the problem only appears later and costs more.
+- The memory chart is exactly the metric that shows the leak; keep it and alert on it.
+- The fix lives in the model code: bound or evict the cache, then redeploy and watch the chart flatten.
+W: Bounded cache: the cause is the growing in-process state, so the code change removes the growth and the chart verifies it.
+X: B=More replicas: each replica grows by the same dictionary, so the leak only moves later while cost rises.
+C=Ignoring memory: the metric is average memory utilization across replicas; removing the alert hides the symptom.
+D=Concurrency as a restart tool: provisioned concurrency scales capacity; it is not a recycling schedule, and the scaling does not clear memory in a replica.
+T: A steady memory climb under flat traffic is a leak in the served code; fix the code, not the replica count.
+V: Model Serving
+
+@ DBX-MLP D3 T3.1 applied comparison
+S: A team compares rollout strategies for a new version of a model on a Model Serving endpoint. Which statement describes the difference correctly?
+A: Canary hosts the new version on a separate endpoint with all traffic, while blue-green needs a single endpoint with two served entities
+B: Both strategies send the same share to the new version, and differ only in whether the share is chosen by percentage or by user group
+C: Canary raises the new version's share in steps on live traffic; blue-green prepares a full second environment and switches all traffic at once
+D: Blue-green changes the share in steps of one percent, while canary always flips to the new version after one successful test
+K: C
+G: ## Two strategies
+- Canary release: a small share of live traffic goes to the new version, the team watches error rate, latency and quality, and the share is raised step by step (or the release is rolled back). Risk is limited to the share. In Model Serving this is a traffic split between served entities in `traffic_config`, for example 95 and 5 percent.
+- Blue-green: the current environment (blue) keeps serving while a complete new one (green) is prepared and tested; traffic is then switched to green in one move, and blue stays available for a quick return.
+## Platform notes
+One endpoint can host several served entities of the same type with a percentage split. A separate endpoint, with clients or a gateway switching the target, is the other form. Databricks also performs zero-downtime updates of an endpoint configuration: the old configuration keeps serving until the new one is ready, which is a platform safeguard and not a rollout strategy of its own.
+W: Gradual shares versus all-at-once switch: that is the difference in blast radius and in the capacity needed.
+X: A=Reversed roles: canary uses a small traffic share, usually within one endpoint; blue-green uses two complete environments, often two endpoints.
+B=Same share: blue-green does not use a partial share on live traffic; the switch is all-or-nothing after testing.
+D=Mixed definitions: neither strategy is defined by one-percent steps or by one test, and the roles of the two are swapped.
+T: Canary grows the new version's share in steps; blue-green switches everything from a ready environment at once.
+V: Model Serving
+
+@ DBX-MLP D3 T3.1 advanced use-case
+S: Version 5 of a fraud model needs a new input column `device_risk`, and the application will send it only after a client release. The old version rejects requests that contain it. The team wants the rollout with the lowest risk to users. Which design fits?
+A: A canary with 5 percent on version 5 in the existing endpoint, because only that small share of requests will be rejected by the old entity
+B: Blue-green: a new endpoint for version 5, tested first; clients switch target at cutover and the old endpoint stays for rollback
+C: Replace version 4 with version 5 in one configuration update, relying on the zero-downtime update to avoid failed requests
+D: A canary with 50 percent, to collect enough requests quickly, and version 4 as a fallback inside the same entity
+K: B
+G: ## Same endpoint means same request format
+Served entities in one endpoint receive requests from the same URL in the same format. A traffic split chooses the entity per request; it cannot adapt the payload. If the two versions have incompatible signatures, any canary share in that endpoint produces errors for that share, and the clients cannot know which entity answers.
+## Blue-green for incompatible changes
+A second endpoint accepts the new format. It can be tested with its own requests before any real client uses it, and the cutover is a client or gateway change together with the application release. The old endpoint serves until then and stays as the rollback target.
+Zero-downtime updates protect the platform side (the old configuration continues until the new one is ready), not the compatibility of requests.
+W: Separate endpoint with a controlled cutover: the contract change is released together with the clients, and nobody receives a mismatched model.
+X: A=Canary in the same endpoint: the share that lands on the other version gets a rejected or wrongly shaped request, so 5 percent of users still see failures.
+C=In-place update: the update is smooth for the platform, but all clients with the old payload would fail at once.
+D=Larger canary: a bigger share means more rejected or wrong requests, and entities of one endpoint do not convert payloads.
+T: Incompatible request signature calls for a separate environment and a coordinated cutover, not a share in one endpoint.
+V: Model Serving
+
+@ DBX-MLP D3 T3.1 applied tradeoff
+S: After a blue-green cutover of a ranking model, the team wants to delete the old (blue) endpoint to stop paying for two environments. Quality labels for the new version only arrive after 5 days. What is the best plan?
+A: Keep the old endpoint unchanged until the labeled results of the new version are checked, then retire it
+B: Delete it now; a rollback can recreate the old endpoint from the registered model version in a few minutes
+C: Keep it but scale its traffic to a permanent 50 percent, so that costs are shared equally with the new version
+D: Delete it now and save the old model's predictions as a Delta table, since the labeled results need only a copy of what it predicted
+K: A
+G: ## Rollback needs a target
+Blue-green trades money for a quick return: both environments exist for a while. The old one is only a rollback target if it is still deployed, warm and configured. The time to keep it is set by when the team can tell that the new version is good, which for delayed labels is after they arrive. Immediate health metrics (errors, latency) say that the service works, not that the predictions are right.
+## Cost note
+During an update of a configuration you are billed for both old and new until the transition is complete; keeping a blue endpoint for days is a deliberate cost for a quality gate. Retire it when the evidence is in.
+W: Keep until labels confirm: the quality of the new version is unknown for 5 days, and only a live old endpoint gives a quick return.
+X: B=Delete now: recreating takes time (environment build, scaling) and happens during an incident; it removes the fast rollback that justifies blue-green.
+C=Permanent 50 percent: this turns the strategy into a long split, serves half of the users the old version, and does not reduce cost.
+D=Prediction copy: a stored table cannot serve live requests, so it is no rollback target.
+T: Keep the blue environment until quality evidence arrives; fast rollback is what the extra cost buys.
+V: Model Serving
+
+@ DBX-MLP D3 T3.1 advanced troubleshooting
+S: A canary sends 10 percent of 400 requests per second to the `challenger` served entity, sized for that share. The checks pass, and the team sets the split to 100 percent challenger. Minutes later P99 latency and request queue time of the endpoint jump and some requests are rejected. What was missed?
+A: The traffic split must be changed in steps of 1 percent, since larger changes are rejected by the traffic configuration
+B: A fully promoted entity must be re-registered under a new alias, because the canary alias is limited to 10 percent
+C: Request queue time is not affected by a traffic change, so a client-side network fault must have occurred at the same time
+D: The challenger was sized for 10 percent; before raising its share, its scale-out range had to cover full traffic (QPS x latency)
+K: D
+G: ## Capacity follows the share
+Each served entity has its own compute scale-out range. A challenger sized for 10 percent of 400 requests per second handles about 40 requests per second. With 160 ms average latency, `40 x 0.16 = 6.4` concurrent requests; at full traffic `400 x 0.16 = 64`. Autoscaling needs time to detect load and add capacity, and meanwhile requests queue and can be rejected.
+## Safer promotion
+- Raise the challenger's minimum and maximum concurrency before moving the split, using required concurrency = QPS x average latency in seconds.
+- Move the split in stages and watch request queue time and error rate between steps.
+- Keep the former entity until the new one is stable.
+W: Capacity of the promoted entity: sizing was for the canary share, so a full switch sends 10 times the load into an entity that has not scaled yet.
+X: A=Step size: the traffic configuration accepts any split that adds up; the problem is capacity, not the size of the step.
+B=Alias limit: an alias on a registered model version has no traffic limit, and the served entity configuration decides the share.
+C=Ignoring queue time: queue time grows exactly when requests arrive faster than replicas take them, so the traffic change explains it.
+T: Resize the challenger for the full load (QPS x latency) before the split is raised, and promote in stages.
+V: Model Serving
+
+@ DBX-MLP D3 T3.1 advanced use-case
+S: A low-traffic internal endpoint receives about 30 requests per minute, from a few batch clients. A new version should go live, and a canary at 5 percent would deliver about 1.5 requests per minute to it. How should the team validate the new version?
+A: Use a 1 percent canary for several weeks, since a longer observation period always collects enough requests for a reliable quality decision
+B: Add the version as a served entity, replay recorded production requests through its own served-model path, compare results, then switch all traffic and keep the old entity
+C: Skip validation because low traffic means low risk, and replace the version directly with one configuration update
+D: Raise the canary to 50 percent so that statistics converge faster, accepting that half of the clients see the new model
+K: B
+G: ## Canary needs traffic
+A canary produces evidence from live requests. At 30 requests per minute, a 5 percent share gives about 90 requests a day, which is too few to see errors that happen in 1 percent of cases, let alone small quality changes. High-traffic endpoints are the natural fit for canaries: a share of 1 to 5 percent still means thousands of requests in minutes.
+## Pre-cutover validation
+A served entity can be called directly at `/serving-endpoints/<endpoint>/served-models/<name>/invocations`; the traffic settings are ignored for such calls. The team can replay recorded production requests against the new version at any speed, compare its output with the old one, and then move all traffic in one step with the old entity still available (blue-green style).
+W: Replay through the direct served-model path, then a full switch with rollback: evidence comes from recorded traffic, not from waiting for live requests.
+X: A=Long thin canary: the evidence arrives very slowly and bad behavior stays in production for weeks.
+C=No validation: a failing model still hits all clients, and low volume gives no early warning.
+D=Large canary: it exposes half of the users to unvalidated behavior and still gives only 15 requests per minute.
+T: Canaries need volume; for low-traffic endpoints validate with replayed requests and a full switch with rollback.
+V: Model Serving
+
+@ DBX-MLP D3 T3.1 advanced tradeoff
+S: A recommendation model is retrained with a new feature set and will serve a sustained 2,000 requests per second. Accuracy is expected to improve, but the team fears subtle quality regressions that offline tests cannot show. Which rollout fits best?
+A: Canary starting at 1 to 5 percent, watching error rate, latency and a quality signal, then raising the share in steps as the evidence grows
+B: Blue-green with a second full-size environment and an instant switch, as that exposes the whole audience to the new result at once and reverts instantly
+C: Replace the version directly outside peak hours, since the quality cannot be known in advance anyway
+D: A 50/50 split from the start, because only equal shares give statistically meaningful comparisons
+K: A
+G: ## High traffic suits canaries
+At 2,000 requests per second, 1 percent is 20 requests per second, so a small share collects thousands of requests in minutes. The risk of a regression that offline tests cannot see is contained to that share, and it can be reversed by moving the share back. Blue-green would need a second environment sized for full traffic and gives no partial evidence before the switch, so its extra cost does not buy protection against subtle quality loss.
+## Practice
+Define the gates in advance (error rate, latency, a quality metric from the inference table), step the share up only when they hold, and size the challenger's scale-out range for the next step.
+W: Small, growing share: it gives enough evidence quickly at high volume and limits the effect of a hidden regression.
+X: B=Instant switch of everything: the whole audience would meet a hidden regression at once, and a full duplicate environment is paid for.
+C=Direct replacement: it gives no staged evidence, no protected share and no quick reaction.
+D=Even split from the start: half of all users get the unproven version, while a small share at this volume is already enough to compare.
+T: High-traffic endpoints can learn from a 1 to 5 percent canary quickly, so staged growth beats an all-at-once switch.
+V: Model Serving
+
+@ DBX-MLP D3 T3.1 advanced troubleshooting
+S: A blue-green switch is done inside one endpoint: the new entity `green` was set to 100 percent and the old entity `blue` to 0, with `scale_to_zero_enabled: true` on both to save cost. A defect appears and the team moves 100 percent back to `blue`. The first requests then take far longer than usual and some time out. What was the design flaw?
+A: The standby `blue` entity had scaled to zero, so rollback met a cold start; keep a minimum capacity on the standby while it is the rollback target
+B: Traffic percentages can only be changed once a day, so the rollback was queued behind the earlier change and delayed
+C: Rollback to a previous entity always rebuilds its Python environment from the registered model version before serving
+D: Zero traffic on `blue` caused the platform to delete the entity, which is why it had to be created again during the incident
+K: A
+G: ## Standby capacity
+With scale to zero enabled, an entity that receives no traffic releases its compute after a period and needs a cold start (compute allocation and model load) when requests return. A blue-green rollback exists for the moment when speed matters, so the standby must be able to answer at once. Keep a non-zero minimum scale-out for the standby while it is the rollback target, and accept the cost; remove it when the old version is retired.
+## Related points
+- Updates of the traffic split on an existing endpoint apply to existing served entities; they do not rebuild them.
+- Scale to zero suits entities that tolerate a first slow request.
+W: Cold standby: scale to zero removed the compute, so the rollback had to start it again under load.
+X: B=Daily limit: the documented update is an ordinary configuration change with no once-a-day rule.
+C=Rebuild on rollback: the environment of an entity exists as long as the entity does; shifting percentages does not rebuild it.
+D=Deleted entity: an entity with 0 percent still exists in the configuration; the delay was compute start, not recreation.
+T: Keep the rollback target warm; a standby with scale to zero turns a quick switch back into a cold start.
+V: Model Serving

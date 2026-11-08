@@ -1,0 +1,622 @@
+# src: https://docs.databricks.com/aws/en/generative-ai/tutorials/ai-cookbook/quality-data-pipeline-rag
+# src: https://docs.databricks.com/aws/en/vector-search/query-vector-search
+# src: https://docs.databricks.com/aws/en/generative-ai/agent-framework/unstructured-retrieval-tools
+# src: https://docs.databricks.com/aws/en/generative-ai/agent-framework/langchain-uc-integration
+# src: https://docs.databricks.com/aws/en/mlflow3/genai/eval-monitor/concepts/judges/
+
+@ DBX-GAI D2 T2.7 advanced use-case
+S: A RAG application answers questions about long insurance policies. Small chunks of about 150 tokens match the user's question precisely, but the generator then lacks the surrounding clauses and gives incomplete answers. Larger chunks of about 1,500 tokens give complete context but make retrieval noisy. Which chunking design addresses both problems?
+A: Keep 1,500-token chunks and add a 50% overlap between neighbors so that every sentence appears in two chunks and the retrieved text is longer
+B: Embed and search small child chunks, store a parent identifier with each child, and pass the larger parent section to the LLM after a child matches
+C: Embed each policy as a single document so the retriever always returns the complete policy and the LLM sees every clause
+D: Keep 150-token chunks and raise the number of results returned from the index so that more fragments reach the prompt in arbitrary order
+K: B
+G: ## Small-to-big (parent-child) retrieval
+A chunk size is a compromise: small chunks give precise embeddings and precise matches, large chunks give the generator enough context. Parent-child chunking (also called small-to-big retrieval) removes the compromise by separating what is searched from what is sent to the LLM.
+- Split each document into larger **parent** sections (for example a policy section), then split each parent into small **child** chunks.
+- Embed and index only the children, and store a `parent_id` (or the parent text) as metadata next to each child in the Delta table that backs the index.
+- At query time, search the children, then look up the parents of the best matches and pass those parents to the prompt, removing duplicates when two children share a parent.
+Databricks documents chunking as an iterative, use-case dependent choice with metadata stored beside the chunks; parent-child is one of the advanced patterns built on that metadata. The exam guide lists "advanced chunking strategies" without naming products; the pattern is generic and you implement it with your own pipeline and an AI Search index (formerly Vector Search).
+W: Child chunks for search, parent for context: the small child embeddings keep matching precise, and returning the parent section gives the LLM the clauses around the match, so answers are complete without making the index noisy.
+X: A=Large chunks with 50% overlap: overlap protects against a fact being cut at a boundary but does not make embeddings more specific. It also doubles stored text and returns near-duplicate passages, which makes noise worse.
+C=One embedding per policy: a single vector for a long policy blurs many topics, so similarity to a narrow question is weak, and the policy can exceed the embedding model's maximum token limit, in which case it is truncated and part of the text is lost.
+D=More small results: returning more fragments only adds sibling pieces by chance, in similarity order rather than document order, so the clauses are still not guaranteed to be contiguous and the prompt grows with unrelated text.
+T: Parent-child retrieval searches small chunks for precision and returns their larger parent for context.
+V: AI Search
+
+@ DBX-GAI D2 T2.7 applied use-case
+S: Many chunks in a product-manual index start with phrases such as "It must be replaced every year" or "This setting is disabled by default", so queries naming the product or setting rarely retrieve them. Which TWO changes add the missing context to these chunks? (Select TWO)
+A: Prepend the document title and section heading to each chunk's text before embedding it, so the vector carries the subject of the passage
+B: Replace the embedding model with a model that has a smaller maximum token limit so each chunk is processed in a shorter window
+C: Remove every chunk shorter than 200 tokens from the index so that only long passages that name their subject remain
+D: Store the heading path and a short document summary as metadata columns, and return them with the chunk (and, if a reranker is used, list them as columns for it to consider)
+E: Lower the chunk overlap to zero so that no text from a neighboring chunk is repeated in the next chunk
+K: A,D
+G: ## Contextual chunks
+A chunk is embedded and retrieved on its own. A passage that says "it" or "this setting" has no subject, so neither the vector nor a keyword match connects it to the product the user names. Advanced chunking fixes this by attaching the context that the chunk lost when it was cut out of the document.
+- **Contextual prefix**: add the document title and the heading path (for example `Pump X200 > Maintenance > Filters`) to the text that is embedded.
+- **Metadata columns**: keep the heading path, product name and a short parent-document summary as columns next to the chunk in the Delta table. They support filters, can be returned to the LLM, and AI Search lets you name metadata columns (`columns_to_rerank`) that the reranker uses as extra context when it scores each passage.
+Databricks guidance for RAG pipelines stresses storing metadata with the chunks and using semantically coherent chunks that can stand alone.
+W: A=Contextual prefix: embedding the title and heading with the text puts the subject (the product and setting) into the vector, so a query naming the product now lands near the passage.
+D=Heading and summary metadata: the context travels with the chunk, can be used for filtering, can be shown to the LLM, and can be passed to the reranker as extra columns to improve its relevance judgment.
+X: B=Smaller token limit: a smaller maximum window only truncates more text. It adds no subject to a passage that never mentions one.
+C=Dropping short chunks: length does not mean a chunk names its subject, and short chunks often hold the facts users ask about, so removing them reduces recall.
+E=Zero overlap: overlap repeats text from a neighbor and can occasionally carry a subject forward, but removing it cannot add missing context and makes boundary losses more likely.
+T: Fix context-poor chunks by adding titles and headings to the embedded text and storing them as metadata.
+V: AI Search
+
+@ DBX-GAI D2 T2.7 applied comparison
+S: Support answers often depend on a single sentence inside a long troubleshooting article, but the sentences before and after it explain the exception. The team wants to retrieve with very precise embeddings and still give the model the neighboring text. Which approach matches this goal?
+A: Sentence-window retrieval: embed individual sentences, and for each hit return the sentence together with a fixed number of sentences on each side
+B: Fixed-size chunking at 2,000 characters with no overlap, so that each chunk is large enough to contain the sentence and its neighbors
+C: Keyword-only retrieval on the article title, so that the full article is always returned whenever a title term matches
+D: Summarize each article and embed only the summary, so the retriever returns one short abstract per article
+K: A
+G: ## Sentence-window retrieval
+Sentence-window retrieval is a variant of small-to-big retrieval. The unit that is embedded is one sentence, which gives the most specific vector possible, while the unit that is returned is a window of the surrounding sentences. The window size is a tunable parameter that you set from evaluation results.
+- Index: one row per sentence with its position, document id and the neighbor text (or the position so the neighbors can be fetched).
+- Query: find the best sentences, expand each into its window, merge overlapping windows, and pass them to the LLM.
+Compare this with parent-child retrieval: the parent there is a structural unit (a section), while the window is purely positional. Choose structural parents when documents have clean headings and windows when they are flowing prose.
+W: Sentence windows: single sentences give sharp retrieval, and expanding each hit by a few neighbors supplies the explanation of the exception without embedding large noisy blocks.
+X: B=Large fixed chunks with no overlap: fixed-size chunks cut at arbitrary offsets, so the sentence and the neighbors that explain it may still land in different chunks, and the large embedding is less specific.
+C=Title keyword retrieval: matching on the title returns whole articles by topic, not the sentence that answers the question, and wastes prompt space on irrelevant content.
+D=Embedding only summaries: a summary drops the exact exception wording that the user needs, so retrieval would hit the article but the model would not see the sentence.
+T: Sentence-window retrieval embeds single sentences and returns each hit with its neighbors.
+
+@ DBX-GAI D2 T2.7 advanced tradeoff
+S: A legal team is choosing between recursive character splitting and semantic chunking (splitting where the topic changes, based on embedding similarity between adjacent sentences) for 4 million pages that must be re-chunked each time the policy changes. Which statement describes the trade-off correctly?
+A: Semantic chunking is cheaper than recursive splitting because it does not call an embedding model, and it always yields chunks of equal length
+B: Recursive splitting is unsuitable for production because it can only cut at an exact character count, ignoring paragraph and sentence boundaries
+C: Semantic chunking aligns boundaries with topic shifts and produces more self-contained chunks, but it needs embedding calls during ingestion and gives variable chunk sizes that must be capped
+D: Both approaches yield the same chunks when the overlap is set to the same value, so the choice only affects the code library used
+K: C
+G: ## Choosing a splitter
+Databricks describes four families of chunking strategy:
+- **Fixed-size** chunking (for example LangChain `CharacterTextSplitter`): quick, but it rarely gives coherent chunks and Databricks says it rarely works for production applications.
+- **Paragraph-based** chunking (for example `RecursiveCharacterTextSplitter`): tries separators from large to small (paragraphs, lines, words), so it keeps natural boundaries when it can.
+- **Format-specific** chunking (for example `MarkdownHeaderTextSplitter` or HTML header splitters): uses the document's structure.
+- **Semantic** chunking (for example LangChain `SemanticChunker`): analyzes content to find topic shifts, which is more involved than the basic approaches.
+## The trade-off
+Semantic chunking needs to embed sentences or windows during ingestion, which adds compute and cost for a large corpus, and its chunk sizes vary, so a maximum size must still be enforced to fit the embedding model's token limit. Recursive splitting is cheap, deterministic and fast to re-run.
+W: Semantic chunking: boundaries follow topic changes so each chunk stands alone, at the price of embedding calls during ingestion and variable-size chunks that need a size cap.
+X: A=Cheaper and uniform: semantic chunking relies on embeddings to detect topic shifts, so it costs more at ingestion, and its chunks are variable in length rather than equal.
+B=Only exact cuts: a recursive splitter tries paragraph, line and word separators first, and only falls back to smaller separators when a piece is still too large. Fixed-size splitting is the one that ignores structure.
+D=Same chunks: the algorithms choose boundaries differently, so overlap does not make them equivalent. The choice changes chunk content, cost and retrieval quality.
+T: Semantic chunking gives coherent, variable-size chunks at higher ingestion cost; recursive splitting is cheap and predictable.
+
+@ DBX-GAI D2 T2.8 applied definition
+S: A RAG pipeline retrieves 50 candidate passages by vector similarity and passes the top 5 to the LLM. Answer quality improves when a second model re-scores the 50 candidates against the query first. What is the role of that re-ranking step?
+A: It replaces the embedding model so that the documents no longer need to be embedded when the index is built
+B: It expands the user's question into several paraphrases so that the first-stage search covers more vocabulary
+C: It re-orders a small set of candidates with a model that reads the query and each passage together, so the most relevant passages reach the prompt and weaker ones are dropped
+D: It compresses each passage into a shorter summary so more passages fit into the LLM context window
+K: C
+G: ## Two-stage retrieval
+First-stage retrieval has to search millions of chunks quickly, so it compares precomputed vectors (a bi-encoder: the query and each chunk are embedded separately) or keywords. That is fast but approximate: the query and the chunk never "see" each other.
+A **re-ranker** is the second stage. It takes a small candidate list (tens of passages) and scores each query-passage pair together, typically with a cross-encoder, which is more accurate but too slow to run on the whole corpus. The best-scoring passages go to the LLM.
+- Retrieve broadly (high recall), then re-rank to keep the best few (high precision).
+- Re-ranking changes the order and the selection, not the index content.
+Databricks AI Search (formerly Vector Search) offers a reranker you add to a query; the docs describe it as a cross-encoder second pass on top of any retrieval strategy.
+W: Re-scoring candidates: a cross-encoder-style model judges the query and each passage together, so the order reflects true relevance and the prompt receives the best few passages.
+X: A=Replacing the embedding model: the re-ranker works on retrieved candidates. Documents are still embedded (or managed embeddings are used) when the index is built.
+B=Query expansion: paraphrasing the question is a pre-retrieval technique that happens before the first search; re-ranking happens after it.
+D=Summarizing: compressing passages is context compression and does not rank them; a summary of a weak passage is still a weak passage.
+T: A re-ranker is a second-stage model that re-scores a small candidate set and keeps the most relevant passages.
+V: AI Search
+
+@ DBX-GAI D2 T2.8 applied use-case
+S: A developer adds the AI Search reranker to a hybrid query and wants the reranker to also consider a `product_name` metadata column and a `parent_doc_summary` column. Which TWO statements about configuring the reranker are correct? (Select TWO)
+A: Metadata columns for reranking are listed in `columns_to_rerank`, separately from the `columns` returned, and their order matters because the reranker reads them in order and considers only the first 2,000 characters
+B: `num_results` limits how many candidates the reranker scores, so setting it to 5 means only five passages are re-scored
+C: The reranker replaces the query type, so `query_type` must be removed when `reranker` is set
+D: `num_results` is the final number of results returned after reranking and does not change how many candidates are used for reranking
+E: The reranker needs the index to be rebuilt with a separate reranking embedding model before it can be used in a query
+K: A,D
+G: ## Reranker parameters in AI Search
+In the Python SDK, a reranker is passed to `similarity_search`:
+```
+from databricks.ai_search.reranker import DatabricksReranker
+index.similarity_search(query_text=q, columns=["id","text"], num_results=5,
+    query_type="hybrid",
+    reranker=DatabricksReranker(columns_to_rerank=["text","parent_doc_summary"]))
+```
+- `columns` selects what is returned; `columns_to_rerank` selects what the reranker reads. They are set separately.
+- The order in `columns_to_rerank` matters, and only the first 2,000 characters it finds are considered, so put the most informative column first.
+- `num_results` is the final number returned and does not affect the number of candidates reranked.
+- The reranker is an optional second pass on top of any retrieval strategy; no index rebuild is needed. The query's `debug_info` reports `reranker_time`.
+The package name changed with the product rename (Vector Search to AI Search); older snippets import from `databricks.vector_search`.
+W: A=columns_to_rerank: the reranker reads its own list of columns in the order given and stops at 2,000 characters, so the key text should come first.
+D=Final result count: `num_results` is what the caller gets back; the candidates scored by the reranker are chosen separately by the service.
+X: B=Candidates limited by num_results: the docs say `num_results` does not affect the number of results used for reranking.
+C=Replacing query_type: the reranker is a second pass on top of any strategy, and the docs example combines it with `query_type="hybrid"`.
+E=Separate embedding model: the reranker is a service applied at query time; the index and its embeddings are unchanged.
+T: Set reranker columns separately and in priority order; `num_results` is the final count, not the candidate count.
+V: AI Search
+
+@ DBX-GAI D2 T2.8 advanced tradeoff
+S: Two applications use the same AI Search index. One is an internal RAG chatbot where answer quality matters most and users accept a response time of a few seconds. The other is an autocomplete box that must answer within tens of milliseconds at high request volume. How should the reranker be used?
+A: Enable it for both, because the reranker adds no measurable time and always improves ordering
+B: Disable it for both, because a reranker lowers retrieval quality whenever hybrid search is already in use
+C: Enable it only for the autocomplete box, since short queries have too little text for hybrid search and need a second pass
+D: Enable it for the chatbot, where its added latency is acceptable for better relevance, and leave it off for the latency-sensitive autocomplete box
+K: D
+G: ## Latency versus relevance
+The AI Search docs describe the reranker as an optional second pass that improves quality (documented as roughly 10% on typical workloads) but adds latency, typically under one second per query. Databricks recommends trying it for any RAG agent use case, and says it is potentially less suitable for high-throughput, low-latency search applications.
+- Quality-first, human-in-the-loop workloads (RAG chatbots, agents) can pay the extra time.
+- Keystroke-level or high-QPS lookups cannot.
+- If the reranker service is temporarily unavailable, the query still returns results that have not been reranked and a warning appears in `debug_info`, so design the application to tolerate unranked results.
+Measure on your own evaluation set before deciding; the benefit depends on the data and on the quality of first-stage retrieval.
+W: Use it where quality matters more than latency: a chatbot absorbs the extra time, while autocomplete cannot afford it, so the reranker is switched per application.
+X: A=No measurable time: the reranker is an extra model call per query, and the debug info reports its time separately (hundreds of milliseconds in the docs example).
+B=Never with hybrid: the reranker is documented as a second pass on top of any strategy, including hybrid, and it is how the highest-precision strategy ("hybrid + reranker") is built.
+C=Only for autocomplete: this reverses the trade-off; a latency-critical box is the worst place for an added model call.
+T: Reranking trades latency for precision: use it for quality-first RAG, skip it for latency-critical lookups.
+V: AI Search
+
+@ DBX-GAI D3 T3.1 applied use-case
+S: A team is loading Markdown release notes for a RAG application. The notes use `#` and `##` headings, and each section answers a different question. Which LangChain component is the best fit for splitting them?
+A: A `CharacterTextSplitter` with a fixed 500-character size, because predictable chunk lengths give consistent embeddings
+B: A `MarkdownHeaderTextSplitter`, which splits on heading levels and keeps the heading text as metadata on each chunk
+C: A `SemanticChunker` run on the raw file, because Markdown syntax cannot be split on its structure
+D: An `HTMLHeaderTextSplitter`, since Markdown files are rendered as HTML before they are stored
+K: B
+G: ## Pick the splitter from the format
+LangChain ships text splitters that map to the chunking families Databricks describes for RAG pipelines.
+- `CharacterTextSplitter`: fixed-size splitting at a separator, quick but rarely coherent.
+- `RecursiveCharacterTextSplitter`: paragraph-based, tries larger separators first.
+- `MarkdownHeaderTextSplitter` and HTML header/section splitters: format-specific, using the document structure as chunk boundaries.
+- `SemanticChunker`: semantic splitting at topic shifts.
+For structured Markdown, the header splitter gives chunks that match the author's sections and records the heading path as metadata that you can store in the Delta table and use for filtering or context.
+W: Markdown header splitter: sections map to questions, boundaries follow the headings, and the heading is kept as metadata for retrieval and context.
+X: A=Fixed 500 characters: this cuts mid-section and rarely produces coherent chunks, which the Databricks guidance says rarely works for production use.
+C=SemanticChunker on raw text: it can work, but it ignores the structure that already marks each topic, and it adds embedding cost. It does not mean Markdown cannot be split structurally.
+D=HTML splitter: the file is stored as Markdown text, and an HTML splitter looks for HTML tags, so it will not see `#` headings.
+T: Use the format-specific splitter (Markdown or HTML headers) when the document structure already marks topics.
+
+@ DBX-GAI D3 T3.1 applied use-case
+S: A developer builds a LangChain chain in a Databricks notebook and wants it to call a chat model hosted on a Model Serving endpoint, including a Foundation Model API endpoint. Which integration class from the `databricks-langchain` package should the chain use?
+A: `UCFunctionToolkit`, which turns the serving endpoint into a callable chat model
+B: `VectorSearchRetrieverTool`, which sends the prompt to the endpoint as a retrieval query
+C: `ChatDatabricks`, which wraps a Databricks serving endpoint as a LangChain chat model
+D: `DatabricksFunctionClient`, which creates the serving endpoint when the chain is invoked
+K: C
+G: ## The databricks-langchain package
+`databricks-langchain` (import name `databricks_langchain`) holds the Databricks integrations for LangChain and LangGraph. The ones that appear most in agent code:
+- `ChatDatabricks(endpoint=...)`: a chat model backed by a Model Serving endpoint, for pay-per-token Foundation Model APIs, provisioned throughput or custom models.
+- `VectorSearchRetrieverTool` (AI Bridge): exposes an AI Search index (formerly Vector Search) as a tool or retriever.
+- `UCFunctionToolkit`: exposes Unity Catalog functions as tools.
+Because `ChatDatabricks` is a normal LangChain chat model, it plugs into `prompt | llm | parser` chains and into LangGraph agents the same way as any other provider's model.
+W: ChatDatabricks: it takes the endpoint name and sends the chat messages to that serving endpoint, so the chain can swap models by changing the endpoint.
+X: A=UCFunctionToolkit: it wraps Unity Catalog functions as agent tools, not a model endpoint.
+B=VectorSearchRetrieverTool: it queries an AI Search index for relevant documents and does not generate text.
+D=DatabricksFunctionClient: it runs and manages Unity Catalog functions; it does not create serving endpoints.
+T: ChatDatabricks is the LangChain chat model for a Databricks serving endpoint.
+V: Model Serving, LangChain
+
+@ DBX-GAI D3 T3.1 applied use-case
+S: An agent built with LangGraph must search a policy index in AI Search when a user asks a policy question, and the LLM must decide on its own when to call the search. Which approach follows the Databricks recommendation for new Python agents?
+A: Create a `VectorSearchRetrieverTool` from `databricks-langchain` with the index name and a tool description that tells the agent when to search, and give it to the agent as a tool
+B: Fetch all rows of the index's source Delta table into the system prompt before every call, so the LLM reads the full corpus each time
+C: Wrap the index in a `UCFunctionToolkit` function that returns a fixed list of the most recent documents regardless of the question
+D: Embed the question in application code and call the serving endpoint of the embedding model directly, then paste raw vectors into the prompt
+K: A
+G: ## Retrieval as an agent tool
+The Databricks page on connecting agents to unstructured data recommends AI Bridge for new Python agents: use `VectorSearchRetrieverTool` from `databricks-langchain` (or `databricks-openai`) to expose an AI Search index as a tool. The pieces:
+```
+vs_tool = VectorSearchRetrieverTool(
+    index_name="catalog.schema.docs_index",
+    tool_name="policy_search",
+    tool_description="Search company policies to answer policy questions.")
+```
+- `tool_description` is read by the LLM to decide when to call the tool, so write it like an instruction.
+- Optional settings include `num_results`, `columns`, `filters` and `query_type`.
+- With tool calling, the agent decides on each turn whether to search, which keeps unrelated questions fast.
+W: Retriever tool with a clear description: the LLM sees the description, decides when a policy question needs a search, and receives only the top results from the index.
+X: B=Whole corpus in the prompt: the corpus will not fit the context window, costs tokens on every call, and removes the point of retrieval.
+C=Fixed recent documents: a function that ignores the question cannot find the relevant policy, so answers depend on luck.
+D=Raw vectors in the prompt: the LLM cannot read vectors as meaning, and the index already does the embedding and similarity search.
+T: Expose the AI Search index to the agent as a retriever tool whose description tells the LLM when to use it.
+V: AI Search, LangChain
+
+@ DBX-GAI D3 T3.1 applied use-case
+S: An agent should be able to call an existing Unity Catalog SQL function, `main.hr.lookup_leave_balance`, as a tool. The team already uses LangChain and LangGraph. Which LangChain-compatible tool should they use?
+A: `ChatDatabricks`, passing the function name as the endpoint
+B: `MarkdownHeaderTextSplitter`, which exposes the function name as a document field
+C: `StrOutputParser`, which executes the function when the LLM responds with text
+D: `UCFunctionToolkit` from `databricks-langchain`, created with the function name and a client, whose `.tools` are given to the agent
+K: D
+G: ## Unity Catalog functions as tools
+Unity Catalog functions (SQL or Python) can be registered once and reused as agent tools, with Unity Catalog providing governance (who may execute them). The Databricks page on agent tools shows `UCFunctionToolkit(function_names=[...], client=client)`; its `.tools` list goes to `create_react_agent` or another LangChain agent constructor.
+- A function's comment and parameter descriptions become the tool description the LLM sees, so document them.
+- Serverless execution mode is the default; the local execution mode does not support SQL functions and is for development with trusted code only.
+- Running the agent on Model Serving requires that the service identity has `EXECUTE` on the function.
+W: UCFunctionToolkit: it loads the Unity Catalog function, turns it into LangChain tools, and the agent calls it when the LLM chooses the tool.
+X: A=ChatDatabricks: it represents a chat model endpoint. A function name is not an endpoint.
+B=MarkdownHeaderTextSplitter: it splits Markdown for chunking and has nothing to do with tools.
+C=StrOutputParser: it only converts a model message into a string. It never runs code.
+T: UCFunctionToolkit wraps Unity Catalog functions as LangChain tools.
+V: Unity Catalog, LangChain
+
+@ DBX-GAI D3 T3.1 applied troubleshooting
+S: A developer writes `chain = prompt | llm` with a `ChatPromptTemplate` and `ChatDatabricks`. Invoking it returns an `AIMessage` object, but the downstream code that writes to a Delta table expects a plain Python string. What is the simplest fix?
+A: Wrap the endpoint call in a `UCFunctionToolkit` so that the output is converted to a string
+B: Add an output parser, as in `prompt | llm | StrOutputParser()`, so the chain returns the message content as a string
+C: Switch to a `CharacterTextSplitter` so that the model output is split into string chunks
+D: Lower the temperature to zero, which makes chat models return plain strings instead of messages
+K: B
+G: ## Chains are composable
+LangChain Expression Language chains connect runnables with `|`: each step's output is the next step's input.
+- `ChatPromptTemplate` turns variables into chat messages.
+- A chat model such as `ChatDatabricks` returns an `AIMessage` (content plus metadata such as token usage).
+- An output parser converts that message into the format downstream code needs; `StrOutputParser` returns the text content, and a JSON or Pydantic parser returns structured data.
+The pattern `prompt | llm | parser` is the basic chain on Databricks and the same shape can be logged with MLflow and served from Model Serving. Select parsers by what the next step consumes.
+W: StrOutputParser: appending it at the end of the chain turns the model message into its text, with no other change to the prompt or the model.
+X: A=UCFunctionToolkit: it provides tools for agents; it does not change a chat model's output type.
+C=CharacterTextSplitter: a text splitter prepares input documents for chunking and is not a post-processing step.
+D=Temperature zero: temperature changes how deterministic the sampling is, not the Python type that the chat model returns.
+T: Add an output parser (for example StrOutputParser) when the chain's last step must return a plain string or structured data.
+V: LangChain
+
+@ DBX-GAI D3 T3.1 applied comparison
+S: A workload classifies each of 2 million support tickets into one of five categories with one prompt and one call to a foundation model, with no retrieval, tools or conversation history. A teammate proposes building it with LangChain and LangGraph. What is the most appropriate recommendation?
+A: LangGraph is required for any production use of a foundation model, so the workload must be rebuilt as an agent graph
+B: Use LangChain document loaders and a vector retriever, so that the ticket categories are retrieved before each call
+C: Call the model directly, for example with `ai_query` over the table, since no chain, tool or agent logic is needed and a framework would only add overhead
+D: Create a multi-agent supervisor with one agent per category, since each category needs a separate model
+K: C
+G: ## Choose the lightest tool that works
+LangChain and LangGraph are useful when an application composes several steps: retrieval, prompt templates, tool calls, branching, memory. For a single prompt and a single call over a table, those layers add dependencies without adding capability.
+- Batch classification, extraction and summarization over a Delta table are covered by `ai_query` in SQL (or a direct client call) with a prompt and a response format.
+- Frameworks help when the logic needs state, loops or tools, or when the team wants to swap models behind one interface.
+- Whichever route you use, MLflow tracing and Unity Catalog governance still apply to the model endpoint.
+This question tests selecting a framework from the requirements, not memorizing class names.
+W: Direct call: the requirement is one prompt and one model call at scale, which a SQL `ai_query` or a direct client call handles with less code and fewer moving parts.
+X: A=LangGraph is required: no Databricks rule requires it. It is an option for stateful, multi-step agents.
+B=Retriever for categories: five fixed categories fit in the prompt, and retrieval would add an index and latency for no gain.
+D=Multi-agent supervisor: it multiplies calls and cost, and the categories are an output label, not separate tasks needing separate agents.
+T: Use a framework when the application needs chaining, tools or state; a single-call task does not.
+V: LangChain, ai_query
+
+@ DBX-GAI D3 T3.2 applied troubleshooting
+S: A RAG assistant tells a user that the premium plan includes 24/7 phone support. The retrieved passages, visible in the MLflow trace, mention only email support and do not mention phone support at all. Which diagnosis and check fit this symptom?
+A: A retrieval failure; the fix is a larger embedding model, since the answer must have come from the index
+B: A latency problem; the fix is to raise the endpoint's concurrency so the model has time to finish reading
+C: A formatting problem; the fix is to add a JSON schema to the prompt
+D: A groundedness failure (the response contains a claim unsupported by the context); check it with the `RetrievalGroundedness` judge and tighten the prompt to answer only from the provided context
+K: D
+G: ## Reading a response qualitatively
+Qualitative assessment means reading real inputs, retrieved context and outputs and labeling the failure. Common categories:
+- **Ungrounded or hallucinated**: a claim that the retrieved context does not support. Compare the answer with the retrieved passages in the trace.
+- **Irrelevant**: the answer does not address the question.
+- **Retrieval miss**: the right passage was never retrieved, so even a faithful model cannot answer well.
+- **Unsafe or toxic**: harmful content, leaked personal data.
+- **Format or tone violation**: wrong schema, wrong language, wrong style.
+In MLflow, built-in LLM judges give these labels at scale: `RetrievalGroundedness` (is the response supported by the retrieved context), `RelevanceToQuery`, `RetrievalRelevance` (is the retrieved context relevant), `Safety`, and `Guidelines` for custom rules. None of these first four needs ground truth.
+W: Groundedness failure: the context lacks phone support, yet the answer states it, so the model invented the claim. A groundedness judge detects this, and a prompt that restricts the model to the context (and allows "I don't know") reduces it.
+X: A=Retrieval failure: the trace shows the retrieved passages are on the topic (plan support). The model added the phone claim itself, so changing the embedding model does not address it.
+B=Latency: timing does not change what content the model states.
+C=Formatting: the symptom is a false claim, not an invalid structure.
+T: A claim that is absent from the retrieved context is a groundedness failure, checked with the RetrievalGroundedness judge.
+V: MLflow
+
+@ DBX-GAI D3 T3.2 applied troubleshooting
+S: Reviewing traces for a RAG assistant, a developer finds that for the question "How do I reset my router?" the retrieved passages are about mobile-phone plans, and the answer is a fluent but off-topic reply about phone plans. Which statement identifies where the problem is and what to measure?
+A: Retrieval is the problem: the context is irrelevant to the question, so measure retrieval relevance (for example with the `RetrievalRelevance` judge) before changing the prompt or model
+B: The generation step is the problem, because a larger LLM would have ignored the irrelevant passages and answered from memory
+C: The problem is only the display of the answer, because the reply is fluent and the content is therefore correct
+D: The problem is the system prompt language, because retrieval is never able to return off-topic passages
+K: A
+G: ## Separate retrieval from generation
+A RAG failure has two places to look, and the trace shows both: the retriever span (what was returned) and the LLM span (what was generated from it).
+- If the retrieved context is wrong, a faithful model produces a fluent wrong answer. Fix retrieval: chunking, embedding model, hybrid search, metadata filters, reranking.
+- If the context is right but the answer ignores or contradicts it, fix generation: prompt, model, temperature.
+`RetrievalRelevance` scores whether the retrieved context is relevant to the request; `RetrievalGroundedness` scores whether the answer is supported by that context; `RelevanceToQuery` scores whether the answer addresses the request. Reading a few traces first tells you which judge to run at scale.
+W: Retrieval first: the retriever span returned phone-plan passages for a router question, so measuring context relevance locates the fault; the model was faithful to bad context.
+X: B=Bigger LLM: a more capable model may answer from its own knowledge, but that bypasses the knowledge base and does not fix retrieval. The documented evaluation separates the two stages.
+C=Display only: fluency is not correctness; the answer is on the wrong topic.
+D=System prompt language: retrievers can and do return irrelevant passages when queries are vague or embeddings miss, and the trace shows exactly that.
+T: Check the retrieved context before blaming the model; fluent text can still rest on irrelevant passages.
+V: MLflow
+
+@ DBX-GAI D3 T3.2 applied use-case
+S: During a manual review of 100 chatbot responses, the team tags issues. Which TWO observed issues are safety problems rather than ordinary quality problems? (Select TWO)
+A: A response repeats a customer's full card number that appeared in a retrieved support ticket
+B: A response answers correctly but uses four paragraphs where one would do
+C: A response explains in detail how to bypass a building's alarm system when asked for troubleshooting help
+D: A response uses British spelling although the style guide asks for American spelling
+E: A response cites a section number that is one off from the real section
+K: A,C
+G: ## Quality issues versus safety issues
+Qualitative review sorts failures into two groups, and the group decides the response:
+- **Quality**: correct intent but flawed output. Verbosity, style, formatting, small citation errors and wrong spelling are fixed with prompt changes, examples or post-processing.
+- **Safety**: output that could harm users or the company: toxic or harmful content, dangerous instructions, personal data leaks, biased treatment. These need guardrails (input and output filters, masking, restricted context) and are tracked as blocking defects.
+MLflow's `Safety` judge checks for harmful, offensive or toxic material; `Guidelines` judges check custom rules (for example "never repeat a payment card number"). Leaks of personal data are also a governance matter: remove sensitive fields before indexing.
+W: A=Card number leak: the response exposes personal financial data from the context, which is a privacy and compliance problem that needs masking or filtering.
+C=Bypassing an alarm system: harmful instructions are a safety issue and need an output guardrail or refusal behavior.
+X: B=Verbose answer: correct but wordy is a style defect, not harm.
+D=British spelling: a style-guide violation is a tone or format issue.
+E=Off-by-one citation: a factual accuracy defect with low severity, handled by evaluating citations and improving retrieval.
+T: Quality issues are fixed by prompts and retrieval; safety issues (harm, leaks, toxicity) need guardrails.
+V: MLflow
+
+@ DBX-GAI D3 T3.2 advanced use-case
+S: A hiring assistant summarizes resumes. A reviewer suspects that candidates with different given names but identical experience receive different tones of summary. What is the most direct qualitative test of this bias concern?
+A: Run each response through a spell checker and compare the error counts across the candidates
+B: Build paired inputs that differ only in the name, generate responses, and have reviewers or a judge compare tone and content for systematic differences
+C: Raise the temperature so that the model varies its output enough to hide the differences
+D: Compare only response length across the candidates, because equal length proves equal treatment
+K: B
+G: ## Testing for bias
+Bias is a pattern across many outputs, not a single bad response. A counterfactual (paired) test isolates the attribute: create inputs that are identical except for the attribute under test (a name, gender, region), generate responses, and compare them.
+- Keep everything else fixed: same prompt, same model, low temperature, so differences come from the attribute.
+- Review a sample by hand, and score tone, recommendation or sentiment with a rubric, for example a `Guidelines` judge that states "the summary uses the same tone regardless of the candidate's name".
+- Look for systematic gaps across many pairs, since single differences are normal.
+Bias findings feed guardrails, prompt changes and model selection; they are also part of responsible-AI governance.
+W: Paired inputs: changing only the name isolates the suspected cause, and comparing tone and content across many pairs reveals whether the model treats the groups differently.
+X: A=Spell check: spelling errors say nothing about differences in tone or recommendations.
+C=Higher temperature: randomness adds noise that hides differences in the evaluation, it does not remove bias from the model.
+D=Length only: equal length can hide different wording, emphasis and sentiment.
+T: Test bias with paired inputs that differ only in the sensitive attribute, then compare outputs for systematic differences.
+V: MLflow
+
+@ DBX-GAI D3 T3.2 applied troubleshooting
+S: Reviewers find that a summarization endpoint's answers often stop in the middle of a sentence, while the retrieved context and the prompt look correct. The responses are all about the same length. What should the developer check first?
+A: The embedding model's maximum token limit, because truncation of chunks causes the model to stop writing
+B: The retriever's `num_results`, because a higher number removes the end of responses
+C: The generation `max_tokens` setting (and the response's finish reason), since a response cut at a fixed length usually hit the output limit
+D: The temperature, because a temperature of zero makes the model stop at random places
+K: C
+G: ## Truncated responses
+A fixed-length cut in the middle of a sentence is a signature of an output token limit. The model did not choose to stop; the request's `max_tokens` (maximum new tokens) ended generation.
+- Check the request parameters of the serving endpoint call and the response's finish reason (OpenAI-compatible responses report `length` when the limit was reached, `stop` when the model finished).
+- Raise the limit, ask for a shorter answer in the prompt, or lower the amount of context so that input plus output fits the model's context window.
+- Do not confuse this with embedding truncation: chunks longer than the embedding model's maximum are truncated at indexing time and lose their ends, which affects retrieval, not generation length.
+W: Output token limit: all the answers end at about the same length, which points to a configured maximum rather than a model or retrieval choice.
+X: A=Embedding token limit: that truncates chunks when they are embedded and affects what is retrieved, not where the response stops.
+B=Retriever num_results: the number of passages changes the input size, not an output cut at a fixed length.
+D=Temperature zero: temperature controls randomness in word choice and does not create a length stop.
+T: Responses cut at a similar length point to the output token limit, not to retrieval or the model.
+V: Model Serving
+
+@ DBX-GAI D3 T3.2 applied use-case
+S: A support-assistant team wants an automated check that every answer stays polite, avoids promising refunds, and never reveals internal ticket IDs. These are team-specific rules, not generic quality dimensions. Which MLflow evaluation approach fits?
+A: A `Guidelines` judge (or several) that states each rule in natural language and returns pass or fail for each response
+B: The built-in `Safety` judge alone, because it covers every company-specific policy automatically
+C: The `RetrievalRelevance` judge, because it checks whether the answer follows company rules
+D: Manual review of every production response, because LLM judges cannot be given custom criteria
+K: A
+G: ## Judges for custom rules
+MLflow's built-in judges cover common dimensions: relevance, safety, groundedness and correctness. For rules specific to your business, the built-in `Guidelines` judges check whether a response passes or fails natural-language rules, such as style or factuality guidelines. For logic that needs code, you write a custom scorer.
+- Write each guideline as a single testable statement ("The response never promises a refund").
+- Keep guidelines separate so the results show which rule failed.
+- Qualitative review of samples is still useful to confirm that the judge agrees with people.
+Guidelines judges do not need ground-truth labels, so they can also run on live traffic samples.
+W: Guidelines judge: each business rule is written as a plain statement, and the judge returns pass or fail with a rationale, so rules can be checked automatically on every response.
+X: B=Safety alone: it checks for harmful, offensive or toxic content, and does not know company policies such as refund promises or ticket IDs.
+C=RetrievalRelevance: it scores the retrieved context against the request, not the answer's compliance with rules.
+D=Manual only: judges accept custom criteria through Guidelines and scorers, and manual review does not scale to all responses.
+T: Use Guidelines judges to turn business rules written in natural language into automatic pass or fail checks.
+V: MLflow
+
+@ DBX-GAI D3 T3.3 advanced troubleshooting
+S: A team indexes 1,500-token chunks using an embedding model whose maximum input is 512 tokens. Retrieval evaluation shows low recall for questions whose answers sit near the end of long chunks. Which change is best supported by the evaluation?
+A: Increase the chunk size to 3,000 tokens so that each answer sits in an even bigger context
+B: Remove the metadata columns from the index, since the extra columns cause the lost answers
+C: Increase `num_results` from 5 to 100 so the missing text is returned somewhere in the list
+D: Reduce the chunk size (with some overlap) to fit within the embedding model's token limit, then re-run the same evaluation set
+K: D
+G: ## Chunk size must fit the embedding model
+Databricks notes that if chunks exceed the embedding model's maximum token limit, they are truncated and information can be lost (the page's example is an embedding model with a 512-token limit). Truncated text is never embedded, so a query cannot match it even though it is stored in the table.
+The evaluation pattern here is diagnostic:
+1. Notice that the misses cluster at the ends of long chunks.
+2. Compare chunk length with the model limit.
+3. Re-chunk to fit under the limit, optionally with overlap, re-embed and re-run the same evaluation questions to confirm recall improves.
+The alternative is a long-context embedding model; chunk size is then bounded by that model's limit instead.
+W: Shrink to fit the limit: chunks of at most 512 tokens (with a small overlap) are fully embedded, so the answers at the former chunk ends become searchable.
+X: A=3,000 tokens: this makes truncation worse, because even more of every chunk goes beyond the embedding window.
+B=Removing metadata: metadata columns do not change which text is embedded, so they do not hide answers.
+C=num_results 100: the truncated text is not in the vector, so adding results does not retrieve it and adds noise to the prompt.
+T: Chunks longer than the embedding model limit are truncated; if misses cluster at chunk ends, shrink the chunks and re-evaluate.
+V: AI Search
+
+@ DBX-GAI D3 T3.3 applied use-case
+S: A team wants to decide between 256-, 512- and 1,024-token chunking. Which evaluation design gives a trustworthy choice?
+A: Re-index with each size but also change the embedding model each time, since better models always produce a better chunk size
+B: Build one fixed set of representative questions with expected source passages, re-index with each chunk size changing only that variable, and compare retrieval and answer metrics for each
+C: Pick the size that produces the fewest chunks, because a smaller index is faster and therefore more accurate
+D: Judge each size on a different set of questions chosen by the team that built that index
+K: B
+G: ## Evaluation-driven chunk size selection
+Databricks describes chunking as iterative and context dependent, with no one-size-fits-all choice, and recommends evaluating the effect of pipeline choices. A sound experiment follows ordinary controlled-experiment rules:
+- A **fixed evaluation set** drawn from real or realistic questions, ideally with the passages that answer them.
+- **One variable at a time** (chunk size, then overlap, then splitter). If the embedding model also changes, you cannot attribute the difference.
+- **Retrieval metrics** (recall@k and precision@k against expected passages) plus **answer metrics** (for example correctness or groundedness judges) because the best retrieval and the best final answer can differ.
+- Log each run with MLflow so the configurations are comparable.
+W: Fixed question set and one variable: every chunk size is scored on the same questions with everything else held constant, so any difference comes from the chunking.
+X: A=Changing the embedding model too: two changes at once mix their effects, so the result cannot say which one helped.
+C=Fewest chunks: index size does not measure answer quality, and larger chunks can blur embeddings and bury answers.
+D=Different question sets: scores are not comparable when each index is graded on different questions.
+T: Compare chunking options on the same evaluation set, changing only the chunking, and score retrieval and answers.
+V: AI Search, MLflow
+
+@ DBX-GAI D3 T3.3 applied use-case
+S: An evaluation of a RAG assistant on 200 questions shows good retrieval (the right chunk is almost always in the top 5), but answers are often incomplete, and groundedness is high. The missing details sit in the paragraphs directly before and after each retrieved chunk. Which TWO chunking changes does this evidence support? (Select TWO)
+A: Increase the chunk size or add overlap so that adjacent paragraphs fall into the same chunk
+B: Switch to much smaller chunks of one or two sentences so that retrieval becomes even more specific
+C: Use parent-child retrieval: keep the small chunks for matching, and return the parent section to the LLM
+D: Replace the embedding model with a smaller one, because the retriever is already finding the right chunk
+E: Disable the LLM's use of retrieved context, so that the answers come from its own knowledge
+K: A,C
+G: ## Reading evaluation results
+The pattern is specific: retrieval finds the right place (good recall at k), the model is faithful (high groundedness), yet the answer is incomplete because the context window that reaches the model lacks the neighboring details. The retriever is not the bottleneck; **context size** is.
+- Larger chunks or overlap put adjacent text in the same chunk.
+- Parent-child (small-to-big) keeps precise matching and passes the larger parent to the LLM.
+Making chunks smaller would increase precision but lose even more context, and tuning the embedding model addresses a problem the data does not show.
+W: A=Bigger chunks or overlap: details from the neighbor paragraphs now travel with the retrieved chunk, so the generator sees the whole picture.
+C=Parent-child: the matched small chunk selects the section, and the larger parent supplies the surrounding paragraphs without making the index less precise.
+X: B=Smaller chunks: they would cut the neighboring detail further away from each match, worsening completeness.
+D=Smaller embedding model: retrieval already works, so changing the embedding model does not add the missing neighbor text.
+E=Ignoring context: this removes the grounding that gives high groundedness and invites hallucination.
+T: When recall and groundedness are good but answers are incomplete, add context around the hit: larger chunks, overlap or parent-child.
+V: AI Search, MLflow
+
+@ DBX-GAI D3 T3.3 applied troubleshooting
+S: After raising chunk overlap from 10% to 60%, retrieval precision@5 falls: the top five results often contain nearly identical passages from the same part of one document, and the prompt carries the same sentences repeated. What does the evaluation indicate?
+A: The embedding model has become less accurate, so it must be fine-tuned before overlap is changed again
+B: The index is too small, so more documents must be added to remove the repeats
+C: Excessive overlap creates near-duplicate chunks that crowd out diverse results, so reduce the overlap (or deduplicate or merge adjacent hits) and re-evaluate
+D: The reranker is the cause of the repeats and must be disabled for any index with overlap
+K: C
+G: ## Overlap has a cost
+Overlap prevents a fact from being cut at a chunk boundary, and Databricks lists it as a factor for continuity and context. But overlap also repeats text. At high overlap, neighboring chunks are nearly identical, so one relevant part of a document can fill most of the top-k slots.
+- Symptoms: duplicate sentences in the prompt, lower precision@k, fewer distinct sources.
+- Fixes: reduce overlap (10-20% is a common starting point, but tune from evaluation), merge adjacent hits from the same document before prompting, or limit results per document.
+- Keep the same evaluation set when you re-test.
+W: Near-duplicate chunks: 60% overlap means each chunk shares most text with its neighbors, so the top-k fills with copies. Lowering overlap or merging adjacent hits restores variety.
+X: A=Embedding model drift: the model is unchanged and the only variable that changed was overlap, so the data points to the chunking.
+B=Too few documents: the repeats come from within a single document's overlapping chunks, not from missing documents.
+D=Reranker: a reranker re-scores candidates; it does not create duplicates, and it is not tied to overlap. Duplicated candidates would be scored as separate passages.
+T: Too much overlap creates near-duplicates that crowd the top-k; tune overlap against precision and diversity.
+V: AI Search
+
+@ DBX-GAI D3 T3.3 applied use-case
+S: A developer compares two chunking strategies. For each question in the evaluation set, the team wants an automatic score of whether the retrieved passages are relevant to the question, without writing expected answers. Which MLflow built-in judge fits?
+A: `RetrievalRelevance`, which judges whether the retrieved context is directly relevant to the user's request and needs only inputs and outputs
+B: `Correctness`, which compares the response with ground-truth expectations that the team would have to write for every question
+C: `Safety`, which scores whether the retrieved context is free from toxic material
+D: `RelevanceToQuery`, which scores the retrieved chunks and ignores the generated answer
+K: A
+G: ## Judges that evaluate retrieval
+The built-in judges page lists whether each judge needs ground truth (`expectations`):
+- `RetrievalRelevance` (inputs, outputs): is the retrieved context relevant to the request? No ground truth.
+- `RetrievalGroundedness` (inputs, outputs): is the response grounded in the retrieved context? No ground truth.
+- `RelevanceToQuery` (inputs, outputs): is the response relevant to the request? No ground truth.
+- `Safety` (inputs, outputs): is the content free from harmful material? No ground truth.
+- `Correctness` and `RetrievalSufficiency` (need `expectations`): compare with ground-truth facts.
+To compare chunking strategies, run the same evaluation set against each index and compare `RetrievalRelevance` per strategy. For full recall measurement you additionally need the expected passages.
+W: RetrievalRelevance: it scores the retrieved context against the request using only inputs and outputs, so no expected answers are needed to rank chunking options.
+X: B=Correctness: it requires ground-truth expectations, which the stem says are not available.
+C=Safety: it checks for harmful or toxic content, not whether chunks are relevant.
+D=RelevanceToQuery: it evaluates the response, not the retrieved chunks.
+T: RetrievalRelevance scores retrieved context without ground truth, which makes it useful for comparing chunking strategies.
+V: MLflow
+
+@ DBX-GAI D3 T3.3 advanced tradeoff
+S: A knowledge base has two question types: lookups of exact facts (a part number, a deadline) and requests to explain a procedure that spans several paragraphs. A team finds that 200-token chunks win on lookups and lose on procedures, while 800-token chunks do the opposite. Which design best serves both types?
+A: Use a single 400-token chunk size and accept the average, since changing chunk size by question type is not possible
+B: Index small chunks for precise lookups and use parent-child (or sentence-window) expansion so procedure questions receive the larger surrounding section
+C: Keep 800-token chunks for all questions and discard the lookup results from evaluation, since procedures are more important
+D: Use 50-token chunks for both types and increase the overlap to 90% to compensate
+K: B
+G: ## When the evaluation shows a split
+A per-question-type breakdown is a typical result of an evaluation: no single chunk size dominates, because the best granularity depends on what the user wants. Advanced chunking lets one index serve both:
+- Index **small** units (precision for lookups).
+- Expand to a **larger** unit when needed (parent section or sentence window) so procedures arrive complete.
+- Alternatively, route by intent: classify the question and query separate indexes or settings per type (see prompt augmentation from user intent).
+The averaged compromise often loses on both types; check this against the per-type metrics.
+W: Small chunks plus expansion: lookups hit the precise small unit, and procedure questions get the parent section or window around the hit, which matches both results.
+X: A=Single compromise size: a middle size is usually worse than each best size on its own type, and the premise that multiple granularities are impossible is wrong.
+C=800 tokens and ignore lookups: this drops half the real workload from evaluation and degrades the lookups users still ask.
+D=50 tokens and 90% overlap: tiny chunks lose procedure context, and very high overlap creates near-duplicates.
+T: If the best chunk size depends on the question type, combine small retrieval units with parent or window expansion.
+V: AI Search
+
+@ DBX-GAI D3 T3.4 applied use-case
+S: A user asks, "What is the warranty on the X200 pump?" An AI Search index stores chunks for many products and has a `product` metadata column. The application should narrow retrieval to the product the user named. Which prompt-augmentation step uses the user's input to do this?
+A: Add every product name in the catalog to the prompt so the LLM can guess the right one
+B: Increase `num_results` so that the X200 chunks appear somewhere among the results
+C: Extract the key field (the product name) from the question, for example with an LLM call or a rule, and apply it as a metadata filter on the index query
+D: Retrieve the 50 most recent chunks of any product and let the user choose from them
+K: C
+G: ## Using the user's input to shape retrieval
+Task 3.4 is about augmenting the prompt or the retrieval call with context that comes from the user's input: key fields, terms and intents.
+- **Key fields** (product, date range, account id): extract them from the question with a small LLM call that returns JSON, or with rules, then apply them as filters on the index query.
+- **Key terms**: add synonyms or the exact identifier so that keyword parts of a hybrid search match.
+- **Intent**: classify the question and route it to a prompt, retriever or tool.
+AI Search queries accept `filters`, and the retriever tool exposes them as a `filters` setting. Filtering on metadata narrows the candidate set before similarity ranking, which improves precision when the corpus mixes many products. Metadata columns must be stored with the chunks to be filterable.
+W: Extract and filter: pulling out the product name and applying it as a metadata filter limits the search to X200 chunks, so the warranty text is not mixed with other products' warranties.
+X: A=Listing every product: it spends prompt tokens and leaves the retrieval unfiltered, so other products' chunks still compete.
+B=More results: a bigger result list still contains other products' chunks and adds noise to the prompt.
+D=Recent chunks: recency does not relate to the product asked about.
+T: Extract key fields from the user's input and use them as metadata filters on the retrieval query.
+V: AI Search
+
+@ DBX-GAI D3 T3.4 applied use-case
+S: In a chat application, the second turn is "And what about its battery life?" Sent to the retriever as written, the query returns generic battery passages from unrelated devices. What is the appropriate augmentation?
+A: Rewrite the follow-up into a standalone query using the conversation history (for example "battery life of the X200 pump") and retrieve with the rewritten query
+B: Embed only the word "battery" with a lower similarity threshold, to widen the search
+C: Send the entire chat history as the query text, which is guaranteed to improve every follow-up
+D: Ask the user to repeat the product name in every message and reject follow-ups
+K: A
+G: ## Query rewriting from conversation context
+Follow-up questions contain pronouns and ellipsis ("its", "and what about"). A retriever sees one string and has no history, so those words carry no meaning for embeddings or keywords.
+- **Condense** the history plus the new message into a standalone question with a small LLM call, then retrieve using that string.
+- Pass the original question and the retrieved context to the answering model as usual.
+- Keep the rewrite step cheap (small model, short output), since it adds a call to every turn.
+This is the same idea as extracting key terms from the user's input; the output is a better retrieval query rather than a filter.
+W: Standalone rewrite: resolving "its" using the earlier turn produces a query that names the product, so the retriever returns the right device's battery passages.
+X: B=Single word with lower threshold: it widens retrieval and returns more unrelated battery passages.
+C=Entire history as the query: long mixed text dilutes the embedding with old topics and is not guaranteed to help.
+D=Reject follow-ups: this removes the conversational behavior the application is supposed to support.
+T: Condense follow-ups with chat history into standalone queries before retrieval.
+
+@ DBX-GAI D3 T3.4 applied use-case
+S: A banking assistant is told by the application, through request fields, the customer's preferred language and account tier. The answering prompt must use this knowledge on every call. How should the application augment the prompt?
+A: Ask the LLM to guess the language and tier from the question in each turn, which is more reliable than request fields
+B: Place the language and tier in a model-serving config file so that every user shares the same setting
+C: Fine-tune a separate model for each language and tier, so that no information needs to be passed at call time
+D: Add template variables, for example `{language}` and `{account_tier}`, to the prompt template and fill them from the request fields together with the retrieved context
+K: D
+G: ## Prompt templates with variables
+A prompt template has fixed instructions and placeholders for per-request values. The application fills the placeholders from three sources:
+- **User input** (the question).
+- **Request or session fields** known to the application (language, account tier, locale, user id): trusted facts that the application can supply without asking the model to guess.
+- **Retrieved context** from the index.
+Example: `Answer in {language}. The customer has the {account_tier} plan. Use only this context: {context}. Question: {question}`.
+Trusted fields supplied by the application are more reliable than values the LLM infers, and the same template serves every user.
+W: Template variables: the known facts are filled into the prompt on each call, so the answer reflects the user's language and tier along with the retrieved context.
+X: A=LLM guesses: known values should not be inferred, and a wrong guess changes the answer for the wrong tier.
+B=Static config: a shared setting applies the same values to every customer.
+C=Fine-tuning per language and tier: this is slow, costly and not needed for values that can be passed in the prompt.
+T: Fill prompt template variables from trusted request fields and retrieved context on every call.
+
+@ DBX-GAI D3 T3.4 applied use-case
+S: Which TWO steps use the content of a user's question to improve what the retriever returns? (Select TWO)
+A: Classify the question's intent (for example billing, technical, account) and route it to the matching index, prompt or tool
+B: Increase the LLM's maximum output tokens, so that longer questions can be answered
+C: Extract entities and terms from the question, such as a product name or an error code, and add them as filters or as exact keywords in a hybrid query
+D: Lower the temperature, so that the same retrieval is repeated for the same user
+E: Store the question in the output Delta table, so that it is available for later audits
+K: A,C
+G: ## What counts as augmentation from user input
+The inputs worth mining from a question are its **intent**, its **key fields** (entities, ids, dates) and its **key terms**. Each one can change retrieval:
+- Intent decides which index, prompt template or tool to use. A billing question searches billing documents, a technical one searches manuals.
+- Entities and terms become metadata filters or exact keywords; in AI Search, hybrid search combines vector and keyword matching using Reciprocal Rank Fusion, so exact codes such as error numbers still match.
+Settings that act on generation (output tokens, temperature) or on logging do not change what is retrieved.
+W: A=Intent routing: the question's intent selects the right index, prompt or tool, so the retriever searches the right collection.
+C=Entities and terms: product names become filters and error codes become exact keywords in hybrid search, which narrows and sharpens the result set.
+X: B=Output tokens: a generation setting that limits the answer's length, with no effect on retrieval.
+D=Lower temperature: this reduces sampling randomness in the LLM; retrieval does not use it.
+E=Storing the question: logging helps audits and evaluation later, but does not change this call's retrieval.
+T: Mine the question for intent, entities and key terms, then use them to route, filter and match.
+V: AI Search
+
+@ DBX-GAI D3 T3.4 applied use-case
+S: A RAG prompt template puts the user's raw question into the instructions: `Use the context to answer. {question} Context: {context}`. Sometimes the model treats parts of the question as instructions and ignores the context. Which prompt-structure change helps most?
+A: Move the context before the instructions and remove the instructions entirely, so the model infers the task
+B: Separate the sections with clear delimiters, state the instructions first, mark the question as the user's data inside delimiters, and tell the model to answer only from the context
+C: Append the user's question twice so that the model weights it more than the context
+D: Replace the context with a longer version of the user's question, so the model has more detail to use
+K: B
+G: ## Structuring a prompt with user input
+When user text and instructions share one block, the model cannot tell which is which. A structured template reduces the confusion:
+1. **Instructions first**: role, task, rules ("answer only from the context; say you don't know otherwise").
+2. **Delimited context**: retrieved passages inside markers such as triple quotes or XML-style tags.
+3. **Delimited user question**: placed in its own marked section and described as the user's question, not as instructions.
+4. **Output format** at the end.
+Delimiters and explicit roles make behavior more consistent and are the first step against accidental instruction-following. Adversarial prompt injection is a separate guardrail topic that needs input filtering as well.
+W: Delimited, ordered sections: clear markers and an explicit rule to answer from context make the user text a labeled input, not a competing instruction.
+X: A=No instructions: without a stated task the model can follow any text, which makes behavior less predictable.
+C=Repeat the question: repeating gives the user text more weight against the context, which worsens the problem.
+D=Replace context with the question: the model then lacks the knowledge base content and will answer from its own memory.
+T: Structure the template with instructions first and delimited context and question sections.
