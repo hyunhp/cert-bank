@@ -9,6 +9,9 @@
 # src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.functions.explode.html
 # src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.functions.split.html
 # src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.functions.approx_count_distinct.html
+# src: https://spark.apache.org/docs/latest/sql-ref-name-resolution.html
+# src: https://spark.apache.org/docs/latest/sql-error-conditions.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.SparkSession.sql.html
 
 @ DBX-ASD D2 T2.4 applied troubleshooting
 S: A notebook cell registers a DataFrame three times in the same session, in this order:
@@ -84,7 +87,7 @@ T: An unqualified name resolves to the temp view first; a database-qualified nam
 V: Spark SQL
 
 @ DBX-ASD D2 T2.4 applied use-case
-S: A table `t` has the ids 1, 2, 3, 4 and 5 in a column `id`. What does this code return?
+S: A DataFrame has the ids 1, 2, 3, 4 and 5 in a column `id`. What does this code return?
 ```
 spark.range(1, 6).createOrReplaceTempView("t")
 spark.sql("SELECT count(*) AS n FROM t WHERE id > :lo",
@@ -296,22 +299,22 @@ C=posexplode: it takes one collection, like explode. Two calls in a single selec
 T: Only one explode per select; chain them to produce the cross product of two arrays.
 V: Spark SQL
 
-@ DBX-ASD D3 T3.2 applied use-case
-S: A table of customer events has several rows per `id`, each with a `ts`. The pipeline must keep exactly the newest row per `id`. Which approach is guaranteed to do that?
-A: Sort with `orderBy(F.col("ts").desc())` and then call `dropDuplicates(["id"])` on the sorted data
-B: Call `dropDuplicates(["id", "ts"])`, which keeps the row with the highest ts for each id
-C: Use `row_number()` over a window partitioned by `id` and ordered by `ts` descending, then keep row number 1
-D: Use `distinct()`, which keeps the first row it meets for each id in the order of the input files
+@ DBX-ASD D3 T3.2 applied troubleshooting
+S: A cleanup step runs `df.dropDuplicates(["id", "typo_col"])` on a DataFrame whose columns are `id`, `amount` and `ts`. A colleague expects it to ignore the unknown name the way `drop("typo_col")` does. What happens?
+A: It runs and compares rows on `id` alone, because names missing from the schema are skipped as they are in drop
+B: It returns the DataFrame unchanged, because a subset that contains an unknown column turns the deduplication off
+C: It raises an AnalysisException, because every column in the subset must resolve against the schema, unlike the names passed to drop
+D: It runs and treats `typo_col` as NULL in every row, so only rows that repeat the same `id` are removed
 K: C
-G: ## dropDuplicates does not choose
-`dropDuplicates(subset)` keeps one row per distinct combination of the subset columns, but it does not say which one. The result can change between runs and after a shuffle.
-## Choosing the row
-When the choice matters (latest, highest, first), define it with a window: `row_number().over(Window.partitionBy("id").orderBy(F.col("ts").desc()))`, then `filter("rn = 1")`. An aggregate with `max_by` is another way, but the window keeps whole rows.
-W: Window ranking: the order is part of the window specification, so the winner per id is defined by the data.
-X: A=Sort then dedup: the dedup is a shuffle on id, and the sort order before it is not preserved, so the surviving row is arbitrary.
-B=Subset with ts: this removes only rows that match on both columns. Rows with different ts values per id all stay.
-D=distinct: it compares whole rows and does not pick by id. File order is not a guarantee either.
-T: dropDuplicates keeps an arbitrary row; use a window with row_number to choose the winner.
+G: ## Subset names are checked
+`dropDuplicates(subset)` groups the rows by the listed columns, so each name has to resolve to a column of the DataFrame. An unknown name fails analysis with an error that lists the available columns.
+## Compare with drop
+`drop("typo_col")` is a no-op for a missing name, which hides typos. `dropDuplicates`, `select`, `filter` and `withColumn` expressions all fail loudly instead. Prefer a loud failure in validation code: a deduplication that silently used only `id` would delete rows that differ in the other key column.
+W: Name resolution: the subset becomes the grouping key of the deduplication, so a name that is not in the schema is an analysis error and the job stops before any data is read.
+X: A=Skipped name: that is the drop behavior. For dropDuplicates a name that is missing from the schema is an error, so the key never silently shrinks to `id`.
+B=Deduplication off: Spark has no rule that disables deduplication for a bad subset. It rejects the call instead.
+D=NULL column: a column that does not exist is never substituted by NULL values. The name must match the schema (case rules follow `spark.sql.caseSensitive`).
+T: dropDuplicates validates its subset names and fails on an unknown column; drop silently ignores them.
 V: Spark SQL
 
 @ DBX-ASD D3 T3.2 applied comparison
@@ -434,26 +437,27 @@ T: A filter and its negation both drop NULL rows; handle NULL explicitly in vali
 V: Spark SQL
 
 @ DBX-ASD D3 T3.3 applied comparison
-S: `df` has a column `x` with the values 1, NULL, 3, NULL. What does this return?
+S: `df` has a column `x` with the values 1, NULL, 3, 5. What does the following code return?
 ```
-df.agg(F.count("x"), F.count("*"), F.count(F.lit(1))).first()
+df.agg(F.count(F.col("x") > 2)).first()[0]
 ```
-A: (4, 4, 4), because every count variant returns the number of rows
-B: (2, 4, 4), because a named column skips NULLs while * or a literal counts every row
-C: (2, 2, 2), because count always ignores NULLs, whichever expression is used
-D: (2, 4, 2), because count of a literal also skips the rows that contain a NULL in another column
+A: 4, because count of an expression counts every row whatever the value of the expression is
+B: 3, because the comparison is false for 1 and NULL for the missing value, and count skips only the NULL
+C: 2, because only the rows where the comparison is true are counted
+D: 1, because count returns the number of rows for which the comparison is NULL
 K: B
-G: ## count variants
-- `count(col)` counts the rows where `col` is not NULL.
-- `count("*")` and `count(F.lit(1))` count all rows.
-- `df.count()` is an action that returns the number of rows as a Python int, while `F.count(...)` is an aggregate expression that is evaluated inside `agg` or `select`.
-## The example
-Two of four values are not NULL, so the first value is 2 and the others are 4.
-W: Column versus row count: count(col) counts non-null values; count(*) and count(1) count rows.
-X: A=Same for all: only count(*) and count of a constant behave that way. A named column counts non-nulls.
-C=Always ignore: a literal 1 is never NULL, so it is counted for every row.
-D=Row skipping: the literal is evaluated per row and never looks at other columns.
-T: count(col) skips NULLs; count(*) and count(1) count every row.
+G: ## count counts non-NULL results
+`F.count(expr)` counts the rows where `expr` is not NULL. A comparison returns a boolean, and `false` is a value just like `true`, so it is counted. Only a NULL result is skipped.
+- `x > 2` gives false for 1, NULL for the NULL row, and true for 3 and 5, so the count is 3.
+- To count the rows that satisfy a condition, turn the false case into NULL: `F.count(F.when(F.col("x") > 2, 1))` returns 2, because `when` without `otherwise` yields NULL.
+- `F.sum(F.when(cond, 1).otherwise(0))` gives the same number and also works when no row matches.
+## Related forms
+`count("*")` and `count(F.lit(1))` count all rows; `count("x")` counts non-NULL values.
+W: Boolean results are values: false is counted and only the NULL from the NULL input is skipped, so three of the four rows are counted.
+X: A=Every row: only count("*") or count of a constant gives 4. A comparison on a NULL input is NULL and is skipped.
+C=True only: that needs `when(cond, 1)` so that false becomes NULL. A bare comparison keeps false as a countable value.
+D=NULL rows: count never counts NULLs, and only one row here gives NULL.
+T: count(expr) skips only NULL results; false is counted, so wrap the condition in when() to count matches.
 V: Spark SQL
 
 @ DBX-ASD D3 T3.3 applied comparison
@@ -533,21 +537,26 @@ T: groupBy().count() returns a DataFrame; DataFrame.count() is the action that r
 V: Spark SQL
 
 @ DBX-ASD D3 T3.3 advanced comparison
-S: Why is `approx_count_distinct` usually cheaper than `count_distinct` on a column with hundreds of millions of distinct values?
-A: It scans one tenth of the rows and scales the result by ten, so most of the input is never read
-B: Each partition builds a small HyperLogLog++ sketch and only sketches are merged, instead of moving every distinct value
-C: It keeps all the distinct values in the memory of the driver, which avoids using the executors completely
-D: It reads column statistics from the Parquet footers instead of the data itself, so no job is needed
-K: B
-G: ## Why exact distinct counts are costly
-A distinct count needs the set of values. Spark first deduplicates (value, group) pairs with a shuffle, then counts, so the shuffle and the hash tables scale with the number of distinct values.
-## What the sketch changes
-`approx_count_distinct` uses HyperLogLog++. Every task makes a compact sketch of a fixed size for its rows, and partial sketches are merged, so only tiny structures cross the network. The price is an estimation error, with a default maximum relative standard deviation of 5%.
-W: Sketch aggregation: the intermediate data per partition has a bounded size, so shuffle volume and memory do not grow with cardinality.
-X: A=Sampling: the function reads all rows. It estimates through a sketch and not through a sample.
-C=Driver collection: the work is distributed on the executors. Pulling all values to a driver would be less scalable.
-D=File statistics: footers hold min, max and null counts, not distinct counts, and the function does not use them.
-T: Approximate distinct counting merges small bounded sketches; exact counting must track every value.
+S: `df` has the columns `store` and `customer` and the rows ('s1','c1'), ('s1',NULL), ('s1','c1') and ('s2','c2'). What does the following code return?
+```
+df.select(F.count_distinct("store", "customer")).first()[0]
+```
+A: 3, because the pair ('s1', NULL) is a third distinct combination and NULL is counted as a value
+B: 4, because with several columns the function counts every row and only checks the first column for repeats
+C: 1, because only the combination that occurs twice is counted
+D: 2, because a row with NULL in any listed column is skipped, which leaves ('s1','c1') and ('s2','c2')
+K: D
+G: ## count_distinct with several columns
+`F.count_distinct(col1, col2, ...)` counts the distinct combinations of the listed columns, like SQL `COUNT(DISTINCT col1, col2)`. A row is counted only if none of the listed columns is NULL.
+## The example
+Row ('s1',NULL) is skipped. The rows ('s1','c1') twice and ('s2','c2') once leave two distinct combinations.
+## Contrast
+`df.select("store","customer").distinct().count()` returns 3, because `distinct` keeps NULL as a value in a row. Use the aggregate when NULL means "unknown, do not count"; use distinct when a NULL combination should count as its own row.
+W: Combination counting with NULL rule: count_distinct counts distinct non-null combinations, so the row with a NULL customer drops out and two combinations remain.
+X: A=NULL as a value: that is what distinct().count() does (3). The aggregate skips rows with a NULL in any listed column.
+B=Row count: duplicates are removed over the whole combination, not only for the first column. Counting all rows would be plain count.
+C=Repeated only: distinct counting returns the number of different combinations, whether they occur once or many times.
+T: count_distinct over several columns counts distinct combinations and skips rows with a NULL in any of them.
 V: Spark SQL
 
 @ DBX-ASD D3 T3.3 applied use-case
