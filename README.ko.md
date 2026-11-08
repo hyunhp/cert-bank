@@ -65,7 +65,7 @@ Amazon Web Services, Palantir Technologies, Microsoft, Google과 관련 없는 �
 | | | GCP-PSE Professional Cloud Security Engineer | 275 | 23 |
 | Databricks | Associate | DBX-DEA Data Engineer Associate | 225 | 20 |
 | | | DBX-DAA Data Analyst Associate | 225 | 17 |
-| | | DBX-MLA Machine Learning Associate | 240 | — |
+| | | DBX-MLA Machine Learning Associate | 240 | 19 |
 | | Professional | DBX-DEP Data Engineer Professional | 300 | 25 |
 | HashiCorp | Associate | TF-TA004 Terraform Associate (004) | 266 | 18 |
 | | | VLT-VA003 Vault Associate (003) | 253 | 15 |
