@@ -1,0 +1,563 @@
+# DBX-ASD batch 02: D1 T1.5 partitioning and shuffles, T1.6 actions/transformations/lazy evaluation, T1.7 Spark modules, D2 T2.1 JDBC and file read/write with overwrite and partitionBy; single answer, detailed explanations
+# src: https://spark.apache.org/docs/latest/sql-data-sources-jdbc.html
+# src: https://spark.apache.org/docs/latest/sql-performance-tuning.html
+# src: https://spark.apache.org/docs/latest/configuration.html
+# src: https://spark.apache.org/docs/latest/ml-guide.html
+# src: https://spark.apache.org/docs/latest/sql-data-sources-parquet.html
+# src: https://spark.apache.org/docs/latest/sql-data-sources-csv.html
+# src: https://spark.apache.org/docs/latest/api/python/getting_started/quickstart_ps.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.repartition.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.take.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrameWriter.partitionBy.html
+
+@ DBX-ASD D1 T1.5 applied use-case
+S: Adaptive query execution is disabled and `spark.sql.shuffle.partitions` is set to 50. A job runs `df.groupBy("country").count().collect()`, and `country` has only 12 distinct values. How many tasks does the stage that reads the shuffled data run?
+A: 12 tasks, because Spark creates one reduce task per distinct grouping key and no more.
+B: 50 tasks, because the shuffle always produces the configured number of partitions, and some of them stay empty.
+C: 1 task, because the final aggregation of a `groupBy` is always merged on a single executor.
+D: As many tasks as the input DataFrame has partitions, because shuffles never change the partition count.
+K: B
+G: ## Where the shuffle partition count comes from
+A wide transformation such as `groupBy`, `join` or `orderBy` redistributes rows across the cluster. Each map task writes its output into shuffle files split by the target partition, and each reduce task reads one target partition.
+- `spark.sql.shuffle.partitions` (default 200) sets how many target partitions a DataFrame or SQL shuffle creates.
+- Rows are assigned by hashing the grouping key and taking it modulo that number, so 12 keys spread across 50 partitions leave at least 38 of them empty.
+- With adaptive query execution (AQE, on by default) Spark can coalesce small shuffle partitions at runtime. In this stem AQE is off, so the configured number applies as it is.
+W: The post-shuffle stage has one task per shuffle partition, so it runs 50 tasks. Twelve of them process the keys and the rest read nothing.
+X: A=One task per key: Spark does not size the shuffle by the number of distinct keys; it hashes keys into a fixed number of partitions.
+C=Single task: partial aggregates are merged in parallel across all shuffle partitions, not on a single executor.
+D=Input partition count: the shuffle breaks the link between input and output partitioning. The output count comes from the shuffle setting.
+T: With AQE off, a DataFrame shuffle yields exactly `spark.sql.shuffle.partitions` partitions, empty ones included.
+
+@ DBX-ASD D1 T1.5 advanced troubleshooting
+S: AQE is disabled and `spark.sql.shuffle.partitions` is 64. A DataFrame `df` has 3 distinct values in column `k` and 10 input partitions. What does the code below print?
+`print(df.repartition("k").rdd.getNumPartitions())`
+A: 3, because Spark creates one partition for each distinct value of the column.
+B: 10, because `repartition` without a number keeps the existing partition count.
+C: 1, because partitioning by a low-cardinality column puts all rows together.
+D: 64, because without an explicit number the hash repartition uses the shuffle partition setting.
+K: D
+G: ## Repartition by column
+`DataFrame.repartition(numPartitions, *cols)` returns a hash-partitioned DataFrame. The first argument may be left out: `repartition("k")` then uses the default number of partitions for DataFrame shuffles, which is `spark.sql.shuffle.partitions`.
+- Rows with the same value of `k` always land in the same partition.
+- Different keys can share a partition, and some partitions can be empty. The count does not depend on the number of distinct values.
+- With AQE on, the runtime may coalesce the result of a column-only repartition. The stem turns AQE off so the configured value shows through.
+W: The partition count equals `spark.sql.shuffle.partitions`, so the code prints 64. Three of those partitions hold data, and the others are empty.
+X: A=One partition per value: hash partitioning does not size itself by cardinality. It uses the configured shuffle count.
+B=Keep the existing count: `repartition` is a full shuffle, so it does not keep the input layout. `coalesce` can only lower the existing count.
+C=One partition: equal keys share a partition, but nothing merges the whole DataFrame into one.
+T: `repartition(col)` without a number hashes into `spark.sql.shuffle.partitions` partitions (AQE aside).
+
+@ DBX-ASD D1 T1.5 applied definition
+S: A single splittable Parquet file of about 1 GB is read with default settings (`spark.sql.files.maxPartitionBytes` is 128 MB). Roughly how many input partitions does Spark create for the scan?
+A: About 8, because Spark splits the file into pieces of at most the maximum partition size.
+B: Exactly 1, because a file is never divided between several tasks.
+C: 200, because the scan uses the default number of shuffle partitions.
+D: One per Parquet column, because Spark reads each column in its own task.
+K: A
+G: ## Input partitions for file sources
+Reading files does not shuffle, so `spark.sql.shuffle.partitions` plays no role. Spark plans the scan from file sizes.
+- `spark.sql.files.maxPartitionBytes` (default 128 MB) is the maximum number of bytes packed into one partition for Parquet, ORC, JSON, CSV and similar sources.
+- A splittable file larger than that is cut into several byte ranges. About 1024 MB / 128 MB gives roughly 8 partitions.
+- Small files are packed together up to the same limit, with `spark.sql.files.openCostInBytes` added per file as an estimated open cost.
+W: The 1 GB file is split at the 128 MB limit, which gives about 8 scan tasks that run in parallel.
+X: B=One partition per file: only non-splittable inputs (for example a gzip-compressed CSV) are bound to a single task. A plain Parquet file is split.
+C=Shuffle partitions: that setting applies after a shuffle, not when reading files.
+D=One per column: Parquet is columnar, but Spark parallelizes by byte ranges of the file, and each task reads the columns the query needs.
+T: File scans are sized by `spark.sql.files.maxPartitionBytes`, not by the shuffle setting.
+
+@ DBX-ASD D1 T1.5 applied comparison
+S: `df_a` has 3 partitions and `df_b` has 5 partitions, with the same schema. What does the code below print, and does it shuffle?
+`print(df_a.union(df_b).rdd.getNumPartitions())`
+A: 5, because Spark keeps the larger of the two partition counts for the union.
+B: 200, because every union ends in a shuffle with the default shuffle partition count.
+C: 8, because union concatenates the partitions of both inputs and does not shuffle.
+D: 3, because the first DataFrame decides the layout and the second one is merged into it.
+K: C
+G: ## Narrow and wide dependencies
+A narrow transformation lets each output partition depend on a limited set of input partitions, so no data has to move between executors. `filter`, `select`, `withColumn` and `union` are narrow. A wide transformation (`groupBy`, `join`, `distinct`, `repartition`) needs a shuffle.
+- `union` simply places the partitions of the two inputs next to each other, so the result has 3 + 5 = 8 partitions.
+- It does not remove duplicates; `union` behaves like SQL `UNION ALL`.
+- A later wide operation then creates the shuffle partitions again.
+W: Union is a narrow operation that appends the 5 partitions to the 3 existing ones, so it prints 8 and runs without a shuffle.
+X: A=Larger count: partition counts are added for a union. Nothing takes a maximum.
+B=Shuffle on every union: union does not redistribute rows, so `spark.sql.shuffle.partitions` does not apply.
+D=First input decides: both inputs keep their own partitions in the result.
+T: `union` is narrow: the output partition count is the sum of the input counts.
+
+@ DBX-ASD D1 T1.5 applied use-case
+S: A job reads 400 CSV files of 1 MB each (400 MB in total) with default file-source settings. Which description of the scan partitions is correct?
+A: 400 partitions, because Spark always creates one partition for every input file.
+B: 200 partitions, because the scan uses the default number of shuffle partitions.
+C: Far fewer than 400, because Spark packs several small files into each partition, counting an open cost for every file.
+D: About 4, because Spark divides the total bytes by 128 MB and the cost of opening a file is not counted.
+K: C
+G: ## Packing small files into partitions
+For file sources Spark first lists the files and sorts them by size. It then fills partitions up to `spark.sql.files.maxPartitionBytes` (128 MB). Every file adds `spark.sql.files.openCostInBytes` (default 4 MB) to the running total, to reflect that opening a file is not free.
+- Here each file counts as about 1 MB + 4 MB = 5 MB, so a partition takes about 25 files.
+- 400 files give roughly 16 partitions, far fewer than 400 tasks, but more than the 4 that the raw byte count suggests.
+- Millions of tiny files are still slow: listing and opening them costs time even when they are packed.
+W: Several small files go into one partition and every file carries an open cost, so the scan has far fewer than 400 partitions, about 16 here.
+X: A=One per file: that holds for large non-splittable files, but Spark packs small files together.
+B=Shuffle default: no shuffle happens in a plain scan, so the setting does not apply.
+D=Bytes divided by 128 MB: that ignores the per-file open cost, which pushes the real count up.
+T: File scans pack small files into partitions using maxPartitionBytes plus an open cost per file.
+
+@ DBX-ASD D1 T1.5 advanced comparison
+S: A job must write Parquet output in which each file covers a separate, non-overlapping range of `ts` values, so that a downstream reader can skip files by min/max statistics. The output should have 8 files. Which call prepares the DataFrame?
+A: `df.repartitionByRange(8, "ts")`, which samples the data and assigns contiguous ranges of `ts` to the partitions.
+B: `df.repartition(8, "ts")`, which hash-partitions the rows, so every file receives values spread over the whole range.
+C: `df.coalesce(8)`, which merges existing partitions and keeps whatever value ranges they already hold.
+D: `df.repartition(8)`, which distributes rows round-robin, so each file holds a random sample of `ts` values.
+K: A
+G: ## Hash, range and round-robin partitioning
+Spark offers several ways to lay out rows across partitions.
+- `repartition(n, col)` is hash partitioning: equal keys share a partition, but neighboring values scatter, so every partition spans the full range.
+- `repartitionByRange(n, col)` samples the column to pick range boundaries and gives each partition a contiguous slice of values.
+- `repartition(n)` without columns spreads rows evenly (round-robin) and says nothing about values. `coalesce(n)` only merges partitions without a shuffle.
+Range partitioning is what makes per-file min/max statistics selective, because files do not overlap.
+W: `repartitionByRange` places contiguous `ts` ranges in separate partitions, so each of the 8 files has a narrow min/max range that readers can use for skipping.
+X: B=Hash repartition: it groups equal `ts` values but scatters neighbors, so each file's min and max cover nearly the whole domain.
+C=Coalesce: it keeps the existing layout, which comes from the reader and not from `ts`, and it cannot guarantee ranges.
+D=Round-robin repartition: rows are spread by position, so every file contains a random sample of `ts`.
+T: Use `repartitionByRange` when files must hold contiguous value ranges; hash partitioning only keeps equal keys together.
+
+@ DBX-ASD D1 T1.6 applied use-case
+S: A notebook runs the lines below on a large Parquet dataset. The first three lines return within a second, and the fourth keeps the cluster busy. Which line starts the Spark job?
+`df = spark.read.parquet(path)`
+`a = df.filter("x > 1")`
+`b = a.select("x", "y")`
+`c = b.count()`
+A: `df = spark.read.parquet(path)`, because the files have to be read before the later lines can use them.
+B: `a = df.filter("x > 1")`, because a filter must scan every row to decide which ones stay.
+C: `b = a.select("x", "y")`, because selecting columns rewrites the data in memory.
+D: `c = b.count()`, because `count()` is an action that forces the whole chain of transformations to run.
+K: D
+G: ## Transformations are lazy, actions are not
+Spark splits DataFrame operations into two groups.
+- Transformations such as `read`, `filter`, `select`, `withColumn`, `join` and `groupBy` only add a step to the logical plan. No data moves, and they return a new DataFrame immediately.
+- Actions such as `count()`, `collect()`, `show()`, `take()` and `write` ask for a result. Each action submits a job that executes the optimized plan.
+- Because the plan is built first, Spark can optimize the whole chain, for example by reading only the columns `x` and `y` and pushing `x > 1` into the Parquet scan.
+W: Only `count()` is an action. It triggers execution of the read, filter and select together, so it is the line that keeps the cluster busy.
+X: A=read: it only defines the source (apart from reading file footers or listing paths for planning). The scan itself waits for an action.
+B=filter: it records a predicate in the plan. The rows are tested when an action runs the scan.
+C=select: it adds a projection to the plan and does not materialize anything.
+T: Transformations build a plan; the first action runs it.
+
+@ DBX-ASD D1 T1.6 advanced troubleshooting
+S: A UDF turns a text column into an integer, and one input row contains the text `"abc"`. The code runs as follows. When does the error appear?
+`@udf("int")`
+`def parse(s): return int(s)`
+`df2 = df.withColumn("n", parse("txt"))`
+`print("built")`
+`rows = df2.collect()`
+A: At the `withColumn` call, because Spark validates every value of the column while it defines it.
+B: At the `collect()` call, inside a task, as a Python exception reported by the failed job. The `print` still runs.
+C: Never, because a UDF returns NULL for values it cannot convert.
+D: At the `print` call, because Spark flushes pending transformations before any output.
+K: B
+G: ## Errors in data surface at action time
+`withColumn` only records a projection with the UDF in the plan, so no row is passed to Python yet. The UDF runs inside executor tasks when an action evaluates the column.
+- Problems found while resolving the plan (a missing column, a wrong function name) can be raised when the transformation is called, in classic PySpark.
+- Problems in the data (a bad value, a failing UDF, a failed cast under ANSI mode) show up only when the affected rows are processed, as a failed task and a failed job.
+- An exception inside a UDF is not turned into NULL. Wrap the conversion in `try`/`except` if NULL is wanted.
+W: Building `df2` runs nothing, so `built` is printed. The failure occurs when `collect()` evaluates the UDF on the bad row and the task raises.
+X: A=At withColumn: nothing evaluates row values while the plan is defined.
+C=Returns NULL: a UDF that raises fails the task. Only code that catches the error and returns `None` produces NULL.
+D=At print: `print` is plain Python and does not trigger a Spark job.
+T: Data errors appear when an action processes the rows, not when the transformation is defined.
+
+@ DBX-ASD D1 T1.6 applied comparison
+S: A developer runs each of the calls below on an uncached DataFrame `df` that was read from Parquet. Which call returns immediately without starting a Spark job?
+A: `df.cache()`, which only marks the DataFrame for caching. The data is stored when a later action first runs.
+B: `df.first()`, which has to read at least one row, so it launches a job over a small number of partitions.
+C: `df.collect()`, which brings every row back to the driver and therefore launches a job over all partitions.
+D: `df.write.parquet(out)`, which writes the result and therefore launches a job that produces the output files.
+K: A
+G: ## Which calls are actions
+`cache()` and `persist()` are lazy. They register a storage level for the plan, and the first action that computes the DataFrame fills the cache.
+- Actions return a value to the driver or write data out: `count`, `collect`, `first`, `head`, `take`, `show`, `foreach`, `toPandas` and every `write` call.
+- `limit`, `select`, `filter`, `repartition` and `explain` do not start a job on the data. `explain` prints the plan and returns.
+- Forgetting that `cache()` is lazy leads to the surprise that nothing appears in the Storage tab until an action runs.
+W: `cache()` only records the persist request in the plan, so it returns at once and the Storage tab stays empty until an action runs.
+X: B=first(): it returns a row to the driver, which is an action, so Spark launches a job.
+C=collect(): it is the classic action and runs a job over all partitions.
+D=write.parquet: every write is an action and executes the plan to produce the files.
+T: `cache()` is lazy; actions return data to the driver or write it out.
+
+@ DBX-ASD D1 T1.6 applied definition
+S: A script defines `df = spark.read.parquet(p).filter("amount > 0")` and then calls `df.count()` followed by `df.count()` again. Nothing was cached. What does the Spark UI show?
+A: One job, because the second count reuses the result of the first one on the same DataFrame.
+B: Two jobs, where the second one only reads the shuffle files left over by the first.
+C: One job, because Spark detects two identical actions and merges them before submission.
+D: Two jobs, and each one scans the Parquet files and applies the filter again from the start.
+K: D
+G: ## Each action recomputes its lineage
+A DataFrame is a recipe, not stored data. Every action submits a new job that runs the whole plan from the source, unless a cache or a reused shuffle output shortens it.
+- Two `count()` calls on an uncached DataFrame read and filter the files twice.
+- `df.cache()` before the first action stores the filtered partitions, so the second action reads from memory.
+- In iterative code, where the same DataFrame feeds several actions, caching the reused result is the usual fix. Cache only data that is reused, because memory is limited.
+W: Without a cache, each `count()` is a separate job that scans the Parquet files and applies the filter again.
+X: A=Result reuse: a DataFrame holds a plan and no stored result, so a second action does not see the first one's output.
+B=Leftover shuffle files: this plan has no shuffle, and a plain count of a filtered scan does not rely on earlier job output.
+C=Merged actions: Spark runs one job per action as you call it. It never merges separate calls.
+T: Without caching, every action reruns the full lineage from the source.
+
+@ DBX-ASD D1 T1.6 applied use-case
+S: A DataFrame `df` has 1,000 partitions and 500 million rows. A developer calls `df.filter("status = 'ERR'").take(3)`, and the first partitions that Spark scans already contain three matching rows. What is the likely behavior?
+A: Spark filters all 1,000 partitions first and cuts the result to three rows on the driver.
+B: Spark scans a small number of partitions first and may stop as soon as it has three rows, increasing the number of partitions scanned only if needed.
+C: Spark always processes exactly one partition, so `take` can return fewer rows than requested.
+D: Spark treats `take` as a transformation and returns a new DataFrame without running a job.
+K: B
+G: ## Actions that need only a few rows
+`take(n)`, `head(n)`, `first()` and `limit(n)` followed by an action do not have to touch the whole dataset.
+- For `take(n)` the driver starts by scanning one partition. If that does not yield enough rows, it scans more partitions in later rounds, with a growing number of partitions per round.
+- When the requested rows are found early, the remaining partitions are never computed, which makes `take` far cheaper than `collect()` on large data.
+- If few rows match the filter, many partitions may be needed, and the cost approaches a full scan.
+W: `take(3)` is an action that reads partitions incrementally and stops once three rows are available, so a matching filter makes it cheap.
+X: A=Full filter first: the driver scans a few partitions at a time and does not need to process everything.
+C=Exactly one partition: Spark scans more partitions if the first one has too few matching rows, so `take` still returns up to the requested number.
+D=Transformation: `take` returns a Python list of `Row` objects, so it is an action.
+T: `take(n)` scans partitions incrementally, so it is much cheaper than `collect()` when matches are plentiful.
+
+@ DBX-ASD D1 T1.6 advanced definition
+S: A developer writes `spark.read.parquet(p).select("a", "b", "c").filter("a = 5").select("b")`. The physical plan shows a scan that reads only columns `a` and `b` and a filter on `a` pushed into the Parquet reader. Which property of Spark's execution model makes this possible?
+A: Eager evaluation, because each step is executed as soon as it is written and its result is stored.
+B: Tungsten code generation, because it rewrites the Parquet files so that unused columns are removed.
+C: Lazy evaluation, because Catalyst optimizes the complete chain of transformations as one plan when an action runs.
+D: Speculative execution, because Spark guesses which columns later steps need and reads them in advance.
+K: C
+G: ## Why laziness helps the optimizer
+When transformations only build a logical plan, Catalyst can analyze and rewrite the whole plan before any data is read.
+- Column pruning: only `a` and `b` are needed, so the Parquet scan skips `c`.
+- Predicate pushdown: the filter `a = 5` is handed to the reader, which can skip row groups using min/max statistics.
+- Operator reordering and combining: adjacent projections collapse, and narrow operations are pipelined into a single stage.
+- `df.explain()` prints this optimized plan without running a job.
+W: Because transformations are lazy, the optimizer sees the full chain at action time and prunes columns and pushes the filter down before the scan runs.
+X: A=Eager evaluation: executing each step on its own would read all three columns first, so there would be nothing left to prune.
+B=Tungsten code generation: it speeds up in-memory execution, and it never rewrites source files.
+D=Speculative execution: it re-launches slow tasks and has nothing to do with choosing columns.
+T: Lazy evaluation lets Catalyst optimize the whole plan at once, which enables pruning and pushdown.
+
+@ DBX-ASD D1 T1.7 applied definition
+S: Which Spark module provides the basic functionality that the other modules build on, such as task scheduling, memory management, fault recovery and the RDD abstraction?
+A: Spark SQL, which parses queries and applies the Catalyst optimizer before any scheduling happens.
+B: Structured Streaming, which supplies the execution engine for all batch and streaming workloads.
+C: MLlib, which supplies the distributed data structures and scheduling used by the other libraries.
+D: Spark Core, which provides scheduling, memory management, fault recovery and RDDs for all higher-level modules.
+K: D
+G: ## The module map
+Spark is a layered system with one execution core and several libraries on top.
+- Spark Core: task scheduling, memory management, fault recovery, interaction with storage systems and the RDD API.
+- Spark SQL and DataFrames: structured data, SQL, the Catalyst optimizer and data source connectors.
+- Structured Streaming: incremental processing of unbounded data using the DataFrame/SQL API.
+- MLlib: machine learning algorithms, feature transformers and pipelines on DataFrames.
+- Pandas API on Spark: the pandas API running on Spark's distributed engine.
+DataFrame queries are finally compiled into RDD-based tasks that Spark Core schedules.
+W: Spark Core owns scheduling, memory management, fault recovery and the RDD abstraction that every other module relies on.
+X: A=Spark SQL: it plans and optimizes structured queries, but the plan then runs on the Core scheduler.
+B=Structured Streaming: it is a library on top of Spark SQL and does not provide the base engine.
+C=MLlib: it uses DataFrames and the core engine and does not provide scheduling or data structures to others.
+T: Spark Core is the foundation (scheduler, memory, fault recovery, RDDs) for all other modules.
+
+@ DBX-ASD D1 T1.7 applied use-case
+S: A team wants to query Parquet, JSON and JDBC sources with SQL and the DataFrame API, using one cost-aware optimizer that pushes filters into the sources. Which Spark module provides this?
+A: Spark SQL, which includes DataFrames, data source connectors and the Catalyst optimizer.
+B: Spark Core, which exposes SQL through the RDD API and optimizes by reordering RDD operations.
+C: Structured Streaming, which is the only module that can read from several data sources.
+D: MLlib, which includes the connectors and optimizer for any structured data it trains on.
+K: A
+G: ## Spark SQL and DataFrames
+Spark SQL is the module for structured data. A DataFrame is a distributed table with named columns, and the same engine runs SQL text and DataFrame code.
+- Catalyst turns the query into a logical plan, optimizes it (pruning, pushdown, join choice) and produces a physical plan.
+- Data source connectors cover Parquet, ORC, JSON, CSV, text, JDBC and others.
+- Python DataFrame code that uses built-in functions runs in the JVM engine, so it does not run at Python speed per row.
+W: Spark SQL bundles DataFrames, the connectors for file and JDBC sources, and the Catalyst optimizer that pushes filters down.
+X: B=Spark Core: RDDs carry no schema, so Core has no SQL layer or query optimizer of its own.
+C=Structured Streaming: it reuses Spark SQL for sources and optimization and is not the only module that can read from several sources.
+D=MLlib: it consumes DataFrames from Spark SQL for training and has no connectors or optimizer of its own.
+T: Spark SQL is the module with DataFrames, SQL, Catalyst and the data source connectors.
+
+@ DBX-ASD D1 T1.7 applied use-case
+S: A pipeline must continuously pick up new JSON files that land in cloud storage, compute running aggregates with the same `groupBy` and `agg` code used in batch jobs, and write results incrementally. Which Spark module is designed for this?
+A: Spark Core, because only its RDD API can read files that arrive after the job has started.
+B: Pandas API on Spark, because it keeps a pandas object that updates itself when new files arrive.
+C: Structured Streaming, which treats the stream as an unbounded table and runs DataFrame operations incrementally.
+D: MLlib, because its pipeline abstraction re-runs every stage whenever new data is detected.
+K: C
+G: ## Structured Streaming in one paragraph
+Structured Streaming models a stream as a table that grows. You write `spark.readStream` instead of `spark.read`, use the usual DataFrame operations, and start the query with `writeStream`. Spark runs it incrementally, by default in micro-batches, and keeps checkpoint and state data so it can recover.
+- The same Catalyst optimizer and the same data sources (files, Kafka and others) are available.
+- Output modes (append, update, complete) and triggers control what is written and how often.
+W: Structured Streaming runs the same DataFrame logic on an unbounded input incrementally, which fits continuous file ingestion with running aggregates.
+X: A=Spark Core: Core has no incremental file discovery for DataFrames. The RDD API processes a fixed set of data.
+B=Pandas API on Spark: it exposes pandas-style batch operations, and the objects do not update themselves when files arrive.
+D=MLlib: pipelines are fitted and applied on request. They do not watch a source for new data.
+T: Structured Streaming is the module for incremental DataFrame processing of unbounded data.
+
+@ DBX-ASD D1 T1.7 applied comparison
+S: A team wants to assemble feature columns and train a logistic regression model as one `Pipeline` on a DataFrame that is distributed across the cluster. Which module and package should new code use?
+A: MLlib through `pyspark.mllib`, the RDD-based API, which is the primary API for new development.
+B: MLlib through `pyspark.ml`, the DataFrame-based API, which is the primary machine learning API.
+C: Pandas API on Spark through `pyspark.pandas`, which ships its own training algorithms and pipelines.
+D: Structured Streaming through `pyspark.sql.streaming`, which fits models on every micro-batch by default.
+K: B
+G: ## MLlib today
+MLlib is Spark's machine learning library: algorithms (classification, regression, clustering, recommendation), feature transformers, `Pipeline` and tuning tools.
+- The primary API is DataFrame-based and lives in `pyspark.ml` (`VectorAssembler`, `LogisticRegression`, `Pipeline`).
+- The RDD-based API in `pyspark.mllib` is in maintenance mode: bug fixes only, no new features.
+- Estimators are fitted with `fit` and produce transformers (models) that are applied with `transform`.
+W: The DataFrame-based `pyspark.ml` API provides `VectorAssembler`, `LogisticRegression` and `Pipeline`, and it is the primary MLlib API for new code.
+X: A=pyspark.mllib: the RDD-based package is in maintenance mode and is not the primary API.
+C=pyspark.pandas: it gives a pandas-like DataFrame API on Spark, and the training algorithms come from MLlib or other libraries.
+D=Structured Streaming: it processes streams and does not train models by default.
+T: For new machine learning code on Spark use the DataFrame-based `pyspark.ml`.
+
+@ DBX-ASD D1 T1.7 applied use-case
+S: A data scientist has a pandas script that uses `read_csv`, `groupby` and `merge`. The input has grown to 500 GB, and the script must keep its pandas-style syntax but run across the cluster. Which option fits?
+A: Switch to the pandas API on Spark with `import pyspark.pandas as ps`, which runs pandas-style calls on distributed data.
+B: Call `toPandas()` on a Spark DataFrame of the data and keep using plain pandas, which distributes the work.
+C: Move the script to MLlib, whose pipelines translate pandas calls into distributed jobs.
+D: Rewrite the script against RDDs of Python tuples, because pandas syntax cannot run on Spark.
+K: A
+G: ## Pandas API on Spark
+The pandas API on Spark (`pyspark.pandas`, imported as `ps`) provides a pandas-like DataFrame API that executes on Spark. Familiar calls such as `ps.read_csv`, `groupby` and `merge` run as distributed Spark jobs.
+- It targets users who know pandas and need to scale beyond one machine.
+- It is different from `toPandas()`, which collects the whole result into the driver's memory as a plain pandas DataFrame.
+- It is also different from pandas UDFs, which apply plain pandas code to batches of data inside Spark.
+W: `pyspark.pandas` keeps the pandas calls and runs them on the cluster, so 500 GB is spread over executors.
+X: B=toPandas(): it collects all rows to the driver, where plain pandas then runs on one machine. A 500 GB result would not fit.
+C=MLlib: it offers machine learning algorithms and does not translate pandas code.
+D=RDD rewrite: no rewrite is needed, because the pandas API on Spark already offers this syntax.
+T: Use `pyspark.pandas` to run pandas-style code distributed; `toPandas()` moves data to one machine.
+
+@ DBX-ASD D1 T1.7 applied definition
+S: Which statement correctly relates the DataFrame API to Spark's modules?
+A: DataFrames belong to Spark Core and run as RDDs of Python objects inside Python worker processes.
+B: DataFrames are available only inside Structured Streaming and cannot be used for batch jobs.
+C: DataFrames exist only in the pandas API on Spark, which converts them to SQL before execution.
+D: DataFrames are part of Spark SQL, so built-in DataFrame operations are optimized by Catalyst and run in the JVM engine.
+K: D
+G: ## DataFrames sit in Spark SQL
+The DataFrame API and the SQL language are two front ends to the same Spark SQL engine.
+- A PySpark DataFrame call builds a logical plan on the JVM side. The Python process only sends commands and receives results.
+- Built-in functions (`F.col`, `F.sum`, `F.when`) run inside the JVM and are optimized by Catalyst. Python UDFs are the exception, because rows must be moved to Python workers.
+- Structured Streaming and MLlib use the same DataFrame, and the pandas API on Spark builds on it too.
+W: DataFrames are part of the Spark SQL module, and built-in operations are optimized by Catalyst and executed in the JVM.
+X: A=Core and Python objects: that describes an RDD of Python objects. DataFrames carry a schema and run through the optimizer.
+B=Streaming only: the same DataFrame class serves batch and streaming, which is why code can be shared between them.
+C=pandas API only: DataFrames are the base abstraction, and the pandas API is built on top of them.
+T: The DataFrame API is part of Spark SQL, so built-in operations get Catalyst optimization.
+
+@ DBX-ASD D2 T2.1 applied troubleshooting
+S: A developer reads a database table in parallel with the code below and gets an error that the options are not allowed together. Which change fixes it while keeping the filter and the parallel read?
+`spark.read.format("jdbc").option("url", url)`
+`  .option("query", "select * from orders where yr = 2025")`
+`  .option("partitionColumn", "id").option("lowerBound", 1)`
+`  .option("upperBound", 1000000).option("numPartitions", 8).load()`
+A: Remove `numPartitions`, because the partition column options already decide how many partitions the read uses.
+B: Move the statement into `prepareQuery`, which lets the `query` option be combined with the partition options.
+C: Pass `lowerBound` and `upperBound` as strings, because the `query` option accepts only string bounds.
+D: Replace `query` with `dbtable` set to a subquery with an alias, and qualify the partition column with that alias.
+K: D
+G: ## query versus dbtable
+The JDBC source accepts two ways to say what to read.
+- `dbtable`: a table name, or anything valid in a `FROM` clause, such as `(select ... ) as o`.
+- `query`: a statement that Spark wraps as a subquery with its own alias. It cannot be combined with `partitionColumn`, and `dbtable` and `query` cannot be used together.
+- The partition options `partitionColumn`, `lowerBound`, `upperBound` and `numPartitions` must all be given together and split the read into parallel range queries.
+The documented workaround is to put the subquery into `dbtable` and name the column through the subquery alias.
+W: `dbtable` with an aliased subquery keeps the year filter, and the partition column can then be used because the read no longer uses `query`.
+X: A=Remove numPartitions: the partition options must be specified together, and the conflict comes from `query` anyway.
+B=prepareQuery: it only adds a prefix such as a `WITH` clause in front of `query`. It does not lift the restriction.
+C=String bounds: the type of the bounds is not the problem, and the options can be passed as numbers or strings.
+T: With `partitionColumn`, use `dbtable` with an aliased subquery, not `query`.
+
+@ DBX-ASD D2 T2.1 advanced definition
+S: A table has `id` values from 1 to 10,000,000. A developer reads it with the options below. What does the resulting DataFrame contain?
+`.option("partitionColumn", "id").option("lowerBound", 1)`
+`.option("upperBound", 1000000).option("numPartitions", 4)`
+A: Only rows with `id` between 1 and 1,000,000, because the bounds act as a filter on the partition column.
+B: All rows of the table, split into 4 partitions, where the first and last partitions also take everything outside the bounds.
+C: An error, because the upper bound is smaller than the largest `id` in the table.
+D: Four rows, one sample per partition, because the bounds select how many rows are read.
+K: B
+G: ## Bounds decide the stride, not the filter
+For a partitioned JDBC read Spark computes a stride from `(upperBound - lowerBound) / numPartitions` and issues one query per partition, each with a `WHERE` range on `partitionColumn`.
+- With bounds 1 to 1,000,000 and 4 partitions the stride is 250,000.
+- The first partition also selects values below the lower bound (and NULLs). The last partition selects everything from its start upward.
+- So all rows are returned. If the bounds do not match the real range, one partition holds most of the data and the read is skewed.
+Pick bounds from the real minimum and maximum of the column.
+W: The bounds only set the stride. All 10 million rows are read, and the last partition takes every `id` above 750,000 while the other three share the first 750,000.
+X: A=Filter: Spark documents that the bounds are not used to filter rows, so every row is returned.
+C=Error: values outside the bounds are accepted. They end up in the first or last partition.
+D=Four rows: the bounds do not sample. Each partition reads all rows in its range.
+T: `lowerBound` and `upperBound` set partition ranges only; rows outside them go to the first or last partition.
+
+@ DBX-ASD D2 T2.1 applied use-case
+S: A DataFrame with 200 partitions is written to PostgreSQL with `df.write.format("jdbc")...option("numPartitions", 8).save()`. How does the write behave?
+A: It opens 200 connections at once, because each partition writes through its own connection.
+B: The option is ignored for writes, because it applies only to parallel reads with a partition column.
+C: Spark lowers the partitions to 8 with `coalesce` before writing, so at most 8 connections insert data in parallel.
+D: Spark shuffles the data into 8 balanced partitions with a full `repartition(8)` before writing.
+K: C
+G: ## numPartitions on JDBC writes
+For JDBC, `numPartitions` is the maximum number of partitions that can be used for parallelism in reading and writing, and so also the maximum number of concurrent JDBC connections.
+- When the DataFrame has more partitions than the limit, Spark calls `coalesce(numPartitions)` before the write. Coalesce is a narrow operation, so it avoids a full shuffle but can leave partitions uneven.
+- Each remaining partition writes rows in batches (`batchsize`, default 1000 rows per round trip).
+- Limiting the value protects the database from too many simultaneous connections.
+W: The write reduces the data to 8 partitions with `coalesce`, so no more than 8 connections insert rows concurrently.
+X: A=200 connections: the option exists to cap concurrency. Without it, a large partition count could overwhelm the database.
+B=Ignored: the documentation lists `numPartitions` as read/write, and it also limits write parallelism.
+D=Full repartition: the reduction uses `coalesce`, which merges partitions without a shuffle.
+T: On JDBC writes `numPartitions` caps the connections by coalescing to that many partitions.
+
+@ DBX-ASD D2 T2.1 applied use-case
+S: A nightly job runs `df.write.format("jdbc")...mode("overwrite").save()` into a relational table. Each run drops and recreates the table, which removes its indexes and grants. The new data has the same schema as the table. Which option keeps the table definition?
+A: `.option("truncate", "true")`, which makes overwrite empty the existing table and keep its metadata.
+B: `.option("createTableOptions", "KEEP")`, which tells the database to preserve indexes on recreation.
+C: `.option("batchsize", 0)`, which turns the overwrite into an in-place update of rows.
+D: `.option("cascadeTruncate", "false")`, which stops the job from dropping the table.
+K: A
+G: ## Overwrite on JDBC
+With `SaveMode.Overwrite` the JDBC writer by default drops the target table and creates it again from the DataFrame schema. Indexes, grants and column types set by hand are lost.
+- `truncate=true` makes Spark issue `TRUNCATE TABLE` instead. The table object, its indexes and its privileges stay.
+- It is intended for the case where the new data has the same schema. If the schema differs, the truncate approach does not work.
+- `createTableOptions` and `createTableColumnTypes` only affect the `CREATE TABLE` statement when a table is created.
+W: With `truncate` set to true the overwrite empties the table instead of dropping it, so indexes and grants stay.
+X: B=createTableOptions: it appends database-specific text to `CREATE TABLE`. The value `KEEP` is not a feature and the table is still dropped.
+C=batchsize: it controls how many rows go in each insert batch and does not change what overwrite does to the table.
+D=cascadeTruncate: it matters only when truncate is enabled and the database supports cascading. It does not prevent a drop.
+T: `truncate=true` makes JDBC overwrite empty the table instead of dropping it.
+
+@ DBX-ASD D2 T2.1 applied use-case
+S: Reading from an Oracle database over JDBC is slow because the driver returns only 10 rows per network round trip by default. Which read option raises the number of rows fetched per round trip?
+A: `batchsize`, which sets the number of rows per round trip for reading.
+B: `fetchsize`, which sets how many rows are fetched per round trip.
+C: `queryTimeout`, which lets the driver wait longer for each batch of rows.
+D: `sessionInitStatement`, which is run before each fetch to enlarge the fetch buffer.
+K: B
+G: ## JDBC tuning options
+Several options look alike, so keep their direction straight.
+- `fetchsize` (read): rows fetched per round trip. Its default of 0 leaves the driver default, and Oracle's driver default is low (10 rows).
+- `batchsize` (write only): rows inserted per round trip, default 1000.
+- `queryTimeout`: seconds the driver waits for a statement. It sets a limit and does not speed anything up.
+- `sessionInitStatement` (read): one SQL statement or block run after each session opens, for settings such as session parameters.
+W: `fetchsize` is the read option that controls how many rows come back per round trip, which removes the many small fetches.
+X: A=batchsize: it is documented for writing only. It controls inserts and has no effect on a read.
+C=queryTimeout: it only caps how long a statement may run, with 0 meaning no limit.
+D=sessionInitStatement: it runs once when a session starts, and it is not a per-fetch hook.
+T: `fetchsize` tunes JDBC reads and `batchsize` tunes JDBC writes.
+
+@ DBX-ASD D2 T2.1 applied definition
+S: A DataFrame is written with the line below. Which directory layout does Spark create under `/out/s`?
+`df.write.partitionBy("country", "year").parquet("/out/s")`
+A: Folders named `year=...` at the top level, with `country=...` folders nested inside them.
+B: One flat folder of Parquet files that contain `country` and `year` as ordinary columns.
+C: Folders named `country=...` only, with `year` stored as a column inside each file.
+D: Folders named `country=...` with `year=...` folders inside, and the files hold only the remaining columns.
+K: D
+G: ## What partitionBy writes
+`DataFrameWriter.partitionBy(*cols)` partitions the output on the file system by the given columns.
+- Each column becomes one directory level, in the order listed: `/out/s/country=KR/year=2025/part-....parquet`.
+- The partition column values are stored in the folder names. The data files hold only the remaining columns.
+- Readers rediscover the columns from the paths, and queries that filter on them can skip whole directories (partition pruning).
+- Choose columns with moderate cardinality; one folder per distinct value can create many tiny files.
+W: Nested `country=.../year=...` folders follow the order of the columns in `partitionBy`, and the files contain only the other columns.
+X: A=year first: the nesting follows the order given to `partitionBy`, so `country` is the outer level.
+B=Flat layout: that is the result without `partitionBy`. With it, the values move into directory names.
+C=Only country: every column listed becomes a directory level, so `year` is a folder too.
+T: `partitionBy` creates one nested `col=value` directory per column, in the given order.
+
+@ DBX-ASD D2 T2.1 advanced troubleshooting
+S: A DataFrame with 3 partitions holds rows for 100 different countries mixed in every partition. The code `df.write.partitionBy("country").parquet(out)` produces about 300 small files. The team wants one file per country. What should the code do before the write?
+A: Call `df.coalesce(1)` so that all rows are written by one task, which gives one file per country folder.
+B: Increase `spark.sql.files.maxPartitionBytes`, because it merges the output files of a write.
+C: Call `df.repartition("country")` so that all rows of a country sit in one partition before the write.
+D: Add `.mode("overwrite")`, because overwrite compacts files that belong to the same partition folder.
+K: C
+G: ## Why partitionBy can create many files
+Every write task creates one file per distinct partition value that occurs in its own partition. With 3 tasks that each see 100 countries, the result is up to 3 x 100 = 300 files.
+- `repartition("country")` shuffles all rows of a country into the same task, so each country folder gets one file (a task may serve several countries, but each folder still gets one file from it).
+- `coalesce(1)` also gives one file per country, but a single task writes everything, which removes parallelism.
+- Output size per file can be capped with the `maxRecordsPerFile` write option or `spark.sql.files.maxRecordsPerFile`.
+W: Repartitioning by the same column first puts each country's rows into a single task, so each country folder receives one file.
+X: A=coalesce(1): it does produce one file per country, but it forces one task to write the whole dataset, which is slow for a large DataFrame. It is not the intended fix.
+B=maxPartitionBytes: it controls how files are split on reads. It has no effect on how many files a write produces.
+D=overwrite: the save mode decides what happens to existing data. It does not compact files within the new write.
+T: Repartition by the `partitionBy` column to get one file per partition value.
+
+@ DBX-ASD D2 T2.1 applied use-case
+S: One Parquet write task produces a single file of 10 million rows. The team wants files of at most 2 million rows each, without changing the number of DataFrame partitions. Which setting does this?
+A: `df.coalesce(5)` before the write, which splits the single partition into five files.
+B: The write option `.option("maxRecordsPerFile", 2000000)`, which starts a new file after that many rows.
+C: Setting `spark.sql.shuffle.partitions` to 5, so the write shuffles into five partitions.
+D: Setting `spark.sql.files.maxPartitionBytes` to a lower value, so the writer cuts files by size.
+K: B
+G: ## Limiting rows per output file
+By default a write task creates one file per partition (per partition value when `partitionBy` is used). `maxRecordsPerFile` (a write option, also available as the session setting `spark.sql.files.maxRecordsPerFile`) caps the rows in each file. The default 0 means no limit.
+- When a task has more rows, it rolls over to a new file. 10 million rows with a 2 million cap give 5 files from the same task.
+- `coalesce` only lowers the number of partitions and cannot split one into several.
+- `maxPartitionBytes` and `openCostInBytes` apply to reading file sources.
+W: `maxRecordsPerFile` makes each writer start a new file after the row limit, so the single partition is written as five files.
+X: A=coalesce(5): coalesce can merge partitions but never split one, so a single partition stays single.
+C=Shuffle partitions: no shuffle occurs in the plain write, so the setting changes nothing.
+D=maxPartitionBytes: it affects reads only. Written file sizes are not controlled by it.
+T: `maxRecordsPerFile` splits one task's output into several files by row count.
+
+@ DBX-ASD D2 T2.1 applied definition
+S: A DataFrame `df` with 6 partitions, all containing rows, is written with `df.write.parquet("/out/x")` and no other options. What exists after the job finishes?
+A: One Parquet file named `/out/x`, because the driver merges the partitions while writing.
+B: One file per partition inside `/out/x`, merged by an extra job that runs after the write.
+C: Six files and 200 additional shuffle files, because every write goes through a shuffle first.
+D: A directory `/out/x` with one part file per partition (six here) and a `_SUCCESS` marker file.
+K: D
+G: ## A DataFrame write produces a directory
+Spark writes in parallel: each task writes its own part file, and the path you give is a directory.
+- `part-00000-....snappy.parquet` and so on: one per task that has data. Snappy is the default Parquet compression.
+- A `_SUCCESS` file marks a successful job commit. Readers use the directory path, for example `spark.read.parquet("/out/x")`.
+- To get a single file, reduce the partitions first with `coalesce(1)` or `repartition(1)`, which removes parallelism. Spark has no setting to merge the files afterwards.
+W: Each of the six partitions is written by its own task as a part file inside the `/out/x` directory, and a `_SUCCESS` marker is added at commit.
+X: A=Single file: Spark never merges partitions on write. A single file needs one partition.
+B=Extra merge job: no job combines the part files after the write.
+C=Extra shuffle: a plain write has no shuffle, and the number 200 is the shuffle partition default, which does not apply here.
+T: A write creates a directory with one part file per partition, plus `_SUCCESS`.
+
+@ DBX-ASD D2 T2.1 applied comparison
+S: A report tool needs CSV files with a header row, a semicolon separator and the text `NA` for NULL values. Which write call delivers this?
+`df.write.option("header", True).option("sep", ";")`
+`  .option("nullValue", "NA").csv("/out/report")`
+A: The call shown, because `header`, `sep` and `nullValue` are CSV options for writing.
+B: The same call with `.option("separator", ";")`, because `sep` is only an alias used for reading.
+C: The same call with `.option("headers", True)`, because the header option name is plural.
+D: The same call with `.option("naValue", "NA")`, because that is how nulls are written.
+K: A
+G: ## CSV write options
+The CSV source documents options for reading and writing.
+- `header`: write a header line with the column names.
+- `sep` (alias `delimiter`): the field separator, one or more characters. It applies to reading and writing.
+- `nullValue`: the string that stands for a null. It applies to reading and writing.
+Spark does not reject option names it does not know. A misspelled name such as `separator` or `headers` is silently ignored, and the write succeeds with default behavior (comma separator, no header).
+W: `header`, `sep` and `nullValue` are the documented CSV option names, and all three apply on write, so the call produces the requested format.
+X: B=separator: that name does not exist and would be ignored, giving comma-separated output. The documented name `sep` works on writes too.
+C=headers: the plural is not an option and would be ignored, so the file would have no header row.
+D=naValue: it is not a CSV option. The documented one is `nullValue`.
+T: Use the documented CSV option names; misspelled ones are ignored without an error.
+
+@ DBX-ASD D2 T2.1 advanced comparison
+S: A developer must write a DataFrame as Parquet with gzip compression for this single write only, leaving the session's default untouched. Which call does this?
+A: `spark.conf.set("spark.sql.parquet.compression.codec", "gzip")` before the write, which applies to the write only.
+B: `df.write.format("parquet.gz").save(out)`, because the format name selects the codec.
+C: `df.write.option("codec", "gzip").parquet(out)`, because every file source reads the codec option.
+D: `df.write.option("compression", "gzip").parquet(out)`, because the write option overrides the session setting.
+K: D
+G: ## Compression for Parquet
+Parquet files are compressed per column chunk. The default codec is `snappy`, a fast choice with a moderate size reduction. Other values include `gzip`, `zstd`, `lz4` and `none`.
+- Session-wide default: `spark.sql.parquet.compression.codec`.
+- Per write: the `compression` option on the writer. It takes precedence over the session setting.
+- `spark.conf.set` changes the session until it is reset, so it would also affect later writes in the same session.
+- gzip and zstd give smaller files than snappy at the price of more CPU time.
+W: The `compression` writer option applies to this write only and has precedence over `spark.sql.parquet.compression.codec`.
+X: A=spark.conf.set: it changes the session default for every later write too, which the stem rules out.
+B=Format name: `parquet.gz` is not a source name. Parquet compresses inside the file, so there is no `.gz` wrapper to choose by name.
+C=codec option: `codec` is not a documented Parquet option, so it would be ignored and the default snappy would be used.
+T: The writer's `compression` option sets the codec for one write and overrides the session default.
