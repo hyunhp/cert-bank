@@ -34,6 +34,7 @@ const STUDY_EXAMS = [
   ["DBX-DAA", "Data Analyst Associate", "associate", "databricks"],
   ["DBX-MLA", "Machine Learning Associate", "associate", "databricks"],
   ["DBX-ASD", "Apache Spark Developer Associate", "associate", "databricks"],
+  ["DBX-MLP", "Machine Learning Professional", "professional", "databricks"],
   ["DBX-DEP", "Data Engineer Professional", "professional", "databricks"],
   ["TF-TA004", "Terraform Associate (004)", "associate", "hashicorp"],
   ["VLT-VA003", "Vault Associate (003)", "associate", "hashicorp"],
