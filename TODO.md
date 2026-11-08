@@ -387,6 +387,7 @@ idle prefetch of `data/explanations/<EXAM>.json` (up to 331 KB gzip) finishes wa
 pass ~700: render the first ~50 cards then the rest on idle, or split explanation files per domain.
 
 ## Tooling notes
+- Test helpers (2026-11-08): `tools/testkit.py` has `serve(root)` (port-0 static server) and `Checker`; all browser tests use it, the two fixed-port tests moved to port 0. New tests: `import testkit` (diagrams/*.py add `tools/` to `sys.path`). Not done on purpose: merging `EXAMS` and `STUDY_EXAMS` or sharing `esc` needs a shared script (cache-bust risk). Open small ideas: `lsGet/lsSet/lsDel` and `fetchData(path, v)` helpers inside index.html and study.js; split long qgen.py functions (`check`, `ingest`) after a snapshot diff of `data/`.
 - Tech-debt pass (2026-10-30): tests matched only AWS exam file names (`[A-Z]{3}-C\d{2}`), so 7 Palantir/Azure exams
   were never loaded by mock_e2e/loading_perf/diagram tests; now any exam code. New drift checks: index.html EXAMS and
   EXAM_LEVEL must match exam-specs.json (vendor_tabs_test), js/study.js STUDY_EXAMS must list every guide (study_test).
