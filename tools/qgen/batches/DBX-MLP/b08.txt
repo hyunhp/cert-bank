@@ -1,0 +1,519 @@
+# src: https://docs.databricks.com/aws/en/jobs/trigger-table-update
+# src: https://docs.databricks.com/aws/en/jobs/if-else
+# src: https://docs.databricks.com/aws/en/jobs/task-values
+# src: https://docs.databricks.com/aws/en/jobs/conditional-tasks
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/monitor-output
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/index
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/monitor-alerts
+# src: https://docs.databricks.com/aws/en/machine-learning/manage-model-lifecycle/index
+
+@ DBX-MLP D2 T2.9 advanced use-case
+S: A data profile refreshes nightly on an inference table, and its drift metrics table is written by each refresh. The team wants a retraining job to start only after fresh drift metrics exist, not at a fixed hour that may come before the refresh finishes. The first task of the job will read the drift rows. Which trigger fits?
+A: A cron schedule at 06:00 each day, which the team moves later whenever the profile refresh starts to take longer than before
+B: A table update trigger on the drift metrics table, so that a job run starts when the profile refresh commits new rows to it
+C: A continuous job that runs the drift query in a loop all day and starts the training notebook when the output changes
+D: A file arrival trigger on the volume that holds the dashboard export, because the dashboard is regenerated after each refresh
+K: B
+G: ## Triggers for retraining jobs
+A retraining pipeline is a Lakeflow job. A job can be started by a schedule, by a file arrival trigger, by a continuous run, or by a table update trigger. The best trigger is the one that matches the event that makes retraining meaningful.
+- A table update trigger watches Unity Catalog tables (Delta and Iceberg managed tables, external Delta tables, materialized views, streaming tables) for updates, merges and deletes, and starts a run when they change. It needs no always-on cluster.
+- The principal in the job's Run as field must have `SELECT` on every monitored table, plus `USE CATALOG` and `USE SCHEMA`, or the trigger fails to evaluate and the job does not run.
+## Where the drift signal lives
+Data profiling (documented earlier as Lakehouse Monitoring) writes a profile metrics table and a drift metrics table as Delta tables. Writing the drift rows is the event that tells the pipeline new evidence exists, so that table is the natural source for the trigger.
+W: Table update trigger: the run starts when the refresh commits new drift rows, so the job never reads stale metrics and needs no guess about how long the refresh takes.
+X: A=Cron schedule: a fixed hour races against the refresh; when the refresh runs long the job reads yesterday's drift rows, and each delay forces a manual change of the schedule.
+C=Continuous job: it keeps a cluster running all day to poll a table that changes once a night, and "output changed" is not a reliable signal that new drift rows were written.
+D=File arrival trigger: it fires on new files in a storage location, and the dashboard export is not the data the job needs; the dashboard is a view of the metric tables, not their source.
+T: Start retraining from the event that produces the evidence (new drift rows) with a table update trigger instead of guessing a time.
+V: Lakeflow Jobs, Data profiling, Unity Catalog
+
+@ DBX-MLP D2 T2.9 advanced troubleshooting
+S: A job has a `check_drift` notebook task that sets a task value with `dbutils.jobs.taskValues.set("n_drifted", 2.0)`. A downstream `If/else condition` task uses the expression `{{tasks.check_drift.values.n_drifted}} == 2`, and the retraining branch never runs, although two features have drifted. What is the cause and the fix?
+A: Task values cannot hold numbers, so the notebook must write the count as a string such as "two" and compare it with the `contains` operator
+B: The If/else task reads only job parameters, so the count must be passed as a job parameter that the schedule sets before the run
+C: The retraining task needs its Run if condition changed to "All done", because the If/else task stays pending until all tasks have run
+D: The equality operator compares strings, so "2.0" is not equal to "2"; use a numeric operator, for example `>= 2`, or write the value as an integer
+K: D
+G: ## If/else tasks and task values
+An `If/else condition` task evaluates a boolean expression with two operands. Operands can be job parameters, task parameters or task values, for example `{{tasks.check_drift.values.n_drifted}}`. A Python notebook sets a task value with `dbutils.jobs.taskValues.set(key, value)`.
+## Comparison rules
+- `==` and `!=` compare their operands as strings, so `12.0 == 12` is false.
+- `>`, `>=`, `<`, `<=` compare numbers, so `12.0 >= 12` is true.
+- Only numeric, string and boolean values are allowed; other types make the expression fail.
+Write retraining gates with numeric operators (`>=`, `>`) against thresholds, which is also the more robust rule: "at least 2 features drifted" instead of "exactly 2".
+W: The notebook stores 2.0, and `==` compares text, so "2.0" and "2" differ; a numeric operator such as `>= 2` evaluates as a number and the branch runs.
+X: A=String count with contains: task values can be numeric; turning a count into words makes numeric thresholds impossible and the condition becomes fragile.
+B=Job parameters only: operands can reference task values written upstream, which is the documented way to branch on a result computed inside the job.
+C=Run if "All done": that setting controls how a task reacts to the outcome of its dependencies; it does not change how the expression is evaluated, and the If/else task completes normally.
+T: Branch on computed values with numeric operators; `==` is a string comparison.
+V: Lakeflow Jobs
+
+@ DBX-MLP D2 T2.9 advanced tradeoff
+S: A drift alert fires and starts the retraining job. The investigation shows that an upstream pipeline change set a feature to null for 40% of rows (`percent_null_delta` jumped), and the real customer behavior did not change. Retraining on the new data would bake the defect into the model. How should the automated pipeline be designed?
+A: Add a data quality gate before training that checks null rates and schema against expectations and stops the run, then route the incident to the data owner
+B: Retrain immediately on the newest data so that the new model learns the missing values, and lower the alert threshold to catch such cases earlier
+C: Disable drift alerts for that feature permanently, because a feature that can be corrupted upstream is not reliable enough to monitor
+D: Retrain twice, on the old and on the new data, and promote whichever model has the higher training accuracy, to avoid a decision about the data
+K: A
+G: ## Not every drift is a reason to retrain
+Drift metrics describe that a distribution changed, not why. Two very different causes produce the same alert.
+- Real-world change (covariate shift): the population or behavior moved, so retraining on recent data helps.
+- Data defect: a broken pipeline, a schema change or a unit change; retraining on it teaches the model the defect.
+The drift metrics table also holds integrity deltas such as `percent_null_delta`, `percent_zeros_delta` and `count_delta`, which show a defect pattern next to the distribution tests. An automated retraining pipeline therefore starts with a validation task (expectations on null rate, ranges, schema) that fails the run, and the alert goes to the owner of the data.
+W: Gating on data quality first keeps a defect out of training and sends the incident to the team that can fix the source, while genuine drift passes the gate and retrains.
+X: B=Retrain immediately: the model would learn a pipeline bug as if it were behavior, and it would degrade again once the upstream defect is fixed.
+C=Disable alerts on the feature: the alert did its job by exposing the defect; removing it leaves the model blind to the next corruption of that feature.
+D=Compare training accuracy: training accuracy is not a holdout measure, and training twice does not address whether the data itself is valid.
+T: Put a data validation gate in front of automated retraining, because drift alone cannot tell behavior change from a defect.
+V: Lakeflow Jobs, Data profiling
+
+@ DBX-MLP D2 T2.9 advanced tradeoff
+S: A fraud model receives its true labels about 45 days after scoring. A team wants automated retraining but worries that waiting for accuracy to drop means 45 days of damage. Feature drift against the training baseline is available daily. Which trigger design best balances speed and reliability?
+A: Retrain on every drift alert and ignore labels, since waiting for performance numbers would only delay each model update further
+B: Retrain only when labelled accuracy falls below the target, and never use drift, because drift can occur while the model stays accurate
+C: Use feature drift as an early signal that starts a candidate run, and let labelled performance and a champion comparison confirm the promotion
+D: Retrain every night on a rolling window, because a schedule is the only trigger type that does not depend on delayed labels
+K: C
+G: ## Leading and lagging signals
+- Input and prediction drift are leading signals: available at scoring time, no labels needed, but they do not prove that quality fell.
+- Labelled performance (accuracy, recall, log loss) is the lagging signal: it measures quality, but only after labels arrive.
+A robust trigger design uses both. Drift opens a candidate run (train and register a challenger). The decision to put it in production is made with labelled data that already exists for the recent window, compared against the current champion.
+This avoids both extremes: promoting every drifted model (some drift is harmless) and waiting passively for lagging proof.
+W: Drift gives the early start and the labelled evaluation against the champion decides, so the response is fast without promoting models that merely look different.
+X: A=Retrain on every alert and ignore labels: drift can be harmless, so the pipeline would promote models without evidence that they are better.
+B=Accuracy only: with a 45-day delay the team would learn about degradation weeks late, which is exactly the damage the design must limit.
+D=Nightly schedule: a schedule can be used, but it retrains regardless of need, and it still has to answer the question of when a new model is better, which needs the labelled comparison.
+T: Drift starts a challenger; labelled evaluation against the champion decides the promotion.
+V: Data profiling, Unity Catalog, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.9 advanced troubleshooting
+S: After a retraining run, the new model is serving, but the profile still reports high baseline drift for the same features. The drift alert fires again after every refresh, and the retraining job starts again every time. The baseline table is the training snapshot of the original model. What should be changed?
+A: Raise the alert threshold until the alert stops firing, because the new model is already in production and no further action is needed
+B: Set the baseline table of the profile to the training data of the newly promoted model as a part of the retraining job
+C: Switch the profile to consecutive drift only, by deleting the baseline table, so that the old snapshot is no longer compared with
+D: Increase the profile granularity to monthly windows so that the drift is averaged away and the alert cannot reach the threshold
+K: B
+G: ## The baseline must follow the model
+For an inference profile the recommended baseline is the data used to train or validate the model being monitored, with the same feature columns and the same model id column. Baseline drift compares each window with that table.
+After a retrain the training distribution changed. If the baseline still describes the old model, every window keeps looking drifted, and a trigger on that alert becomes a retraining loop. The retraining job should therefore update the baseline table (and the profile configuration that points to it) as part of promotion, so drift is measured against what the serving model actually saw.
+## Why not hide the signal
+Raising thresholds, changing granularity or removing the baseline treats the symptom and also blinds the monitor to the next real shift.
+W: Updating the baseline to the new training data makes baseline drift mean "different from what the serving model learned", which ends the loop and keeps the alert meaningful.
+X: A=Raise the threshold: the signal is a false alarm only because the reference is stale; a higher threshold also hides real drift in the future.
+C=Delete the baseline: consecutive drift only detects abrupt changes between windows and would miss a slow drift away from the training distribution.
+D=Monthly windows: averaging over a longer window delays detection and still compares to the old model's data, so a persistent shift continues to show.
+T: Move the profile baseline to the new model's training data whenever retraining promotes a model.
+V: Data profiling, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.9 applied use-case
+S: Retraining needs three feature tables that three different pipelines update between 01:00 and 03:00, in any order, with several commits each. A table update trigger exists on the training job. The team wants one run after all three have been refreshed, not one run per commit. Which configuration fits?
+A: Monitor the tables with the trigger set to start when any table is updated, and let the training task skip itself when inputs are incomplete
+B: Create three separate jobs, each triggered by one table, and ask the last job to cancel the runs of the two jobs that started earlier
+C: Use a cron schedule at 03:00 and add a retry policy, because table update triggers cannot monitor more than one table
+D: Monitor all three tables, trigger when all of them are updated, and set a wait after the last change so that a batch of commits is complete
+K: D
+G: ## Controlling when a table update trigger fires
+A table update trigger can monitor several tables. With more than one, "Trigger when" decides whether a run starts when any table or all tables are updated. Two advanced options shape the timing:
+- Minimum time between triggers: the minimum wait after a previous run completes.
+- Wait after last change: the trigger waits this many seconds after the latest update, and another update inside the period resets the timer. It exists for tables updated in batches whose whole batch must be done.
+A trigger can monitor up to 25 tables; more than 10 requires file events on the external location. The job can read `{{job.trigger.table_update.updated_tables}}` to know which tables changed.
+W: Watching all three tables with an "all updated" condition and a wait after the last change gives one run after every table has been refreshed and the commit burst has ended.
+X: A=Any table: the first commit starts a run on partial inputs, and later commits start more runs, which is the behavior to avoid; skipping inside the task does not remove the extra runs.
+B=Three jobs with cancellation: this builds fragile orchestration by hand for something the trigger already supports.
+C=Cron with retries: table update triggers do monitor multiple tables, and a fixed time repeats the race that the pipeline updates finish at different times.
+T: Combine "all tables updated" with a wait after the last change to run retraining once per complete data refresh.
+V: Lakeflow Jobs, Unity Catalog
+
+@ DBX-MLP D2 T2.9 advanced use-case
+S: A scheduled retraining job trains a model and registers it in Unity Catalog as `prod.ml.churn`. Batch scoring and a serving endpoint load `models:/prod.ml.churn@Champion`. The team wants retraining to be fully automatic, but a new version must not reach production unless it beats the current model. Which last stage of the job fits?
+A: Register the new version and set the Champion alias to it at once, then run the evaluation in a later job and roll back by deleting the version
+B: Register the version, give it a Challenger alias, evaluate it against the champion, and move Champion to it only if the gate passes
+C: Overwrite the files of the champion version in the registry with the new model weights so that the alias keeps its target
+D: Write the new model to a volume as a pickle file and ask a reviewer to copy it over the champion by hand
+K: B
+G: ## Automatic training, controlled promotion
+In Unity Catalog, each registered model has versions, and aliases such as `Champion` and `Challenger` are mutable named pointers to a version. Consumers that load `models:/<name>@Champion` follow the pointer, so a promotion is one call, `client.set_registered_model_alias(name, "Champion", version)`, and a rollback is the same call with the older version.
+## Pipeline shape
+- Train and register a new version (never overwrite an existing version, which are immutable records of a run).
+- Alias it `Challenger` so evaluation tasks can load it by name.
+- Evaluate against the champion; if the gate holds, reassign `Champion`.
+This keeps retraining automatic while promotion stays conditional.
+W: The challenger alias lets the evaluation task load the candidate, and the Champion pointer moves only after the gate passes, so consumers never see an unvalidated version.
+X: A=Set Champion first: production and the endpoint would use the unvalidated version immediately, and deleting a version afterwards is not a rollback.
+C=Overwrite the champion version: registered versions are immutable records tied to a run, and replacing weights in place destroys lineage and the ability to roll back.
+D=Pickle on a volume and manual copy: it removes the automation and bypasses the registry that gives governance, lineage and aliases.
+T: Register every retrained model as a new version with a Challenger alias, and move Champion only through the gate.
+V: Unity Catalog, MLflow, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.10 applied use-case
+S: The nightly retraining job produces a challenger. The registry stores metrics from the time each version was trained, and the champion's stored AUC is 0.91 from three months ago. The challenger scores 0.89 on today's holdout. An engineer suggests promoting only if the challenger's number beats the stored one. What is the flaw, and what should the job do?
+A: The comparison is fine; a lower number means the challenger is worse, so the job should keep the champion and stop
+B: The stored metric is a training-time value; the challenger should be compared on test data from the training pipeline only, never on newer data
+C: Both models should be scored on the same current holdout, including the champion, because the stored number came from older data and a different split
+D: The challenger should be compared by its training loss, since loss does not depend on which holdout was used for the comparison
+K: C
+G: ## Compare candidates on the same data
+A metric is a property of a model and a dataset. A stored metric for the champion describes its performance on the data of three months ago; the challenger's number describes today's holdout. The two values are not comparable, because the data distribution and often the split are different.
+## The champion-challenger evaluation task
+In an automated retraining job, an evaluation task loads the champion (for example `models:/prod.ml.churn@Champion`) and the challenger, scores both on the same recent holdout, and compares the same metrics. Only then does it decide on promotion. A fresh score of the champion also shows how far it has degraded, which is useful for monitoring.
+W: Scoring champion and challenger on the same current holdout removes the difference of data and split, so the comparison measures the models rather than the datasets.
+X: A=Comparing against the stored number: the 0.91 may have been reached on easier or older data; the challenger could be better on today's data, or the champion could be worse than 0.91 now.
+B=Old test data only: restricting the check to the training pipeline's test set hides precisely the shift that triggered retraining.
+D=Training loss: it measures how well the model fits the data it saw and says nothing about generalization to a holdout.
+T: Evaluate champion and challenger on the same fresh holdout; never compare against a stale stored metric.
+V: MLflow, Unity Catalog
+
+@ DBX-MLP D2 T2.10 advanced comparison
+S: A pricing model uses the predicted default probability directly in a formula (expected loss = probability x exposure). Retraining yields two candidates: model X has the higher AUC, model Y has the lower log loss and a reliability curve close to the diagonal. Which should the pipeline prefer, and why?
+A: Model Y, because the formula needs probabilities matching observed frequencies, which log loss and calibration measure and AUC does not
+B: Model X, because AUC is threshold independent and therefore the only metric that matters for any model that outputs a probability
+C: Model X, because a higher AUC guarantees that its probabilities are better calibrated, so log loss and the reliability curve would only repeat the same information
+D: Model Y, because log loss is always lower for the simpler model, so lower log loss proves that Y generalizes better than X
+K: A
+G: ## Discrimination and calibration
+- Discrimination (AUC, PR AUC): does the model rank positives above negatives? Invariant under any monotonic transformation of the scores.
+- Calibration: does a predicted 0.2 correspond to about 20% observed? Measured with log loss, Brier score and reliability curves.
+Two models can have identical AUC and very different calibration, because stretching the scores keeps the order. When the score is used as a probability in arithmetic (expected loss, expected value, a decision cost), calibration matters and log loss or the Brier score is the selection metric. A model with good ranking but poor calibration can often be repaired with a post-hoc calibration step (Platt scaling or isotonic regression) fitted on held-out data.
+W: The formula multiplies the probability by the exposure, so the probabilities themselves must be right; log loss and a diagonal reliability curve show that, while AUC ignores it.
+X: B=AUC as the only metric: AUC ignores the scale of the scores, so it cannot say whether 0.2 means 20%; it is the right metric for ranking tasks, not for this formula.
+C=AUC guarantees calibration: it does not; any monotonic distortion of the scores leaves AUC unchanged and breaks calibration.
+D=Simpler model has lower log loss: log loss is a measure on the holdout and has no built-in preference for simplicity; the argument is not valid.
+T: Select on log loss and calibration when probabilities are consumed as numbers, and on AUC when only the ranking matters.
+V: MLflow
+
+@ DBX-MLP D2 T2.10 applied use-case
+S: A fraud model sees 0.4% positive transactions. Automated retraining picks the challenger with the highest validation accuracy, and last month's pick missed most fraud while showing 99.6% accuracy. Fraud ops can review a fixed number of alerts per day. Which selection metric should the pipeline use?
+A: Validation accuracy again, but averaged over five random seeds and several cross-validation folds to make the comparison more stable
+B: ROC AUC on the training set, because it is not affected by the share of positive examples
+C: Mean squared error of the hard 0/1 predictions, because it penalizes each wrong decision equally
+D: Precision-recall AUC, or recall at the precision the review capacity allows, on a holdout
+K: D
+G: ## Accuracy fails on imbalanced data
+With 0.4% positives, a model that never flags fraud has 99.6% accuracy. The selection metric must reflect the cost structure.
+- PR AUC summarizes precision and recall over thresholds and is sensitive to the rare class.
+- Recall at a fixed precision (or precision at a fixed alert volume) turns the business constraint, "analysts review N alerts a day", into the metric itself.
+- Measure on a holdout, never on training data.
+In an automated job, the evaluation task logs the chosen metric with MLflow and the promotion gate compares it with the champion's recomputed value.
+W: PR AUC or recall at the allowed precision targets the rare class and the review capacity, so the pipeline would not choose a model that ignores fraud.
+X: A=Accuracy averaged over seeds: averaging stabilizes the number but the metric still rewards a model that predicts "no fraud" for everything.
+B=ROC AUC on the training set: a training-set score is optimistic and says nothing about generalization; the ROC curve is also less sensitive to false positives when negatives dominate.
+C=MSE on hard predictions: with hard labels this equals the error rate, so it ranks models like accuracy and shares the same blind spot.
+T: Pick selection metrics that fit class imbalance and operational capacity, such as PR AUC or recall at fixed precision.
+V: MLflow
+
+@ DBX-MLP D2 T2.10 advanced tradeoff
+S: A weekly retraining job promotes the challenger whenever its validation AUC exceeds the champion's. Over several weeks the champion alias flips back and forth between nearly identical models, which causes churn in downstream approvals. Differences are around 0.001 AUC. How should the promotion rule change?
+A: Retrain more often, so that more candidates are compared and the best of many replaces the champion
+B: Promote only if the improvement exceeds a minimum margin and a bootstrap interval of the difference on the holdout excludes zero
+C: Compare on the training set instead, where the difference between candidates is larger and easier to detect
+D: Remove the gate and let each new model become the champion automatically, because newer models always reflect the latest data better and need no check
+K: B
+G: ## Noise in model comparison
+A metric on a finite holdout is an estimate with sampling noise. A difference of 0.001 AUC is usually inside that noise, and random seeds of training add more. A rule such as "challenger > champion" then promotes based on chance.
+## A stable promotion rule
+- Require a minimum practical improvement (a margin that matters for the business).
+- Estimate uncertainty, for example by bootstrapping the holdout and computing the difference of the two models on the same resamples, and require the interval to exclude zero.
+- Keep the champion otherwise. Every promotion costs validation, approvals and risk, so stability has value.
+W: A margin plus an interval that excludes zero separates real improvement from noise, so the alias moves only when the evidence supports it.
+X: A=More frequent retraining: more candidates mean more chances for random upward differences (selection on noise), which increases flipping.
+C=Compare on the training set: the training metric is inflated by fitting and says nothing about generalization.
+D=Always promote the newest model: this drops validation entirely and exposes production to regressions and unvalidated changes.
+T: Gate promotion on a practical margin and a statistically supported difference, not on a bare greater-than.
+V: MLflow, Unity Catalog
+
+@ DBX-MLP D2 T2.10 advanced troubleshooting
+S: A retraining job runs a hyperparameter search and then selects the best run. The final reported performance in production is regularly lower than the logged value. The selection code is:
+runs = mlflow.search_runs(experiment_ids=[exp_id],
+    order_by=["metrics.test_auc DESC"], max_results=1)
+best = runs.iloc[0]["run_id"]
+What is the main problem with this approach?
+A: It orders by the metric ascending, so the job selects the worst run of the whole experiment and the result is lower in production than logged
+B: `search_runs` reads only the first run of an experiment, so the best run is never part of the result
+C: Choosing by test metric makes the test set part of model choice and biases it; select on validation and score the test set once
+D: The job should select by the training AUC instead, since the test set is not available to the registry
+K: C
+G: ## Selection bias
+Every comparison against a dataset uses information from it. If dozens of runs are compared on the test set and the best is kept, the winner's test score is optimistically biased (a maximum of noisy estimates), and the test set can no longer report honest generalization.
+## The three-way discipline
+- Train set: fit parameters.
+- Validation set (or cross-validation): compare runs, tune hyperparameters, choose the model.
+- Test set: scored once for the selected model, as the number reported to stakeholders and used in the promotion gate.
+In code this means `order_by=["metrics.val_auc DESC"]` for selection, and a separate evaluation task that logs `test_auc` of the winner only. `mlflow.search_runs` accepts the `order_by` list; `DESC` gives the largest first.
+W: The query ranks on test_auc, so the test set has influenced the choice; ranking on a validation metric and scoring the test set once restores an unbiased final number.
+X: A=Ascending order: the clause says DESC, so the highest value comes first and `max_results=1` returns the best run by that metric.
+B=Only the first run: `search_runs` returns all runs that match the filter, ordered and limited as requested.
+D=Training AUC: this is the most optimistic metric and rewards overfitting; the registry has nothing to do with availability of test data.
+T: Choose on validation, report on a test set touched once.
+V: MLflow
+
+@ DBX-MLP D2 T2.10 advanced use-case
+S: The automated promotion gate must accept a challenger only if the primary metric improves, p95 scoring latency stays under the limit documented for the application, and the input and output signature stays compatible with callers of the champion. Which design is best?
+A: Log the metrics and the signature check as outputs of an evaluation task, and let an If/else gate move the Champion alias only when all conditions pass
+B: Promote on the primary metric alone and ask the application team to report latency and signature problems after the release
+C: Move the Champion alias first and run the checks afterwards, so that a failing check triggers a rollback by moving the alias back
+D: Combine the three values into one weighted score and promote above a threshold, so that a very good metric can offset a failed latency limit
+K: A
+G: ## Promotion gates are conjunctions of constraints
+A production model must satisfy several requirements at once. Some are objectives (improve the metric) and others are constraints (latency, size, compatible signature). Treat constraints as pass/fail checks, not as terms in a score that can be bought off with a good objective.
+## Implementation in a job
+- An evaluation task computes the metrics, times scoring on a sample, compares the model signature with the champion's, and sets task values.
+- An `If/else condition` task evaluates them (numeric operators for metrics).
+- Only the true branch runs the task that calls `set_registered_model_alias(name, "Champion", version)`. Serving and batch jobs that load `@Champion` then change automatically.
+W: The evaluation task produces all three facts before any alias moves, and the gate moves Champion only when every condition holds, so production never sees a model that fails a constraint.
+X: B=Metric alone: this discovers latency and signature breaks after callers are affected, which is what a gate before promotion prevents.
+C=Promote then verify: during the window production already runs the unverified model, and a rollback is an incident rather than a rejected candidate.
+D=Weighted score: a compensatory score lets a large metric gain hide a violated latency limit or a breaking signature, which are hard constraints.
+T: Check all constraints before moving the alias, and treat constraints as pass/fail gates.
+V: Unity Catalog, MLflow, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.10 advanced tradeoff
+S: A demand model is retrained weekly from a table of daily records. The retraining job shuffles all rows randomly, puts 80% into training and 20% into the holdout, and the challenger always looks better than the champion; in production the new models often disappoint. Which change gives a more trustworthy selection?
+A: Increase the holdout to 50% of the rows while keeping the random shuffle, to reduce the variance of the estimate
+B: Normalize the holdout features with statistics computed on the holdout itself, so that its scale matches the production data at scoring time
+C: Stratify the random split by product id, which keeps the same products in both parts
+D: Split by time, training on earlier days and evaluating on the most recent days, and score the champion on that same later period
+K: D
+G: ## Random splits leak the future
+Daily records of a series are correlated over time. A random split puts yesterday and tomorrow in different parts, so the holdout contains days between training days; the model interpolates instead of forecasting. Metrics are too good for any model, and recent models fit the interpolation best, so the challenger always wins.
+## Time-based evaluation
+Train on data up to a cut-off and evaluate on the period after it, which mimics how the model will be used. In retraining this also matches the question the gate answers: does the challenger beat the champion on the newest period? Both are scored on the same later window, and the cut-off moves forward with each run.
+W: A time-based split evaluates on data the model could not have seen, as in production, and scoring the champion on the same later period keeps the comparison fair.
+X: A=Larger random holdout: the estimate would be less noisy but still leaky, because the rows around each held-out day are in training.
+B=Normalize with holdout statistics: this leaks information from the evaluation data into preprocessing and makes the score less honest.
+C=Stratify by product id: it balances products across parts but does not stop neighboring days from landing on both sides of the split.
+T: For time-dependent data, select models with a time-ordered split and compare champion and challenger on the same later window.
+V: MLflow
+
+@ DBX-MLP D2 T2.11 applied comparison
+S: A drift metrics table row for the column `plan_type` (a categorical feature with five values) shows `ks_test` as null, while `chi_squared_test` and `tv_distance` have values. A teammate suspects a bug in the profile. What is the correct reading?
+A: It is a bug, because the KS test is computed for every column type and a null value means that the refresh failed
+B: It is expected: the KS test is computed only for numeric columns, and categorical columns get chi-square, total variation and related distances
+C: It means that `plan_type` has no drift, because null in a test column is how the table encodes the absence of any change
+D: It means the column was converted to numbers by the profile, and the null shows that the KS test had too few distinct values to run
+K: B
+G: ## Drift tests by column type
+The drift metrics table fills different columns for numeric and categorical data and leaves the others null.
+- Numeric columns: `ks_test` (statistic and p-value), `wasserstein_distance`, `population_stability_index`.
+- Categorical columns: `chi_squared_test` (statistic and p-value), `tv_distance`, `l_infinity_distance`, `js_distance`.
+- Integrity deltas such as `percent_null_delta`, `count_delta` and `avg_delta` apply across types where relevant.
+A null in a test column therefore means "not applicable to this data type", not "no drift" and not "error". When writing an alert query, pick the metric columns that match the column type, or the filter silently drops rows.
+W: KS is defined for numeric distributions, so a categorical column leaves it null and uses chi-square, total variation, L-infinity and Jensen-Shannon distance instead.
+X: A=KS for every column type: the documentation says KS is calculated for numeric columns only, and the other tests are filled in for categorical columns, so the row is correct.
+C=Null as no drift: the null marks an inapplicable test, while no drift would appear as a statistic near zero and a large p-value.
+D=Converted to numbers: the profile does not recode categories to run a numeric test; it computes the categorical metrics instead.
+T: Numeric columns use KS, Wasserstein and PSI; categorical columns use chi-square and the distance metrics; nulls mean not applicable.
+V: Data profiling
+
+@ DBX-MLP D2 T2.11 advanced troubleshooting
+S: A numeric feature in a scoring table has about 400 million rows per window. The alert rule is `ks_test.pvalue < 0.05`, and it fires every day even though the distribution plots of the baseline and the current window look the same, and the model quality is unchanged. What is the best fix?
+A: Lower the p-value limit to 0.0000001 and keep the rule otherwise unchanged, so that fewer days will fire
+B: Replace the KS test with a chi-square test on the same numeric column, because chi-square has no sensitivity to the sample size of a window
+C: Alert on an effect size, such as the KS statistic, Wasserstein distance or PSI, against a threshold chosen for practical impact
+D: Sample 100 rows per window so that the test has less power and stops detecting small differences
+K: C
+G: ## Significance is not importance
+A p-value answers "could this difference be sampling noise?". With hundreds of millions of rows, even a negligible shift is statistically significant, so `pvalue < 0.05` fires on differences that have no effect on the model.
+## Use effect sizes for large windows
+- KS statistic: the largest gap between the two cumulative distributions, between 0 and 1.
+- Wasserstein distance: how far the distribution moved, in the units of the feature.
+- Population stability index: documented guidance is below 0.1 for no significant change, below 0.2 for moderate change and 0.2 or more for significant change.
+Pick the threshold from the impact on the model, for example the value at which past performance dropped, and alert on that.
+W: Effect-size metrics measure the size of the shift rather than its detectability, so a threshold tied to practical impact stops the daily false alarms while still catching a real change.
+X: A=Tiny p-value limit: this moves the cutoff arbitrarily and still depends on sample size, so it will break again if the volume doubles.
+B=Chi-square instead: chi-square is for categorical columns and is also more sensitive as counts grow, so it does not remove the problem.
+D=Sampling 100 rows: this throws away data to make the test blind, so it would also miss genuine large shifts and give unstable results.
+T: At large sample sizes alert on effect size (KS statistic, Wasserstein, PSI), not on p-values.
+V: Data profiling
+
+@ DBX-MLP D2 T2.11 applied definition
+S: A governance policy states that a numeric model input is considered significantly shifted when the population stability index against the baseline reaches a threshold. The team wants to align the alert with the guidance in the data profiling documentation. Which statement matches that guidance?
+A: PSI of 0.2 or more is a significant change, 0.1 to below 0.2 moderate, and below 0.1 not significant
+B: A PSI of 0.5 or more is significant, from 0.2 to below 0.5 is moderate, and everything below 0.2 means no change at all
+C: A PSI below 0.05 is significant and a PSI near 1 means that the two distributions are identical
+D: PSI is a probability between 0 and 1 where 0.05 is the usual cutoff, as with a p-value
+K: A
+G: ## Population stability index
+PSI compares two distributions of a numeric variable after bucketing. It is zero when the distributions are the same and grows without an upper bound as they diverge (range 0 to infinity). The data profiling documentation gives these rules of thumb for the `population_stability_index` column of the drift metrics table:
+- PSI below 0.1: no significant population change.
+- PSI below 0.2: moderate change.
+- PSI of 0.2 or more: significant change.
+It is calculated for numeric columns only. Because it is an effect size and not a p-value, it does not grow just because the row count grows, which makes it a common alert metric for large windows.
+W: These cutoffs (0.1 and 0.2) are the ones the documentation states for the PSI column, so an alert at 0.2 matches "significant change".
+X: B=0.5 and 0.2 bands: these numbers do not match the documentation, and a 0.2 PSI would be reported as significant, not as no change.
+C=Small is significant: PSI near zero means the distributions agree, not that they differ; near 1 would be a large shift.
+D=PSI as a probability: it is not a p-value and is not limited to 1; the 0.05 convention belongs to hypothesis tests.
+T: PSI under 0.1 is stable, under 0.2 moderate, and 0.2 or more significant.
+V: Data profiling
+
+@ DBX-MLP D2 T2.11 advanced tradeoff
+S: A monitor tracks 300 numeric features with a KS test per feature on every refresh and alerts when any p-value is below 0.05. Even for stable data, about 15 features alarm per refresh and the on-call team ignores the alerts. Which approach reduces false alarms without ignoring real drift?
+A: Raise the refresh frequency so that each alarm is checked twice, and ignore features that alarm only once
+B: Remove the 100 features with the highest variance, because noisy features are the source of false alarms
+C: Alert only if the p-values of at least three consecutive days are below 0.05, and apply the same rule to all 300 features without any change
+D: Correct for multiple comparisons (for example Bonferroni) or alert on effect-size thresholds, and prioritize features by importance
+K: D
+G: ## Multiple testing
+At a significance level of 0.05, a stable feature still has a 5% chance of a "significant" result. With 300 independent tests per refresh the expected number of false alarms is 300 x 0.05 = 15, which matches the symptom.
+## Options
+- Correct the threshold: Bonferroni divides the level by the number of tests (0.05 / 300), or use a false discovery rate procedure.
+- Alert on effect size (KS statistic, PSI, Wasserstein) with thresholds from past impact; no p-value is involved.
+- Prioritize: monitor features by model importance, so low-importance features cannot flood the alert channel.
+The drift metrics table already holds one row per column and window, so these rules can be written as one SQL alert.
+W: Adjusting for the number of tests, or using effect-size thresholds with feature importance, addresses the arithmetic that causes about 15 alarms from 300 tests while still detecting large shifts.
+X: A=Higher refresh frequency: more refreshes mean more tests and more false alarms, and ignoring single alarms is an informal rule without any error control.
+B=Remove high-variance features: variance is not the cause of false alarms, and it can remove features that carry real drift.
+C=Three consecutive days: requiring persistence reduces some noise but it does not correct for the number of tests, and it delays detection of abrupt shifts.
+T: 300 tests at 0.05 give about 15 false alarms; correct for multiplicity or alert on effect size.
+V: Data profiling
+
+@ DBX-MLP D2 T2.11 advanced use-case
+S: Product wants a single drift rule for the categorical feature `device_type` that has a clear meaning for stakeholders: "alert when at least 5 percent of traffic has moved to different categories compared with the baseline". Which drift metric matches this wording most directly?
+A: `chi_squared_test.pvalue`, with the alert limit at 0.05, because 0.05 and 5 percent are the same number and the test measures the moved share
+B: `ks_test.statistic`, because the KS statistic always measures the share of rows that moved
+C: `tv_distance` with a threshold of 0.05, the largest probability gap between the two distributions
+D: `wasserstein_distance`, because it reports the share of categories whose frequency changed at all
+K: C
+G: ## Choosing an interpretable categorical metric
+Total variation distance between two discrete distributions P and Q is the largest difference between the probabilities they assign to any event, which equals half the sum of the absolute differences of the category shares. It runs from 0 to 1, and 0.05 means that about 5 percentage points of probability mass would have to move to turn one distribution into the other. This makes it easy to explain to non-statisticians, and it does not grow with sample size.
+Other categorical columns in the drift metrics table:
+- `chi_squared_test`: statistic and p-value; sensitive to sample size.
+- `js_distance`: Jensen-Shannon distance, symmetric and bounded.
+- `l_infinity_distance`: the largest single-category difference in share.
+Numeric-only metrics (`ks_test`, `wasserstein_distance`, `population_stability_index`) are null for categorical columns.
+W: Total variation distance is exactly "how much probability mass moved", so a 0.05 threshold states the policy in the wording stakeholders use.
+X: A=Chi-square p-value at 0.05: the equal numbers are a coincidence; the p-value is a significance level and says nothing about how much traffic moved.
+B=KS statistic: it is a numeric-column metric (null for categorical columns), and it measures a gap between cumulative distributions, not a share of rows.
+D=Wasserstein distance: it is calculated for numeric columns only and measures the distance values moved, not a count of changed categories.
+T: Use tv_distance for categorical features when the rule is "this much mass moved".
+V: Data profiling
+
+@ DBX-MLP D2 T2.11 advanced comparison
+S: A heavy-tailed numeric feature, `basket_value` in euros, shifts upward by about 12 euros on average after a pricing change. The team wants a drift number that says how far the distribution moved in the units of the feature, so that analysts can set the limit in euros. Which column of the drift metrics table fits?
+A: `ks_test.statistic`, because it is expressed in the units of the feature and equals the shift in the mean of the values
+B: `wasserstein_distance`, which is in the units of the feature and reads as the average distance moved
+C: `chi_squared_test.statistic`, which is the same as the Wasserstein distance when the column is bucketed
+D: `percent_null_delta`, since a shift of values is a change in the share of non-null values
+K: B
+G: ## Distance in the units of the data
+- KS statistic: the maximum gap between two cumulative distribution functions. Unitless, 0 to 1. It reacts to where the curves differ most but not to how far apart the values are; a small shift of a dense region and a large shift of a rare tail can give similar statistics.
+- Wasserstein distance (earth mover's distance, first order): the minimum average distance that probability mass must move to turn one distribution into the other. It has the units of the feature, so a uniform upward shift of 12 euros yields a distance of 12.
+- PSI: unitless, bucket based, with the usual 0.1 and 0.2 guidance.
+For a business-readable limit such as "alert when the basket distribution moves by more than 10 euros", the Wasserstein column is the one that can be set in euros. It is calculated for numeric columns only.
+W: Wasserstein distance has the units of the feature and for a pure upward shift equals the shift, so an analyst can set the limit in euros.
+X: A=KS statistic: it is a unitless number between 0 and 1, not a shift in the mean, so it cannot be set in euros.
+C=Chi-square statistic: it is a categorical test statistic and not a distance in the units of a numeric variable; it is null for numeric columns.
+D=percent_null_delta: it tracks the change in the share of null values, which is a data integrity metric and does not describe shifted values.
+T: Use Wasserstein distance when drift should be read and limited in the units of the feature.
+V: Data profiling
+
+@ DBX-MLP D2 T2.12 advanced comparison
+S: A feature's mean rises by 0.3% every day, so each window differs only slightly from the previous one. After six weeks the distribution is far from the training data. The profile compares each window only to the previous one and no alert has fired. Which monitoring feature closes the gap?
+A: A shorter window granularity such as one hour, because consecutive drift becomes sensitive to slow trends when windows are shorter
+B: A higher alert threshold on consecutive drift, so that the accumulated shift will show in the next window
+C: A custom metric that stores yesterday's average, since the drift table cannot hold a value from before the previous window
+D: A baseline table with the training data, so that baseline drift measures every window against the fixed reference
+K: D
+G: ## Two kinds of drift
+Data profiling computes two kinds of drift, in the drift metrics table (`drift_type` column):
+- Consecutive drift (`CONSECUTIVE`) compares a window with the previous window. It detects abrupt changes, but a slow trend produces only tiny steps between neighbors.
+- Baseline drift (`BASELINE`) compares a window with the baseline table. It is computed only if a baseline table is provided, and it measures the accumulated distance to a fixed reference such as the training data.
+Gradual drift is the case for a baseline: the sum of many small steps becomes a large baseline distance even though no step is large. Use both: consecutive for sudden breaks, baseline for slow decay.
+W: Baseline drift measures each window against the training distribution, so 0.3% daily steps accumulate into a large distance that crosses the threshold.
+X: A=Hourly granularity: smaller windows make the steps between neighbors even smaller and add noise, so a slow trend remains invisible.
+B=Higher consecutive threshold: raising a threshold makes alerts rarer, and the next consecutive step is still as small as before.
+C=Custom metric with yesterday's value: this reimplements by hand what a baseline table already offers and still only compares neighbors.
+T: Slow drift needs baseline drift against a fixed reference; consecutive drift catches sudden changes.
+V: Data profiling
+
+@ DBX-MLP D2 T2.12 applied use-case
+S: An analyst needs a SQL alert that fires when the Wasserstein distance of any numeric feature against the training baseline exceeds a limit. Which statement describes the query source correctly?
+A: Query the drift metrics table, keep rows with `drift_type = 'BASELINE'`, and test the `wasserstein_distance` column per `column_name`
+B: Query the profile metrics table, because it has the distribution statistics, and calculate the distance in the query from the quantile columns
+C: Query the inference table of the endpoint, because it holds one row per request and the distance needs raw rows
+D: Query the dashboard's cached results, since the metric tables contain only the latest window and no history
+K: A
+G: ## Which table answers which question
+- Profile metrics table: per-window statistics of each column (counts, nulls, mean, quantiles, model quality metrics). Use it to alert on a statistic leaving a range, for example `percent_null` above a limit.
+- Drift metrics table: per-window comparison with the previous window or with the baseline: deltas, `ks_test`, `chi_squared_test`, `tv_distance`, `js_distance`, `wasserstein_distance`, `population_stability_index`. Use it to alert on distribution change.
+A profile alert is an ordinary Databricks SQL alert over a query on one of these tables; it can notify by email, webhook, Slack or PagerDuty. Filter by `drift_type`, `column_name`, `slice_key` and the window to avoid mixing comparison types.
+W: The drift table already contains the precomputed distance per column and window, and filtering on the baseline type ensures the number compares with the training data and not the previous window.
+X: B=Profile metrics table: it holds the statistics, not the distances, and recomputing a distance from quantiles in SQL duplicates what the profile already stores.
+C=Inference table: it holds raw payloads, so the query would have to recompute distributions for every window itself and would bypass the profile's baseline handling.
+D=Dashboard cache: the dashboard is a view built on the metric tables, and the tables themselves keep one row per window and column as history.
+T: Distribution alerts query the drift metrics table, filtered by drift type and column.
+V: Data profiling, Databricks SQL
+
+@ DBX-MLP D2 T2.12 advanced use-case
+S: The team will attach an inference profile to the scoring table of a churn model. It chooses a baseline table to measure drift. Which baseline satisfies the documented guidance?
+A: Last week's production scoring data, because it is the most recent known good state and requires no extra table to maintain
+B: A random 1% sample of all customers from the CRM, because the baseline should be independent of the model
+C: The data used to train or validate the model, with the same feature columns and the same model id column as the profiled table
+D: The labelled holdout results only, with a prediction column but without any feature columns, because drift is about outputs
+K: C
+G: ## Baseline for an inference profile
+The documentation recommends for an inference profile the data that was used to train or validate the model being profiled. Alerts then say that the data drifted relative to what the model learned. The table should:
+- match the schema of the profiled table (the timestamp column is the exception);
+- contain the same feature columns as the primary table;
+- carry the same `model_id_col` as the primary table so rows are aggregated consistently.
+If columns are missing in either table, the profile uses best-effort heuristics to compute the metrics. A baseline made of last week's data would drift along with production and could not show slow decay; a baseline without features cannot measure feature drift at all.
+W: Training or validation data with the same features and model id column defines "what the model learned", so baseline drift directly measures the distance from the model's experience.
+X: A=Last week's production data: that is a moving reference which absorbs gradual drift, and consecutive drift already covers neighbor comparison.
+B=CRM sample: it is a different population from the scoring table and unrelated to the training distribution, so differences would not mean model risk.
+D=Holdout without features: drift of inputs cannot be computed without feature columns, and the baseline would lack the columns the primary table has.
+T: For an inference profile, use training or validation data with matching feature and model id columns as the baseline.
+V: Data profiling
+
+@ DBX-MLP D2 T2.12 advanced comparison
+S: A credit model's input features show no drift against the baseline, yet default rates in a new segment behave differently from what the model learned, and its accuracy has fallen. Which statement about the monitoring explains this and names the feature needed?
+A: Drift tests are flawed, because they compare only means; switching to a median-based test would have caught the accuracy loss
+B: The change is concept drift, which input tests cannot see; the inference profile needs the label column for accuracy metrics
+C: The baseline table must have been wrong; with the training data as baseline, the accuracy drop would have shown up as feature drift
+D: Accuracy cannot be tracked in a profile, so the team must compare predictions to labels in a separate notebook each month
+K: B
+G: ## Data drift versus concept drift
+- Data (covariate) drift: the distribution of the inputs P(X) changes. Distribution tests on features detect it.
+- Concept drift: the relationship P(y given X) changes while inputs look the same, for example behavior in a segment changes after a policy shift.
+Input tests cannot detect concept drift, because the inputs did not move. It shows up only against ground truth. An inference profile with a `label_col` and `prediction_col` computes model quality metrics (accuracy, precision, recall, F1 for classification; error metrics for regression) per window and writes them to the profile metrics table, so quality trends become visible when labels arrive.
+W: The inputs are stable but the target relationship changed, which only labelled quality metrics reveal, so the inference profile needs the label column joined in.
+X: A=Median-based test: it is still a test on inputs; if the inputs' distribution is unchanged, no choice of input statistic shows a change in the label relationship.
+C=Wrong baseline: a correct baseline would show the same absence of feature drift, because the inputs did not move.
+D=Accuracy cannot be tracked: inference profiles compute accuracy, precision, recall and F1 when predictions and labels are present.
+T: No input drift with falling accuracy means concept drift; monitor labelled quality metrics too.
+V: Data profiling
+
+@ DBX-MLP D2 T2.12 advanced use-case
+S: Labels for a recommendation model arrive about three weeks late, so quality metrics cannot be computed yet. The team still wants an early warning that the model's behavior has shifted. Which monitored column gives the earliest label-free evidence of model-level change?
+A: The prediction column, whose drift against the baseline is tracked daily without labels
+B: The label column, because a profile can calculate drift on labels before they have been joined or are available
+C: The model id column, because its distribution shows when a new version has been trained
+D: The timestamp column, because a change in request timing proves that the model has changed
+K: A
+G: ## Prediction drift as a proxy
+Without labels, only inputs and outputs are observable. Drift on the prediction column (class shares, score distribution) shows that the model now behaves differently, whether because inputs shifted, because an upstream feature broke, or because a new version was deployed. It is a cheap early warning that something changed, not proof that quality fell. The drift metrics table is filled for the prediction column like any other column (numeric tests for scores, categorical tests for predicted classes).
+Combine it with feature drift to localize the cause, and confirm with labelled metrics when they arrive.
+W: Prediction drift is available at scoring time and reflects any change in model behavior, so it gives the earliest signal while labels are still missing.
+X: B=Label column: late labels are absent for the window, so there is nothing to compare; this is the very reason quality metrics are unavailable.
+C=Model id column: it identifies versions and is used to group metrics, but a change in its distribution only mirrors a deployment decision and not behavior.
+D=Timestamp: request timing reflects traffic patterns and does not describe what the model predicts.
+T: With delayed labels, watch the prediction column's drift as an early label-free signal.
+V: Data profiling
+
+@ DBX-MLP D2 T2.12 applied troubleshooting
+S: A monitor on a low-traffic model uses hourly windows with about 150 requests each and alerts on KS p-values. Alerts flap every few hours, and the distribution plots across days look steady. Which change fits the traffic?
+A: Use a shorter granularity of five minutes, so each alert is based on the freshest requests
+B: Switch the alert from the drift table to the profile metrics table, because it is unaffected by window size
+C: Add a second profile with the same hourly granularity, because two profiles halve the noise in the alerts
+D: Use a daily (or longer) window so each window has enough rows, and alert on an effect size with a threshold
+K: D
+G: ## Window size and statistical power
+A drift statistic for a window is estimated from that window's rows. With 150 rows the empirical distribution is noisy: two samples from the same distribution often differ, so p-values dip below limits by chance and effect-size values fluctuate widely.
+## Choose granularity for the traffic
+- The granularities of a time series or inference profile (for example 5 minutes, 30 minutes, 1 hour, 1 day, 1 week, 1 month) set the windows of the metric tables.
+- Pick the shortest window with enough rows for a stable estimate; a daily window with thousands of rows is more reliable for a low-traffic model.
+- Keep an effect-size threshold, since p-values are sensitive to size in the other direction as the window grows.
+W: Longer windows collect more rows per estimate, which stabilizes the statistic, and a threshold on an effect size keeps the rule independent of window size.
+X: A=Five-minute windows: fewer rows per window make estimates even noisier and the alerts would flap more.
+B=Profile metrics table: its per-window statistics are equally estimated from the same few rows and a mean or quantile is noisy at that size.
+C=Second identical profile: duplicating the computation gives identical numbers on the same data, with no noise reduction.
+T: Match window size to traffic: more rows per window give stable drift statistics.
+V: Data profiling

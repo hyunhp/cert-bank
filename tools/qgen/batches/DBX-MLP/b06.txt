@@ -1,0 +1,493 @@
+# src: https://docs.databricks.com/aws/en/machine-learning/mlops/mlops-workflow
+# src: https://docs.databricks.com/aws/en/machine-learning/mlops/deployment-patterns
+# src: https://docs.databricks.com/aws/en/notebooks/testing
+
+@ DBX-MLP D2 T2.1 applied use-case
+S: A multitask Lakeflow job runs `train`, then `validate`, then `deploy`. The validation task must evaluate exactly the model version that this run's training task registered, even when two runs execute at the same time. How should the version reach the validation task?
+A: The validation task loads `models:/prod.ml.churn@champion`, because the alias always names the newest candidate version
+B: The training task publishes the model URI as a task value, and the validation task reads it from the upstream task
+C: The validation task calls `get_latest_versions` on the model name, because the highest version number is always the current run's
+D: The training task writes the model URI to a file under `/tmp`, and the validation task reads that file from its own compute
+K: B
+G: ## Passing the model between pipelines
+In the recommended Databricks workflow the training pipeline, the model validation pipeline and the deployment pipeline are tasks of one multitask job. The training task ends by registering the model in Unity Catalog and yields a model URI. The validation task takes that URI, loads the model from Unity Catalog and runs its checks. Databricks says to use task values (`dbutils.jobs.taskValues.set` in the producer, `.get(taskKey=..., key=...)` in the consumer) to hand the URI over.
+## Why identity matters
+A pipeline stage must test the artifact its own run produced. Anything that resolves "the newest" or "the current" version at read time can point to another run's model.
+W: A task value is scoped to the job run, so the validation task receives exactly the URI its upstream training task produced, regardless of concurrent runs.
+X: A=Champion alias: the alias points to the model already serving production, so validation would test the old release instead of the new candidate.
+C=Latest version lookup: with two concurrent runs, the highest version can belong to the other run, so the wrong model is validated.
+D=File in /tmp: local disk of one task's compute is not shared with the next task, which may run on different compute, so the file is not found.
+T: Pass the model URI between job tasks with task values, never by resolving the latest version.
+V: Lakeflow Jobs, Unity Catalog, MLflow
+
+@ DBX-MLP D2 T2.1 advanced troubleshooting
+S: The training notebook ends with `mlflow.register_model(uri, "prod.ml.churn")`. When the same job is deployed to staging for integration tests, new test versions appear in the production catalog. What is the correct fix under the deploy code pattern?
+A: Keep the hard-coded name and tell staging runs to delete the extra versions after each test has finished
+B: Give staging write access to the production catalog so that the registration always succeeds there
+C: Duplicate the notebook for each environment and edit the model name in each copy by hand
+D: Read the catalog name from an environment-specific job parameter and build the registered model name from it
+K: D
+G: ## One code base, one catalog per environment
+In the deploy code pattern the same pipeline code runs in development, staging and production. Each environment normally corresponds to a catalog in Unity Catalog, and Databricks says to set up the pipeline code to register the model to the catalog of the environment where the pipeline runs. Assets written to the staging catalog are temporary and kept only until testing is complete.
+## Parameterize, do not fork
+The environment-specific value (catalog, schema, endpoint name) belongs in configuration such as job parameters or bundle variables, so reviewed code is identical everywhere.
+W: Deriving the registered model name from an environment-specific parameter keeps the code identical while each run registers into its own catalog, so staging tests never touch production assets.
+X: A=Cleanup after tests: the run still writes into production assets and can race with real consumers or fail when cleanup does not run, so isolation is already broken.
+B=Staging write access to production: this removes the isolation between environments and lets test code change production models.
+C=Per-environment copies: the code that is tested in staging is no longer the code that runs in production, which defeats code promotion.
+T: Parameterize the catalog so identical code registers models into the catalog of the environment it runs in.
+V: Unity Catalog, MLflow, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.1 applied use-case
+S: A model version fails the model validation task because its accuracy on one customer segment is below the agreed threshold. What should the validation pipeline do under the recommended Databricks workflow?
+A: Delete the failing version and start training again automatically until a version passes the checks
+B: Record the failure on the model version, withhold the Challenger alias, end the run and notify the owners
+C: Assign the Challenger alias anyway, because the deployment step compares it with the Champion afterwards
+D: Move the Champion alias to an older version so that production serves a model that is known to pass
+K: B
+G: ## The job of the validation pipeline
+Model validation loads the model from Unity Catalog and runs checks that depend on the organization: format and metadata, performance on selected data slices, compliance checks for tags or documentation. Its main function is to decide whether the version proceeds to deployment. A passing version gets the Challenger alias. A failing run exits, and the job can notify users.
+## Keep the evidence
+Tags such as `model_validation_status` (PENDING, PASSED, FAILED) and annotations on the version record the outcome. Because the model lives in the production catalog, data scientists can load a failed version from the development workspace to investigate.
+W: Recording the result on the version, not assigning Challenger, ending the run and notifying makes the gate meaningful and keeps the failed version available for diagnosis.
+X: A=Delete and retrain: the evidence needed to diagnose the failure is destroyed, and a loop of retraining on the same code will keep failing.
+C=Challenger anyway: the alias signals that checks passed, so a failing version would enter the champion comparison and could be promoted.
+D=Moving Champion: production is untouched by a failed candidate, so there is nothing to roll back, and changing the alias would alter live serving for no reason.
+T: A failed validation leaves evidence on the version, withholds Challenger and stops the run.
+V: Unity Catalog, MLflow, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.1 applied use-case
+S: A challenger model beat the champion in the offline comparison. Several batch inference jobs score with `models:/prod.ml.churn@champion`. How does the deployment pipeline put the challenger into use with the least change to those jobs?
+A: Edit the version parameter of every inference job so that it names the new version number
+B: Re-register the artifact under a new model name and update each job to read that name
+C: Reassign the Champion alias to the new version, and let each job pick it up on its next run
+D: Redeploy every inference job with a new hard-coded model URI taken from the training task
+K: C
+G: ## Aliases decouple deployment from inference
+The inference pipeline references the registered model by alias, for example Champion. If the alias is moved to a new version, the next execution of the pipeline loads that version automatically. Databricks describes this as decoupling the model deployment step from inference pipelines. Batch or streaming pipelines load the Champion version, and for real-time use the deployment pipeline sets up or updates a Model Serving endpoint.
+W: Moving the Champion alias is one metadata update, and every job that resolves the alias uses the new version on its next run with no code or configuration change.
+X: A=Editing version parameters: each consumer must be changed and kept in sync, which is exactly the coupling aliases remove, and a missed job keeps scoring with the old model.
+B=New model name: this splits the version history and lineage across two registered models and still requires changing every consumer.
+D=Hard-coded URI: the job configuration changes at every release, and a rollback requires another redeployment of all jobs.
+T: Promote by moving the Champion alias, and inference jobs follow it without being edited.
+V: Unity Catalog, MLflow
+
+@ DBX-MLP D2 T2.1 advanced tradeoff
+S: Data scientists have read-only access to the production catalog. Their development experiments compared many algorithms and wide hyperparameter ranges. The production pipeline retrains automatically every week and must be reliable. How should the tuning be handled in the production training code?
+A: Rerun the full algorithm and hyperparameter search at every weekly production retraining
+B: Copy the best development model into production and disable training there
+C: Remove tuning entirely and rely on the library defaults, because a weekly automated retraining must stay simple and predictable
+D: Pass the best development findings as a configuration file with only the top options
+K: D
+G: ## Tuning in development, a narrow search in production
+Databricks notes that in development data scientists test many algorithms and hyperparameters, while in production training code it is common to consider only the top-performing options. Limiting tuning this way saves time and can reduce the variance that tuning adds to automated retraining. When data scientists can read the production catalog, they may determine the optimal hyperparameters themselves, and the production pipeline is run with that selected set, typically supplied in a configuration file.
+W: A configuration file with the selected hyperparameters or a short list keeps production retraining fast and stable while the code stays reviewed and the model is still trained on production data.
+X: A=Full search each week: it is slow and costly, and the tuning noise can pick a different configuration every week, adding variance to an automated process.
+B=Copying a development model: this is the deploy models pattern, and it gives up automated retraining on production data.
+C=Library defaults: this discards the tuning result and probably loses model quality that the data scientists already measured.
+T: Production retraining uses the few best options found in development, supplied by configuration.
+V: MLflow, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.1 applied comparison
+S: A team promotes only the model artifact (deploy models). After months, the production inference notebook no longer matches the feature engineering code used in development, and predictions are skewed. Which statement gives the structural cause and the recommended remedy?
+A: Only the artifact is promoted, so supporting code goes separately; adopt deploy code so all pipelines pass the same tests
+B: Unity Catalog models cannot store feature dependencies, so the team must export the feature code into every model
+C: Aliases do not work with batch inference, so the inference job should load models by hard-coded version numbers
+D: The model should be retrained in production every day, because stale models cause feature code to drift
+K: A
+G: ## What each pattern promotes
+Deploy models trains in development, tests the artifact in staging and moves it to production. Databricks lists as a disadvantage that supporting code, such as pipelines for feature engineering, inference and monitoring, needs to be deployed to production separately. Nothing forces that code through the same review and integration test, so it can diverge.
+Deploy code promotes the training code and the supporting code together. All of it goes through code review and integration tests in staging, and the production model is trained on production code. Deploy models still fits when training is very expensive or hard to reproduce, work happens in one workspace, or there is no CI/CD.
+W: The skew comes from supporting code that is shipped by a separate, untested path, and deploy code removes it because every pipeline is promoted and integration-tested together.
+X: B=Feature dependencies: models trained with Unity Catalog feature tables do store feature and function dependencies, so this is not a limitation, and the problem is code that is out of step.
+C=Hard-coded versions: aliases work for batch and streaming inference, and hard-coding versions removes the decoupling without fixing code drift.
+D=Daily retraining: a fresh model trained with the old feature code is still scored by mismatched inference code, so the skew remains.
+T: Deploy models leaves supporting code on a separate path, deploy code promotes it with the model code.
+V: Unity Catalog, MLflow
+
+@ DBX-MLP D2 T2.1 applied use-case
+S: A real-time endpoint serves the current champion. The new champion is ready, and the team plans to create a second endpoint and ask clients to switch URLs to avoid downtime. What is the simpler approach under Databricks guidance?
+A: Delete the endpoint and create it again with the new model version, because endpoint updates always cause an outage
+B: Create a separate endpoint per model version and keep every old one running, so that rollback never needs an update
+C: Update the existing endpoint to the new model version; the existing configuration keeps serving until the new one is ready
+D: Stop client traffic during a maintenance window, update the endpoint and restart the traffic afterwards
+K: C
+G: ## Deployment pipeline and serving
+For real-time use cases the model deployment pipeline sets up the inference infrastructure as a REST API endpoint with Model Serving. If an endpoint already exists for the current model, the pipeline can update it with the new model. Databricks states that Model Serving performs a zero-downtime update by keeping the existing configuration running until the new one is ready.
+## Consequence for clients
+Clients keep one stable endpoint URL and the lifecycle pipeline owns what is behind it.
+W: Updating the existing endpoint gives zero downtime because the old configuration serves until the new one is ready, and the URL that clients use never changes.
+X: A=Delete and recreate: this creates an outage and a new endpoint that clients must be moved to, although in-place updates avoid both.
+B=One endpoint per version: endpoints accumulate cost and management work, and clients still need to be redirected on every release.
+D=Maintenance window: downtime is unnecessary because the update keeps the existing configuration live until the new one is ready.
+T: Update the existing endpoint in place: Model Serving keeps the old configuration live until the new one is ready.
+V: Model Serving, Unity Catalog
+
+@ DBX-MLP D2 T2.2 applied definition
+S: An auditor asks which parameters, input data and code produced version 12 of a registered model. Which Databricks capability records that link at training time?
+A: An MLflow run that logs parameters, metrics, the model and a link to the data and code
+B: The Champion alias on the registered model, which names the version that serves production
+C: A Lakeflow Jobs schedule, which stores the cron expression and the next trigger time
+D: A Model Serving endpoint, which lists the served versions and the routing percentages
+K: A
+G: ## Tracking is the system of record for development
+Databricks recommends managing model development with MLflow. A training run logs parameters, metrics, artifacts and code snapshots to the MLflow Tracking server. When tuning is done, the final model artifact is logged to the tracking server to record a link between the model, the input data it was trained on and the code used to generate it. A registered model version in Unity Catalog points back to that run.
+## Mapping features to activities
+Tracking answers "how was this built". Unity Catalog answers "which versions exist and who may use them". Jobs answer "when and in which order does it run". Serving answers "what answers requests".
+W: The logged MLflow run is the record of parameters, metrics, code and data that the registered version points to, which is what an audit of version 12 needs.
+X: B=Champion alias: it only says which version serves production now, and it says nothing about how that version was built.
+C=Schedule: a schedule describes when a job runs, not the inputs and code of one training run.
+D=Serving endpoint: it describes where and how a version is served, not how it was trained.
+T: MLflow Tracking links a model to its parameters, data and code.
+V: MLflow, Unity Catalog
+
+@ DBX-MLP D2 T2.2 applied use-case
+S: A bank needs one governed place that holds model versions across development, staging and production, with per-environment permissions, version history and a marker for the version in use. Which feature mapping fits?
+A: One MLflow experiment per environment, with experiment permissions and run tags marking the stage of each run
+B: Git branches named dev, staging and release, with a tag on each commit that trained a model
+C: Models in Unity Catalog, a catalog per environment, and aliases such as Champion
+D: One feature table per environment, with the model weights stored as a column of the table
+K: C
+G: ## Model lifecycle in Unity Catalog
+Databricks says to use Models in Unity Catalog to manage model versioning, governance and deployment status. Environments are usually catalogs (dev, staging, prod), so permissions are granted per catalog or schema, and the pipeline registers each model in the catalog of the environment where it runs. Aliases (Challenger, Champion) mark deployment status, replacing the legacy workspace registry stages.
+## What the others do
+Experiments track runs, Git tracks code and feature tables hold feature data. Each is part of the lifecycle but none is a governed model registry.
+W: Registered models in per-environment catalogs give access control and version history through Unity Catalog, and aliases mark which version is in use.
+X: A=Experiments with tags: experiments organize runs, not governed registered versions, and run tags are not an access-controlled deployment marker.
+B=Git branches: Git versions code, not model artifacts, and tags on commits do not control who may load a model.
+D=Feature tables: they store feature values, and putting weights in a column loses the model packaging, versioning and serving integration.
+T: Unity Catalog models, catalogs per environment and aliases cover governance, versions and deployment status.
+V: Unity Catalog, MLflow
+
+@ DBX-MLP D2 T2.2 applied use-case
+S: An ML engineer wants training, validation and deployment to run in order, with the next step skipped and the owners notified if a step fails. Which feature maps to this lifecycle activity?
+A: A multitask Lakeflow job with task dependencies and failure notifications
+B: A Model Serving endpoint with several served models and a traffic split
+C: An MLflow experiment with autologging enabled for the training library
+D: A Unity Catalog volume that stores the intermediate artifacts of each task
+K: A
+G: ## Orchestration
+The recommended architecture is a multitask Databricks workflow (Lakeflow Jobs) where the first task is the model training pipeline, followed by model validation and model deployment tasks. Task dependencies stop downstream tasks when an upstream one fails, and notifications on a job tell users about a validation failure. Task values pass the model URI.
+## Do not mix up neighbours
+Serving, tracking and storage are essential but they do not sequence or gate steps.
+W: A multitask job expresses the order train, validate, deploy as dependencies, stops after a failure and sends notifications, which is the orchestration activity.
+X: B=Traffic split: it divides requests between served models at an endpoint and does not run or order pipeline steps.
+C=Autologging: it records parameters and metrics during training and does not sequence later tasks or notify anyone.
+D=Volume: it stores files and does not run, order or monitor tasks.
+T: Lakeflow Jobs orchestrate train, validate and deploy with dependencies and notifications.
+V: Lakeflow Jobs, MLflow
+
+@ DBX-MLP D2 T2.2 advanced use-case
+S: Monitoring shows that the drift metric of a production model passed its threshold. The team wants retraining to start without a person noticing first. Which combination follows the Databricks workflow?
+A: A Git folder webhook that runs the training notebook after every commit to the main branch
+B: An autoscaling setting on the Model Serving endpoint that adds replicas when drift grows
+C: An alias on the registered model that blocks scoring until a data scientist removes it
+D: A SQL alert on the monitoring metric table with a webhook that triggers the training job
+K: D
+G: ## Closing the loop
+The data profiling (monitoring) pipeline writes metric tables to the production catalog. Databricks describes triggered retraining: a SQL alert checks whether a metric is anomalous, for example drift or model quality against a threshold, and the alert uses a webhook destination that can trigger the training workflow. Databricks recommends starting with scheduled, periodic retraining and moving to triggered retraining when needed.
+W: The SQL alert on the metric table detects the threshold breach, and the webhook starts the same training job, which automates the monitoring-to-retraining step.
+X: A=Commit webhook: it reacts to code changes, not to drift in data or predictions, so retraining would not follow the breach.
+B=Autoscaling: replica scaling reacts to load and has no connection to drift, and retraining is not started.
+C=Blocking alias: this stops serving and needs a person, the opposite of automatic retraining.
+T: Monitoring metric table, SQL alert and webhook start retraining automatically.
+V: Lakeflow Jobs, Databricks SQL, Unity Catalog
+
+@ DBX-MLP D2 T2.2 applied use-case
+S: A recommendation model was trained with features from Unity Catalog feature tables. Client applications should send only the user ID to the endpoint, and the endpoint should add the stored features. What must the training pipeline do?
+A: Log the model with a plain flavor log function and join the features in the client application
+B: Log the model with the Feature Engineering client and the training set, so lookups are packaged
+C: Write a custom model that reads the offline feature table with Spark inside its predict function
+D: Copy the feature values into the request payload from a nightly export of the feature tables, refreshed every hour
+K: B
+G: ## Features travel with the model
+When a model is logged through the Databricks Feature Engineering client with a training set built from feature tables, the model stores the dependencies for the features and functions. Model Serving uses this dependency graph to look up features from the appropriate online stores at inference time, and it can apply functions for preprocessing or compute on-demand features during scoring. The caller sends only the lookup keys.
+W: Logging with the Feature Engineering client records the lookup information, so the endpoint resolves the user ID to its features at request time.
+X: A=Client-side join: every application must re-implement the lookup, and a mismatch with training reintroduces training-serving skew.
+C=Spark in predict: serving containers have no Spark session, and an offline table read per request would be far too slow.
+D=Exported payload values: the features go stale between exports, and clients carry the work that the packaged lookup removes.
+T: Log with the Feature Engineering client so Model Serving looks up features from the key.
+V: Unity Catalog, Model Serving, MLflow
+
+@ DBX-MLP D2 T2.2 applied definition
+S: The validation pipeline must store the outcome of its checks on a model version (pending, passed or failed) without changing which version serves production. Which mechanism fits?
+A: A version tag such as `model_validation_status`, updated as the checks run
+B: An alias named after the status, moved between versions as checks finish
+C: A new registered model name per status, copying the version into it
+D: The notebook revision history of the validation task, searched on demand
+K: A
+G: ## Tags and aliases do different jobs
+In Unity Catalog, an alias is a mutable name that points to one version, and pipelines load models through it, so moving an alias changes what is deployed. Tags are key-value attributes on a model or version. Databricks suggests a tag such as `model_validation_status` with the value PENDING while checks run, then PASSED or FAILED, and recording results on the version as annotations.
+W: A version tag stores the outcome next to the version and can be changed without touching the aliases that decide which version is served.
+X: B=Status alias: an alias can point to one version at a time and consumers resolve aliases, so using aliases for status mixes validation state with deployment state.
+C=Name per status: copying versions fragments lineage and history across registered models.
+D=Notebook history: it is not attached to the model version, so downstream tasks and reviewers cannot query the status.
+T: Use version tags for validation status and aliases for deployment status.
+V: Unity Catalog, MLflow
+
+@ DBX-MLP D2 T2.2 applied use-case
+S: A team wants code to move between stages by review: dev branch, main branch, release branch, with notebooks and modules synchronized to each workspace. Which feature carries this lifecycle activity?
+A: MLflow code snapshots stored with each run, which are copied between workspaces
+B: Notebook exports saved to a shared workspace folder, which colleagues import
+C: Databricks Git folders connected to the project's Git repository and its branches
+D: Unity Catalog volumes holding zip files of the code, mounted in each environment
+K: C
+G: ## Version control for code
+Databricks recommends Git for version control. Pipelines and code are stored in Git, so moving ML logic between stages is moving code from the development branch to the staging branch to the release branch. Databricks Git folders (formerly Repos) integrate with the Git provider and sync notebooks and source code with the workspace. MLflow tracking can also save code snapshots, but those are records of what ran.
+W: Git folders connect each workspace to the repository, so the reviewed branch is the code that runs in that stage.
+X: A=Run snapshots: they document what was executed and have no review, branching or merge process.
+B=Notebook exports: manual copies carry no history, review or traceability.
+D=Volume zip files: this is a file store without branch, diff or code review, so promotion is not controlled.
+T: Git folders connect branches in the Git repository to the workspace for code promotion.
+V: Databricks Git folders, MLflow
+
+@ DBX-MLP D2 T2.3 applied troubleshooting
+S: The function below is hard to unit test: callers sometimes get a DataFrame and sometimes a boolean.
+```
+def prepare(df, name):
+    if name not in df.columns:
+        return False
+    return df.filter(col(name).isNotNull())
+```
+Which change follows Databricks guidance on testable functions?
+A: Keep one function and return a tuple of the DataFrame and a flag
+B: Split it into a function returning a boolean for column existence and one always returning the DataFrame
+C: Wrap the body in try/except and return None on any failure, so that the type is at least consistent
+D: Return the string "missing" when the column is absent and keep the DataFrame result otherwise
+K: B
+G: ## Design for tests
+The Databricks unit testing page advises that, for the best results, a function should return a single predictable outcome and be of a single data type. A check for existence returns true or false. A count returns a non-negative whole number. A function that returns false in one case and the thing itself in another forces tests (and callers) to branch on the type.
+W: Two small functions each have one predictable outcome and one return type, so each is tested with simple asserts.
+X: A=Tuple: one function still mixes two concerns, and every caller must unpack the pair, which keeps the test logic complicated.
+C=Return None on failure: this hides real errors and adds a third possible outcome, so the function becomes less predictable.
+D=String marker: the return type stays mixed (string or DataFrame), so callers and tests must still check the type.
+T: Write functions with one predictable outcome and one return type so they are easy to test.
+V: Databricks Git folders, pytest
+
+@ DBX-MLP D2 T2.3 applied comparison
+S: Feature helper functions are used by Python notebooks and by a packaged job, and the team wants pytest to find the tests automatically. Where should the Python functions and their tests live?
+A: In one notebook, with functions and tests together and the notebook included with `%run` elsewhere
+B: Functions in one notebook and tests in a second notebook, run from a job
+C: In a workspace folder as saved notebook revisions, with a revision per test run
+D: In `.py` files in a Git folder, with tests in `test_*.py` files that notebooks and jobs can import
+K: D
+G: ## Where to keep functions and tests
+The Databricks guidance for Python and R is to store functions and their unit tests outside of notebooks. Benefits: the functions can be called from notebooks and from outside them, and test frameworks such as pytest are designed to run tests from files. Databricks also provides tools to discover, run and track Python unit tests in the workspace. The cost is more files to maintain. Storing functions and tests in the same or separate notebooks makes them harder to reuse outside notebooks and harder to test there. (For Scala notebooks the advice differs: functions in one notebook and tests in another.)
+W: Plain Python files in a Git folder can be imported by notebooks and by a packaged job and pytest discovers `test_*.py` files without notebook tooling.
+X: A=Single notebook: the functions cannot be used outside notebooks, and pytest does not discover tests inside it as it does in files.
+B=Two notebooks: reuse by notebooks is easy, but the functions still cannot be imported by a packaged job, and testing outside notebooks is hard.
+C=Revision history: revisions are not a test structure and give neither importable modules nor discovery.
+T: For Python, keep functions and tests in files outside notebooks, in a Git folder.
+V: Databricks Git folders, pytest
+
+@ DBX-MLP D2 T2.3 advanced troubleshooting
+S: A unit test for a function that deduplicates transactions reads `prod.ml.transactions` and runs the function that deletes duplicate rows in place. A colleague objects. What is the right design?
+A: Run the test only at night, when fewer users query the production table
+B: Point the test at a limited sample of production rows and delete duplicates only inside that sample of rows
+C: Grant the test account read-only rights and keep the production table as the input
+D: Build a small DataFrame of fake rows that resembles production data and run the function
+K: D
+G: ## Never test against production data
+Databricks says it is a best practice not to run unit tests against functions that work with data in production. This matters most for functions that add, remove or change data. Create fake data that is as close as possible to the production data, for example a small DataFrame with explicit schema and a few rows that cover the cases (duplicates, nulls).
+## Why fake data is also better
+Known input gives known expected output, tests stay fast and deterministic and they can run in any environment, including CI on a cluster without access to production.
+W: A small fake DataFrame with production-like schema is deterministic and cannot change production, so the function can be asserted on exact expected rows.
+X: A=Nightly timing: timing does not change that the test modifies production data, and the delete still runs on real rows.
+B=Production sample: the function still operates on production rows whose content changes between runs, so expected output is not fixed.
+C=Read-only account: this prevents deletion but the test would then fail on the write path, and results vary with live data.
+T: Unit tests run on small fake data shaped like production, never on production tables.
+V: pytest, Databricks Git folders
+
+@ DBX-MLP D2 T2.3 applied troubleshooting
+S: A notebook job runs the lines below. The job task always shows success, even when a test fails.
+```
+import pytest
+pytest.main([".", "-v", "-p", "no:cacheprovider"])
+```
+What is the fix?
+A: Add `import sys` so that pytest can write the cache files into the repository
+B: Keep the return value of `pytest.main` and assert it equals 0, so a failure fails the cell
+C: Install pytest with `%pip` in the same cell, so that failures stop being swallowed
+D: Wrap the call in try/except and print any exception, so that failures show up in the cell output
+K: B
+G: ## Make failures visible to the job
+`pytest.main` returns an exit code instead of raising an exception. If the notebook ignores it, the cell finishes normally and the job task is marked successful. The Databricks pattern stores the return code and asserts it:
+`retcode = pytest.main([".", "-v", "-p", "no:cacheprovider"])` followed by `assert retcode == 0, "The pytest invocation failed. See the log for details."`
+The assertion fails the cell, and therefore the task and the CI check. Results appear in the cluster's driver logs.
+W: Asserting that the return code is 0 turns failing tests into a failing cell, so the job task and CI stage fail as intended.
+X: A=Import of sys: the cache option is already disabled, and writing cache files has no relation to the reported status.
+C=Installing pytest: pytest is installed already, because the call runs, so installing it again does not change the status.
+D=Catching exceptions: pytest.main does not raise on test failures, so there is nothing to catch and the status stays green.
+T: Assert that the return code of `pytest.main` is 0 so that failures fail the task.
+V: pytest, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.3 applied troubleshooting
+S: A new test file called `checks_features.py` contains functions named `check_age_bucket` and `check_null_rate`. Running `pytest .` in the notebook reports that no tests were run. What is the cause?
+A: Pytest only runs tests that are stored inside notebooks, so the file must be converted to a notebook first
+B: Pytest needs a Spark session fixture before it can collect any test from a file
+C: Pytest collects `test_*.py` or `*_test.py` files and `test_*` functions, so neither name matches
+D: Pytest skips files that import from other modules in the same Git folder
+K: C
+G: ## Test discovery
+By default pytest looks for `.py` files whose names start with `test_` (or end with `_test`) and, inside them, for functions whose names start with `test_`. The Databricks page uses `test_myfunctions.py` with functions such as `test_tableExists`. Files and functions with other names are not collected unless the configuration is changed.
+W: Neither the file name nor the function names follow the default convention, so pytest collects zero tests.
+X: A=Notebook only: pytest runs Python files, and Databricks recommends storing tests outside notebooks.
+B=Spark fixture: Spark is needed by tests that use it, but collection does not depend on it.
+D=Imports: importing the module under test is the normal pattern, as `from myfunctions import *`, and does not stop collection.
+T: Name test files `test_*.py` and test functions `test_*` for default discovery.
+V: pytest, Databricks Git folders
+
+@ DBX-MLP D2 T2.3 applied use-case
+S: A SQL-only team writes data quality functions for their notebooks and wants to unit test them. Where does Databricks recommend storing such functions?
+A: As cells in one SQL notebook that each test notebook includes with `%run`
+B: As SQL user-defined functions in a schema, called by notebooks and tests
+C: As Python files in a Git folder, called from SQL through a magic command
+D: As temporary views that are created at the beginning of each test notebook session and dropped at its end
+K: B
+G: ## SQL notebooks
+For SQL notebooks Databricks recommends storing the functions as SQL user-defined functions (SQL UDFs) in schemas. The notebooks can then call both the SQL UDFs and queries that test them, for example a query that calls the function with known input and compares the result with the expected value. The recommendation differs from Python and R, where functions and tests live in files outside notebooks.
+W: SQL UDFs stored in a schema are reusable by every SQL notebook and can be tested with plain SQL queries against expected values.
+X: A=Run include: SQL notebooks keep the functions inside a notebook, so reuse and testing outside it are limited, and the page does not recommend it.
+C=Python files from SQL: this adds a language boundary for a SQL-only team, and the documented SQL approach is the UDF.
+D=Temporary views: views hold queries or data, not reusable function logic, and they vanish with the session.
+T: Keep SQL functions as SQL UDFs in a schema and test them with SQL.
+V: Databricks SQL, Unity Catalog
+
+@ DBX-MLP D2 T2.3 applied troubleshooting
+S: `test_features.py` runs in a Git folder with pytest and fails at the line below with `NameError: name 'spark' is not defined`, although the same code works in a notebook.
+```
+from features import add_age
+df = spark.createDataFrame([(1, 1990)], ["id", "yob"])
+assert "age" in add_age(df).columns
+```
+What is the fix?
+A: Create the session in the test file with `SparkSession.builder.getOrCreate()`, since a plain file has no `spark`
+B: Add `%run ./features` as the first line of the file, so that the notebook runtime provides the spark variable to it
+C: Replace the DataFrame with a pandas DataFrame, because tests in files cannot use Spark
+D: Import `spark` from the `features` module, which is where Databricks defines it
+K: A
+G: ## Notebook globals are not file globals
+Databricks notebooks create a Spark session for you and expose it as `spark`. A `.py` file imported or collected by pytest has no such global. The Databricks testing page therefore creates the session in the file: `spark = SparkSession.builder.appName('integrity-tests').getOrCreate()` (in both `myfunctions.py` and `test_myfunctions.py`, with the comment that a file that is not a notebook must create a Spark session).
+W: Calling `SparkSession.builder.getOrCreate()` in the test file gives the file its own handle to the session, which is the documented pattern.
+X: B=%run: it is a notebook command and is not valid Python in a `.py` file, so it neither runs nor injects variables.
+C=Pandas only: tests in files can use Spark through a session, and a pandas frame would not test the Spark function.
+D=Import from features: the module does not define `spark` either, and importing it would only work if the module created one.
+T: Files outside notebooks must create their own SparkSession.
+V: pytest, Databricks Git folders
+
+@ DBX-MLP D2 T2.4 advanced comparison
+S: A reviewer wants to know where the final unit and integration tests run in the deploy code pattern, compared with the deploy models pattern. Which answer is correct?
+A: Deploy code runs the final tests in production; deploy models runs them in staging
+B: Both patterns run the final tests in development and use staging only for the load test
+C: Deploy code runs the final tests in development; deploy models runs them in staging
+D: Deploy code runs the final tests in staging; deploy models runs them in development
+K: D
+G: ## Where the last test happens
+Databricks states that the environment shown in its diagram is the final environment in which a step is run. In deploy models, the model is built in development and its final unit and integration testing is performed in the development environment. The artifact is tested in staging and then deployed to production.
+In deploy code, unit tests and integration tests run in development environments too, but final unit and integration testing is performed in staging, where the code is built, tested and promoted to production, which then trains the model on production data.
+W: Deploy code moves code through staging, whose CI runs the final tests, while deploy models ends its final code tests in development because only the artifact travels.
+X: A=Production for code: production runs the promoted pipelines, and the final tests of code come before it in staging.
+B=Both in development: that would leave staging with no testing purpose, which contradicts the documented staging stage.
+C=Reversed: it assigns staging to deploy models and development to deploy code, the opposite of the diagram.
+T: Final tests run in staging for deploy code and in development for deploy models.
+V: MLflow, Unity Catalog
+
+@ DBX-MLP D2 T2.4 applied definition
+S: A model team reviews three automated checks. One calls a feature function on a three-row DataFrame and asserts the result. One triggers the feature, training and inference pipelines in sequence against the staging catalog. One sends a few requests to a temporary staging endpoint. Which classification is right?
+A: The first is a unit test, and the second and third are integration tests
+B: The first and second are unit tests, because they run on small data, and the third is a load test
+C: All three are integration tests, because each runs in the staging workspace
+D: The first and third are unit tests, because they use test data, and the second is a system test
+K: A
+G: ## Unit versus integration
+A unit test checks a self-contained unit of code, such as a function, in isolation, using fake input. An integration test runs the pipelines together (feature engineering, training, inference, monitoring) to prove that they work correctly together. When the application is real-time, the integration test also creates serving infrastructure by triggering the deployment pipeline and may send small requests to a temporary endpoint.
+## Size is not the criterion
+A check is an integration test because it exercises hand-offs between components, not because of the environment or data volume. Data volume can be reduced in integration tests to save time.
+W: The three-row function check isolates one unit, while the pipeline sequence and the temporary endpoint check exercise several components together, which defines integration tests.
+X: B=Small data: reduced data does not turn a pipeline run into a unit test, which is defined by isolation of a function.
+C=Environment: the location does not define the type. A function test can run in staging and remains a unit test.
+D=Test data and system test: the endpoint request tests the serving path of the pipeline, and the sequence is an integration test by the documented definition.
+T: A unit test isolates a function, an integration test runs pipelines or endpoints together.
+V: MLflow, Model Serving, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.4 advanced use-case
+S: A team wants to save cost and time in CI. Pull requests trigger two kinds of checks. Which order of checks does the staging stage in Databricks guidance suggest?
+A: Run integration tests first, then unit tests, because a full run finds more defects at once
+B: Run both kinds at the same time on one cluster, and merge if either of them passes
+C: Build and run unit tests when the pull request opens, then run integration tests once they pass
+D: Skip unit tests in CI because developers run them locally, and run integration tests before merging
+K: C
+G: ## CI in the staging stage
+A pull request against the main branch starts the process. The pull request builds the source code and triggers unit tests. If the unit tests fail, the pull request is rejected. The CI process then runs the integration tests. Because unit tests are fast and cheap while integration tests run all pipelines, running the cheap ones first stops a broken change before the expensive run.
+W: Unit tests run first and reject a bad pull request quickly, and only a change that passes them pays for the integration run.
+X: A=Integration first: the expensive run happens on changes with simple function defects that a unit test would have caught in seconds.
+B=Parallel and merge on either: a single passing kind is not enough, because the merge requires all tests to pass.
+D=Skip unit tests in CI: local runs are not enforced, and CI exists to make sure changes in a development branch do not break existing functionality.
+T: CI runs unit tests when the pull request opens, then integration tests, and merges only if all pass.
+V: Databricks Git folders, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.4 applied tradeoff
+S: Twelve data scientists open pull requests against the same main branch every day. Each pull request passes its integration tests, but the pipeline sometimes breaks on main after several merges. What does Databricks suggest in addition?
+A: Require every pull request to wait for the previous one to merge, and drop all integration tests from CI
+B: Run integration tests only on the release branch, because the main branch is never executed
+C: Merge without integration tests and rely on production monitoring to catch the failures
+D: Schedule periodic integration tests on the main branch to catch interactions between merged changes
+K: D
+G: ## Concurrent changes
+Each pull request is tested against the main branch as it was when the test ran. When many users merge concurrently, two individually passing changes can interact badly. Databricks notes that you can schedule periodic integration tests on the main branch, which is a good idea if the branch is updated frequently with concurrent pull requests from multiple users. If tests fail, the CI/CD system should notify users and post results on the pull request.
+W: Scheduled integration tests on main run the combined state of all merged changes and surface conflicts that no single pull request test could show.
+X: A=Serial merging, no integration tests: serialization slows the team and without integration tests, interface breaks still go undetected.
+B=Release branch only: the release branch triggers the production update, so defects would be found after main is already broken.
+C=Monitoring as test: production monitoring detects effects on real users and not pipeline faults before release, which is the purpose of staging.
+T: Add scheduled integration tests on main when many pull requests merge concurrently.
+V: Lakeflow Jobs, Databricks Git folders
+
+@ DBX-MLP D2 T2.4 advanced definition
+S: In the production stage the training pipeline registered a new version, and the team argues that the staging integration tests already proved quality, so the pipeline may assign Challenger directly. Which check is still needed?
+A: The production validation task, with format, metadata, slice and compliance checks on the new version
+B: A second round of unit tests of the feature functions, run on production data
+C: A manual rerun of the staging integration tests against the production catalog before each retraining
+D: Nothing, since training code that passed in staging produces equivalent models in production
+K: A
+G: ## Code tests do not validate a model
+Staging unit and integration tests prove that the pipeline code works with reduced data. The production run trains a new model on full production data, so the resulting model is a new artifact whose quality is unknown. Databricks therefore places a validation pipeline after training in production: it loads the registered model, checks format and required metadata, evaluates selected data slices and compliance requirements, and only a model that passes can be assigned Challenger.
+W: Validation is evaluated on the model that was just produced from production data, which code tests in staging cannot do.
+X: B=Unit tests on production data: they test functions and, as the Databricks page says, should not run on production data.
+C=Integration tests on production catalog: they would write temporary assets into production and still test code and not the new model.
+D=Nothing: the same code on different data can produce a weaker model, and automated retraining makes an unchecked version risky.
+T: Code tests pass in staging, but each newly trained model still needs validation in production.
+V: Unity Catalog, MLflow, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.4 applied use-case
+S: Staging integration tests passed, and the release team asks what formally pushes the new pipeline code into the production environment. Which step does Databricks describe?
+A: The pull request approval, which immediately updates the production jobs
+B: Creating a release branch from the tested main branch, which triggers CI/CD to update production jobs
+C: A data scientist copying the dev notebooks into the production workspace
+D: Registering the new model version, which then makes every connected workspace sync the new code on its own
+K: B
+G: ## From staging to production
+If all tests pass, the new code is merged into the main branch. After CI tests pass and the dev branch is merged into main, the ML engineer creates a release branch. The output of the staging process is that release branch, and it triggers the CI/CD system to start the production stage and update production jobs. ML engineers own the production environment, and data scientists typically do not have write or compute access there.
+W: The release branch cut from tested code is the documented trigger for updating production jobs, so production only receives code that passed staging.
+X: A=Pull request approval: it only leads to a merge into main, which is still the staging stage and does not touch production.
+C=Manual copy: it bypasses CI/CD and review, and data scientists do not normally have write access to production.
+D=Model registration: registering a version records a model and does not deploy pipeline code to jobs.
+T: A release branch from tested main triggers CI/CD to update production jobs.
+V: Databricks Git folders, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.4 applied use-case
+S: Integration tests on a pull request fail in the inference stage. The CI system currently only turns its status red. What should the CI/CD system also do, according to Databricks guidance, before the code can reach the main branch?
+A: Merge the change anyway and open a ticket, because inference failures are repaired after release
+B: Rerun only the unit tests until the status turns green, then merge the change automatically
+C: Notify the users and post the results on the pull request, and merge only after the tests pass
+D: Delete the pull request branch and ask the author to create the change again from the main branch
+K: C
+G: ## Failure handling in CI
+In the staging stage the new code is merged into the main branch only if all tests pass. If tests fail, Databricks says the CI/CD system should notify users and post results on the pull request. The author then sees which stage failed (here inference) and fixes the branch, while main stays releasable.
+## Why the result belongs on the pull request
+The pull request is where review happens, so the evidence of which pipeline stage failed is attached to the change that caused it.
+W: Notifying users and posting the results on the pull request tells the author which stage failed and keeps the change out of main until all tests pass.
+X: A=Merge anyway: broken inference code would reach main and then the release branch, where production jobs are updated from.
+B=Rerun unit tests: the failure is in an integration stage, and unit tests do not exercise the hand-offs between pipelines, so a green unit run proves nothing about it.
+D=Delete the branch: the author loses the history needed for debugging, and the failure feedback is still not delivered.
+T: On failing tests, notify users and post results on the pull request, and do not merge.
+V: Lakeflow Jobs, Databricks Git folders
