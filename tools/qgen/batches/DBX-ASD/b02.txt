@@ -373,25 +373,23 @@ C=String bounds: the type of the bounds is not the problem, and the options can 
 T: With `partitionColumn`, use `dbtable` with an aliased subquery, not `query`.
 
 @ DBX-ASD D2 T2.1 advanced definition
-S: A table has `id` values from 1 to 10,000,000. A developer reads it with the options below. What does the resulting DataFrame contain?
-`.option("partitionColumn", "id").option("lowerBound", 1)`
-`.option("upperBound", 1000000).option("numPartitions", 4)`
-A: Only rows with `id` between 1 and 1,000,000, because the bounds act as a filter on that column, as in a WHERE clause.
-B: All rows, split into 4 partitions; the first and last partitions also take everything outside the bounds.
-C: An error, because the upper bound is smaller than the largest `id` in the table.
-D: Four rows, one sample per partition, because the bounds select how many rows are read.
-K: B
-G: ## Bounds decide the stride, not the filter
-For a partitioned JDBC read Spark computes a stride from `(upperBound - lowerBound) / numPartitions` and issues one query per partition, each with a `WHERE` range on `partitionColumn`.
-- With bounds 1 to 1,000,000 and 4 partitions the stride is 250,000.
-- The first partition also selects values below the lower bound (and NULLs). The last partition selects everything from its start upward.
-- So all rows are returned. If the bounds do not match the real range, one partition holds most of the data and the read is skewed.
-Pick bounds from the real minimum and maximum of the column.
-W: The bounds only set the stride. All 10 million rows are read, and the last partition takes every `id` above 750,000 while the other three share the first 750,000.
-X: A=Filter: Spark documents that the bounds are not used to filter rows, so every row is returned.
-C=Error: values outside the bounds are accepted. They end up in the first or last partition.
-D=Four rows: the bounds do not sample. Each partition reads all rows in its range.
-T: `lowerBound` and `upperBound` set partition ranges only; rows outside them go to the first or last partition.
+S: A table `tickets` has the columns `ticket_id` (BIGINT, unique), `customer_name` (VARCHAR), `created_at` (TIMESTAMP) and `body` (TEXT). A developer wants an 8-way parallel JDBC read with `partitionColumn`. Which setup is valid?
+A: `partitionColumn` set to `customer_name` with `lowerBound` "A" and `upperBound` "Z", because Spark splits any sortable column into ranges.
+B: `partitionColumn` set to `body` with `numPartitions` 8 and no bounds, because Spark hashes the text value to place each row.
+C: `partitionColumn` set to `created_at` with timestamp strings as bounds, because the column may be numeric, date or timestamp.
+D: `partitionColumn` set to `ticket_id` with `numPartitions` 8 only, because the bounds are optional for a unique numeric column.
+K: C
+G: ## What partitionColumn accepts
+A partitioned JDBC read turns the table into `numPartitions` range queries on one column, so Spark must be able to compute a stride between two bounds.
+- `partitionColumn` must be a numeric, date or timestamp column of the table. Strings and text columns do not qualify, because Spark cannot compute a stride over them.
+- `partitionColumn`, `lowerBound` and `upperBound` must all be given if any of them is, and `numPartitions` must be given as well.
+- For a date or timestamp column the bounds are written as date or timestamp strings. The bounds set the stride only and do not filter rows.
+- Pick a column that is indexed and spread evenly, so the range queries are cheap and the partitions have a similar size.
+W: A timestamp column is an eligible partition column, and the timestamp bounds give Spark the range to cut into 8 strides.
+X: A=String column: only numeric, date and timestamp columns can be split into strides, so a VARCHAR name column is not valid.
+B=Text column: Spark does not hash values for a JDBC read. It builds range predicates, which need a numeric, date or timestamp column and two bounds.
+D=No bounds: `partitionColumn`, `lowerBound`, `upperBound` and `numPartitions` must be specified together, whatever the column.
+T: A JDBC `partitionColumn` must be numeric, date or timestamp and comes with both bounds and `numPartitions`.
 
 @ DBX-ASD D2 T2.1 applied use-case
 S: A DataFrame with 200 partitions is written to PostgreSQL with `df.write.format("jdbc")...option("numPartitions", 8).save()`. How does the write behave?
@@ -448,28 +446,28 @@ C=queryTimeout: it only caps how long a statement may run, with 0 meaning no lim
 D=sessionInitStatement: it runs once when a session starts, and it is not a per-fetch hook.
 T: `fetchsize` tunes JDBC reads and `batchsize` tunes JDBC writes.
 
-@ DBX-ASD D2 T2.1 applied definition
-S: A DataFrame is written with the line below. Which directory layout does Spark create under `/out/s`?
-`df.write.partitionBy("country", "year").parquet("/out/s")`
-A: Folders named `year=...` at the top level, with `country=...` folders nested inside each one.
-B: One flat folder of Parquet files that contain `country` and `year` as ordinary columns.
-C: Folders named `country=...` only, with `year` stored as a column inside each file.
-D: Folders named `country=...` with `year=...` inside, and the files hold only the other columns.
-K: D
-G: ## What partitionBy writes
-`DataFrameWriter.partitionBy(*cols)` partitions the output on the file system by the given columns.
-- Each column becomes one directory level, in the order listed: `/out/s/country=KR/year=2025/part-....parquet`.
-- The partition column values are stored in the folder names. The data files hold only the remaining columns.
-- Readers rediscover the columns from the paths, and queries that filter on them can skip whole directories (partition pruning).
-- Choose columns with moderate cardinality; one folder per distinct value can create many tiny files.
-W: Nested `country=.../year=...` folders follow the order of the columns in `partitionBy`, and the files contain only the other columns.
-X: A=year first: the nesting follows the order given to `partitionBy`, so `country` is the outer level.
-B=Flat layout: that is the result without `partitionBy`. With it, the values move into directory names.
-C=Only country: every column listed becomes a directory level, so `year` is a folder too.
-T: `partitionBy` creates one nested `col=value` directory per column, in the given order.
+@ DBX-ASD D2 T2.1 applied troubleshooting
+S: `/out/s` was written with `partitionBy("country", "year")`. A developer reads one country with the line below and finds that `country` is missing from the schema, while `year` is present. Which change makes Spark rebuild `country` from the directory names?
+`df = spark.read.parquet("/out/s/country=KR")`
+A: Add `.option("mergeSchema", "true")`, because schema merging reads partition names from the directory path.
+B: Add `.option("basePath", "/out/s")`, because partition discovery then starts at the table root and includes `country`.
+C: Add `.option("partitionBy", "country")`, because the reader needs the partition column names to infer them.
+D: Set `spark.sql.sources.partitionColumnTypeInference.enabled` to `true`, because inference decides which folders are columns.
+K: B
+G: ## Partition discovery starts at the path you pass
+When a file source is read, Spark scans the given path for `name=value` folders and turns them into columns. Discovery only looks below the path you pass.
+- Reading `/out/s` finds `country` and `year`.
+- Reading `/out/s/country=KR` finds only `year`, because `country=KR` is part of the given path and not below it.
+- `basePath` tells the reader where the table root is, so the folders between the root and the given path count as partition columns as well.
+- Partition values are stored in folder names, not in the data files, so there is no other place for Spark to take `country` from.
+W: Setting `basePath` to `/out/s` moves the start of partition discovery to the table root, so `country` is rebuilt from the folder name while the read stays limited to the Korean folder.
+X: A=mergeSchema: it merges the schemas found in the Parquet files, and `country` is in no file. It does not change where folder discovery starts.
+C=partitionBy on read: `partitionBy` is a writer method, and the reader has no option of that name. It would be ignored.
+D=Type inference flag: it is true by default and only chooses the data types of columns that were already discovered.
+T: Use `basePath` to keep partition columns when reading a single partition folder.
 
 @ DBX-ASD D2 T2.1 advanced troubleshooting
-S: A DataFrame with 3 partitions holds rows for 100 different countries mixed in every partition. The code `df.write.partitionBy("country").parquet(out)` produces about 300 small files. The team wants one file per country. What should the code do before the write?
+S: A DataFrame with 3 partitions holds rows for 100 different countries mixed in every partition. The code `df.write.partitionBy("country").parquet(out)` produces about 300 small files. The team wants one file per country, and the write must stay parallel instead of funneling all data through one task. What should the code do before the write?
 A: Call `df.coalesce(1)` so that all rows are written by one task, which gives one file per country folder.
 B: Increase `spark.sql.files.maxPartitionBytes`, because it merges the output files of a write.
 C: Call `df.repartition("country")` so that all rows of a country sit in one partition before the write.
@@ -509,14 +507,14 @@ S: A DataFrame `df` with 6 partitions, all containing rows, is written with `df.
 A: One Parquet file named `/out/x`, because the driver merges the partitions while writing.
 B: One file per partition inside `/out/x`, merged by an extra job that runs after the write.
 C: Six files and 200 additional shuffle files, because every write goes through a shuffle first.
-D: A directory `/out/x` with one part file per partition (six here) and a `_SUCCESS` marker file.
+D: A directory `/out/x` with one part file per partition (six here), written in parallel by six tasks.
 K: D
 G: ## A DataFrame write produces a directory
 Spark writes in parallel: each task writes its own part file, and the path you give is a directory.
 - `part-00000-....snappy.parquet` and so on: one per task that has data. Snappy is the default Parquet compression.
-- A `_SUCCESS` file marks a successful job commit. Readers use the directory path, for example `spark.read.parquet("/out/x")`.
+- With the default Hadoop output committer of open-source Spark, a `_SUCCESS` file also marks a successful job commit. Readers use the directory path, for example `spark.read.parquet("/out/x")`.
 - To get a single file, reduce the partitions first with `coalesce(1)` or `repartition(1)`, which removes parallelism. Spark has no setting to merge the files afterwards.
-W: Each of the six partitions is written by its own task as a part file inside the `/out/x` directory, and a `_SUCCESS` marker is added at commit.
+W: Each of the six partitions is written by its own task as a part file inside the `/out/x` directory, so the path is a directory with six data files.
 X: A=Single file: Spark never merges partitions on write. A single file needs one partition.
 B=Extra merge job: no job combines the part files after the write.
 C=Extra shuffle: a plain write has no shuffle, and the number 200 is the shuffle partition default, which does not apply here.
