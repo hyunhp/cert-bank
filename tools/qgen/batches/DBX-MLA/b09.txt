@@ -1,0 +1,545 @@
+# DBX-MLA batch 09: T4.1 batch vs real-time vs streaming 5, T4.2 custom model endpoints 5, T4.3 pandas/Spark batch inference 5, T4.4 declarative pipelines 5, T4.5 querying endpoints 5, T4.6 traffic split 4 (guide read 2026-11-08)
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/custom-models
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/create-manage-serving-endpoints
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/score-custom-model-endpoints
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/serve-multiple-models-to-serving-endpoint
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/route-optimization
+# src: https://docs.databricks.com/aws/en/machine-learning/model-inference/
+# src: https://docs.databricks.com/aws/en/mlflow/models.html
+# src: https://docs.databricks.com/aws/en/machine-learning/manage-model-lifecycle/
+# src: https://docs.databricks.com/aws/en/ldp/
+# src: https://docs.databricks.com/aws/en/ldp/concepts
+# src: https://docs.databricks.com/aws/en/ldp/streaming-tables
+# src: https://docs.databricks.com/aws/en/ldp/pipeline-mode
+
+@ DBX-MLA D4 T4.1 applied use-case
+S: A retailer scores all 40 million customers every night with a churn model. Marketing opens the scores the next morning from a Delta table, and nobody needs a prediction at the moment a customer acts. Which deployment mode fits?
+A: Real-time serving: one REST request per customer from a scheduler, so each score comes back within milliseconds
+B: Batch inference: a scheduled job scores the whole table and writes the predictions to a Delta table
+C: Streaming inference: a continuously running pipeline that waits for events and scores each one on arrival
+D: Real-time serving with a route-optimized endpoint, so that 40 million calls finish at the highest possible rate
+K: B
+G: ## Three ways to serve a model
+- **Batch inference** runs the model over a large, bounded set of rows on a schedule (hourly, nightly) and stores the predictions, usually in a table. Consumers read the stored results later. Latency per prediction does not matter; throughput and cost do.
+- **Real-time (online) inference** keeps a model behind a REST endpoint. A client sends a request and gets a prediction back right away. On Databricks this is Mosaic AI Model Serving, which uses serverless compute and scales with demand.
+- **Streaming inference** scores events continuously as they arrive in a stream and writes results to a table or sink, with freshness measured in seconds to minutes.
+## How to choose
+Ask when the prediction is needed. If it is needed inside a user request, use real-time. If it is needed shortly after an event but not in the request, use streaming. If it is consumed later from a table, batch is the simplest and cheapest.
+W: Batch inference: the input is a bounded table, the output is read the next day, and no caller waits, so a scheduled scoring job that writes to Delta needs no always-on endpoint.
+X: A=Real-time per customer: it works technically but pays for an always-on endpoint and 40 million round trips to produce results that are only read the next morning.
+C=Streaming inference: the input is a finite table scored once a night, not an unbounded event stream, so a continuously running pipeline adds cost for no freshness benefit.
+D=Route-optimized endpoint: route optimization targets high-QPS, low-latency online traffic; the mode is still real-time, which is the wrong fit for a nightly bulk job.
+T: Prediction needed in the request = real-time; needed seconds after an event = streaming; read later from a table = batch.
+
+@ DBX-MLA D4 T4.1 applied use-case
+S: A checkout service must return a fraud score to the payment page while the customer waits, using the values in that single request. Which approach meets the requirement?
+A: A nightly batch job that scores all transactions of the previous day and writes the results to a Delta table
+B: A triggered pipeline that rescores the transactions table every hour and refreshes a materialized view
+C: A weekly retraining job that recomputes the fraud scores for every known customer before the next run
+D: A model serving endpoint that the service calls over REST for each request and gets the score in the response
+K: D
+G: ## Per-request predictions need an online endpoint
+Real-time inference means a caller sends input and waits for the prediction. On Databricks, Mosaic AI Model Serving exposes a registered model as a REST API. The service is described as highly available and low-latency, with automatic scale-up and scale-down as demand changes, so the application only needs an HTTP client.
+## Why stored scores do not work here
+A table of precomputed scores can only contain customers and transactions that existed at the last run. A brand-new transaction has no row yet, so the page would have nothing to read. Per-request input that only exists at checkout time forces online scoring.
+W: Model serving endpoint: it scores the new transaction at the moment it is sent, returns the prediction in the HTTP response, and scales with checkout traffic.
+X: A=Nightly batch: the new transaction does not exist when the job runs, so the page would show yesterday's data or nothing, with up to a day of delay.
+B=Hourly triggered pipeline: triggered mode refreshes the available data and stops, so the score would arrive up to an hour late and never inside the customer's request.
+C=Weekly retraining: retraining changes the model, not when predictions are produced, and weekly recomputation is far too slow for a checkout.
+T: When the input exists only at request time and a person waits, use a real-time serving endpoint.
+
+@ DBX-MLA D4 T4.1 advanced comparison
+S: Clickstream events arrive continuously from a message bus. The business wants each event scored within seconds to minutes and appended to a table that dashboards read, but no caller waits for a response. Which mode fits best?
+A: Streaming inference, with a pipeline running in continuous mode that scores new events and appends to a table
+B: Batch inference, with a nightly job that scores the whole event history again and overwrites the table
+C: Real-time serving, with every dashboard refresh calling a REST endpoint once per displayed event row
+D: Batch inference, with a job started by hand each morning that scores only the events of the previous day
+K: A
+G: ## Streaming sits between batch and real-time
+Streaming inference reads a growing source incrementally and scores rows as they arrive, so freshness is seconds to minutes. Nobody waits on a response, which separates it from real-time serving, and the data is unbounded, which separates it from batch.
+## Pipeline modes
+In Lakeflow Spark Declarative Pipelines (formerly Delta Live Tables), triggered mode refreshes the data available at the start and stops; continuous mode keeps tables fresh as new data arrives. The docs match continuous mode with freshness needs from every 10 seconds to a few minutes, and triggered mode with updates every 10 minutes, hourly or daily.
+W: Streaming inference: continuous processing handles the unbounded feed, delivers freshness in seconds to minutes, and writes results to a table with no request-response loop.
+X: B=Nightly overwrite: results would be up to a day old, and rescoring all history every night wastes compute on events that were already scored.
+C=REST call per row: this turns a table-producing workload into thousands of online calls and puts scoring on the dashboard's critical path, though no caller needs a synchronous answer.
+D=Manual morning job: scores arrive a day late and depend on a person, which fails the seconds-to-minutes freshness requirement.
+T: Unbounded events + seconds-to-minutes freshness + no waiting caller = streaming inference.
+
+@ DBX-MLA D4 T4.1 applied use-case
+S: Which TWO workloads are best served by batch inference rather than a real-time endpoint? (Select TWO)
+A: Precomputing next-week demand forecasts for every store and SKU, which planners read in a dashboard on Monday
+B: Ranking products for a shopper while the product page loads, using the items viewed in the current session
+C: Scoring a freshly typed support message so that an agent sees a suggested category before the reply is sent
+D: Scoring a 200-million-row customer table once a month to pick the audience of a marketing campaign
+E: Returning a credit decision to a loan applicant who is waiting on the web form after submitting it
+K: A,D
+G: ## Choosing by consumption pattern
+Batch inference suits workloads where the input set is known in advance, the output is stored, and the consumer reads it later. The model runs over the whole table on a schedule, so there is no always-on endpoint and no per-request latency target.
+Real-time inference suits workloads where the input only exists at request time (a session, a message just typed) and a person or service waits for the answer.
+## Test for each scenario
+Ask: does the input exist before the request, and will the result be read later? If both are yes, precompute in batch.
+W: A=Demand forecasts: stores and SKUs are a known, finite set, the forecasts are read later in a dashboard, so a weekly scheduled job that writes a table is enough.
+D=Monthly campaign audience: the whole customer table exists in advance, and the output is a stored list used later, which is the textbook bulk scoring case.
+X: B=Session ranking: the session items exist only while the page loads and the shopper waits, so only an online endpoint can use them.
+C=Typed message: the message does not exist until the agent has it open, and the suggestion is needed before replying, which requires an online call.
+E=Loan applicant waiting: the decision is needed while the applicant waits on the form, using the submitted input, so it needs an online call.
+T: Known, finite input read later = batch; input that appears at request time with someone waiting = real-time.
+
+@ DBX-MLA D4 T4.1 advanced tradeoff
+S: A team serves a recommendation model with a scheduled batch job that writes scores to a table. Which downside must the team accept compared with real-time serving?
+A: Predictions cannot be written to a Delta table, so consumers must use a REST API to read them
+B: The model must be trained again for every run, which makes the scoring job slower than an endpoint
+C: Scores are only as fresh as the last run, so new users or changed inputs wait for the next job
+D: Only one consumer can read the stored scores at a time, which limits the number of dashboards
+K: C
+G: ## The staleness trade-off
+Batch inference trades freshness for simplicity and cost. Predictions are computed at schedule time and stored, so a row that appears or changes after the run has no score (or an old score) until the next run. Real-time serving computes the prediction from the input in the request, so it always reflects the current input, at the price of an always-available endpoint.
+## What batch does not cost you
+Stored predictions sit in an ordinary Delta table: many consumers read them in parallel with SQL, dashboards or jobs, and scoring uses an already trained model, loaded from the registry.
+W: Staleness: the score reflects the data at the last run, so anything new or changed waits for the next scheduled execution, the main limit of batch.
+X: A=Delta output: batch jobs write predictions to Delta tables directly, and consumers read them with SQL, so no REST API is needed to read results.
+B=Retraining per run: scoring loads an already trained model and applies it. Training is a separate job on its own schedule.
+D=Single reader: Delta tables support many concurrent readers, so any number of dashboards can use the stored scores.
+T: Batch = cheap and simple but only as fresh as the last run.
+
+@ DBX-MLA D4 T4.2 applied definition
+S: A data scientist has a trained scikit-learn model and wants it available behind a Databricks Model Serving endpoint as a custom model. What is the correct sequence?
+A: Package the model in a Docker image, push it to a registry, then point a serving endpoint at the image
+B: Create a serving endpoint first, then upload the model file to it and log the model after creation
+C: Export the model to ONNX, copy the file to a volume, then start a cluster that exposes it as a REST API
+D: Log the model in MLflow format, register it in Unity Catalog, then create an endpoint that serves the version
+K: D
+G: ## What a custom model is
+Databricks calls traditional ML models or Python models packaged in the MLflow format "custom models". Examples are scikit-learn, XGBoost, PyTorch and Hugging Face transformer models. Anything with arbitrary Python code can be wrapped with the `pyfunc` flavor.
+## Deployment steps
+1. **Log** the model with MLflow (autologging on Databricks Runtime ML, a built-in flavor such as `mlflow.sklearn.log_model`, or custom `pyfunc`). Adding a signature and input example is recommended; a signature is required for Unity Catalog.
+2. **Register** it in Unity Catalog (recommended) or the legacy workspace model registry.
+3. **Create the endpoint** (Serving UI, REST API or MLflow Deployments SDK) and choose the model and version as the served entity.
+Databricks builds the serving container for you, so no image, cluster or ONNX conversion is needed.
+W: Log, register, serve: the MLflow format and the registered model version are what the endpoint creation form and API take as the served entity.
+X: A=Docker image: custom model serving builds the container from the registered MLflow model, so users do not build or push images.
+B=Endpoint first: the endpoint needs an existing registered model version as a served entity, so the model must be logged and registered before creation.
+C=ONNX plus cluster: ONNX is not required and a cluster is not the serving mechanism; Model Serving runs on serverless compute managed by Databricks.
+T: Custom model serving = log in MLflow format, register (Unity Catalog), create endpoint.
+
+@ DBX-MLA D4 T4.2 applied use-case
+S: Which TWO actions prepare a model so that it can be served from a Unity Catalog endpoint? (Select TWO)
+A: Log it with MLflow, using a built-in flavor or pyfunc, and include a signature so the input and output schema are known
+B: Convert the model to a PySpark ML pipeline, because only Spark ML models can be served from Model Serving
+C: Register the logged model in Unity Catalog, so that a versioned model exists that an endpoint can reference
+D: Attach the model to a running all-purpose cluster so that the endpoint can borrow that cluster's compute
+E: Export the model weights to a CSV file, because serving endpoints load tables and not MLflow models
+K: A,C
+G: ## What the endpoint needs
+A serving endpoint references a **registered model version** as its served entity. Two things must exist first.
+- A model **logged in MLflow format**. Built-in flavors (`mlflow.sklearn`, and so on) or `pyfunc` for custom code both work. The Databricks docs recommend a signature and input example, and a signature is necessary for logging models to Unity Catalog.
+- A **registered** version in Unity Catalog (recommended) or the workspace registry.
+Model Serving supports many frameworks, not only Spark ML, and it runs on its own serverless compute.
+W: A=Log with signature: MLflow format is the packaging that Model Serving deploys, and the signature is required for Unity Catalog and documents the schema of requests.
+C=Register in Unity Catalog: the endpoint takes a registered model name and version, so registration creates what can be served and governed with `EXECUTE` grants.
+X: B=Spark ML only: custom model serving explicitly covers scikit-learn, XGBoost, PyTorch and Hugging Face models, so no conversion to Spark ML is needed.
+D=Attach to a cluster: endpoints use serverless Model Serving compute sized by the endpoint settings, not an all-purpose cluster.
+E=CSV of weights: endpoints serve MLflow-format models, not exported tables, and a CSV loses the model code and its signature.
+T: Log (MLflow format, signature) then register (Unity Catalog); the endpoint serves a registered version.
+
+@ DBX-MLA D4 T4.2 applied troubleshooting
+S: An endpoint was created by a data scientist's personal account. After that person left the company and was removed from the workspace, a teammate with full permissions tries to update the endpoint's served model version and gets `PERMISSION_DENIED`. What is the cause and the lasting fix?
+A: The recorded creator is no longer a workspace member; recreate the endpoint under a long-lived service principal
+B: The new model version has a signature mismatch; relog the model with the previous input example
+C: The endpoint scaled to zero; wait for the cold start to finish and then repeat the update request
+D: The endpoint name starts with a reserved prefix; rename it and apply the update again afterwards
+K: A
+G: ## Creator identity
+When an endpoint is created, Databricks records the calling identity as its creator. That identity is used to access Unity Catalog resources on behalf of the endpoint and cannot be changed afterwards.
+Configuration and served-entity updates re-check that the recorded creator is still a workspace member and still holds the required grants (`USE CATALOG`, `USE SCHEMA`, `EXECUTE` on the model). If not, the update fails with `PERMISSION_DENIED` even when the person making the call has valid permissions.
+## Fix and prevention
+Delete the endpoint and recreate it under a service principal that is a current member with the grants. Databricks recommends a long-lived service principal owned by the team, not a personal account that may be removed.
+W: Recorded creator removed: the update re-validates the creator's membership, which fails, and the identity cannot be changed, so recreating under a service principal is the lasting fix.
+X: B=Signature mismatch: a bad model version would fail with a schema or validation error, not a permission error tied to workspace membership.
+C=Scale to zero: a scaled-to-zero endpoint adds cold-start latency to queries, but it does not block configuration updates or raise `PERMISSION_DENIED`.
+D=Reserved prefix: the `databricks-` prefix is blocked at creation, and a name that was already accepted cannot cause permission errors later.
+T: Use a team-owned service principal as endpoint creator; a removed personal creator breaks every update.
+
+@ DBX-MLA D4 T4.2 advanced tradeoff
+S: A team enables scale to zero on the endpoint for an internal demand-forecast API that is called only a few times per day. A second team asks to reuse the same setting on the endpoint behind a payment checkout. What should be said?
+A: Scale to zero never adds latency, so it is safe for checkout and always cheaper for any endpoint
+B: Scale to zero is not advised for production, since capacity is not guaranteed and idle endpoints pay a cold start
+C: Scale to zero is unsupported for custom model endpoints, so the first team must recreate its endpoint without it
+D: Scale to zero is only a Unity Catalog permission setting and has no effect on compute or latency
+K: B
+G: ## What scale to zero does
+With scale to zero enabled, a serving endpoint releases its compute when it is idle. This saves cost on endpoints that are rarely called. The cost is that the next request needs compute to start again, a **cold start**, which adds latency, and the docs say capacity is not guaranteed when the endpoint is scaled to zero.
+## Decision
+- Rarely used, latency-tolerant endpoint (internal tool): scale to zero is reasonable.
+- Latency-sensitive production endpoint (checkout): keep minimum capacity running. Databricks does not recommend scale to zero for production endpoints.
+W: Not recommended for production: idle endpoints need a cold start and capacity is not guaranteed, which is unacceptable on a payment path but acceptable for an occasional internal call.
+X: A=Never adds latency: the docs state the opposite, a scaled-up-again endpoint has extra latency (cold start), and capacity is not guaranteed.
+C=Unsupported for custom models: the custom model creation settings include a scale-to-zero option, so the first team's setup is valid and needs no recreation.
+D=Permission setting: scale to zero is a compute scaling option of the served entity, unrelated to Unity Catalog grants.
+T: Scale to zero saves cost but adds cold-start latency and no capacity guarantee: fine for rare internal calls, not for production paths.
+
+@ DBX-MLA D4 T4.2 applied use-case
+S: A model needs to clean the request first (map unseen category values, rename columns) and then call a trained estimator, and the same code must run at serving time. How should the team package it for a custom model endpoint?
+A: Wrap the preprocessing and estimator in a custom `mlflow.pyfunc.PythonModel` and log that, so the code is served with the model
+B: Keep the preprocessing in a notebook that clients run before calling the endpoint, and log only the bare estimator
+C: Log the bare estimator and ask the endpoint to run a separate notebook before each prediction request it receives
+D: Log only the preprocessing code as a pyfunc and store the trained estimator in a separate model with its own endpoint
+K: A
+G: ## Custom pyfunc models
+Besides built-in flavors, MLflow supports **custom logging with `pyfunc`**, which the Databricks docs describe as the method for deploying arbitrary Python code or "additional code alongside your model". You subclass `mlflow.pyfunc.PythonModel`, implement `predict(self, context, model_input)`, and log it. Preprocessing, the estimator and post-processing then travel as one versioned artifact that Model Serving builds into the endpoint.
+## Why this beats client-side preprocessing
+If every client repeats the cleaning, versions drift and requests differ from training. One packaged model guarantees the same transformation at training-time test and serving time.
+W: Custom pyfunc: it bundles the cleaning code and the estimator in one logged, registered artifact, so the endpoint applies the same logic to every request.
+X: B=Client notebook: this moves logic out of the model, so each client must reproduce it exactly, and an endpoint cannot call a notebook.
+C=Separate notebook per request: endpoints serve the logged MLflow model; they do not execute a notebook before each request.
+D=Two models: splitting code and estimator across endpoints doubles network hops and still leaves the caller to chain them.
+T: Need custom code with the model at serving time = log a pyfunc `PythonModel` that includes it.
+
+@ DBX-MLA D4 T4.3 applied use-case
+S: A data scientist must score 80,000 rows that already fit in memory as a pandas DataFrame, using a registered MLflow model, in a one-off notebook. What is the simplest correct approach?
+A: Convert the rows to a Spark DataFrame and register a new pandas UDF with a separate cluster for each batch
+B: Load the model with `mlflow.pyfunc.load_model` and call `predict` on the pandas DataFrame
+C: Create a model serving endpoint and loop over all rows with one REST call per row, then merge results
+D: Retrain the model on the 80,000 rows and use the training predictions as the final output
+K: B
+G: ## Single-node batch inference with pandas
+For a dataset that fits in the memory of one node, load the registered model and call `predict` on a pandas DataFrame:
+```
+model = mlflow.pyfunc.load_model(model_uri)
+preds = model.predict(pdf)
+```
+`mlflow.pyfunc.load_model` returns a generic Python-function wrapper that works for any flavor, so the same code scores a scikit-learn, XGBoost or custom model. No Spark is needed.
+## When to scale out
+When the data no longer fits on one node, move to Spark with `mlflow.pyfunc.spark_udf` (see the other scoring questions in this set).
+W: Load and predict: the data fits in memory, so one node and one `predict` call on the pandas DataFrame is the least complex route and uses the registered model as is.
+X: A=Extra UDF and clusters: this adds distributed machinery that 80,000 rows do not need, and a cluster per batch is not how a UDF is run.
+C=Row-by-row REST calls: 80,000 sequential network calls are slow and costly compared with one in-memory prediction, and they need an endpoint that does not exist.
+D=Retrain and reuse: training predictions are not scores from the registered model, and they are biased because the model saw those rows.
+T: Fits in memory = `load_model` + `predict` on pandas; too large = Spark UDF.
+
+@ DBX-MLA D4 T4.3 applied use-case
+S: A registered model must score a 600-million-row Delta table, and the result is written to another table. The data cannot be collected to the driver. What should the team do?
+A: Call `toPandas()` on the table, run `predict` on the driver, then write the pandas result back to Delta
+B: Load the model as a pandas object inside a loop on the driver and read 10,000 rows at a time
+C: Wrap the model with `mlflow.pyfunc.spark_udf` and add the prediction column with `withColumn`
+D: Move the table to a CSV file and have each analyst run the notebook on a laptop with the model
+K: C
+G: ## Distributed batch inference with a Spark UDF
+MLflow can export a logged model as an Apache Spark UDF so scoring runs on the executors, in parallel, on a Spark DataFrame:
+```
+udf = mlflow.pyfunc.spark_udf(spark, model_uri)
+df = spark.table(t).withColumn("prediction", udf())
+```
+The Databricks docs show this pattern for batch jobs (and for Spark Streaming jobs). The data stays distributed, so the table size is limited by the cluster, not by driver memory.
+## Why not the driver
+`toPandas()` pulls every row to the driver. For hundreds of millions of rows this exhausts memory or runs serially even if it fits.
+W: Spark UDF: scoring is parallelized across the cluster, the data never needs to fit on the driver, and the output is a DataFrame that can be saved as a Delta table.
+X: A=`toPandas()`: it collects all 600 million rows onto the driver, which runs out of memory and wastes the cluster.
+B=Driver loop: this scores serially on one node in many small reads, so most of the cluster sits idle and the job takes far longer.
+D=Laptops: moving production data out of the platform creates governance problems and cannot handle the volume.
+T: Large table = `mlflow.pyfunc.spark_udf` and `withColumn`; small data = pandas `predict`.
+
+@ DBX-MLA D4 T4.3 applied use-case
+S: A nightly scoring job must always use whichever model version is currently marked Champion in Unity Catalog, without editing the job when a new version is promoted. How should the job load the model?
+A: Use the URI `models:/prod.ml_team.iris_model@Champion`, so each run resolves the alias to its current version
+B: Copy the version number into the job code, then edit and redeploy the job after every promotion
+C: Use the URI `models:/prod.ml_team.iris_model/latest`, so the job always gets the newest uploaded version
+D: Download the model artifacts once into a volume folder and have the job read the files from there
+K: A
+G: ## Alias-based loading
+A Unity Catalog **alias** is a mutable name that points to one model version, such as `Champion`. A model URI of the form `models:/<catalog>.<schema>.<model>@<alias>` resolves to whatever version the alias points to when the code runs.
+The Databricks docs show exactly this for batch inference: loading `models:/prod.ml_team.iris_model@Champion` with `mlflow.pyfunc.load_model`. If the Champion alias is reassigned to a new version, the inference workload picks it up on its next execution, which decouples model deployment from the batch job. The job needs `EXECUTE` on the model plus `USE SCHEMA` and `USE CATALOG`.
+W: Alias URI: the alias is resolved at load time on every run, so promoting a new Champion changes what the next batch uses with no job edit.
+X: B=Hard-coded version: it works until the next promotion, then it silently keeps scoring with the old model unless somebody edits the job.
+C=`latest`: Unity Catalog models are addressed by version number or alias, and "newest uploaded" is not the same as the approved Champion, so an untested version could be scored.
+D=Downloaded copy: the files never change after the download, so promotions are ignored and registry governance and lineage are bypassed.
+T: Load `models:/<name>@<alias>` in batch jobs so alias moves change the model with no code change.
+
+@ DBX-MLA D4 T4.3 applied troubleshooting
+S: A model trained with specific library versions is scored on a different cluster with `mlflow.pyfunc.spark_udf`. Predictions fail or differ because installed packages do not match the model's logged dependencies. What does Databricks suggest for the UDF?
+A: Downgrade the cluster runtime to the oldest version available and retry the same notebook there
+B: Set `env_manager="virtualenv"` in `spark_udf`, so the model's dependencies are restored for the UDF only
+C: Convert the model to a CSV of coefficients and rebuild the prediction formula in SQL on the new cluster
+D: Install the model's packages on the driver only and keep the UDF on the executors unchanged
+K: B
+G: ## Model dependencies and UDFs
+MLflow logs the Python packages a model needs. When the scoring environment differs, MLflow warns about the mismatch. For `pyfunc` models you can fetch the requirements with `mlflow.pyfunc.get_model_dependencies` and `%pip install` them in the notebook.
+For Spark UDF scoring, the Databricks docs add a better option: pass `env_manager="virtualenv"` to `mlflow.pyfunc.spark_udf`. This restores the model's dependencies in the context of the UDF and does not affect the outside environment, so the notebook's own libraries stay untouched.
+W: `env_manager="virtualenv"`: it rebuilds the logged dependency set just for the UDF, keeping exact versions without changing the notebook environment.
+X: A=Oldest runtime: guessing a runtime does not guarantee the model's versions and loses other fixes on the cluster.
+C=SQL formula: rebuilding a model by hand is error-prone, impossible for non-linear models and skips the logged artifact.
+D=Driver only: the UDF runs on the executors, so fixing the driver leaves the executors with the mismatched libraries.
+T: Mismatched dependencies in `spark_udf` = `env_manager="virtualenv"`; for pandas scoring use `get_model_dependencies` and `%pip install`.
+
+@ DBX-MLA D4 T4.3 applied definition
+S: Which TWO code patterns score a logged MLflow model in batch on Databricks? (Select TWO)
+A: `mlflow.pyfunc.load_model(uri).predict(pdf)` on a pandas DataFrame that fits on one node
+B: `spark.table(t).predict(model)` which adds a prediction column to a Spark DataFrame using the registered model
+C: `mlflow.pyfunc.load_model(uri).fit(pdf)` which scores the rows after refreshing the model's weights
+D: `df.withColumn("prediction", mlflow.pyfunc.spark_udf(spark, uri)())` on a Spark DataFrame
+E: `spark.read.format("mlflow").load(uri)` which returns the predictions of the model for the whole table
+K: A,D
+G: ## Two supported scoring patterns
+- **pandas**: `mlflow.pyfunc.load_model(model_uri)` returns a model object whose `predict` takes a pandas DataFrame (or NumPy array) and returns predictions. Good for data in memory on one node.
+- **Spark UDF**: `mlflow.pyfunc.spark_udf(spark, model_uri)` returns a UDF applied with `withColumn` for a distributed Spark DataFrame. Calling the UDF without arguments uses the columns from the model signature.
+## What does not exist
+- A Spark DataFrame has no `predict(model)` method.
+- A pyfunc model is for scoring and exposes `predict`, not `fit`; scoring does not retrain.
+W: A=pandas predict: loading the pyfunc model and calling `predict` on a pandas DataFrame is the documented single-node batch scoring path.
+D=Spark UDF: `spark_udf` plus `withColumn` is the documented distributed batch path, and the same UDF also works in Spark streaming jobs.
+X: B=`DataFrame.predict`: Spark DataFrames have no such method, so the call raises an `AttributeError`; scoring requires a UDF or a model's `predict`.
+C=`fit` on pyfunc: the loaded pyfunc wrapper is for inference; it has no `fit`, and retraining is not scoring anyway.
+E=`spark.read.format("mlflow")`: MLflow models are loaded with pyfunc APIs, and no such Spark data source exists for scoring a table.
+T: Batch scoring = pyfunc `predict` on pandas, or `spark_udf` with `withColumn` on Spark.
+
+@ DBX-MLA D4 T4.4 applied definition
+S: The exam guide says "Delta Live Tables" for building streaming pipelines. Which statement matches the current Databricks product?
+A: The product was replaced by Databricks Jobs, which runs only imperative notebooks and orchestrates by hand
+B: The product is now Model Serving, and pipelines are created by defining a served entity for each stream
+C: The product is Lakeflow Spark Declarative Pipelines, a declarative framework for batch and streaming pipelines in SQL and Python
+D: The product is only a SQL warehouse feature that cannot run Python code or streaming sources
+K: C
+G: ## Naming
+The framework formerly called Delta Live Tables is now documented as **Spark Declarative Pipelines on Lakeflow** (Lakeflow pipelines). It builds on Apache Spark Declarative Pipelines and adds functionality on the Databricks Runtime.
+## What it is
+A declarative framework for building **batch and streaming** data pipelines in **SQL and Python**. You declare datasets (streaming tables, materialized views, views) and their queries; the engine handles orchestration, ordering and retries. The docs list automatic orchestration, declarative processing and incremental processing as the benefits over hand-built Structured Streaming plus job orchestration. When the exam guide says "Delta Live Tables", read it as this product.
+W: Lakeflow Spark Declarative Pipelines: it is the renamed DLT, a declarative batch and streaming framework with SQL and Python interfaces.
+X: A=Jobs replacement: Lakeflow Jobs orchestrates tasks and can run a pipeline, but it is a different product and the pipeline framework is still declarative.
+B=Model Serving: Model Serving hosts models behind endpoints; it does not define data pipelines or datasets.
+D=SQL warehouse only: pipelines support Python as well as SQL and read streaming sources, so the feature is not limited to a SQL warehouse.
+T: Delta Live Tables = Lakeflow Spark Declarative Pipelines: declarative batch and streaming pipelines.
+
+@ DBX-MLA D4 T4.4 advanced troubleshooting
+S: A pipeline's streaming table adds a `score` column by applying model version 1 to each new event. The team swaps the query to use version 2 and runs a normal (non-full) update. What does the table contain afterwards?
+A: Only version 2 scores, because every update recomputes all rows with the latest query
+B: Old rows keep version 1 scores and new rows get version 2 scores, until a full refresh
+C: The update fails, because the query of a streaming table cannot be edited after its first run has completed
+D: Old rows are deleted, and only rows that arrive after the change remain in the table
+K: B
+G: ## Streaming tables process each row once
+In a pipeline, a **streaming table** processes each record exactly once, assuming an append-only source. A row already appended is not re-read on later updates. The Databricks streaming table docs give an example: changing `SELECT LOWER(name)` to `SELECT UPPER(name)` leaves old rows lowercase while new rows are uppercase, and a **full refresh** requeries all earlier data from the source to update every row.
+## Consequence for scoring
+Applying the same reasoning to a model-scoring column, changing the model changes only rows processed after the change. To make every row use the new model, run a full refresh. Teams must also remember that different query versions have processed different rows.
+W: Mixed versions until full refresh: a streaming table sees each row once, so earlier rows keep the old logic and a full refresh is what reprocesses them.
+X: A=Recompute everything: that describes a materialized view, which recomputes results as needed, not a streaming table.
+C=Edit blocked: the docs say you can change the query without recomputing the entire dataset, so the update runs.
+D=Delete old rows: a changed query does not remove rows already appended; they stay unless a full refresh rebuilds the table.
+T: Streaming table = each row processed once; changing the logic needs a full refresh to rescore old rows.
+
+@ DBX-MLA D4 T4.4 advanced comparison
+S: Raw events are appended to a table continuously and never updated. A team wants a pipeline dataset that holds the scored events, adding each new event once, at low latency. Which dataset type fits?
+A: A materialized view, because it always recomputes the full table on each update
+B: A streaming table, because it processes each appended record once with incremental, low-latency handling
+C: A view, because views are persisted to the catalog and can be queried by other pipelines
+D: A materialized view, because it is the only type that supports a streaming source such as Kafka
+K: B
+G: ## Choosing a pipeline dataset type
+- **Streaming table**: each record is processed exactly once for an append-only, growing source; suited to ingestion and incremental processing, high throughput and low latency.
+- **Materialized view**: results are recomputed as needed to match the current state of the data; suited to aggregations, joins and sources that can change by updates and deletes.
+- **View**: evaluated on demand and not persisted; usable only inside the same pipeline.
+## Applying it
+Append-only events with a "score each once" requirement is the streaming table pattern. If the source could be updated or deleted, or the query needs joins that must stay correct when a dimension changes, a materialized view is safer because streaming-table joins do not recompute when dimensions change.
+W: Streaming table: it reads new rows from the growing source on every update and appends the result once, which matches append-only, low-latency scoring.
+X: A=Full recompute: a materialized view recomputes as needed (incrementally when possible); it is meant for changing data and joins, not for append-once low-latency ingestion.
+C=View: views are not persisted and can be used only within the same pipeline, so nothing would be stored for others to read.
+D=Only MV supports streaming: the claim is reversed, since streaming tables are always defined against streaming sources.
+T: Append-only growing source, score once = streaming table; changing source or joins that must stay correct = materialized view.
+
+@ DBX-MLA D4 T4.4 applied use-case
+S: Scored events from a declarative pipeline must be no more than a couple of minutes old, and the pipeline should keep running as new data arrives. Which pipeline mode fits?
+A: Triggered mode, which refreshes available data and stops, started by a daily schedule
+B: Triggered mode, because it is the only mode that can update streaming tables
+C: Continuous mode, which keeps a standalone streaming table refreshed on every record
+D: Continuous mode, which processes new data as it arrives to keep tables fresh
+K: D
+G: ## Triggered vs continuous
+- **Triggered**: the pipeline refreshes all tables with the data available when the update starts, then stops. Fits freshness needs of every 10 minutes, hourly or daily.
+- **Continuous**: the pipeline runs until stopped and processes data as it arrives in the configured sources. Fits freshness needs between every 10 seconds and a few minutes.
+Pipeline mode is independent of the dataset type: both streaming tables and materialized views can be updated in either mode. For workloads needing millisecond-level latency there is a separate real-time mode.
+## Standalone note
+Refresh operations for standalone materialized views and streaming tables (created outside a pipeline) always run in triggered mode.
+W: Continuous mode: it runs until stopped and keeps tables fresh as new data arrives, matching a freshness target of a few minutes.
+X: A=Daily trigger: freshness would be up to a day, far from a couple of minutes.
+B=Only triggered updates streaming tables: pipeline mode is independent of table type, and streaming tables update in both modes.
+C=Standalone table in continuous mode: standalone streaming tables and materialized views always refresh in triggered mode, so this setup is not available.
+T: Freshness of seconds to a few minutes = continuous pipeline mode; every 10 minutes or slower = triggered.
+
+@ DBX-MLA D4 T4.4 advanced use-case
+S: A streaming table in a pipeline computes windowed features before scoring. The stream has no end, and the pipeline fails from memory pressure. Which TWO measures keep the stream's state bounded? (Select TWO)
+A: Use a source that is naturally bounded, with a well-defined start and end, such as a finite set of files
+B: Run a full refresh of the streaming table at every update, so that no state is retained between updates
+C: Add a watermark, so the system knows how long to wait for late events before closing each time window
+D: Convert the table to a view, because views cache all earlier windows and release them on a schedule
+E: Raise the number of shuffle partitions, which stores the unbounded state in a larger number of files
+K: A,C
+G: ## Bounded state
+Streaming tables are built for low-latency streaming over **bounded state** and use checkpoints. They expect streams that are naturally bounded or bounded with a watermark. An unbounded stream without a watermark can cause a pipeline to fail due to memory pressure.
+- A **naturally bounded** stream has a defined start and end, for example a directory of files where no new files are added after the initial batch.
+- A **watermark** in Structured Streaming tells the engine how long to wait for delayed events before treating a window as complete, so old state can be dropped.
+## Not a fix
+Repeating a full refresh or changing the dataset type does not bound the state of a windowed streaming query.
+W: A=Naturally bounded source: a finite source ends, so the amount of state is limited by its size.
+C=Watermark: it defines when a window is complete, which lets old state be discarded so memory stays bounded.
+X: B=Full refresh each update: it reprocesses all source data and costs more, and the windowed query still keeps unbounded state while running.
+D=View: views are evaluated on demand and are not persisted; they do not cache windows or release state, and a view of the same unbounded query has the same problem.
+E=More shuffle partitions: this changes how state is distributed, not how much of it is kept, so an unbounded stream still grows without limit.
+T: Streaming tables need naturally bounded streams or a watermark; otherwise state grows until memory fails.
+
+@ DBX-MLA D4 T4.5 applied use-case
+S: A scikit-learn model is served on an endpoint that is not route optimized. A client has a pandas DataFrame of two rows. Which request body does Databricks recommend, and where is the output?
+A: A `dataframe_split` body with `columns` and `data`; predictions come back under a `predictions` key
+B: A `dataframe_records` body with one object per row; predictions come back under a `results` key
+C: A raw CSV string in the request body; predictions come back as another CSV in the response
+D: A pickle of the DataFrame sent as binary data; predictions come back as a pickled DataFrame
+K: A
+G: ## Scoring formats for custom models
+Model Serving accepts two families of input for custom models: **pandas DataFrame (JSON)** and **tensor input**. For a DataFrame, you JSON-serialize it with one of the supported keys.
+- `dataframe_split` (**recommended**): the DataFrame in `split` orientation, with `index`, `columns` and `data`.
+- `dataframe_records`: the DataFrame in `records` orientation, one JSON object per row.
+The response contains the model output serialized as JSON and wrapped in a `predictions` key, for example `{"predictions": [0, 1]}`. The request goes to `https://<instance>/serving-endpoints/<name>/invocations`.
+W: `dataframe_split` and `predictions`: this is the recommended pandas format and the documented response shape for custom models.
+X: B=Records with `results`: `dataframe_records` is a valid key, but it is not the recommended one, and the response key is `predictions`, not `results`.
+C=CSV: the supported formats for custom models are JSON pandas DataFrame and tensors, not raw CSV.
+D=Pickle: binary pickles are not an accepted scoring format and would be unsafe to deserialize from callers.
+T: Send `dataframe_split` JSON; read the `predictions` key.
+
+@ DBX-MLA D4 T4.5 applied definition
+S: A scheduled production job calls a model serving endpoint over REST. How should the job authenticate, according to Databricks recommendations?
+A: With machine-to-machine OAuth tokens, because they are recommended for production scenarios
+B: With the personal access token of the engineer who created the job, since it needs no setup
+C: With no token at all, because endpoint queries from inside the workspace are always anonymous
+D: With a new personal access token created per request and pasted into the request body
+K: A
+G: ## Authentication for querying
+To send scoring requests with the REST API or the MLflow Deployments SDK, the caller needs a Databricks credential. Databricks gives two rules:
+- **Production**: use machine-to-machine (M2M) OAuth tokens.
+- **Testing and development**: use a personal access token that belongs to a **service principal**, not to a workspace user.
+Tying production calls to a person's token breaks when that person leaves, and widens what a leaked token can do.
+W: M2M OAuth: it is the documented recommendation for production, uses a service principal identity, and avoids personal credentials.
+X: B=Engineer's token: personal tokens belong to a user, so the job breaks when that person leaves and runs with all that user's permissions.
+C=No token: endpoints require authentication and authorization on every request, even from inside the workspace.
+D=Token per request in the body: tokens go in an authorization header and are not created per call; this multiplies secrets with no benefit.
+T: Production endpoint calls = M2M OAuth; dev and test = service principal PAT, not a user PAT.
+
+@ DBX-MLA D4 T4.5 applied use-case
+S: A PyTorch model with a tensor input signature is served on an endpoint. A client wants to send one row of four floats. Which body fits the supported tensor formats?
+A: `{"dataframe_split": {"data": [[5.1, 3.5, 1.4, 0.2]]}}`, the format meant for pandas models
+B: `{"text": "5.1, 3.5, 1.4, 0.2"}`, with the numbers typed as a single string
+C: `{"inputs": [[5.1, 3.5, 1.4, 0.2]]}`, the columnar tensor format
+D: `{"dataframe_records": [5.1, 3.5, 1.4, 0.2]}`, with a bare list in place of row objects
+K: C
+G: ## Tensor input
+For models expecting tensors (TensorFlow, PyTorch), custom model endpoints accept the tensor formats of TensorFlow Serving's API.
+- `instances`: row format; use when all input tensors share the same 0-th dimension.
+- `inputs`: columnar format; use when tensors cannot be expressed in row form, for example named tensors with different counts per name.
+A single batch of four floats is `{"inputs": [[5.1, 3.5, 1.4, 0.2]]}`. The response is again `{"predictions": [...]}`.
+Pandas-style keys (`dataframe_split`, `dataframe_records`) are for models whose signature is column-based.
+W: `inputs`: it is the documented columnar tensor key, and the example in the Databricks docs sends exactly this body to a tensor-input model.
+X: A=`dataframe_split`: that key describes a JSON-serialized pandas DataFrame, which matches column-based models, not a tensor signature, and its `data` lacks the `columns` the format expects.
+B=Free text: no endpoint format accepts a comma-separated string for tensor input.
+D=`dataframe_records` with a flat list: this key needs a list of objects keyed by column name, so a bare list of numbers is invalid.
+T: Tensor models take `instances` or `inputs`; pandas models take `dataframe_split` or `dataframe_records`.
+
+@ DBX-MLA D4 T4.5 applied troubleshooting
+S: After route optimization is enabled on an endpoint, a script that sent a personal access token to the usual `/serving-endpoints/<name>/invocations` URL starts failing. What is the explanation?
+A: Route-optimized endpoints accept only OAuth tokens and must be queried at their own dedicated URL
+B: Route optimization disables REST access, so the endpoint can only be queried from a Serving UI
+C: The personal access token expired at the moment of the change, so a new token with the same URL fixes it
+D: Route optimization converts the endpoint to batch mode, which rejects requests that wait for a reply
+K: A
+G: ## Route optimization changes how you query
+Route optimization improves the network path for inference requests, lowering overhead latency and raising throughput. It is recommended for endpoints with high QPS and throughput requirements.
+The trade-off is a different calling convention. The Databricks query page warns that, if route optimization is enabled, the usual authentication flow and invocation URL do not apply: route-optimized endpoints **only accept OAuth tokens (not personal access tokens)** and must be queried at a **dedicated URL**. Clients need updating to the OAuth flow and the new URL.
+W: OAuth and dedicated URL: both the credential type and the address change, so the old script fails until it is updated.
+X: B=No REST: route-optimized endpoints are still queried over HTTP; they just use a different URL and authentication.
+C=Expired token: the failure follows the setting change, and the docs say personal access tokens are not accepted by these endpoints, so a fresh one would also fail.
+D=Batch mode: route optimization is a latency and throughput improvement for online serving, not a switch to batch.
+T: Route optimization = OAuth tokens only and a dedicated query URL; update clients when enabling it.
+
+@ DBX-MLA D4 T4.5 applied troubleshooting
+S: A model was trained with columns in a fixed order. Requests sent as `dataframe_records` sometimes produce predictions that look wrong because the model reads the wrong column. What does Databricks recommend?
+A: Switch to `dataframe_split`, which carries an explicit `columns` list and preserves ordering
+B: Keep `dataframe_records` and sort each JSON object's keys alphabetically before sending
+C: Retrain the model with the columns shuffled randomly so that order no longer matters
+D: Send the same request in the form of a tensor with the `instances` key instead
+K: A
+G: ## Why split is preferred
+A JSON object is unordered, so the `records` orientation does not guarantee that column order is kept. The Databricks docs note exactly this and prefer the `split` orientation, which sends `columns` as an ordered list next to `data` rows. The model then receives the columns in the order listed.
+## Related guidance
+Logging the model with a signature records column names and types, which helps the endpoint validate the input. Matching names and order is still the caller's responsibility.
+W: `dataframe_split`: columns are an explicit ordered list, so every row lines up with the training order and the documented guidance prefers it.
+X: B=Sort keys: alphabetical order is not the training order, and it still relies on the unordered object form.
+C=Shuffled retraining: this hurts the model and does not fix inconsistent client requests.
+D=Tensor `instances`: that is for tensor-signature models; applied to a column-based model it fails or discards column names.
+T: Prefer `dataframe_split` over `dataframe_records` because it preserves column order.
+
+@ DBX-MLA D4 T4.6 applied use-case
+S: A team wants 90% of live traffic to go to the current model version and 10% to a challenger, to compare them with real requests, behind one endpoint name. How is this configured?
+A: Create two endpoints and ask every client to pick between the two endpoint names with a random draw in code
+B: Serve both as served entities on one endpoint, with `traffic_percentage` values of 90 and 10 in `traffic_config`
+C: Register both models under one alias in Unity Catalog, so that the registry splits the requests
+D: Enable scale to zero on one served entity, which makes it receive a tenth of the traffic
+K: B
+G: ## Multiple served entities on one endpoint
+A single endpoint can serve several models or model versions at the same time. The endpoint config lists `served_entities` (each with a name, the registered model, its version and size) and a `traffic_config` with `routes` that give each served entity a `traffic_percentage`. In the Databricks example, `current` (model A) gets 90 and `challenger` (model B) gets 10.
+This enables A/B tests and lets you try a new version while the current version stays in production. Clients keep calling one endpoint URL; the platform does the split.
+W: One endpoint with two served entities: `traffic_config` routes split requests by percentage, the platform does the routing, and clients keep a single URL.
+X: A=Two endpoints with client coin flip: this pushes routing into every client, makes the split hard to change, and ignores the built-in traffic configuration.
+C=Shared alias: an alias points to one version, and the registry does not route inference requests.
+D=Scale to zero: this setting controls compute release when idle and has no relationship to the share of requests a served entity gets.
+T: Traffic split = several served entities on one endpoint plus `traffic_config` percentages.
+
+@ DBX-MLA D4 T4.6 advanced comparison
+S: A team wants to A/B test a scikit-learn model against an external LLM provider model on a single serving endpoint with a 50/50 split. What does the documentation say?
+A: It works as long as the percentages add up to 100 across the two served entities
+B: It works only when the LLM is served with pay-per-token pricing in the same region
+C: It is blocked: the sklearn model must first be converted into an external model of the same task type
+D: It is not allowed: different model types, such as custom and external models, cannot share one endpoint
+K: D
+G: ## One model type per endpoint
+Traffic splitting works across served entities of the same kind. The Databricks docs list the types that can be served on a Model Serving endpoint (custom models, models from Foundation Model APIs provisioned throughput, external models) and state: you cannot serve different model types in a single endpoint, for example a custom model and an external model.
+For external models, several can share an endpoint if they have the same task type and unique names. You cannot mix external and non-external models in one endpoint.
+## What to do instead
+Compare models of different kinds with two endpoints and separate evaluation, not with a traffic split.
+W: Mixed types not allowed: a custom scikit-learn model and an external provider model are different model types, so they cannot be served from one endpoint.
+X: A=Percentages sum to 100: a correct sum is required of any split, but it does not override the one-type-per-endpoint rule.
+B=Pay-per-token and region: those details do not change the rule; the restriction is on mixing model types.
+C=Convert to external: an external model is a reference to a hosted third-party model; a trained scikit-learn model cannot be turned into one.
+T: One endpoint serves one model type: custom with custom, external with external of the same task type.
+
+@ DBX-MLA D4 T4.6 applied use-case
+S: An endpoint serves `current` (90%) and `challenger` (10%). Before changing the split, an engineer wants to send test requests only to the challenger. Which route sends them there?
+A: POST to the endpoint URL with a `traffic_percentage` field set to 100 in the request body
+B: POST to `/serving-endpoints/<endpoint>/served-models/challenger/invocations`, which ignores traffic settings
+C: Temporarily delete the `current` served entity so the challenger gets all requests for the test
+D: Add a header `X-Served-Model: challenger` to a call on the normal endpoint URL
+K: B
+G: ## Querying one served model
+Besides the endpoint URL, each served model has its own invocation path: `POST /serving-endpoints/{endpoint-name}/served-models/{served-model-name}/invocations`. The request format is the same as for the endpoint, but the specific served model answers and **the traffic settings are ignored**. In the docs' example, sending everything to `/serving-endpoints/multi-model/served-models/challenger/invocations` means the `challenger` serves every request.
+This lets teams smoke-test or evaluate one served entity without touching the production split.
+W: Served-model path: it addresses one served entity directly and bypasses the percentages, so tests hit only the challenger while production traffic keeps its 90/10 split.
+X: A=Body field: `traffic_percentage` belongs to the endpoint configuration, not to scoring requests, and the request body is only the model input.
+C=Delete the current entity: this removes the production model from serving and risks an outage just to run a test.
+D=Custom header: no such header is documented; the way to target an entity is the served-model path.
+T: Query `/served-models/<name>/invocations` to hit one served entity regardless of the traffic split.
+
+@ DBX-MLA D4 T4.6 applied use-case
+S: The challenger performs well, and the team changes the split to 50/50 with a configuration update on a running endpoint. What happens while the update is in progress?
+A: The endpoint stops answering requests until the new split is applied, so updates need a maintenance window
+B: The endpoint answers with the new split immediately, and a failed update leaves half of the settings applied
+C: The old configuration keeps serving traffic until the new one is ready, and a failed update leaves it active
+D: The endpoint answers all requests with the challenger until the update finishes, then returns to the new split
+K: C
+G: ## Updating a live endpoint
+You can update the traffic split on a running endpoint through the REST API (`PUT /api/2.0/serving-endpoints/{name}/config` with the new `traffic_config`) or with Edit configuration in the Serving UI.
+Databricks states how updates behave:
+- Until the new configuration is ready, the **old configuration keeps serving** prediction traffic.
+- If an update fails, the existing active configuration stays effective, as if the update had not happened. Check the endpoint status to verify the update applied.
+- Only one update can run at a time, and an in-progress update can be cancelled from the Serving UI.
+Updates also re-check the recorded creator's workspace membership and grants.
+W: Old configuration keeps serving: traffic is not interrupted, and a failed update leaves the previous settings active, which is why the status should be checked afterwards.
+X: A=Downtime: there is no outage, because the previous configuration continues to answer while the new one prepares.
+B=Partial application: the update either becomes the active configuration or the old one stays, there is no half-applied state.
+D=All requests to challenger: during the update the old routes (90/10) continue to apply; no temporary override sends everything to one entity.
+T: Endpoint updates are safe: the old config serves until the new one is ready, and a failed update changes nothing.
