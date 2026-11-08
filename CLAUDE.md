@@ -50,6 +50,7 @@ Question ids are never reused (qgen takes the next id above every id in the pool
 in place instead of delete + re-add. Announce a new `lastDay` (retired exam) as soon as it is known.
 
 ## Hard rules
+- Reply to the owner in Korean (owner rule, 2026-11-08). Code, commands, paths, exam codes and quoted errors stay verbatim; committed files keep their own language (docs and batches in English).
 - Never create files or folders the site reads whose names start with `_` (GitHub Pages/Jekyll
   drops them; `.nojekyll` is a safety net, not a license). Mock exam broke on 2026-09-26 because of this.
 - Questions are added or changed only through batch files in `tools/qgen/batches/<EXAM>/bNN.txt`
