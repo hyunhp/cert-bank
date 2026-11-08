@@ -45,24 +45,26 @@ C=Linear regression only: Spark ML has many families (trees, ensembles, GBT, ALS
 T: When the data fits on one node and the single-node algorithm is better, use Spark for data preparation and train on a single node.
 V: Spark ML, scikit-learn
 
-@ DBX-MLP D1 T1.1 applied use-case
-S: A telecom team trains on 300 GB with a `StringIndexer`, a `VectorAssembler` and a random forest. The same feature logic and model must run on historical backfills and on events read from a Kafka source with Structured Streaming, without a separate serving endpoint and without re-implementing the encodings in another language. Which design matches?
-A: Train a Spark ML `Pipeline`, keep the fitted `PipelineModel`, and call its `transform` on the streaming DataFrame inside the streaming query
-B: Train scikit-learn on a sample and score each micro-batch by calling `toPandas()` on it inside `foreachBatch` on the driver
-C: Train a Spark ML model but copy its coefficients into a hand-written UDF, so that the streaming query does not depend on Spark ML classes
-D: Call `fit` on the streaming DataFrame so that the `PipelineModel` keeps learning from every micro-batch while it scores
-K: A
-G: ## Spark ML stages are DataFrame operators
-A fitted `PipelineModel` is a chain of `Transformer`s. Each stage's `transform` takes a DataFrame and returns a DataFrame with extra columns, and that works on both batch and streaming DataFrames. The indexer mapping, the assembler and the forest therefore run inside the Spark engine, once for backfills and once for the stream, from one saved artifact.
-## What does not work
-- A streaming DataFrame cannot be passed to `fit`: estimators need to read the data several times, which a stream does not allow. Fit on a batch DataFrame (historical data) and apply the resulting model to the stream.
-- Models do not learn online in Spark ML; retraining is a separate job that produces a new `PipelineModel`.
-W: Applying the fitted `PipelineModel` with `transform` on the streaming DataFrame reuses the exact same encodings and model for batch and stream, runs distributed, and needs no extra endpoint.
-X: B=toPandas in foreachBatch: it pulls each micro-batch to the driver, loses the distributed scoring, and a model trained on a sample plus hand-ported encodings reintroduces the training-serving gap.
-C=Coefficients in a UDF: a random forest has no coefficient vector, and even for linear models a hand copy breaks the single artifact and drifts from the trained pipeline.
-D=fit on a stream: Spark ML estimators cannot be fitted on streaming DataFrames, and a fitted model does not update itself with new micro-batches.
-T: Fit on batch data, then apply the fitted PipelineModel to batch and streaming DataFrames alike.
-V: Spark ML, Structured Streaming
+@ DBX-MLP D1 T1.1 troubleshooting
+S: A Spark ML `RandomForestClassifier` is fitted on a 60 GB Delta table on a cluster with 10 workers of 16 cores. The Spark UI shows only 8 tasks in the training stages while 152 cores are idle, and the fit takes far longer than the team expected. The DataFrame was read from a table stored in 8 large files. What is the most effective change?
+A: Switch to scikit-learn on the driver, because Spark ML cannot use more cores than the number of input files in a Delta table
+B: Raise `spark.driver.memory` so that the driver can hold the partitions that the 8 tasks are processing, which frees the other cores
+C: Repartition the training DataFrame to a small multiple of the total core count (for example 320) and cache it before calling `fit`
+D: Increase `numTrees` to 160 so that Spark ML creates one task per tree and fills the idle cores with work
+K: C
+G: ## Spark ML parallelism follows partitions
+Spark ML algorithms run as ordinary Spark jobs: one task processes one partition of the training DataFrame, and the iterative or per-level aggregation happens across those tasks. If the DataFrame has 8 partitions, at most 8 cores work on each pass, however large the cluster is.
+## What to check
+- Compare the number of tasks in the Spark UI stage with the total executor cores.
+- Repartition to a small multiple of the core count (`df.repartition(320)`) so all cores get work and one slow partition does not dominate.
+- Cache the repartitioned DataFrame when the algorithm makes many passes (random forest levels, logistic regression iterations), so the shuffle is paid once.
+- Adding workers to a job with too few partitions only adds idle cores.
+W: Spark ML tasks follow the partitions of the input. Repartitioning to a multiple of the cores spreads the passes over the whole cluster, and caching pays the shuffle once for all passes.
+X: A=Move to scikit-learn: the number of files only limits the initial partition count and is cheap to change; a single driver gives up the distribution that the data size may need.
+B=Driver memory: the tasks run on executors and the idle cores are caused by too few partitions, not by driver memory.
+D=More trees: trees are built level by level over the partitions, not one task per tree, so the number of trees does not create tasks.
+T: Spark ML uses as many cores as the DataFrame has partitions; repartition to a multiple of the cores and cache before fit.
+V: Spark ML, Delta Lake
 
 @ DBX-MLP D1 T1.1 advanced tradeoff
 S: A 1 TB Delta table feeds a gradient-boosted tree model. A learning curve shows validation error flat once the training set exceeds roughly 2% of the rows (about 20 GB), and the team has a tuned XGBoost model for this problem. Spark ML training on the full table takes hours on a large cluster. Which plan is the best trade-off?
@@ -124,24 +126,25 @@ D=More workers: adding workers increases coordination, and for small data it can
 T: For data that fits on one node, distribution overhead makes a single node faster; Spark ML pays off beyond the memory of one machine.
 V: Spark ML, scikit-learn
 
-@ DBX-MLP D1 T1.2 applied troubleshooting
-S: A training job saves a fitted model with `model.write().overwrite().save(path)`, where `model = pipeline.fit(train)`. A scoring job loads it with `Pipeline.load(path)` and calls `transform(batch)`, which raises an `AttributeError` for `transform`. What is the fix?
-A: Replace `Pipeline.load` with `PipelineModel.load(path)`, because the saved artifact is the fitted model
-B: Call `fit(batch)` on the loaded object first so that the stages learn the batch schema, then call `transform`
-C: Save with `pipeline.write().save(path)` instead, because only an unfitted `Pipeline` can be restored in another job without version conflicts
-D: Load the path as a single `LogisticRegressionModel`, since a saved pipeline always stores only its last stage
+@ DBX-MLP D1 T1.2 applied use-case
+S: A 200-million-row churn table has nulls in `income` and `tenure_months`. The `VectorAssembler` stage fails on them, and the first fix, filtering the null rows before training, would also drop a large share of new customers. Scoring batches contain nulls as well. How should the pipeline be changed?
+A: Add an `Imputer` stage with `strategy="median"` before `VectorAssembler`, so the medians learned at `fit` are stored and applied at scoring
+B: Fill the nulls with `df.fillna(0)` in the training notebook, then repeat the same call in each scoring job
+C: Set the `VectorAssembler` option to skip invalid rows, and accept that scoring batches return fewer rows than were sent in
+D: Compute the mean of each column with `agg` on the training table and write it into a SQL expression in every consumer
 K: A
-G: ## Two classes, two roles
-`Pipeline` is an `Estimator`: it holds stages and its `fit(df)` returns a `PipelineModel`. `PipelineModel` is a `Transformer`: it holds the fitted stages (learned indexer mappings, scaler statistics, the trained model) and offers `transform`.
-## Persistence
-Both can be saved and loaded (ML persistence). Loading must use the matching class: `Pipeline.load` for an unfitted pipeline and `PipelineModel.load` for a fitted one. The scoring job needs the fitted artifact, so it must load `PipelineModel`.
-## Why not refit
-Calling `fit` in scoring would relearn mappings and scaler statistics from the scoring batch, which breaks consistency with training.
-W: The saved path holds a fitted `PipelineModel`; loading it with `PipelineModel.load` restores all learned state and exposes `transform`.
-X: B=Fit on the batch: that would learn new statistics from the scoring data and produce a different model; the loaded object also has no `transform` to call after a mismatched load.
-C=Save the unfitted pipeline: an unfitted pipeline has no learned state, so scoring would again need training data.
-D=Last stage only: a saved `PipelineModel` stores every stage in order, which is why loading the whole model reproduces the feature steps.
-T: Save and load the fitted artifact as `PipelineModel`; `Pipeline` is the unfitted recipe.
+G: ## Missing values are learned state
+`Imputer` is an `Estimator`. `fit` computes a surrogate value per column (mean by default, or median or mode) and returns an `ImputerModel` that stores them. All `null` and `NaN` values in the input columns are treated as missing and replaced. The input columns must be numeric.
+## Why it belongs in the pipeline
+- The fill values come from the training data and travel inside the saved `PipelineModel`, so scoring uses the same numbers without any copy.
+- Median is robust to outliers, which matters for skewed columns such as income.
+- Dropping rows (skip) changes the population: new customers with few records are lost, and a scoring job would silently return fewer predictions than it received.
+- Imputers do not handle categorical features well: encode those with `StringIndexer` first.
+W: The `Imputer` stage learns the medians at `fit` and keeps them in the `PipelineModel`, so every training and scoring batch gets the same fill values and no row is removed.
+X: B=fillna(0) in notebooks: a constant of 0 is a modelling choice that distorts income, and the call has to be repeated by hand in every scoring job, where the copies drift.
+C=Skipping rows: invalid rows are removed, so the model never sees the new customers and scoring returns fewer rows than requested, which breaks joins on the output.
+D=Hand-written SQL: the training means are copied into every consumer, which is the training-serving mismatch that a stored `ImputerModel` avoids, and a mean is not robust to outliers.
+T: Use an Imputer stage so that the fill values are learned once and stored in the PipelineModel.
 V: Spark ML
 
 @ DBX-MLP D1 T1.2 applied use-case
@@ -165,43 +168,44 @@ T: Put row-level feature logic in the pipeline (SQLTransformer) so the saved Pip
 V: Spark ML
 
 @ DBX-MLP D1 T1.2 advanced tradeoff
-S: A pipeline for 200 million rows has `VectorAssembler`, `StandardScaler`, `StringIndexer` and a random forest. The team tunes with `CrossValidator(numFolds=3)` and wants to avoid recomputing the featurization for every fold and parameter combination. Which stages can they safely fit or run once outside the cross-validated estimator?
-A: Only stateless stages such as `VectorAssembler`; the `StandardScaler` and `StringIndexer` must stay inside so each fold fits its own statistics
-B: All featurization stages, because the scaler and indexer are unsupervised and cannot leak label information
-C: None of them, because `CrossValidator` rejects a `Pipeline` that has been partly fitted and requires an unfitted estimator
-D: The `StringIndexer` and `StandardScaler`, but not the `VectorAssembler`, since only stages that learn from data are deterministic
-K: A
-G: ## Where leakage enters
-Estimator stages learn from data: `StandardScaler` stores mean and standard deviation, `StringIndexer` stores the category mapping. If they are fitted on the whole training set before cross-validation, every validation fold has influenced those values. The effect is small for a scaler but real, and the reported metric is slightly optimistic. It becomes serious for supervised preprocessing (target encoding, feature selection).
-## Practical rule
-- Put learning stages inside the `Pipeline` passed to `CrossValidator`, so each fold fits them on its own training split.
-- Stateless transformers (`VectorAssembler`, `SQLTransformer` with row-level logic) learn nothing, so applying them once, before cross-validation, gives identical results and saves repeated work.
-- The extra cost of fitting scalers and indexers inside every fold is usually small compared with fitting the forest.
-W: Only stateless stages can be hoisted out without changing the results; stages that learn statistics stay inside so every fold fits them on its own training split.
-X: B=All stages are safe: the claim that unsupervised stages cannot leak is wrong; fitting on the full set lets validation rows shape the statistics, and the habit leads to real leakage with supervised preprocessing.
-C=CrossValidator rejects it: `CrossValidator` accepts any `Estimator`, including a `Pipeline`; it also happily takes a pipeline whose first stages were applied to the data beforehand.
-D=Learning stages outside: this reverses the rule; stages that learn from data are exactly the ones that must be fitted per fold, while the deterministic assembler is the one that is free to move.
-T: Hoist only stateless transformers out of cross-validation; keep stages that learn from data inside the cross-validated pipeline.
+S: A text pipeline produces TF-IDF vectors with 8 million dimensions, stored as sparse vectors of about 150 non-zero values each. Linear models on them need features on a comparable scale, and a trial with `StandardScaler(withMean=True)` ran out of executor memory. Which stage keeps the vectors sparse and still rescales the features?
+A: `MinMaxScaler`, because mapping each feature to the range 0 to 1 leaves all the zeros in place
+B: `RobustScaler(withCentering=True)`, because removing the median is cheaper than removing the mean
+C: `StandardScaler(withMean=True)` with a higher executor memory setting, since centering is needed for every linear model
+D: `MaxAbsScaler`, which divides each feature by its largest absolute value and does not center the data
+K: D
+G: ## Centering makes sparse data dense
+`StandardScaler` has `withMean` set to false by default; centering subtracts the mean from every entry, so a sparse vector becomes dense. The Spark documentation warns that this builds a dense output. With 8 million dimensions per row, the dense output cannot be held in memory.
+## Scalers that keep sparsity
+- `MaxAbsScaler` rescales each feature to [-1, 1] by dividing through its maximum absolute value. It does not shift or center the data, and so it does not destroy any sparsity.
+- `StandardScaler` with the default `withMean=False` scales to unit standard deviation only and also keeps sparse vectors sparse.
+- `MinMaxScaler` subtracts the minimum, and `RobustScaler(withCentering=True)` subtracts the median, so both can make sparse vectors dense.
+W: `MaxAbsScaler` only divides, so zero entries stay zero and the vectors stay sparse. It is an `Estimator`, so the maxima learned at `fit` are stored in the pipeline.
+X: A=MinMaxScaler: it subtracts each feature's minimum before scaling, and any non-zero minimum turns zeros into non-zero values, which makes the vectors dense.
+B=RobustScaler with centering: removing the median is also a shift, and the documentation warns that centering builds a dense output.
+C=More memory for centering: dense vectors of 8 million values per row are far beyond any realistic executor size, and the shift is not required to make the features comparable in scale.
+T: For high-dimensional sparse features, scale with MaxAbsScaler or StandardScaler without centering.
 V: Spark ML
 
 @ DBX-MLP D1 T1.2 applied troubleshooting
-S: A streaming job runs `pipeline.fit(stream_df)` on a Kafka-backed streaming DataFrame to build a `PipelineModel` that scores the same stream. The query fails at the `fit` call. What is the correct restructuring?
-A: Add `.writeStream.start()` before `fit` so the pipeline can read the stream and learn from each micro-batch
-B: Fit the pipeline on a batch DataFrame of history, save the `PipelineModel`, and apply it with `transform` to the stream
-C: Replace the random forest with a `StreamingLogisticRegression` stage, which is the supported streaming estimator in `pyspark.ml` pipelines
-D: Cache the streaming DataFrame with `.cache()` so that the estimator can pass over it more than once
-K: B
-G: ## Fit needs data it can re-read
-Estimators (`StringIndexer`, `StandardScaler`, random forest) pass over the training data once or many times. A streaming DataFrame is unbounded and cannot be re-read, so Spark does not allow batch actions such as `fit` on it. A streaming query is started with `writeStream`.
-## The standard pattern
-- Training: fit on a bounded, historical batch DataFrame (for example a Delta table snapshot) and save the `PipelineModel`.
-- Serving the stream: `model.transform(stream_df)` is allowed, because transformers are row-wise operators and can run inside a streaming query.
-- Refresh: schedule retraining as a separate batch job and swap in the new model.
-W: Training happens on bounded data and the resulting `PipelineModel` is applied to the stream, which is the supported pattern.
-X: A=writeStream before fit: `writeStream.start()` starts a query to a sink; it does not make `fit` accept a stream, and it does not train from micro-batches.
-C=StreamingLogisticRegression: that class belongs to the old RDD-based `pyspark.mllib` API, not to `pyspark.ml` pipelines, and it would not replace the other estimator stages.
-D=cache on a stream: streaming DataFrames cannot be cached for batch re-reading; the restriction on batch actions remains.
-T: Fit Spark ML pipelines on batch data; apply the fitted model to streams with transform.
+S: A pipeline for a streaming source has stages `[VectorAssembler(inputCols=["emb", "amount"]), classifier]`, where `emb` is a `VectorUDT` column produced by an upstream step. Fitting on historical batch data works, but starting the query that applies the `PipelineModel` to the streaming DataFrame fails because the size of `emb` is unknown. Which stage solves this?
+A: A `VectorSizeHint(inputCol="emb", size=64)` stage placed before the `VectorAssembler`
+B: A `VectorSlicer` on `emb` with the indices 0 to 63, which fixes the size by selecting a subset of values
+C: A `.cache()` call on the streaming DataFrame, so that Spark can look at the contents of `emb` and infer the vector size
+D: A `Normalizer` on `emb`, because normalizing a vector also writes the vector length into the column metadata
+K: A
+G: ## Vector size in metadata
+`VectorAssembler` needs the size of every input vector column to build output metadata. For a batch DataFrame, Spark can inspect the contents. In a streaming DataFrame, the contents are not available until the stream starts, so the size must come from column metadata.
+## VectorSizeHint
+`VectorSizeHint` is a transformer with `inputCol` and `size`. It adds the vector size to the column metadata so `VectorAssembler` and other stages can use that column. Its optional `handleInvalid` parameter controls vectors with nulls or the wrong size: `error` (default), `skip` (filter those rows) or `optimistic` (do not check, and so the metadata can disagree with the content).
+- Put it directly before the stage that needs the size.
+- Use `error` or `skip` rather than `optimistic` unless the producer is fully trusted.
+- Fitting estimators still needs batch data: apply the fitted model to the stream with `transform`.
+W: `VectorSizeHint` writes the known size of `emb` into the column metadata, so `VectorAssembler` can run on a streaming DataFrame without looking at the data.
+X: B=VectorSlicer: it selects entries by index and still depends on knowing the input vector, it does not declare the size of the column in the metadata.
+C=cache on a stream: streaming DataFrames cannot be cached for batch inspection, and the contents appear only after the query starts.
+D=Normalizer: it rescales each vector to unit norm and leaves the column metadata without a declared vector length.
+T: Put VectorSizeHint before VectorAssembler when vector columns come from a streaming DataFrame.
 V: Spark ML, Structured Streaming
 
 @ DBX-MLP D1 T1.2 applied use-case
@@ -407,22 +411,24 @@ T: Parallelism is the number of concurrent fits; it helps only when each fit lea
 V: Spark ML
 
 @ DBX-MLP D1 T1.4 applied use-case
-S: Only 0.3% of 50 million loan records are defaults. A `CrossValidator` with the default `BinaryClassificationEvaluator` gives every parameter combination an area under the ROC curve between 0.96 and 0.97, so the best model hardly differs from the others, yet precision at useful recall levels varies a lot. Which evaluator setting improves the selection?
-A: Switch to `MulticlassClassificationEvaluator(metricName="accuracy")`, which separates the combinations by correct predictions
-B: Set `metricName="areaUnderPR"` on the `BinaryClassificationEvaluator`, since precision-recall is more sensitive to rare positives
-C: Keep `areaUnderROC` and add more folds, which separates combinations that currently look equal
-D: Use `RegressionEvaluator(metricName="r2")` on the predicted probabilities, which separates models by explained variance
-K: B
-G: ## Imbalance and metrics
-With rare positives, the ROC curve's false-positive rate is dominated by the huge number of negatives, so large changes in the number of false positives barely move the ROC curve. The precision-recall curve uses precision, in which false positives are compared with the number of predicted positives, so it reflects the quality on the rare class.
-## Where the metric is set
-`CrossValidator` picks the best `ParamMap` by the evaluator's metric. `BinaryClassificationEvaluator` supports `areaUnderROC` (default) and `areaUnderPR`; you change it with `setMetricName`. Accuracy is misleading here, because predicting "no default" for everything gives 99.7%.
-- Also consider class weights (`weightCol`) in training, which is a separate decision from the selection metric.
-W: Area under the PR curve responds to precision on the rare class, so the grid candidates are separated according to the quality that matters.
-X: A=Accuracy: a model that never predicts a default scores 99.7%, so accuracy separates nothing useful.
-C=More folds with ROC: more folds average out noise but the metric itself stays insensitive to the rare class.
-D=R2 on probabilities: `RegressionEvaluator` treats the prediction as a number; it is not designed for ranking quality of a classifier.
-T: With rare positives, select by areaUnderPR (or another positive-class metric), not ROC or accuracy.
+S: A team wants to pick `k` for a Spark ML `KMeans` model on 80 million unlabeled customers. They build a `ParamGridBuilder` over `k` from 3 to 12 and need an evaluator for `TrainValidationSplit`, which picks the best `ParamMap` by the evaluator metric. There is no label column. Which evaluator fits?
+A: `ClusteringEvaluator`, which computes the silhouette score from the `features` and `prediction` columns and needs no label
+B: `MulticlassClassificationEvaluator(metricName="f1")`, comparing the cluster index with a column of random labels
+C: `BinaryClassificationEvaluator`, because each cluster is a positive class against all of the others
+D: `RegressionEvaluator(metricName="rmse")` on the cluster index, since lower distance to the centre is the better fit
+K: A
+G: ## Tuning without labels
+`CrossValidator` and `TrainValidationSplit` need an `Evaluator` whose metric tells which `ParamMap` is better. Classification and regression evaluators compare predictions with a label column, which an unsupervised task does not have. `ClusteringEvaluator` computes the silhouette score (by default with squared Euclidean distance) from the feature vectors and the cluster assignments only.
+## Cautions
+- The silhouette score is a larger-is-better measure, so no change of direction is needed.
+- It is distance based: scale the features before `KMeans` and before evaluating, otherwise one feature decides the score.
+- The score usually changes little between neighbouring values of `k`: also consider the business use and the cost of the cluster count.
+- At 80 million rows, `TrainValidationSplit` fits each `k` once, while `CrossValidator` would multiply the cost by the number of folds.
+W: `ClusteringEvaluator` measures cluster separation without labels, so the grid over `k` can be scored and the best model chosen by the highest silhouette.
+X: B=f1 on random labels: the metric would compare cluster numbers with noise, and cluster indices have no fixed meaning that could match any label.
+C=BinaryClassificationEvaluator: it needs a true label and a raw prediction column, and clusters are not positive and negative classes.
+D=RMSE on the cluster index: the index is an arbitrary identifier, so a difference between two identifiers carries no information about fit.
+T: Tune unsupervised models with an evaluator that needs no label, such as ClusteringEvaluator.
 V: Spark ML
 
 @ DBX-MLP D1 T1.4 applied use-case

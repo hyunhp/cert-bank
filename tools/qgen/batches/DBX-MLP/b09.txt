@@ -1,0 +1,559 @@
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/index
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/create-monitor-api
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/create-monitor-ui
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/monitor-output
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/monitor-alerts
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/monitor-dashboard
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/monitor-diagnose-endpoints
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/inference-tables
+# src: https://docs.databricks.com/aws/en/ai-gateway/inference-tables
+
+@ DBX-MLP D2 T2.13 applied use-case
+S: A governed table `ml.crm.customer_dim` is fully rewritten every night by a pipeline. It has no event timestamp that describes when a row happened, and it holds no model predictions. The team wants data quality metrics, such as null rates and distributions, tracked for each nightly state of the whole table. Which profile type fits?
+A: A time series profile on the `updated_at` column, with a daily granularity, so that each nightly rewrite becomes a separate time window
+B: A snapshot profile, which processes the complete table at every refresh and records the metrics for the state of the table at that time
+C: An inference profile with the customer id as the model id column, so that every customer is profiled as a separate model
+D: No profile at all, because profiles can be attached only to tables that grow by appending rows and never to rewritten tables
+K: B
+G: ## Three profile types
+Data profiling (documented earlier as Lakehouse Monitoring, which the exam guide still calls it) attaches a profile to a Unity Catalog table and writes two Delta metric tables, the profile metrics table and the drift metrics table, plus a dashboard. The profile type decides how the table is cut into windows.
+- Snapshot: for any table that does not fit the other two. The complete table is processed at every refresh and the window is a single point in time. The maximum table size is 4TB.
+- Time series: the table has a timestamp column that says when each row happened; metrics are computed per time window at the chosen granularities.
+- Inference: a request log with timestamp, model inputs, prediction, optional label and a model id column; adds model quality metrics.
+## Why this matters
+A rewritten dimension table has no meaningful event time, so time windows would describe `updated_at` values rather than the state of the table. Snapshot keeps one metric set per refresh, and the drift metrics table can compare refreshes.
+W: Snapshot is the type for tables without a meaningful time axis or predictions: each refresh profiles the whole current table, so the nightly states can be compared.
+X: A=Time series on updated_at: windows would group rows by modification time, not by nightly state, so the metrics would describe how old rows are rather than how the full table looks after each rewrite.
+C=Inference profile: that type expects a request log with predictions and a model id column; a customer id is not a model, and no model quality metrics could be computed.
+D=No profile: profiles work on managed or external Delta tables, views and materialized views, and rewritten tables are fine for a snapshot profile.
+T: Use a snapshot profile when the whole table is the unit to profile at each refresh and there is no time axis or prediction log.
+V: Unity Catalog, Data profiling
+
+@ DBX-MLP D2 T2.13 advanced use-case
+S: A serving endpoint logs requests and responses to an inference table. The request and response columns hold JSON strings with the feature values and the prediction, and true labels arrive later in a separate table. The team wants an inference profile with accuracy and F1 trends. What should the pipeline do before creating the profile?
+A: Create the inference profile directly on the logged table and set the prediction column to the response JSON column, which the profile parses automatically
+B: Create a time series profile on the logged table, because inference profiles accept only tables written by batch scoring jobs and never endpoint logs, and it would give the same metrics
+C: Export the table to a CSV file in a volume every night, because profiles are able to read only files and cannot read Delta tables
+D: Schedule a job that unpacks the JSON into one column per feature and prediction, joins the labels, and profile the resulting Delta table
+K: D
+G: ## What an inference profile expects
+An inference profile reads a flat table in which each row is one request, with a timestamp, the model inputs as columns, a prediction column, an optional label column and a model id column. Model quality metrics need both `prediction_col` and `label_col`.
+## Inference table payloads
+An endpoint inference table stores the raw request and response payloads. The documented workflow is: enable inference tables, schedule a job that unpacks the JSON payloads according to the schema of the endpoint, optionally join the unpacked rows with ground-truth labels, and then create the monitor over the resulting Delta table and refresh it.
+W: Unpacking the JSON into typed columns and joining the late labels produces the flat request log that the inference profile needs, so accuracy and F1 can be computed per window.
+X: A=Response JSON as the prediction: the profile does not parse payloads; a string of JSON would be treated as a categorical value and no classification metrics could be computed.
+B=Time series profile: endpoint logs are fine as a source once flattened, and a time series profile would give no model quality metrics at all.
+C=CSV export: profiles read Delta tables in Unity Catalog directly; exporting to files adds a step and loses the table that the profile attaches to.
+T: Flatten and label-join the payloads first; the inference profile attaches to the flat Delta table, not to the raw log.
+V: Model Serving, Data profiling, Unity Catalog
+
+@ DBX-MLP D2 T2.13 applied troubleshooting
+S: A team creates a time series profile today on an events table that has two years of history, expecting two years of daily metrics. The first refresh finishes, but the dashboard shows only about the last month. No error is reported. What explains this?
+A: When a time series or inference profile is created, only the data from the 30 days before its creation is analyzed; new data is processed after that
+B: The daily granularity discards all windows older than the retention period of the metric tables, which is set to 30 days by default in the profile
+C: The dashboard was created by a different user, and Unity Catalog row filters hide the older windows from everyone except the table owner
+D: The profile processes only the files added since the table was last optimized, and the older files are skipped until a full refresh is requested
+K: A
+G: ## First refresh of time series and inference profiles
+When a time series or inference profile is created, Databricks analyzes only the data of the 30 days before creation. After that, all new data is processed on each refresh. Because the 30-day cut-off can fall in the middle of a window, the first window may be partial.
+## Design consequence
+If a long history is needed for trend comparison, do not expect the profile to backfill it. Plan for a baseline table that represents the earlier acceptable distribution, or contact the account team about the look-back period, which the documentation says is the way to adjust it.
+W: The documented behavior is a 30-day look-back at creation, so a profile created today starts with roughly the last month and then grows as new data arrives.
+X: B=Retention setting: the metric tables are ordinary Delta tables without a profile-level retention setting that deletes old windows; the limit applies to the initial analysis only.
+C=Row filters: no row filter is applied by the profile, and the metric tables are governed by regular Unity Catalog grants; the short history is the same for all viewers.
+D=Optimize-based skipping: profiles do not depend on optimization state; with change data feed enabled only appended data is processed, but the history cut-off is the 30-day look-back.
+T: Time series and inference profiles look back 30 days at creation, then process all new data.
+V: Data profiling, Unity Catalog
+
+@ DBX-MLP D2 T2.13 advanced tradeoff
+S: A 6TB append-only table of clickstream events, with an `event_ts` timestamp, must be profiled for null rates and distribution drift. A first attempt with a snapshot profile is rejected for size. Refresh cost must also stay low as the table grows. Which configuration meets both needs?
+A: A snapshot profile with a slicing expression on `event_ts`, so that each slice is smaller than the maximum table size for snapshots
+B: An inference profile, because it supports larger tables than snapshot and does not require predictions when the label column is omitted
+C: A time series profile on `event_ts` with change data feed enabled on the table, so that each refresh processes only newly appended data
+D: A snapshot profile on a deep clone refreshed monthly, which keeps the profiled table under the limit while the source continues to grow
+K: C
+G: ## Size limit and incremental processing
+A snapshot profile processes the complete table on every refresh and is limited to 4TB; for larger tables, the documentation points to time series profiles. For time series and inference profiles, it is a best practice to enable change data feed (CDF) on the table: then only newly appended data is processed instead of re-processing the table at every refresh, which keeps cost under control across many tables. Profiles over materialized views do not support incremental processing.
+## Applying it
+An append-only event table with a timestamp is the textbook time series case: windows by event time, new rows only per refresh.
+W: A time series profile has no 4TB snapshot limit, gives windowed metrics by `event_ts`, and CDF limits each refresh to the new appended rows.
+X: A=Slicing on event_ts: slices are computed in addition to the whole table, so the full table still has to be processed and the snapshot size limit still applies.
+B=Inference profile: it needs a prediction column and a model id and exists for request logs; it is not a way around a size limit for plain event data.
+D=Clone and monthly snapshot: a stale clone profiles old data, still carries the full-table cost at each refresh, and breaks as soon as the clone itself exceeds 4TB.
+T: Large append-only tables with a timestamp: time series profile plus change data feed.
+V: Data profiling, Delta Lake
+
+@ DBX-MLP D2 T2.13 applied troubleshooting
+S: A platform team has already attached a snapshot profile to `ml.churn.scored_customers`. An ML engineer now calls `create_monitor` with an `InferenceLogConfig` for the same table to get accuracy trends, and the call fails. The table does have prediction, label, timestamp and model version columns. What is the correct way forward?
+A: Create the second profile with a different output schema, because the limit applies to each metric-table location and not to the table
+B: Delete the snapshot profile, or profile a separate view or table over the same predictions, because a table can have only one profile
+C: Add inference settings to the existing snapshot profile with an update call, because one profile can combine the snapshot and inference types
+D: Ask for the MANAGE privilege on the catalog, because creating an additional profile on a table needs a privilege higher than the first one
+K: B
+G: ## One profile per table
+Only a single profile can be created in a Unity Catalog metastore for any table. The profile type is chosen when it is created; the three types are mutually exclusive configurations. Deleting a profile with `delete_monitor` does not delete the metric tables or the dashboard that it created; those are separate assets.
+## Decision
+When a different analysis is needed for data that is already profiled, either replace the profile (delete and recreate with the new type, accepting new metric tables) or profile a different table object, such as a view or a table that holds the predictions in the right shape.
+W: Since one table can have only one profile, the engineer either replaces the snapshot profile or attaches the inference profile to another view or table over the predictions.
+X: A=Different output schema: the restriction is on the profiled table and the metastore, not on where metrics are written, so the second call fails whatever the output schema is.
+C=Mixing types: a profile has exactly one of snapshot, time series or inference configuration; it is not possible to add a second analysis mode to it.
+D=Higher privilege: creating a profile needs USE CATALOG, USE SCHEMA, SELECT and MANAGE on the catalog, schema or table, and more privileges do not lift the one-profile limit.
+T: One profile per table: replace it or profile another table or view.
+V: Data profiling, Unity Catalog
+
+@ DBX-MLP D2 T2.13 advanced use-case
+S: A classifier was trained and evaluated on a validation set stored in `ml.churn.validation`. The team now builds an inference profile on the unpacked endpoint log and wants drift alerts that tell them when production inputs differ from what the model saw during development. Which baseline should they supply?
+A: The first 30 days of the unpacked production log, because the baseline must be taken from the same table so that the schema matches exactly the primary one
+B: A random sample of the latest production week, refreshed each night, so that the baseline always represents current traffic
+C: The training pipeline's raw input files, joined with all columns of the source systems, to include as many fields as possible
+D: The validation set, with the same feature columns and model id value as the primary table, so drift is measured against the evaluation data
+K: D
+G: ## Baseline tables
+In addition to the primary table, a profile can use a baseline table: a reference with the same schema (except the timestamp column for time series and inference profiles). Drift is then computed relative to those expected values. For an inference profile, the documented good choice is the data used to train or validate the model, so users are alerted when data has drifted relative to what the model was trained and validated on. The baseline should contain the same feature columns as the primary table and the same `model_id_col` so that data are aggregated consistently. Ideally the test or validation set used to evaluate the model is used, which also makes the quality metrics comparable.
+W: The validation set represents the distribution on which the model was evaluated, and with matching columns and model id the baseline drift metrics measure production against that reference.
+X: A=First 30 days of production: this encodes whatever production looked like at the start, which may already differ from training data, and a baseline is a separate table, not a time slice of the primary table.
+B=Latest production week: a baseline that moves with the traffic always looks like the current data, so baseline drift stays near zero and real shifts are hidden.
+C=Raw source files: columns that do not match the primary table are only handled with best-effort heuristics, and the raw data is not what the model consumed after feature engineering.
+T: For inference profiles, use the training or validation data, with matching feature and model id columns, as baseline.
+V: Data profiling, MLflow
+
+@ DBX-MLP D2 T2.14 applied use-case
+S: Overnight, the p95 latency of a model serving endpoint tripled and the error rate rose, while the feature and prediction distributions in the inference profile look normal. Where should the on-call engineer look first to diagnose the problem?
+A: The endpoint health metrics in the Serving UI, which show latency, request rate, error rate, CPU usage and memory usage of the serving infrastructure
+B: The drift metrics table of the profile, because every production incident first appears as a change in the distribution of a feature
+C: The logged ground-truth labels, because latency and error rate are model quality metrics that are computed from correct and incorrect predictions
+D: The build logs of the endpoint, because they are streamed in real time and show every request that is currently being served
+K: A
+G: ## Four layers of a monitoring pipeline
+- Logging: inference tables capture requests, responses, status codes and execution times in a Unity Catalog Delta table.
+- Data and prediction drift: the profile's drift metrics table compares windows or a baseline.
+- Model performance: quality metrics (accuracy, RMSE, F1) need labels joined to predictions.
+- Health: infrastructure metrics of the endpoint, such as latency, request rate, error rate, CPU and memory, available in the Serving UI for the last 14 days and streamable to observability tools.
+## Reading the symptom
+Latency and errors are health signals. Normal distributions in the profile say the inputs are fine, so the infrastructure view is the next place to look.
+W: Endpoint health metrics cover exactly the symptoms of latency, errors and resource usage, and the normal profile already rules out data issues.
+X: B=Drift metrics table: drift describes the data distribution; an infrastructure problem can occur with perfectly normal inputs, as the stem shows.
+C=Ground-truth labels: latency and error rate are not derived from labels; quality metrics come from comparing predictions with labels and say nothing about response time.
+D=Build logs: they show the output of creating the Python environment of the endpoint during deployment (kept up to 30 days), not live request handling.
+T: Latency and errors are health metrics; distribution and accuracy are profile metrics.
+V: Model Serving, Data profiling
+
+@ DBX-MLP D2 T2.14 advanced troubleshooting
+S: An inference profile is refreshing on schedule and the drift tables fill normally, but the accuracy, precision and recall columns are NULL for every window. The prediction column is configured. Which cause is most likely?
+A: The model was registered in Unity Catalog instead of the workspace registry, which blocks the quality metrics of an inference profile
+B: The profile is set to a daily granularity, and quality metrics are computed only for windows of one week or longer
+C: No label column is configured, or the ground-truth labels were never joined to the logged predictions, so model quality cannot be calculated
+D: The drift metrics are computed first and block the quality metrics until baseline drift has been calculated for each column
+K: C
+G: ## Model quality needs labels
+For an inference profile, model quality is calculated only if both `label_col` and `prediction_col` are provided. The label is optional in the configuration, so a profile can be created without it and still produce data quality and drift metrics, while the accuracy, precision, recall and F1 (or the regression metrics) stay null.
+## Fix
+Join the ground truth to the unpacked request log (for example by a request identifier such as `client_request_id`), add the label column to the profile configuration, and refresh. Where labels arrive late, drift on inputs and predictions is still available in the meantime.
+W: Without a label column that holds the ground truth, quality metrics cannot be derived, even though drift and distribution statistics are produced.
+X: A=Registry type: the profile reads a table; it has no link to where the model is registered, and Unity Catalog models are the supported current approach.
+B=Granularity: every granularity from five minutes to a year supports the same set of metrics; the window size changes the number of rows per window, not which metrics exist.
+D=Metric ordering: the metrics tables are computed in the same refresh and do not depend on each other; baseline drift is not a precondition for quality metrics.
+T: Quality metrics in an inference profile exist only when prediction and label columns are both present.
+V: Data profiling, Model Serving
+
+@ DBX-MLP D2 T2.14 advanced use-case
+S: A lending model gets ground-truth repayment labels only about 60 days after scoring. The team wants a monitoring design that gives useful signals during those 60 days and also reports true quality later. Which design does that?
+A: Wait to create any monitor until the labels are available, because an inference profile cannot be created on a table that has no label column yet
+B: Alert on endpoint latency alone during the waiting period and compute accuracy by hand after the labels arrive
+C: Retrain the model every week during the delay, since without labels no signal about the model is available to monitor
+D: Profile the unpacked log now for input and prediction drift against a baseline; join labels later so quality metrics fill in for those windows
+K: D
+G: ## Proxy signals and delayed truth
+Quality metrics need labels, which often lag. Drift on feature columns and on the prediction column needs no labels, and it is an early warning because a changed input distribution usually precedes a quality drop. The label column in an inference profile is optional, so the profile can run without it and quality metrics appear once labels are available in the profiled table.
+## Design
+Unpack the endpoint log into a flat table with a stable request key; create the inference profile with baseline from the validation set; add the labels to the table when they arrive (for example with a scheduled `MERGE` on the request key) and refresh.
+W: Input and prediction drift is monitored from day one, and the label column filled later lets quality metrics follow for the same windows without redesigning the monitoring.
+X: A=Waiting for labels: the label column is optional for an inference profile, so drift and data quality can be tracked from the first request.
+B=Latency only: this covers health and says nothing about the changing data or the predictions; it leaves the long delay without any model-related signal.
+C=Weekly blind retraining: with no signal, retraining is expensive guesswork and might not address any real change, and new models cannot be validated without labels.
+T: With delayed labels, monitor drift now and let quality metrics follow when the labels join.
+V: Data profiling, Model Serving
+
+@ DBX-MLP D2 T2.14 applied use-case
+S: A customer complains that the endpoint returned a nonsensical score for one specific request yesterday. The ML engineer needs the exact input payload and response, the HTTP status code and the execution time of that single request. Which monitoring component holds that detail?
+A: The aggregated profile metrics table, which stores the raw payload of every request for each time window
+B: The inference table of the endpoint, which logs request and response payloads with status codes and timing in a Unity Catalog Delta table
+C: The Model Registry page of the model version, which keeps a copy of each scored request for 90 days
+D: The dashboard created by the profile, which can be filtered down to one single request with the request id widget of its filter bar
+K: B
+G: ## Row-level versus aggregate monitoring
+Inference tables log request and response data of an endpoint per request into a Unity Catalog Delta table; they log data like HTTP status codes, model execution times and the request and response JSON, which is why they serve debugging as well as monitoring. Profiles aggregate: they produce statistics per window, slice and column, so individual rows are not recoverable from them.
+## Use
+Query the inference table by the `request_id` (or by a `client_request_id` supplied by the caller, which can also be used to join labels) to see the exact payload.
+W: The inference table is the per-request log with payloads, status and timing, so one request can be found and replayed.
+X: A=Profile metrics table: it holds summary statistics for window, slice and column combinations such as counts, means and quantiles, never the raw payloads.
+C=Registry page: the registry describes versions, aliases and lineage of models and does not store scored requests.
+D=Profile dashboard: its widgets filter windows, slices and models of the aggregated metric tables, not individual requests.
+T: Row-level debugging uses the inference table; trend monitoring uses the profile's aggregated tables.
+V: Model Serving, Unity Catalog
+
+@ DBX-MLP D2 T2.14 advanced tradeoff
+S: A regulated team must keep system logs, custom application logs, metrics and traces of a custom model serving endpoint for years, queryable with SQL. The endpoint health metrics in the Serving UI are only available for the last 14 days. Which approach meets the retention requirement?
+A: Take a screenshot of the Serving UI charts every week and store the images in a volume together with the audit documents
+B: Increase the granularity of the profile to one year so that the metric tables keep the endpoint logs for that period
+C: Configure OpenTelemetry telemetry on the endpoint so that logs, metrics and traces persist to Unity Catalog Delta tables for long-term retention
+D: Keep only the ephemeral service logs, because stdout and stderr streams are stored in the logs tab of the endpoint without any time limit
+K: C
+G: ## Where operational data lives
+Endpoint health metrics (latency, request rate, error rate, CPU, memory) are shown in the Serving UI for the last 14 days, and the data can also be streamed to observability tools. For custom model serving endpoints, OpenTelemetry telemetry persists standard system logs, custom application logs, metrics and traces to Unity Catalog Delta tables, for historical debugging, compliance and SQL analysis. Ephemeral service logs capture `stdout` and `stderr` for deployment-time debugging, and build logs are retained for up to 30 days.
+## Choosing
+Retention and SQL access are requirements of persisted telemetry, not of the UI or the profile.
+W: OpenTelemetry writes logs, metrics and traces to Unity Catalog Delta tables, which gives long-term retention and SQL queries under Unity Catalog governance.
+X: A=Screenshots: the images cannot be queried with SQL, are manual, and lose the underlying values.
+B=Yearly granularity: granularity sets the window length of data profiling metrics for a table; it does not collect endpoint logs and metrics at all.
+D=Ephemeral logs only: they are meant for immediate debugging, are streamed in the logs tab, and are not a compliance-grade retained record.
+T: Long-term, SQL-queryable endpoint telemetry comes from OpenTelemetry persistence to Delta tables.
+V: Model Serving, Unity Catalog
+
+@ DBX-MLP D2 T2.14 applied troubleshooting
+S: After the nightly profile refresh succeeds, business stakeholders who open the profile dashboard in the morning still see last week's charts. The metric tables already contain the new windows. What is the cause and the fix?
+A: The dashboard refreshes separately from the profile, so its queries must run again after the profile refresh, for example on a schedule
+B: The profile refresh also needs a manual publish of the dashboard, and only the profile owner can publish it for other users
+C: Dashboards read the baseline table only, so the new windows appear after the baseline table is replaced by the latest data
+D: The metric tables sit in another catalog than the dashboard reads, so the output schema must change
+K: A
+G: ## Two refresh cycles
+When a profile runs, the metric tables are updated, but the dashboard is not automatically updated. Clicking Refresh on the dashboard re-runs its queries over the metric tables; it does not trigger profile calculations. To see new values, refresh the profile and then refresh the dashboard, which can be automated with a schedule for the dashboard that runs after the profile refresh.
+## Consequence for pipelines
+In a monitoring pipeline, schedule the profile refresh first and the dashboard and alert queries after it.
+W: Profile refresh and dashboard refresh are independent: the dashboard shows data only after its own queries are run again over the updated metric tables.
+X: B=Manual publish: the dashboard is an ordinary dashboard that can be shared; there is no extra publish step that holds back new profile data.
+C=Baseline-only reads: dashboards display the profile metrics and drift metrics tables, which hold the windows of the primary table and drift against the baseline; replacing the baseline would change drift values and not make charts current.
+D=Schema mismatch: the dashboard is generated over the profile's own metric tables, and the metric tables already contain the new windows, so the location is correct.
+T: Refresh the profile, then refresh the dashboard; they are separate.
+V: Data profiling, AI/BI Dashboards
+
+@ DBX-MLP D2 T2.15 applied use-case
+S: The on-call team wants a Slack or PagerDuty notification when the population stability index of any numeric feature of a served model exceeds an agreed threshold. The drift metrics table is refreshed daily by the profile. Which design implements this with documented features?
+A: Add the on-call address to the profile's email notification setting, which sends a message whenever any drift metric crosses a threshold
+B: Run a notebook every hour that reads the dashboard widgets and posts a message to the channel with a webhook
+C: Set the endpoint's rate limit to the threshold, so that requests are refused when the drift of the inputs is too large
+D: Create a Databricks SQL query on the drift metrics table and an alert on it with a notification destination such as a webhook, Slack or PagerDuty
+K: D
+G: ## Alerts on metric tables
+Profile alerts are normal Databricks SQL alerts: you write a query on the profile metrics table or the drift metrics table, then create an alert on that query that is evaluated at a chosen frequency and sends notifications when triggered. By default the notification is an email; you can also set a webhook or send to applications such as Slack or PagerDuty. Typical uses are: a statistic leaves a range (missing values above a level), data changes (drift table), and data drifted relative to the baseline, which for inference profiles can be the signal to retrain.
+## Threshold
+The drift table contains `population_stability_index` for numeric columns (below 0.1 no significant change, below 0.2 moderate, 0.2 or above significant).
+W: A SQL alert on a query over the drift metrics table evaluates the metric on a schedule and notifies through a webhook or Slack or PagerDuty destination.
+X: A=Profile email settings: the profile's notification settings report profile events such as a failed or timed-out refresh and do not evaluate drift thresholds.
+B=Polling notebook: it can work technically, but it reads a dashboard that is not a data source, and it replaces a built-in alert mechanism with code to maintain.
+C=Rate limit: rate limits control request volume per endpoint or user and have no connection to feature distributions.
+T: Drift alerts are SQL alerts over the drift metrics table with a notification destination.
+V: Data profiling, Databricks SQL
+
+@ DBX-MLP D2 T2.15 advanced troubleshooting
+S: A team configured email addresses in the profile's notification settings, and expected an email when feature drift increased last week. Drift was clearly visible in the drift metrics table but nobody was notified. What is the reason?
+A: The email limit was exceeded, because a profile sends at most one email per week for each monitored column
+B: The notification settings cover events such as a failed or timed-out refresh and never check drift values; drift needs a SQL alert on the drift table
+C: Emails are sent only for baseline drift, and the profile had no baseline table, so none were generated
+D: Notifications work only for snapshot profiles, so the inference profile could not send any email about drift, whatever the thresholds in the metric tables were
+K: B
+G: ## Two different notification mechanisms
+The profile's own notification settings, for example `on_failure` with a list of email addresses (a maximum of 5 per event type), notify about the execution of the profile: refresh failures or timeouts. They do not evaluate any metric. Notifications about values, such as the fraction of missing values or a drift statistic, come from Databricks SQL alerts on queries over the profile metrics or drift metrics tables.
+## Pipeline
+Use both: profile notifications to know that the monitoring itself is broken, and SQL alerts to know that the data or model changed.
+W: The email setting is for profile execution events; value-based alerts belong to a SQL alert on the metric tables, which is why drift went unnoticed.
+X: A=Weekly email limit: the only documented limit is five addresses per event type, and there is no per-column weekly cap.
+C=Baseline-only: the setting does not compute or send drift notifications at all, either for baseline or for consecutive windows.
+D=Snapshot only: notification settings are available for all profile types, but they are about refresh events, not about snapshot data.
+T: Profile notifications report refresh failures; drift thresholds need SQL alerts.
+V: Data profiling, Databricks SQL
+
+@ DBX-MLP D2 T2.15 advanced tradeoff
+S: An inference profile covers a model with 120 features. Alerting on each feature separately would create 120 alert objects to own and tune, and a single event can shift many features together. Which design gives the team a manageable but still specific alert?
+A: One alert whose query returns, for the latest window, the columns whose drift against the baseline is above the agreed threshold; the alert fires if any row is returned and lists the columns
+B: One alert on the average of all drift values across the 120 columns, which hides a single strongly drifting feature in the mean
+C: One alert on the number of rows in the profile metrics table, because a new window is written only when some feature has drifted
+D: 120 alerts created by script, one per feature, each with its own destination and threshold, because grouping features cannot be done in a query
+K: C
+G: ## Alert granularity
+A SQL alert evaluates one query and triggers on a condition on its result, for example when rows are returned or when a value passes a threshold. The drift metrics table has one row per column, window, slice and drift type, so a single query can filter the latest window and the right `drift_type`, apply the threshold with a `WHERE` clause, and return the offending columns.
+## Trade-offs
+- Per-feature alerts: precise but heavy to maintain and noisy when one cause shifts many features.
+- One aggregated number: easy but a mean hides a single feature that has drifted a lot.
+- One alert that lists the drifted columns: one object, specific content in the message.
+W: A single query that returns the columns above the threshold gives one alert to manage and still tells the responder which features drifted.
+X: A=Average of all drift values: averaging dilutes one severe drift among 119 stable features and the alert would stay quiet.
+B=Row count of the metrics table: windows are written at each refresh whether or not there is drift, so the count says nothing about the distribution.
+D=120 scripted alerts: queries can filter by `column_name`, window and threshold together, so grouping is possible, and many alerts only add maintenance and noise.
+T: Alert on a query that returns the drifted columns, not on one alert per feature or one blended average.
+V: Data profiling, Databricks SQL
+
+@ DBX-MLP D2 T2.15 advanced troubleshooting
+S: A SQL alert was built from a dashboard query on the drift metrics table, with the query parameter `:model_id` whose default is 1. After version 2 replaced version 1 in production, the alert never fires although version 2 inputs drifted. What should the team check?
+A: The default parameter value, because an alert based on a query with parameters uses the default values, so it still evaluates version 1
+B: The notification destination, because alerts on parameterized queries send messages only to the query owner
+C: The refresh history of the dashboard, because alerts are evaluated only after someone opens the dashboard
+D: The size of the baseline table, because drift for a new model version is computed only if the baseline has at least one million rows
+K: A
+G: ## Parameters in alert queries
+If the query of a profile alert uses parameters, the alert is based on the default values of those parameters. The documentation tells you to confirm that the default values reflect the intent of the alert.
+## Practical rule
+Write the alert query so that it selects the current model (for example the latest `model_id` value, or an explicit list) without a parameter default that silently becomes outdated. Version changes are the typical case where a hard-coded default turns an alert into a monitor of a retired model.
+W: The alert evaluates the query with the default parameter value of 1, so version 2 is never inspected and no row can be returned for it.
+X: B=Destination: the problem is what is evaluated, not who is notified; the alert would send for version 1 rows if they met the condition.
+C=Dashboard dependency: alerts run their query on their own schedule; they do not wait for dashboards to be opened.
+D=Baseline size: no minimum baseline row count exists; the baseline needs matching columns and model id so that the drift can be aggregated.
+T: Alerts use the default parameter values of their query, so hard-coded model ids go stale.
+V: Data profiling, Databricks SQL
+
+@ DBX-MLP D2 T2.15 advanced use-case
+S: A monitoring owner worries that the drift alert would stay silent if the profile stopped refreshing, for example after a schedule was disabled or the refresh failed repeatedly. Which design closes this gap?
+A: Rely on the existing drift alert, because it also evaluates to true whenever no new rows are found in the drift metrics table
+B: Increase the alert evaluation frequency to every minute, which forces the profile to refresh when the alert notices stale data
+C: Remove the profile schedule and refresh it only on demand, so that no scheduled run can fail silently
+D: Add a freshness alert on the metric tables (latest window end older than expected) and set the profile's failure notification
+K: D
+G: ## Alerts only see rows
+A drift alert is a query over metric tables. When the profile stops refreshing, the query returns the old rows or nothing, so the condition of a drift threshold is not met and the alert looks healthy. Monitoring must therefore also watch the monitoring.
+## Two layers
+- Profile notification settings, such as `on_failure` emails, report refresh failures and timeouts.
+- A freshness alert, a SQL query on the metric table that compares the latest `window.end` with the current time, covers a disabled schedule or a stuck pipeline that produces no failure event.
+W: The freshness alert catches silent staleness and the failure notification catches refresh errors, so a stopped profile is reported either way.
+X: A=Existing drift alert: it triggers on a drift condition, and missing rows do not satisfy a drift-threshold condition, so silence would look like no drift.
+B=Faster alert evaluation: alerts evaluate queries only; they do not trigger profile refreshes, and checking more often does not make stale data fresh.
+C=On-demand refresh only: removing the schedule guarantees staleness unless a person remembers to run it and removes the automation.
+T: Alert on staleness of the metric tables in addition to alerting on drift.
+V: Data profiling, Databricks SQL
+
+@ DBX-MLP D2 T2.15 advanced tradeoff
+S: A drift alert is built on `ks_test.pvalue < 0.05` for a numeric feature. The daily windows each hold about 40 million requests, and the alert fires almost every day even though dashboards show the distributions practically unchanged. What is the best change?
+A: Lower the p-value threshold to 0.0001 and keep the test unchanged, which removes the dependency on the number of requests
+B: Alert on an effect-size distance such as `wasserstein_distance` or `population_stability_index`, with a threshold set on the change that matters
+C: Reduce the window to five minutes, so that each window holds fewer rows and the p-value reflects only changed requests
+D: Switch the feature to the chi-squared test column, because chi-squared is the test the drift table reports for numeric columns, and it ignores the number of rows
+K: B
+G: ## Significance versus size
+A hypothesis test such as the Kolmogorov-Smirnov test returns a p-value that falls as the sample grows: with tens of millions of rows, even a trivial difference is statistically significant. The drift metrics table also stores distance-type measures that quantify how big the change is: `wasserstein_distance` and `population_stability_index` for numeric columns (PSI below 0.1 means no significant change, 0.2 or more significant change). Chi-squared, total variation, L-infinity and Jensen-Shannon distances are reported for categorical columns only.
+## Alert design
+Alert on a quantity with an interpretable threshold (a PSI of 0.2, or a Wasserstein distance expressed in feature units), not on a p-value that scales with traffic.
+W: An effect-size metric does not shrink with sample size, so the threshold means the same thing at 40 million rows as at 40 thousand rows.
+X: A=Smaller p-value threshold: with a huge sample, tiny shifts still reach even very small p-values, so the alert stays sensitive to irrelevant changes and the threshold remains arbitrary.
+C=Five-minute windows: this makes the windows noisy and multiplies the number of tests per day, and it still does not tell the size of the change.
+D=Chi-squared for numeric: the table computes chi-squared for categorical columns only and leaves it null for numeric columns.
+T: With large windows, alert on effect-size drift metrics rather than on p-values.
+V: Data profiling, Databricks SQL
+
+@ DBX-MLP D2 T2.16 advanced use-case
+S: A feature's weekly mean rises by about 1% per week for ten weeks. Each week looks almost the same as the previous week, yet the model's inputs are clearly different from training. Which comparison reveals this drift, and why?
+A: Consecutive drift with a weekly granularity, because it compares each window with the previous one and accumulates the changes over time
+B: A p-value check on the previous window only, because a p-value above 0.05 for ten weeks proves the distribution was stable
+C: Baseline drift, which compares each window with a fixed baseline table, so small steps add up to a clear difference from the reference
+D: The null-rate columns of the profile metrics table, because a slow rise of a mean is always caused by missing values in the column
+K: C
+G: ## Two drift types
+The drift metrics table has a `drift_type` column. `CONSECUTIVE` compares a window with the previous window (and is calculated only if a consecutive window exists after aggregation). `BASELINE` compares a window with the baseline distribution given by the baseline table, and exists only if a baseline table is provided.
+## Gradual change
+Consecutive comparisons are sensitive to sudden shifts but each step of a slow trend is small, so no single comparison looks serious. A fixed reference accumulates the whole movement: after ten weeks the window differs from the baseline by about ten steps.
+W: Baseline drift measures distance from the fixed reference, so the accumulated 10% shift appears even though each weekly step is small.
+X: A=Consecutive drift: each metric is a difference between two adjacent windows and nothing is accumulated across rows; the differences stay as small as the weekly steps.
+B=Previous-window p-value: a non-significant adjacent comparison only says the two neighbors are similar, and a trend of small steps passes every such test.
+D=Null rates: nothing in the stem indicates missing values; a mean can rise while null rates stay constant.
+T: Use baseline drift to catch gradual change and consecutive drift to catch sudden change.
+V: Data profiling
+
+@ DBX-MLP D2 T2.16 applied troubleshooting
+S: An engineer queries the drift metrics table of a time series profile and finds only rows with `drift_type = 'CONSECUTIVE'`. The team expected comparisons with the training distribution. What is missing?
+A: No baseline table was set in the profile configuration, and baseline drift is calculated only if a baseline table is provided
+B: The granularity is too small, and baseline rows appear only for weekly or monthly granularities
+C: The slicing expressions were not set, because baseline comparison is computed only for slices and not for the whole table
+D: The profile has not been refreshed twice yet, because baseline rows are written only from the second refresh onward
+K: A
+G: ## When each drift type exists
+- Consecutive drift: calculated when a consecutive time window exists after aggregation according to the specified granularities.
+- Baseline drift: calculated only if a baseline table is provided.
+The baseline is configured on the profile (a Unity Catalog table or view with the same schema, except the timestamp column). Adding it later requires updating the profile and refreshing; windows then get BASELINE rows as well.
+W: Without a baseline table there is nothing to compare to, so only the consecutive comparisons appear.
+X: B=Granularity: every available granularity yields both drift types when the inputs exist; granularity does not control baseline rows.
+C=Slicing: metrics are always computed for the entire table, and slices are extra; the whole table can have baseline drift as soon as a baseline exists.
+D=Second refresh: baseline drift does not depend on a previous refresh, only on a baseline table being configured.
+T: BASELINE rows exist only when a baseline table is configured.
+V: Data profiling
+
+@ DBX-MLP D2 T2.16 advanced use-case
+S: A retailer's traffic follows strong yearly seasonality. A time series profile with consecutive weekly drift raises false alarms every holiday week, while a baseline taken from last spring would also alarm. The team wants alerts only when holiday behavior itself changes. Which baseline fits?
+A: A baseline table with the average of the entire previous year, because an average removes all seasonal influence
+B: No baseline, and a consecutive drift alert with a higher threshold in December, which hides every other kind of change in that month as well as the holiday effect
+C: A baseline table filled with synthetic uniform data, so that every real window differs from it by the same constant amount
+D: A baseline table holding the previous holiday period, so the current holiday window is compared with an acceptable seasonal distribution
+K: D
+G: ## Baselines represent acceptable windows
+For time series profiles, the baseline table should contain data from time windows whose distributions represent an acceptable quality standard; the documentation's example is weather data with a baseline of a week, month or year of close-to-normal temperatures. The baseline is a design choice that encodes what normal means.
+## Seasonality
+Comparing a holiday week with the previous ordinary week, or with spring, will always differ. A baseline from the last comparable season makes drift mean a change beyond the expected seasonal pattern. If several seasons matter, maintain separate baselines or slice by season rather than average them.
+W: A baseline from the previous holiday period compares like with like, so drift beyond it reflects a change in holiday behavior and not the calendar.
+X: A=Full-year average: the average is dissimilar to a holiday week as much as to an ordinary one, so the holiday alarm would still fire.
+B=Higher December threshold: this is a blunt threshold that hides real problems in December and leaves the cause (comparing different seasons) untouched.
+C=Synthetic uniform data: drift would be measured against a distribution that never occurred, so every window would look drifted or the threshold would be meaningless.
+T: Choose a baseline window that represents acceptable behavior for the same season.
+V: Data profiling
+
+@ DBX-MLP D2 T2.16 advanced troubleshooting
+S: A retraining job overwrites the baseline table with the latest training data after each run, and the team notices that baseline drift stays near zero for months, even during a known upstream data change that the dashboards show clearly. What is the design flaw?
+A: The baseline table must be in a different catalog than the primary table, because otherwise both are read from the same cache
+B: The baseline moves with the data: a reference replaced by recent data is always the new normal, so it cannot expose changes since validation
+C: Baseline drift is computed only at the first refresh and then frozen, so the later windows are never compared
+D: The baseline must have a timestamp column in its schema, because rows without timestamps are ignored by the drift calculation of the profile when it refreshes
+K: B
+G: ## A baseline is a fixed yardstick
+Baseline drift measures how far each window is from the baseline distribution. If the baseline is regularly replaced with the newest data, the yardstick moves with the object it measures, and gradual or even abrupt changes are absorbed after the next overwrite.
+## Practice
+Tie the baseline to the model version: the validation data of the model that is in production. When a new version is promoted, change the baseline together with it, and keep that history in a versioned table or a table per model. The consecutive drift type already answers "what changed since last window".
+W: A baseline overwritten with recent data always describes today's data, so baseline drift hides precisely the change the team wants to see.
+X: A=Separate catalog: location does not affect the calculation; the baseline is a Unity Catalog table or view with a matching schema.
+C=Frozen after first refresh: baseline drift is calculated for every window at each refresh when a baseline is set; the problem is the reference content.
+D=Timestamp column: the baseline schema must match the primary table, with the timestamp column as the exception for time series and inference profiles.
+T: Keep the baseline stable and tied to the model version; do not overwrite it with recent data.
+V: Data profiling, MLflow
+
+@ DBX-MLP D2 T2.16 advanced tradeoff
+S: A low-traffic endpoint gets about 500 requests per day. A time series profile with a daily granularity produces drift values that swing from window to window without any real change. Which change gives a more stable drift signal?
+A: Use a weekly granularity (or longer) so that each window holds enough requests for stable estimates, accepting slower detection
+B: Switch to a five-minute granularity, which gives many more drift values and averages out the noise
+C: Remove the baseline table, because baseline drift is the part of the drift metrics that depends on sample size
+D: Keep the daily windows and set the alert threshold to zero, because any variation above zero in a small daily sample is a real change in the data
+K: A
+G: ## Granularity controls the sample behind each metric
+Each window gets its own statistics and its own drift comparison. Available granularities range from five minutes to a year. Distribution tests and distances estimated from a few hundred rows are noisy: quantiles, category frequencies and PSI bins become unstable.
+## Trade-off
+Longer windows give stable estimates but detect a change later. Shorter windows detect faster but fluctuate. For low-volume endpoints, choose the shortest window that still holds enough rows for stable estimates, and consider slices sparingly because each slice splits the sample further.
+W: A weekly window pools about 3500 requests, which stabilizes the estimates, and the cost is a slower reaction, which is a conscious trade-off.
+X: B=Five-minute windows: a handful of requests per window makes statistics even noisier and the number of comparisons grows, so false alarms increase.
+C=Dropping the baseline: baseline drift is a comparison against a reference and is not what makes small windows noisy; both drift types depend on window sample size.
+D=Zero threshold: with small samples, random variation always exceeds zero, so the alert would fire on noise at every refresh.
+T: Match the window length to the traffic so that each window holds enough rows.
+V: Data profiling
+
+@ DBX-MLP D2 T2.16 applied definition
+S: An analyst runs `SELECT window.start, avg_delta FROM main.ml.tx_drift_metrics WHERE column_name = 'amount' AND drift_type = 'CONSECUTIVE' AND slice_key IS NULL` and sees `avg_delta = -4.2` for one window. What does this value mean?
+A: The average amount of that window is 4.2 above the average of the baseline table
+B: The average amount of that window is 4.2 percent of the average in the previous window
+C: The average is 4.2 below the previous window's, as delta is current minus comparison
+D: The model's average prediction error fell by 4.2 relative to the previous window, as quality is also stored there
+K: C
+G: ## Reading the drift metrics table
+The drift metrics table stores one row per window, comparison window, column, slice and drift type. The documented rule is: differences are calculated as current window minus comparison window. The comparison window is the previous window for `CONSECUTIVE` rows (given by `window_cmp`) and the baseline for `BASELINE` rows. The `_delta` columns, such as `count_delta`, `avg_delta`, `percent_null_delta`, are absolute differences of the corresponding profile metric, in the unit of that metric.
+## Filters
+`slice_key IS NULL` selects the whole table; `column_name` selects the column; `drift_type` the comparison.
+W: With the sign convention current minus comparison, a negative `avg_delta` for `amount` means that the average fell by 4.2 relative to the previous window.
+X: A=Baseline: the filter selects CONSECUTIVE rows, which compare with the previous window; baseline comparisons are in BASELINE rows.
+B=Percent of previous: avg_delta is a difference in the unit of the column, not a ratio or a percentage.
+D=Prediction error: the row is the column `amount` and avg_delta compares averages of that column; model error metrics belong to the profile metrics table.
+T: Drift deltas are current minus comparison window, filtered by drift_type.
+V: Data profiling
+
+@ DBX-MLP D2 T2.17 advanced use-case
+S: Two versions of a regression model (ids `7` and `8`) served in parallel are logged into one inference table with a model version column configured as the model id column. The team wants the daily RMSE trend of each version for the whole table. Which query reads it from the profile metrics table?
+A: Query the drift metrics table, filter `column_name = 'prediction'` and plot `avg_delta`, as the change of the mean prediction measures the error
+B: Query the profile metrics table with `log_type = 'BASELINE'` and `column_name = 'prediction'`, grouped by version, for the daily error
+C: Query the profile metrics table without slice filters, and average `root_mean_squared_error` over all rows, because every row is a separate model
+D: Query the profile metrics table with `column_name = ':table'`, `slice_key IS NULL` and `model_id IN (7, 8)`, ordered by `window.start`
+K: D
+G: ## Where model quality lives
+For an inference profile with both `label_col` and `prediction_col`, regression metrics such as `root_mean_squared_error`, `mean_absolute_percentage_error` and `r2_score` are stored in the profile metrics table. Metrics that use more than one column are stored in rows where `column_name` is `:table`. Slices are created automatically for each distinct value of the model id column, and the whole table is `slice_key = NULL`; `log_type` is INPUT for the primary table and BASELINE for the baseline table. This is how the dashboard answers "is model version A better than version B".
+## Reading a trend
+Filter the `:table` rows, choose the models, keep the whole-table slice, order by window start.
+W: The `:table` rows hold the model quality metrics, and filtering by model id and the whole-table slice returns the daily RMSE of each version ready to plot.
+X: A=Drift table of the prediction: avg_delta is the change of the average prediction, which can move without any change in error and does not use labels.
+B=Baseline log type and prediction column: it returns summary statistics of the baseline data, not quality over time of production requests.
+C=Averaging across rows: rows mix windows, models and slices, so the mean would blend versions 7 and 8 and hide the comparison.
+T: Model quality is in `:table` rows of the profile metrics table, filtered by model id and ordered by window.
+V: Data profiling, MLflow
+
+@ DBX-MLP D2 T2.17 applied troubleshooting
+S: An inference profile for a binary classifier shows accuracy, precision, recall and F1 per window, but `log_loss` and `roc_auc_score` are NULL. The label and prediction columns are configured. What is missing?
+A: A baseline table, because the ranking and probability metrics are computed only for BASELINE rows
+B: A column with the predicted class probabilities, because log loss and ROC AUC require `prediction_proba_col`
+C: A weekly granularity, because threshold-free metrics are computed only over windows of seven days or more
+D: A slicing expression on the label, because ROC AUC is produced only for sliced data
+K: B
+G: ## Which metrics need which columns
+For classification, accuracy, precision, recall, F1 and the confusion matrix need the predicted class and the label. `log_loss` and `roc_auc_score` evaluate predicted probabilities, so they require the `prediction_proba_col`. Without it, those columns remain null while the others are filled. Precision, recall and F1 are stored as structs with one-vs-all, macro and weighted values.
+## Why it matters
+When the team wants to see calibration or ranking quality (log loss, AUC) degrade before accuracy does, the endpoint log must retain the probabilities, and the unpacking job must write them as a column.
+W: Log loss and ROC AUC need predicted probabilities, so the profile must have a probability column provided by the unpacked log.
+X: A=Baseline table: the baseline affects drift comparisons and a BASELINE log type; it is not required to compute the metrics of the primary table.
+C=Granularity: the window size does not decide which metrics exist, only the number of rows in each window.
+D=Slicing: slices add rows for subsets of the data and are not a precondition for AUC; the whole table gets the metric when the inputs are there.
+T: Log loss and ROC AUC need a probability column in the inference table.
+V: Data profiling, MLflow
+
+@ DBX-MLP D2 T2.17 advanced use-case
+S: Overall accuracy of a classifier has been flat for two months, but customer support reports poor results for one sales region. How can the team find out from the existing monitoring whether quality fell for that region?
+A: Add `slicing_exprs=["region"]` to the profile so that quality metrics are computed per region, and read the slices from the metric tables
+B: Add the region as the model id column so each region is monitored as a separate model, which also removes the model version from the profile
+C: Create a second inference profile on the same table filtered to the region, because a table may have several profiles with different filters
+D: Lower the granularity to one hour, because an hourly window shows regional differences that daily windows average out
+K: A
+G: ## Slices
+Metrics are always computed for the whole table, and, if you give slicing expressions, also for each slice. For `slicing_exprs=["col_1", "col_2 > 10"]`, there is one slice per unique value of `col_1`, and two for the predicate. The metric tables identify them by `slice_key` and `slice_value`; the entire table has both NULL. Quality metrics are slice-aware, so accuracy per region can be read next to the overall value.
+## Why it matters
+A flat overall metric can hide a subgroup that got worse and another that improved. Slice expressions are cheap but each slice shrinks the sample, so choose slice columns where the business needs separate answers.
+W: A slicing expression on `region` makes the profile compute quality metrics for each region, so the regional decline becomes visible next to the flat overall value.
+X: B=Region as model id: the model id column identifies the model or version; using it for regions conflates two concepts and loses the version comparison.
+C=Second profile: a table can have only one profile in the metastore, so a filtered duplicate on the same table is not possible.
+D=Hourly granularity: it changes the time window, not the subgroup; a regional problem is still averaged with the other regions in each window.
+T: Use slicing expressions to expose subgroup quality that overall metrics hide.
+V: Data profiling
+
+@ DBX-MLP D2 T2.17 advanced troubleshooting
+S: The team's inference profile uses a constant string `prod` in the model id column for every request, whatever the served version. After version 3 replaced version 2, accuracy dips for a week and recovers. The team cannot tell whether version 3 caused the dip. What should they change?
+A: Replace the profile with a snapshot profile, which keeps one record for the table after each refresh and so shows the latest version only
+B: Lower the granularity to five minutes so that the day of the version switch is separated from the rest of the data
+C: Populate the model id column with the model version when unpacking the log, so that the profile computes metrics for each version separately
+D: Delete the metric tables after every promotion so that the new version starts with a clean history
+K: C
+G: ## Model id column
+In an inference profile the model id column identifies the model or version that produced the prediction. Slices are created automatically for each distinct value of that column, and metrics (including quality) are computed per model id. With a constant value every version is pooled in one series.
+## Fix
+The unpacking job should write the served model name and version (the inference log carries it for the served model) into the model id column. The dashboard and the metric tables then support direct version comparisons, including a canary period where two versions serve at the same time.
+W: A model version in the model id column lets the profile compute quality per version, so the dip can be attributed to version 3 or not.
+X: A=Snapshot profile: it would drop the time windows and the prediction/label based model quality metrics, which are the very information needed.
+B=Five-minute granularity: windows would still mix versions served within the same window, and tiny windows give noisy accuracy.
+D=Deleting the metric tables: this destroys the history needed for comparison and does not separate versions in the new data.
+T: Put the model version into the model id column so quality is tracked per version.
+V: Data profiling, Model Serving, MLflow
+
+@ DBX-MLP D2 T2.17 advanced use-case
+S: Weekly F1 of a fraud model has fallen from 0.82 to 0.71. The drift metrics for all input features against the training baseline are low and stable. What is the most likely explanation and the right next step?
+A: The baseline table is too small, so the next step is to double its size and wait for the drift to appear
+B: Data drift in some feature is hidden by the daily granularity, so the next step is to use a yearly granularity
+C: The endpoint is overloaded, because quality metrics move together with latency, so the next step is to scale the endpoint out with more concurrency
+D: The input-to-fraud relationship changed (concept drift) while inputs look the same, so inspect recent labels and consider retraining on them
+K: D
+G: ## Reading quality against drift
+Input drift says that feature distributions changed. Quality metrics say that predictions became less correct. They can disagree:
+- Input drift with stable quality: the model still generalizes; watch, do not rush.
+- Stable inputs with falling quality: concept drift. The mapping from features to label changed (for example, fraudsters adapted), so the same inputs now mean something different.
+Because the baseline comparison uses feature columns, concept drift is invisible there and is detected only through labels.
+## Next step
+Examine the labelled window (slices help), then retrain with recent labels and evaluate the new candidate before promoting.
+W: F1 fell while input distributions remain stable, which points to a changed feature-label relationship; recent labels show where it changed and retraining restores it.
+X: A=Bigger baseline: drift is already low against the baseline; a larger baseline would not create a signal for a change that does not appear in the inputs.
+B=Yearly granularity: longer windows blur changes further, and the weekly windows already show a stable input distribution.
+C=Overloaded endpoint: latency and resource use do not alter the model's predictions; the quality metric compares predictions with labels.
+T: Falling quality with stable inputs signals concept drift; use labels and retrain.
+V: Data profiling, MLflow
+
+@ DBX-MLP D2 T2.17 advanced troubleshooting
+S: The inference table logs a `sampling_fraction` below 1 for many rows because requests were down-sampled. A trend chart of daily request counts computed with `COUNT(*)` falls whenever the fraction is lowered although real traffic is steady. How should the volume trend be computed?
+A: Keep `COUNT(*)` and accept that sampled logs cannot show volume, because down-sampling removes the information permanently and for every row
+B: Weight each logged row by `1 / sampling_fraction`, for example `SUM(1 / sampling_fraction)`, to estimate the real number of requests
+C: Multiply the count by the number of served models, because each model logs an equal part of the requests
+D: Replace the time window by a longer one, because the sampling fraction averages out over longer windows
+K: B
+G: ## Sampled logs
+The Unity Gateway inference table schema contains a `sampling_fraction` column: the fraction used if down-sampling was applied, where 1 means no down-sampling. A row logged with a fraction of 0.25 stands for roughly four real requests. Plain row counts therefore measure the sample, not the traffic, and the trend follows configuration changes.
+## Estimating traffic
+Weight by the inverse of the fraction: `SUM(1 / sampling_fraction)` estimates the number of requests; for averages of features or errors, the sample mean is still unbiased if down-sampling is random, but an inverse-weighted mean is needed if the fraction varies with the request type.
+W: Weighting each logged row with the inverse sampling fraction restores the estimated request volume, and the trend no longer moves when the fraction changes.
+X: A=Giving up on volume: the fraction is recorded per row for exactly this purpose, so volume can be estimated even though individual rows are missing.
+C=Multiplying by model count: the logged fraction is a property of the row and has no relation to the number of served models.
+D=Longer windows: if the fraction changes at one time, longer windows merely mix periods of different sampling and keep a biased count.
+T: Re-weight sampled inference-table rows by the inverse of their sampling fraction to estimate volume.
+V: Unity Catalog, Model Serving
