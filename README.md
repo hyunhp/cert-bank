@@ -67,7 +67,11 @@ affiliated with Amazon Web Services, Palantir Technologies, Microsoft or Google,
 | Databricks | Associate | DBX-DEA Data Engineer Associate | 225 | 20 |
 | | | DBX-DAA Data Analyst Associate | 225 | 17 |
 | | | DBX-MLA Machine Learning Associate | 240 | 19 |
+| | | DBX-ASD Apache Spark Developer Associate | 225 | 17 |
+| | | DBX-GAI Generative AI Engineer Associate | 225 | 19 |
+| | | DBX-CEA Context Engineer Associate | 225 | 16 |
 | | Professional | DBX-DEP Data Engineer Professional | 300 | 25 |
+| | | DBX-MLP Machine Learning Professional | 295 | 19 |
 | HashiCorp | Associate | TF-TA004 Terraform Associate (004) | 266 | 18 |
 | | | VLT-VA003 Vault Associate (003) | 253 | 15 |
 | | Professional | TF-IEP002 Terraform Infrastructure Engineer Professional (002) | 252 | 20 |

@@ -1,0 +1,462 @@
+# src: https://docs.databricks.com/aws/en/machine-learning/automl-hyperparam-tuning/optuna
+# src: https://docs.databricks.com/aws/en/machine-learning/ray/index
+# src: https://docs.databricks.com/aws/en/machine-learning/ray/ray-create
+# src: https://docs.databricks.com/aws/en/machine-learning/ray/scale-ray
+# src: https://docs.databricks.com/aws/en/machine-learning/train-model/distributed-training/
+# src: https://docs.databricks.com/aws/en/machine-learning/train-model/distributed-training/spark-pytorch-distributor
+# src: https://docs.databricks.com/aws/en/machine-learning/train-model/distributed-training/deepspeed
+
+@ DBX-MLP D1 T1.9 applied troubleshooting
+S: A team launches 40 parallel Optuna workers on Spark, but each worker builds its own study with the default in-memory storage, as in `study = optuna.create_study()`. Every worker reports a different "best" result, and TPE never learns from the trials of other workers. Which change fixes the design?
+A: Raise the number of trials on each worker so that every in-memory study collects enough history to find the same optimum
+B: Create the study with `MlflowStorage` for the experiment and run it through `MlflowSparkStudy`, so all workers share one study
+C: Make every worker use `RandomSampler` with the same seed, so that all in-memory studies visit the same points in order
+D: Collect each worker's study on the driver after the run and merge the trial lists into one summary table by hand
+K: B
+G: ## Why a distributed Optuna study needs shared storage
+An Optuna `Study` is a record of trials: the parameters tried and the objective value returned. A sampler such as TPE reads that record to decide which parameters to try next. With the default in-memory storage the record lives inside one Python process. If 40 workers each create a study, there are 40 separate records and 40 separate searches that only look alike.
+## The Databricks integration
+The Databricks page "Hyperparameter tuning with Optuna" describes two classes from MLflow 3:
+- `MlflowStorage` lets Optuna use the MLflow tracking server (one experiment) as its storage backend, so every worker reads and writes the same trial history.
+- `MlflowSparkStudy` wraps an Optuna `Study` and runs the parallel optimization on PySpark executors.
+```
+storage = MlflowStorage(experiment_id=exp_id)
+study = MlflowSparkStudy(study_name="tune", storage=storage)
+study.optimize(objective, n_trials=200, n_jobs=40)
+```
+W: A shared storage backend turns 40 separate searches into one study: each new suggestion by the sampler sees all finished trials, and the result is one set of best parameters. MlflowStorage on the MLflow experiment plus MlflowSparkStudy is the documented way to get it on Spark.
+X: A=More trials per worker: each in-memory study still sees only its own trials, so there are still 40 independent searches. More history per worker costs compute and does not make the workers agree.
+C=Same seed, RandomSampler: random sampling does not learn from past trials at all, so it gives up the benefit of TPE. Identical seeds would also make the workers repeat the same points instead of covering the space.
+D=Merge on the driver afterwards: merging after the fact gives a table, but the sampler never used the other workers' results while searching. The problem is shared state during the run, not reporting at the end.
+T: Distributed Optuna needs one shared study record: MlflowStorage as the backend and MlflowSparkStudy to run it on executors.
+
+@ DBX-MLP D1 T1.9 applied definition
+S: A team compares its Optuna setup with an older Hyperopt job. It calls `MlflowSparkStudy(study_name="gbt", storage=storage)` without passing a sampler or pruner. Which algorithms does the study use by default?
+A: A random-search sampler with no early stopping, so the study behaves like a fixed grid until a pruner is set
+B: A grid sampler over the first suggested values and a successive-halving pruner that stops half of the trials
+C: The CMA-ES sampler for continuous spaces and a hyperband pruner that allocates resources to promising trials
+D: `TPESampler` to propose new parameters and `MedianPruner` to stop trials that look worse than the median
+K: D
+G: ## Two pluggable parts of every Optuna study
+- The **sampler** decides which hyperparameters to try next, using the finished trials. Examples are random, grid, TPE and CMA-ES samplers.
+- The **pruner** decides whether to stop a running trial early, based on intermediate values the objective reports. Examples are median, successive-halving and hyperband pruners.
+## Defaults in MlflowSparkStudy
+The Databricks reference for `MlflowSparkStudy` lists the parameters `study_name`, `storage`, `sampler` and `pruner`. It states that `optuna.samplers.TPESampler` is used as the default sampler and `optuna.pruners.MedianPruner` as the default pruner. TPE is a Bayesian method (it models good and bad regions of the space), so it is closer to Hyperopt's `tpe.suggest` than to random search.
+W: TPESampler is the default sampler and MedianPruner is the default pruner, so an unconfigured study already searches with a Bayesian method and can stop trials that look worse than the median of earlier trials at the same step.
+X: A=Random search, no pruning: random sampling is an option you can pass, but it is not the default. A default pruner also exists.
+B=Grid sampler and successive halving: a grid sampler needs an explicit search grid and is never the default, and successive halving is a different pruner that must be passed in.
+C=CMA-ES and hyperband: both are valid Optuna components when you pass them yourself, but the documented defaults are TPE and the median pruner.
+T: MlflowSparkStudy defaults to a TPE sampler and a median pruner; anything else is passed in explicitly.
+
+@ DBX-MLP D1 T1.9 applied troubleshooting
+S: A team runs a notebook on an older cluster runtime, and `from mlflow.pyspark.optuna.study import MlflowSparkStudy` raises an import error. The same notebook works on the team's newer runtime, which already includes MLflow 3. What is the best fix on the older cluster?
+A: Run `%pip install mlflow --upgrade` and `%pip install optuna` first in the notebook, or use a runtime with MLflow 3
+B: Replace the import with `hyperopt.SparkTrials`, which is the maintained way to run Optuna objectives on executors
+C: Import only `MlflowStorage` and pass it to a plain `optuna.create_study`, because that class exists in every MLflow version and Spark needs no study wrapper
+D: Copy the MLflow 3 package folder from the newer cluster into the old one so that the Spark executors find the same classes
+K: A
+G: ## Where the integration comes from
+`MlflowStorage` and `MlflowSparkStudy` were added with MLflow 3.0. The Databricks Optuna page says MLflow 3.0 is preinstalled on recent Databricks Runtime ML versions, and that on older runtimes you install the latest Optuna and MLflow yourself:
+```
+%pip install mlflow --upgrade
+%pip install optuna
+```
+## Why a notebook-scoped install is the usual fix
+A `%pip` install is notebook-scoped and is distributed to the executors of that session, so parallel trials import the same versions as the driver. Alternatively, choose a runtime that already ships MLflow 3, which keeps a production job reproducible without an install step.
+W: Upgrading MLflow and installing Optuna in the notebook (or using a newer ML runtime) provides the module that the import needs. This is the exact guidance on the Databricks Optuna page for older runtimes.
+X: B=Hyperopt SparkTrials: it is a different library and is not a way to run Optuna objectives. Databricks documents it as no longer maintained, so it is not a migration target.
+C=MlflowStorage only: the storage class ships in the same MLflow 3 package as the Spark study, so the older MLflow fails on it as well. A plain create_study would also not run on executors.
+D=Copying package folders: hand-copied files bypass dependency resolution and do not reach executors reliably. A supported install is both simpler and reproducible.
+T: MlflowStorage and MlflowSparkStudy need MLflow 3: use a runtime that includes it or upgrade MLflow and install Optuna with %pip.
+
+@ DBX-MLP D1 T1.9 advanced troubleshooting
+S: A team tunes a neural network for 50 epochs per trial with `MlflowSparkStudy` and the default pruner. Poor trials still run all 50 epochs, and the log shows no pruned trials. The objective only trains the model and returns the final validation loss. What should the engineer change?
+A: Switch the storage backend from `MlflowStorage` to a local SQLite file on the driver, because MLflow storage disables every pruner in the study
+B: Raise `n_jobs` so that Spark can interrupt long trials from outside the executor task once enough of them run in parallel
+C: Make the objective report its validation loss to the trial after every epoch and stop the trial when the pruner marks it as unpromising
+D: Raise `n_trials` above 100, because the default pruner stays inactive until it has seen a hundred completed trials in the study
+K: C
+G: ## How pruning works in Optuna
+A pruner can only judge a trial by **intermediate values**. The Databricks page documents the pruner as an argument of `MlflowSparkStudy` with `MedianPruner` as the default. A pruner compares what a running trial has reached at a given step with what earlier trials had reached at that step. The objective therefore has to report a value at each epoch (or fold) and end the trial early when the pruner says so, using the pruning interface of the Optuna trial object (see the Optuna documentation).
+## Why it matters on Spark
+Each trial occupies an executor task. Pruned trials give the slot back quickly, so the same cluster completes many more trials. An objective that returns only one final number gives the pruner nothing to compare, so no trial is ever pruned.
+W: Per-epoch reporting gives the default median pruner the intermediate values it compares, and ending the trial when it signals gives the slot back to a better-chosen trial.
+X: A=SQLite storage: pruning does not depend on the storage type, and a local file on the driver would not be shared by executors. The change would break the shared study rather than enable pruning.
+B=Larger n_jobs: n_jobs sets how many trials run at once. It does not let Spark cancel a running function, and it does not produce intermediate values for the pruner.
+D=More than 100 trials: the pruner needs per-step values, not a large trial count. The missing reports are the real cause.
+T: Pruners act on intermediate values: report them from the training loop and stop the trial when the pruner says so.
+
+@ DBX-MLP D1 T1.9 applied use-case
+S: A team ports a Hyperopt job that used `hp.loguniform("C", np.log(1e-10), np.log(1e10))` and `SparkTrials(parallelism=20)` to Optuna on Databricks. Which port matches the pattern in the Databricks Optuna example?
+A: `trial.suggest_float("C", np.log(1e-10), np.log(1e10))` in the objective, with `SparkTrials(parallelism=20)` passed to `optuna.create_study`
+B: `trial.suggest_float("C", 1e-10, 1e10, log=True)` inside the objective, with the study run by `MlflowSparkStudy` on a shared `MlflowStorage`
+C: `trial.suggest_categorical("C", [1e-10, 1e-5, 1, 1e5, 1e10])` declared before the objective, with `MlflowSparkStudy` acting as the sampler
+D: `trial.suggest_float("C", 1e-10, 1e10)` on the default linear scale, because Optuna rescales very wide ranges to a log scale automatically
+K: B
+G: ## From Hyperopt to Optuna
+Hyperopt declares the search space outside the objective (`hp.*` expressions passed to `fmin`) and distributes with `SparkTrials`, which Databricks documents as no longer maintained. Optuna declares the space inside the objective, with `trial.suggest_*` calls, and the Databricks integration distributes it with `MlflowSparkStudy` on `MlflowStorage`.
+## The scale of the range
+A parameter such as `C` spans many orders of magnitude. A linear draw from `1e-10` to `1e10` puts almost every sample in the top decade. The Databricks Optuna example therefore declares `svr_c = trial.suggest_float('svr_c', 1e-10, 1e10, log=True)`: the bounds are the raw values and `log=True` makes the sampler work on the log scale. Hyperopt's `loguniform` takes the logarithm of the bounds; Optuna does not.
+W: B=Raw bounds with `log=True` plus `MlflowSparkStudy`: the suggest call keeps the search on a log scale across the 20 orders of magnitude, and the study object replaces `SparkTrials` for parallel execution on executors.
+X: A=Log bounds and SparkTrials: `SparkTrials` is a Hyperopt class and not an argument of `optuna.create_study`. Log-transformed bounds would also sample between about -23 and 23 as raw values of `C`.
+C=Categorical list: five fixed values throw away the continuous range and give the sampler nothing to model between them. `MlflowSparkStudy` runs a study and is not a sampler.
+D=Default linear scale: Optuna samples linearly unless `log=True` is given, so nearly all trials land in the largest decade.
+T: Port Hyperopt log-uniform spaces to Optuna with raw bounds and log=True inside the objective, and SparkTrials to MlflowSparkStudy.
+
+@ DBX-MLP D1 T1.9 advanced tradeoff
+S: A study runs several hundred concurrent trials on Spark. Each trial reports its parameters and metrics to the MLflow tracking server, and the team sees throttled REST calls and slow trials. A colleague proposes dropping `MlflowStorage` in favor of a custom `mlflow.log_param` call in each objective. Why is `MlflowStorage` the better design?
+A: It caches all trial results in driver memory and writes a single batch after the last trial, so no REST call happens during the search
+B: It replaces the MLflow tracking server by a Delta table, so REST calls to the tracking server are never made at all
+C: It samples a subset of the trials and logs only those, which keeps the number of REST calls roughly constant
+D: It batches writes and flushes them on an interval or at a size threshold, which avoids throttling of the tracking REST API
+K: D
+G: ## The cost of fine-grained logging
+Every trial writes parameters, intermediate values and a final value. At several hundred concurrent trials this is a large stream of small REST calls to the MLflow tracking server, and a service that throttles will answer with errors or delays, which slows the objective itself.
+## Batching in MlflowStorage
+The Databricks API reference describes `MlflowStorage` as an MLflow-based storage class for Optuna with batch processing to avoid REST API throttling. Two parameters control it:
+- `batch_flush_interval`: seconds between automatic flushes (default 1.0).
+- `batch_size_threshold`: maximum number of items collected before a flush is triggered (default 100).
+Because the storage is also what Optuna reads for the shared study, it serves both as logging and as coordination for the samplers.
+W: MlflowStorage collects writes in a batch and flushes on an interval or when the batch reaches a size threshold. That reduces the number of REST calls and avoids throttling, while still keeping the whole shared study in the experiment.
+X: A=One write after the last trial: nothing could then be shared during the search, so TPE would not see other workers' results, and a driver failure would lose all trials. The flush happens during the run.
+B=Delta table instead of tracking server: the storage is based on the MLflow experiment, so it still talks to the tracking server. It reduces the call rate by batching, not by changing the backend.
+C=Logging only a sample: sampling would drop trials from the study history, which harms the sampler. All trials are recorded.
+T: MlflowStorage batches Optuna writes (flush interval and size threshold) to avoid MLflow REST throttling at high concurrency.
+
+@ DBX-MLP D1 T1.10 applied troubleshooting
+S: A data scientist runs `setup_ray_cluster(max_worker_nodes=4)` in a notebook that is attached to serverless compute, and the call fails. The goal is to run Ray Tune for CPU-based models. Which option does the Databricks documentation support?
+A: Add `autoscale=True` to the call, because serverless compute only needs the autoscaling flag for the Ray-on-Spark integration
+B: Switch the notebook to standard (shared) access mode, which runs each Ray worker in an isolated container with full Ray support
+C: Attach the notebook to a dedicated (single user) or no-isolation shared ML cluster, or to a jobs cluster, and create the Ray cluster there
+D: Install `ray[default]` with `%pip` in the serverless session so that the Ray head process is started inside the serverless sandbox
+K: C
+G: ## Ray on Spark
+Ray on Databricks creates a Ray cluster **on top of a Spark cluster**: `ray.util.spark.setup_ray_cluster` starts a background Spark job, each Spark task becomes a Ray worker node, and the Ray head runs on the Spark driver. Because it needs this kind of cluster, the documentation lists limits:
+- Ray on Spark is supported for **dedicated** access mode, **no isolation shared** access mode and **jobs clusters** only.
+- A Ray cluster created with the Ray-on-Spark integration cannot be started on serverless-based runtimes. For serverless GPU compute there is a separate offering, Ray on AI Runtime.
+## Decision
+For a CPU Ray Tune workload, use an ML runtime cluster in a supported access mode (or a jobs cluster for scheduled runs).
+W: Dedicated or no-isolation shared access mode, or a jobs cluster, are the supported places to create a Ray-on-Spark cluster. Serverless compute is not, so the work moves to a supported cluster.
+X: A=autoscale flag: autoscaling only changes how many Ray workers exist on a cluster that already supports Ray on Spark. It cannot make serverless compute a valid host.
+B=Standard shared access mode: the documented supported modes are dedicated and no isolation shared, so standard shared mode is not one of them. No container-isolated Ray worker exists in this integration.
+D=pip install on serverless: Ray being installed does not help, because the limitation lies in the compute type, not in the package. The integration depends on a Spark cluster to place Ray worker nodes.
+T: Ray on Spark needs dedicated or no-isolation shared access mode or a jobs cluster; serverless GPU work uses Ray on AI Runtime.
+
+@ DBX-MLP D1 T1.10 applied use-case
+S: A nightly job tunes models with Ray Tune. Several analysts also want to submit Ray tasks to the same Ray cluster during the day through `ray.init()` from their own notebooks. A cluster created with `setup_ray_cluster` in the first analyst's notebook disappears whenever that notebook detaches. Which setup fits?
+A: Run `setup_ray_cluster` in every analyst's notebook with the same arguments, so that all of them share the first cluster's workers
+B: Start a global mode Ray cluster with `setup_global_ray_cluster` from a notebook job, and let users connect with `ray.init()`
+C: Use `setup_ray_cluster` and raise the idle timeout so the cluster stays alive after the notebook detaches
+D: Run the Ray head on a laptop and connect the Databricks workers to it with the Ray Job CLI and `ray start`
+K: B
+G: ## Per-user and global Ray clusters
+- `setup_ray_cluster` creates a Ray cluster that is **only available to the notebook user** who created it. It is shut down automatically after the notebook is detached or after 30 minutes without submitted tasks.
+- `setup_global_ray_cluster` (Ray 2.9.0 and above) creates a **global mode** cluster that all users attached to the Databricks compute can use. It has no inactivity timeout: it runs until the blocking call is interrupted or the cluster stops.
+## Properties of global mode
+- Only one active global mode Ray cluster per Databricks cluster.
+- Any attached notebook can call `ray.init()` to connect.
+- Because many users share it, resource contention can occur, so size it and schedule heavy runs with care.
+W: A global mode Ray cluster, started from a notebook job and kept running, is the documented way to share one Ray cluster among users independent of any single notebook.
+X: A=Each analyst runs setup_ray_cluster: every call makes a separate, user-specific Ray cluster, not a shared one. Costs multiply and nothing is shared.
+C=Longer idle timeout: the 30-minute inactivity limit is not what removes the cluster here, since detaching the notebook shuts it down too. A per-user cluster stays tied to the notebook.
+D=Head on a laptop: the Ray cluster CLI is not supported on Databricks, and the Job CLI is for submitting jobs from outside through the driver proxy. It does not turn a laptop into the head of a cluster.
+T: Use setup_global_ray_cluster for a shared, notebook-independent Ray cluster; setup_ray_cluster is per user and stops on detach.
+
+@ DBX-MLP D1 T1.10 applied troubleshooting
+S: A team has a running Ray cluster that executes a long Ray Tune search. A data scientist runs `%pip install lightgbm` in the same notebook to add a library for a new experiment, and the whole Ray cluster stops. What is the documented way to avoid this?
+A: Run `%pip install` from a second notebook, because only the notebook that created the Ray cluster is affected by pip
+B: Install the library with `%pip` on every Ray worker through a Ray remote function that calls `subprocess` at the start of each trial
+C: Call `ray.shutdown()` before `%pip` and `ray.init()` afterwards, because pip always needs the Ray client to be disconnected first
+D: Install libraries before the Ray cluster is created, either at the top of the notebook or as cluster libraries
+K: D
+G: ## Why `%pip` stops Ray
+A `%pip` command restarts the Python process of the notebook environment. The Ray cluster was started from that process as a background Spark job, so the restart tears it down. The Ray on Databricks page says to avoid `%pip` on a running Ray cluster for this reason, and to install libraries before initializing it.
+## Practical order
+1. Install notebook-scoped libraries (`%pip`) or use cluster libraries.
+2. Call `setup_ray_cluster` and `ray.init()`.
+3. Run Tune or other Ray workloads.
+Related guidance: with Ray 2.12 and above, remote Ray tasks can use notebook-scoped and cluster Python libraries; on Ray 2.11 and below, dependencies must be pre-installed in the session with `%pip` before starting the cluster.
+W: Installing before the Ray cluster is initialized keeps the cluster from being stopped, and the Ray tasks then see the libraries as well.
+X: A=A second notebook: a separate notebook's %pip may leave your Ray cluster alone, but the libraries are then not installed in the session that runs the new experiment, and the problem recurs when you install there.
+B=Subprocess pip inside trials: this installs on whichever worker runs the trial each time, adds start-up delay to every trial and gives no consistent environment. It is not the documented approach.
+C=ray.shutdown() around pip: a client disconnect does not protect a cluster that lives in the notebook process. The cluster is lost anyway, and the documented fix is the order of operations.
+T: Do not %pip install on a live Ray cluster; install libraries first, then create the Ray cluster.
+
+@ DBX-MLP D1 T1.10 advanced troubleshooting
+S: A Ray Tune job on Databricks reports each trial to MLflow, but the trials fail with credential errors inside the Ray tasks, while MLflow logging works in the notebook itself. Which step does the documentation require for MLflow with Ray Tune, Ray Train or custom Ray tasks?
+A: Set `DATABRICKS_HOST` and a token (or client ID and secret) as environment variables before `setup_ray_cluster`
+B: Call `mlflow.autolog()` once on the driver, which carries the notebook's credentials to every Ray worker automatically
+C: Pass the notebook's access token as an argument to every `tune.report` call so that each worker authenticates when it reports, and rotate it per trial
+D: Run the Tune job from the Ray head node only, since remote Ray tasks are never allowed to call the MLflow tracking server
+K: A
+G: ## Why Ray tasks need explicit credentials
+Ray tasks run in separate worker processes started by the Ray-on-Spark cluster. They do not inherit the interactive notebook's authentication context, so MLflow calls from inside a task cannot authenticate by themselves.
+## The documented setup
+The Ray on Databricks page ("Using MLflow in Ray tuner, Ray train or customized Ray tasks") says integration requires Ray 2.41 or above, and that you set environment variables **before** calling `ray.util.spark.setup_ray_cluster`:
+```
+os.environ["DATABRICKS_HOST"] = "https://<workspace>"
+os.environ["DATABRICKS_TOKEN"] = "<secret>"
+setup_ray_cluster(max_worker_nodes=2, min_worker_nodes=2)
+```
+Alternatively use `DATABRICKS_HOST` with `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` (a service principal). Read secrets from a secret scope rather than typing them into a notebook.
+W: Environment variables for host and credentials, set before the Ray cluster is created, are passed to the Ray workers, so the tasks can talk to the tracking server.
+X: B=mlflow.autolog on the driver: autologging configures the driver session and does not transfer credentials to separate Ray worker processes.
+C=Token in tune.report: a metric report is not an authentication channel, and putting a token in each report would expose the secret in results.
+D=Head node only: restricting the job to the head would remove the distributed trials, and on Databricks the Ray head has 0 CPUs by default. Remote tasks may call MLflow once they have credentials.
+T: Set DATABRICKS_HOST and credentials as environment variables before setup_ray_cluster so Ray tasks can log to MLflow.
+
+@ DBX-MLP D1 T1.10 advanced tradeoff
+S: A fixed-size Databricks cluster of 10 workers runs a Spark feature job for two hours and then a Ray Tune search for two hours. A Ray cluster created with a fixed `max_worker_nodes=10` keeps all workers busy as Ray nodes, so the Spark stage queues behind it. How should the team configure the hybrid workload?
+A: Reduce the Ray cluster to a single worker for the whole day, because Ray and Spark cannot share a cluster at all
+B: Raise `spark.executor.memory` as high as possible so that Spark caches more data and finishes before Ray starts
+C: Enable Ray-on-Spark autoscaling with minimum and maximum worker nodes, and keep `spark.executor.memory` small, so idle Ray workers are freed
+D: Start one global Ray cluster for each Spark task with `setup_global_ray_cluster`, so that every Spark job owns its own Ray head and workers
+K: C
+G: ## Hybrid Spark and Ray
+Ray on Databricks runs inside a Spark cluster. Both frameworks want the same machines: Spark executors use JVM heap and cache memory, Ray workers use Python heap and an object store. The scaling page gives two rules for hybrid workloads:
+- **Compute**: with a fixed number of nodes, enable Ray-on-Spark autoscaling. When no Ray work is running, the Ray cluster scales down and the nodes are free for Spark tasks; when Ray is used again, it scales up. Use `min_worker_nodes` and `max_worker_nodes` (Ray 2.10 and above); scale-down speed can be tuned with `autoscale_idle_timeout_minutes`.
+- **Memory**: reduce `spark.executor.memory` to a small value (the docs give 4g as an example), because the Spark executor holds dataset caches and triggers garbage collection lazily, which takes memory away from Ray and can cause out-of-memory errors.
+You can also make the Databricks cluster itself autoscale and cap Ray at a subset, for example Ray on at most 4 of up to 10 nodes.
+W: Autoscaling the Ray-on-Spark cluster lets idle Ray workers go away so Spark tasks can use the nodes, and a small executor memory leaves room for Ray. This is the documented hybrid configuration.
+X: A=One Ray worker all day: the two frameworks do share a cluster by design, and a single worker would remove the parallelism the search needs.
+B=Maximum executor memory: large executor heaps make the competition worse because Ray's heap and object store are then starved. The docs recommend the opposite.
+D=A Ray cluster per Spark task: a global cluster is one per Databricks cluster and is for sharing among users. More heads would multiply the head overhead and not release workers to Spark.
+T: For hybrid Spark and Ray, autoscale the Ray cluster so idle workers return to Spark, and keep spark.executor.memory small.
+
+@ DBX-MLP D1 T1.10 applied use-case
+S: A team preprocesses data with Spark and then trains with Ray Tune on a GPU cluster. Spark preprocessing tasks sometimes grab GPUs, which leaves fewer GPUs for Ray, and the CPU-only Spark stages have fewer task slots than the instance has cores. Which cluster setting does Databricks recommend?
+A: Set `spark.executor.memory` to the full node memory so that Spark never competes for resources with the Ray object store
+B: Set the Spark cluster configuration `spark.task.resource.gpu.amount` to `0` so Spark transformations do not claim GPUs
+C: Set `num_cpus_head_node` and `num_gpus_head_node` to zero so the Ray head cannot take any resources from Spark
+D: Set `spark.task.resource.gpu.amount` to the number of GPUs per node so each Spark task owns all of the node's GPUs
+K: B
+G: ## GPU slots are a Spark resource too
+On a GPU cluster, Spark can schedule tasks by GPU: each task requests `spark.task.resource.gpu.amount` GPUs. If that is 1, a Spark task needs a GPU to run, so the number of concurrent tasks is capped by the (few) GPUs and GPU-hungry Ray workloads are blocked while Spark runs.
+## The recommendation
+The Ray on Databricks create page ("Non-GPU workloads") describes a typical flow: Spark with UDFs for simple preprocessing that needs no GPUs, then Ray for complex ML that does. It recommends setting `spark.task.resource.gpu.amount` to `0` at the Spark cluster level. The benefits stated are:
+- Higher Spark parallelism, because a GPU instance usually has many more CPU cores than GPU devices.
+- On a shared cluster, Spark jobs do not compete for GPUs with concurrently running Ray workloads.
+W: Setting the GPU amount per Spark task to 0 lets DataFrame transformations run on all CPU cores without claiming GPUs, so Ray keeps the GPUs and Spark gets more parallelism.
+X: A=Full executor memory: it does not stop Spark tasks from requesting GPUs, and a very large executor heap reduces what is left for Ray.
+C=Zero head node resources: the Ray head already defaults to 0 CPUs and 0 GPUs on Databricks, so this changes nothing about GPU contention from Spark tasks.
+D=All GPUs to each Spark task: it would make Spark reserve even more GPUs per task, so fewer Spark tasks run and Ray has no GPUs left.
+T: For Spark preprocessing before GPU Ray training, set spark.task.resource.gpu.amount to 0.
+
+@ DBX-MLP D1 T1.11 applied tradeoff
+S: A team trains a PyTorch network that fits easily in the memory of one GPU, on a dataset that also fits on one machine. A colleague proposes an 8-node GPU cluster with distributed training "to be faster". What does Databricks guidance recommend?
+A: Train on one machine, moving to a larger or multi-GPU instance if needed, and distribute only when model or data exceed memory
+B: Always distribute neural network training, because communication overhead is smaller than the compute gained on every dataset size and model
+C: Use a CPU cluster of 8 nodes, since GPU instances cannot be combined with distributed training libraries in Databricks Runtime ML
+D: Convert the network to a Spark ML pipeline, because Spark ML models scale better than neural networks on a single node
+K: A
+G: ## Scale up first, then out
+**Vertical scaling** means a bigger machine (more memory, cores or GPUs). **Horizontal scaling** means more machines. For deep learning the Databricks "Distributed training" page says: when possible, train neural networks on a single machine, because distributed code for training and inference is more complex than single-machine code and slower due to communication overhead. Consider distributed training and inference when the model or the data are too large to fit in memory on a single machine.
+## The cost of going out
+Synchronous distributed training exchanges gradients between processes every step. Over a network that takes time that a single machine with fast links (or one GPU) never spends. The compute saved is only worth the overhead when a single machine cannot hold the work.
+W: The documentation prefers one machine and distributes only when the model or data exceed memory. Here both fit, so a bigger single instance is the cheapest path.
+X: B=Always distribute: the documentation says the opposite, because of code complexity and communication overhead.
+C=CPU cluster: Databricks Runtime ML includes TorchDistributor, the DeepSpeed distributor and Ray for GPU clusters, so GPUs and distributed training can be combined. CPU nodes would also train a network much more slowly.
+D=Convert to Spark ML: Spark ML trains classical algorithms on DataFrames; a PyTorch network is not converted into a Spark ML pipeline by a flag.
+T: Prefer one machine for neural networks; scale out only when the model or data exceed single-machine memory.
+
+@ DBX-MLP D1 T1.11 applied use-case
+S: A data scientist develops in a local IDE through Databricks Connect against Standard compute on Databricks Runtime 17.0 or above. The training DataFrame is far too large for the laptop, and the model is a classical Spark ML algorithm. The team wants distributed training without managing a dedicated ML cluster. What does Databricks offer?
+A: A global Ray cluster started from the IDE with `setup_global_ray_cluster`, because Standard compute supports Ray only for Spark ML algorithms
+B: `TorchDistributor` launched from the IDE, because it is the module Databricks documents for training Spark ML models on Standard compute
+C: A `toPandas()` call in the IDE session followed by a scikit-learn fit, since the Databricks Connect client sends the fit to the cluster
+D: The `pyspark.ml.connect` module, which Databricks documents for distributed training and inference of Spark ML models on Standard compute
+K: D
+G: ## Distributed Spark ML from a client
+Spark ML algorithms train over partitioned DataFrames, so memory and compute grow with the cluster. The Databricks "Distributed training" page says Databricks offers distributed training for Spark ML models with the `pyspark.ml.connect` module, to train Spark ML models and run model inference. In Databricks Runtime 17.0 and above, Spark ML is enabled by default in Standard compute, so you can use Spark's distributed machine learning without managing a full cluster.
+## What the other tools are for
+- `TorchDistributor`, the DeepSpeed distributor and Ray are listed for deep learning and custom parallel code.
+- Plain scikit-learn runs in one Python process: after `toPandas()` it runs in the IDE process, on the local machine.
+W: pyspark.ml.connect is the documented route for distributed Spark ML training and inference on Standard compute with Databricks Runtime 17.0 and above, so the data stays on the cluster.
+X: A=Global Ray cluster: Ray on Spark is documented for dedicated access mode, no isolation shared access mode and jobs clusters, not for Standard compute, and Ray is not the Spark ML route.
+B=TorchDistributor: it launches PyTorch training code, not Spark ML algorithms.
+C=toPandas then scikit-learn: `toPandas()` pulls all rows into the client process, which is too small for the data, and a scikit-learn fit runs in that one process and is never sent to the cluster.
+T: For classical Spark ML at scale from a client, use pyspark.ml.connect on Standard compute (Databricks Runtime 17.0 and above).
+
+@ DBX-MLP D1 T1.11 applied troubleshooting
+S: A multi-node GPU training job on four nodes fails at start-up with `ncclInternalError: Internal check failed`, although the same code runs on one node. The message points to a problem with network communication among the GPUs. Which fix does the Databricks documentation give?
+A: Double `num_processes` beyond the GPU count, so that NCCL opens more sockets and can pick a working network interface
+B: Set `NCCL_P2P_DISABLE` to `1` in the training code, because it forces NCCL to use the primary network interface between nodes
+C: Change the backend from `nccl` to `gloo` on the GPU nodes, because gloo is the documented replacement for NCCL on multi-node GPU clusters
+D: Add `os.environ["NCCL_SOCKET_IFNAME"] = "eth0"` to the training code so that NCCL uses the primary network interface
+K: D
+G: ## Where the error comes from
+Synchronous distributed training exchanges gradients between processes through a communication library. On GPUs this is NCCL (backend `nccl`); on CPU instances it is Gloo (backend `gloo`). Both the TorchDistributor page and the Ray on Databricks page list the same multi-node symptom: `ncclInternalError: Internal check failed` means NCCL cannot use some of the network interfaces for GPU communication.
+## Documented fixes by symptom
+- `ncclInternalError: Internal check failed`: set `NCCL_SOCKET_IFNAME` to `eth0` in the training code (primary network interface).
+- `peer access is not supported between these two devices` (on G5 GPUs on AWS): set `NCCL_P2P_DISABLE` to `1`.
+- Gloo `RuntimeError: Connection refused` on CPU instances: set `GLOO_SOCKET_IFNAME` to `eth0`.
+W: Pointing NCCL at the primary network interface with NCCL_SOCKET_IFNAME is the documented remedy for this multi-node error.
+X: A=More processes: extra processes do not change which interface NCCL uses, and a process count above the GPU count is not how NCCL selects a network path.
+B=NCCL_P2P_DISABLE: the documented use is the different error about peer access between two devices on G5 GPUs. It does not select the network interface between nodes.
+C=Gloo on GPUs: gloo appears in the documentation as the CPU backend, with its own interface variable, not as a replacement for NCCL on GPU clusters.
+T: ncclInternalError on multi-node GPU training: set NCCL_SOCKET_IFNAME to eth0 so NCCL uses the primary network interface.
+
+@ DBX-MLP D1 T1.11 advanced troubleshooting
+S: A team distributes PyTorch training over 8 GPU nodes and measures a 6x speed-up compared with 1 node. Doubling to 16 nodes gives only 1.2x more. GPU utilization on each node drops during the steps. What is the most likely cause and the right reaction?
+A: The model is too small for a GPU; replace the GPUs with a CPU cluster of 32 nodes to restore the speed-up
+B: Spark is limiting the number of tasks; set `spark.task.resource.gpu.amount` to `0` to give the extra nodes more work in each step
+C: Synchronization overhead grows with nodes; use fewer, larger machines or more GPUs per node if the model fits
+D: The cluster autoscaled down during training; enable autoscaling so that Spark removes idle GPU nodes mid-run
+K: C
+G: ## Diminishing returns in synchronous training
+In data-parallel training each step ends with a gradient exchange between all processes. The compute per step shrinks when the batch is split across more processes, but the exchange time stays or grows with node count and network latency. Past a point, extra nodes mostly wait.
+## What to do
+- Stay on the smallest number of machines that meets the time target; the Databricks "Distributed training" page notes that distributed code can be slower because of communication overhead.
+- Use machines with more GPUs per node (fast links inside a node) rather than more single-GPU nodes.
+- Increase the per-GPU batch size so compute per step grows relative to the exchange.
+These choices reduce the share of time spent in communication.
+W: The signature of communication overhead is a falling GPU utilization and diminishing speed-up as nodes are added. Consolidating onto fewer or larger machines is the fitting response when the model fits.
+X: A=Smaller model and CPUs: the 6x speed-up at 8 nodes shows that the GPUs were useful. CPUs would make training slower overall.
+B=GPU amount per Spark task: that setting is about Spark tasks claiming GPUs in mixed Spark and Ray flows. It does not change the gradient exchange of a training job already running.
+D=Autoscaling down: an autoscale removal during training would fail or stall the job rather than produce steady diminishing returns at higher node counts.
+T: Diminishing speed-up with falling GPU utilization signals communication overhead: prefer fewer, larger machines.
+
+@ DBX-MLP D1 T1.11 advanced troubleshooting
+S: A cluster has 6 worker nodes, each with 4 GPUs and 48 cores. A team runs `setup_ray_cluster(max_worker_nodes=6)` and starts Ray Tune trials that each request one GPU. The trials never start, although the GPUs of the cluster are idle. What should the engineer change?
+A: Pass `num_cpus_worker_node=48` and `num_gpus_worker_node=4`, so that each Spark worker hosts one Ray worker owning all of its cores and GPUs
+B: Raise `max_worker_nodes` to 24, one for each GPU in the cluster, because the number of Ray workers decides how many GPUs Ray can see
+C: Set `num_gpus_head_node=4`, because the Ray head schedules every GPU trial and hands out the GPUs of the workers to the trials
+D: Set `spark.executor.memory` to a small value such as 4g, because Spark executors keep all GPUs reserved until their memory is reduced
+K: A
+G: ## Ray workers get only what you declare
+`setup_ray_cluster` starts a background Spark job, and each Spark task becomes a Ray worker node. The Databricks scaling page gives the defaults for a Ray worker node: `num_cpus_worker_node` is 1 and `num_gpus_worker_node` is 0. A Ray worker that declares zero GPUs can never run a task that requests a GPU, whatever hardware the Spark worker has.
+## Recommended sizing
+Set `num_cpus_worker_node` to the number of CPU cores per Spark worker and `num_gpus_worker_node` to the number of GPUs per Spark worker. Then each Spark worker launches one Ray worker node that fully uses the machine.
+W: Declaring the cores and GPUs per Ray worker node lets the Ray scheduler place GPU trials on them, and one Ray worker per Spark worker uses the whole node.
+X: B=24 Ray workers: each would still declare 0 GPUs by default, so GPU trials still could not be placed.
+C=GPUs on the head: the head runs on the Spark driver and by default has 0 CPUs and 0 GPUs; GPU capacity for trials comes from the Ray worker nodes.
+D=Small executor memory: this setting is recommended for hybrid Spark and Ray memory pressure and does not declare GPUs to Ray.
+T: Ray workers default to 1 CPU and 0 GPUs: set num_cpus_worker_node and num_gpus_worker_node to the per-node hardware.
+
+@ DBX-MLP D1 T1.11 advanced tradeoff
+S: A forecasting team currently fits a scikit-learn model on one large memory-optimized node. Data doubles each year. The team asks for the strongest argument for investing in a distributed Spark ML implementation now, although today's job runs fine on one node. Which argument is correct?
+A: Vertical scaling stops at the largest node, whereas data-parallel training grows by adding workers, at the price of communication overhead
+B: Distributed training is always faster than single-node training for every data size, so the job will speed up immediately and cost less
+C: Spark ML models require no additional validation, because partitioned data removes the risk of overfitting
+D: Single-node training cannot be tracked in MLflow, so only distributed jobs can be logged to the experiment
+K: A
+G: ## Planning for growth
+Scaling up is simple: same code, bigger instance. Its limits are (1) a maximum instance size, (2) rising cost per unit of memory at the top end, and (3) a single point of failure. Scaling out adds machines, which in data-parallel algorithms means more partitions and more memory; the limits are later but the price is complexity and communication.
+## Trade-off to state
+- Choose a single node while the data fits with margin; it is simpler, usually faster for small data and easier to debug.
+- Plan the move to a distributed implementation when the growth curve will pass the largest node, because rewriting a pipeline under pressure is costly. Check that the algorithm exists in Spark ML and validate that its quality matches.
+W: The real reason to plan ahead is the ceiling: growth will pass any single machine, and Spark ML's data parallelism continues to scale with workers. The overhead is the price, so it is a trade-off, not a free win.
+X: B=Always faster: for data that fits on a node the communication and scheduling overhead often make the distributed version slower, so the claim is false.
+C=No validation needed: partitioning does not prevent overfitting, and the Spark ML model needs the same evaluation as any other.
+D=MLflow only for distributed jobs: MLflow tracks runs from single-node code equally well.
+T: Scale up while data fits; plan to scale out before data growth passes the largest node, accepting communication overhead.
+
+@ DBX-MLP D1 T1.12 applied use-case
+S: A vision team has a model that fits in the memory of one GPU, but the 4 TB image dataset takes days to cover per epoch on one GPU. The team has a cluster of GPU nodes and wants faster epochs. Which parallelization strategy fits?
+A: Model parallelism, where each GPU holds a different layer block and the batch moves through them as a pipeline
+B: Hyperparameter parallelism, where each GPU trains the same model on the same full dataset with another learning rate and a different seed
+C: Data parallelism with `TorchDistributor`: each process holds a full model copy, reads its own data shard and syncs gradients
+D: Vertical scaling of the driver node only, because PyTorch reads images on the driver and trains on the workers
+K: C
+G: ## Data parallelism versus model parallelism
+- **Data parallelism**: every process keeps a complete copy of the model. The dataset is divided into shards, each process computes gradients for its shard, and the gradients are averaged (all-reduce) so the copies stay identical. It speeds up training when the model fits in one device but the data (or the number of steps) is large.
+- **Model parallelism** (including pipeline parallelism): the model itself is split across devices because it does not fit in one. It is a memory solution, not a throughput one.
+## On Databricks
+`TorchDistributor` (a PySpark module in Databricks Runtime ML) launches PyTorch training as a Spark job, initializes the communication channels and uses `torch.distributed.run`. A typical function uses `DistributedDataParallel` and a `DistributedSampler` and is run with `TorchDistributor(num_processes=..., local_mode=False, use_gpu=True).run(train, ...)`.
+W: The model fits on one GPU and the problem is data volume, so data parallelism is the match. TorchDistributor runs DDP across the GPU workers, each with its own shard.
+X: A=Model parallelism: it is used when the model does not fit in one GPU. This model fits, so splitting layers adds pipeline waiting without addressing the data volume.
+B=Different learning rates per GPU: that is a hyperparameter search, which finds a setting but does not shorten the time to pass over the data for a given model.
+D=Bigger driver: training runs in the worker processes, and a larger driver does not speed up epochs.
+T: Model fits and data is large: data parallelism (full model copies on shards, gradients synchronized), for example with TorchDistributor.
+
+@ DBX-MLP D1 T1.12 advanced use-case
+S: A team wants to fine-tune a language model whose weights and optimizer state do not fit in the memory of a single GPU. Plain data-parallel replicas run out of GPU memory immediately. Which Databricks option is recommended for models that need higher compute but are limited by memory?
+A: The DeepSpeed distributor, built on TorchDistributor, with optimized memory use and pipeline parallelism
+B: A larger `TorchDistributor` with `num_processes` doubled, so that each GPU holds half of a complete model replica
+C: Spark ML `pyspark.ml` estimators, which shard neural network weights across executors automatically when the DataFrame is large and wide
+D: Ray Tune, which splits a model across GPUs when a trial reports that the memory of one GPU is full
+K: A
+G: ## When replicas do not fit
+Plain data parallelism copies the whole model (weights, gradients and optimizer states) to every GPU. If one copy does not fit in a GPU, adding replicas only adds more failures. The memory has to be partitioned or the model split across devices.
+## Databricks guidance
+The "Distributed training with DeepSpeed distributor" page says it is built on top of TorchDistributor and is the recommended solution for customers with models that require higher compute power but are limited by memory constraints. DeepSpeed (open source, from Microsoft) offers optimized memory usage, reduced communication overhead and advanced pipeline parallelism. The page lists low GPU memory, large model training and large input data such as batch inference as scenarios. An example notebook fine-tunes a 7B chat model with it.
+W: The DeepSpeed distributor targets this exact case, models that are limited by GPU memory, with memory optimizations and pipeline parallelism on top of TorchDistributor.
+X: B=Doubling num_processes: each process still builds a complete replica, so there is no halving of a model. More processes mean more copies and the same out-of-memory error.
+C=Spark ML estimators: pyspark.ml covers classical algorithms and does not shard weights of PyTorch language models.
+D=Ray Tune: Ray Tune runs hyperparameter trials. It does not partition a model across GPUs.
+T: Model too big for one GPU: use memory-saving, model-splitting tools such as the DeepSpeed distributor, not more full replicas.
+
+@ DBX-MLP D1 T1.12 applied troubleshooting
+S: A notebook launches `TorchDistributor(num_processes=4, local_mode=False, use_gpu=True).run(train, 1e-3)`. The job fails with errors that objects cannot be found or pickled on the executors. The `train` function imports `torch` at the top of the notebook and calls helper functions that use `torch` too. What is the documented fix?
+A: Wrap the call in `spark.sparkContext.broadcast(torch)`, so the imported module object is available on every executor and in every task
+B: Put the import statements, such as `import torch`, inside the training function and inside any other function it calls
+C: Set `local_mode=True`, which removes the need to ship any function from the driver to the executors
+D: Convert the function to a lambda expression because pickle cannot serialize named functions
+K: B
+G: ## How the training function reaches the workers
+`TorchDistributor.run(main, *args)` calls `main(**kwargs)` for a function (or runs `torchrun` for a file path). A function defined in a notebook is serialized on the driver and sent to the executors, where each process starts its own Python interpreter. References to modules imported at notebook level, to open handles or to stateful objects often do not survive that transfer.
+## Documented guidance
+The TorchDistributor page lists a common notebook error where objects cannot be found or pickled because import statements were not distributed to the executors. The fix is to include all imports at the top of the function passed to `run`, and inside any other user-defined function that the training method calls. It also suggests keeping the whole distributed logic inside one training function and reading `device_id` from `LOCAL_RANK`.
+W: Imports inside the training function and its helpers run in each worker process, so no module object has to be pickled from the driver.
+X: A=Broadcast a module: Python modules are not data to broadcast, and the problem is the serialization of references, which broadcasting does not repair.
+C=local_mode=True: it changes where the processes run, not how the function is shipped. Moving the same function with outside imports gives the same type of error.
+D=Lambda: serialization of a lambda has more restrictions than a named function, and it would hide the import problem rather than fix it.
+T: With TorchDistributor, put imports inside the training function and any helpers it calls so workers resolve them locally.
+
+@ DBX-MLP D1 T1.12 applied troubleshooting
+S: A team moves single-GPU code to 4 processes with `TorchDistributor`. The model is wrapped in `DistributedDataParallel`, but the data loader is still `DataLoader(dataset, batch_size=64)`. Epoch time barely improves, and each process sees every sample. What should be changed?
+A: Increase `batch_size` to the size of the whole dataset, so that every process finishes in one step
+B: Replace DDP with `DataParallel` on the driver, which assigns different rows to each worker automatically
+C: Set `spark.task.resource.gpu.amount` to `0`, because Spark tasks otherwise read the data twice on each GPU of a node
+D: Pass `sampler=DistributedSampler(dataset)` to the `DataLoader`, so each process reads a distinct shard of every epoch
+K: D
+G: ## What DDP does and does not do
+`DistributedDataParallel` replicates the model per process and synchronizes **gradients**. It does not shard the data. Each process builds its own `DataLoader`, so without a distributed sampler all processes iterate over the full dataset. The work is repeated 4 times and the gradients are averaged over nearly identical batches.
+## Sharding the data
+`torch.utils.data.DistributedSampler` divides the dataset indices among the processes by rank, so each process reads about one quarter of the data per epoch. The Databricks TorchDistributor example does exactly this: it builds `DDP(model)`, `DistributedSampler(dataset)` and `DataLoader(dataset, sampler=sampler)` inside the training function.
+```
+sampler = DistributedSampler(dataset)
+loader = DataLoader(dataset, sampler=sampler, batch_size=64)
+```
+W: A distributed sampler splits each epoch's samples across the processes, which is what makes the data-parallel step faster. Gradient synchronization by DDP is then useful because each process sees different data.
+X: A=Whole-dataset batch: it would exceed GPU memory, and each process would still read all samples.
+B=DataParallel on the driver: it is the older single-process, multi-GPU approach, not a way to split data across Spark workers, and TorchDistributor is set up for DDP.
+C=GPU amount per Spark task: this setting is about Spark tasks and GPU claims, and does not control how a PyTorch loader selects samples.
+T: DDP only synchronizes gradients: add a DistributedSampler so each process trains on its own shard.
+
+@ DBX-MLP D1 T1.12 advanced tradeoff
+S: A team has 64 GPUs. Each tuning trial of its model trains with data parallelism over 8 GPUs, and there are 40 trials to run. The team wants the search to finish as fast as possible with this budget. Which plan is best?
+A: Run the 40 trials one at a time on all 64 GPUs, since a single distributed fit always has the highest total throughput
+B: Run about 8 trials at a time, each on its own 8 GPUs, rather than every trial on all 64 GPUs in sequence
+C: Run each trial on a single GPU and skip data parallelism, because trial-level parallelism always beats data parallelism
+D: Run all 40 trials at once on 64 GPUs by giving each trial 1.6 GPUs through fractional sharing
+K: B
+G: ## Two levels of parallelism share one budget
+Hyperparameter tuning is parallel across trials and each trial may be parallel within itself (data parallelism). Both draw from the same GPU pool, so the split is a trade-off.
+- Trial-level parallelism has almost no communication cost, because trials are independent.
+- Data parallelism inside a trial has a synchronization cost that grows with the number of processes (see the Databricks distributed training page about communication overhead).
+## Reasoning
+If a trial scales well to 8 GPUs but poorly to 64, spend the budget on 64 / 8 = 8 concurrent trials: the 40 trials then need 5 waves. Running one trial on 64 GPUs wastes capacity on diminishing returns. Trial-level concurrency is also where Optuna and Ray Tune help, by allocating resources per trial. The per-trial size depends on the measured scaling curve and the model memory, not on a rule.
+W: Eight concurrent trials of 8 GPUs each keep every GPU busy and avoid the large synchronization cost of a 64-process job, so the 40 trials finish in about five waves.
+X: A=One trial at a time on 64 GPUs: communication overhead grows with process count, so gains from 8 to 64 GPUs are usually small. That leaves trials waiting in a queue.
+C=Single-GPU trials: the statement is not generally true. If one GPU cannot hold the data volume or the time per trial grows too much, the data parallelism inside the trial pays for itself.
+D=Fractional GPUs: a model that needs 8 GPUs for data parallelism cannot be given 1.6 GPUs without changing the design, and 40 simultaneous trials would not fit.
+T: Split the GPU budget between concurrent trials and the width of each trial using the measured scaling curve; avoid wide jobs with poor scaling.
+
+@ DBX-MLP D1 T1.12 applied comparison
+S: A team trains a gradient-boosted classifier and a logistic regression on a 2 TB Delta table of tabular features. The data cannot fit on one node. The team asks whether to use `TorchDistributor` for the distributed training. Which answer is correct?
+A: Yes, since TorchDistributor distributes any scikit-learn estimator after you wrap it in a PyTorch module
+B: Yes, but only with `local_mode=True`, which spreads the 2 TB across all workers automatically
+C: No, use Spark ML estimators, which parallelize over DataFrame partitions, and keep TorchDistributor for PyTorch code
+D: No, tabular data cannot be trained in a distributed way at all, so the table must be sampled down to fit on one machine
+K: C
+G: ## Match the framework to the model family
+- **Spark ML** (`pyspark.ml`) implements classical algorithms (linear and logistic regression, tree ensembles, k-means and others) over DataFrames, with data parallelism built into the algorithms. Databricks also offers `pyspark.ml.connect` for distributed training and inference of Spark ML models from Databricks Connect.
+- **TorchDistributor, DeepSpeed distributor and Ray** are the options listed on the Distributed training page for deep learning workloads, where the training code is PyTorch (or Ray Train) code that you write.
+## Decision
+A 2 TB table with a tree ensemble and a linear model is a Spark ML case: the algorithm reads partitioned DataFrame data, and nothing needs rewriting as a PyTorch training loop. TorchDistributor is for launching distributed PyTorch.
+W: Spark ML estimators are built for partitioned DataFrames, so they train classical models on data that exceeds one node. TorchDistributor serves PyTorch code and is not the route for these models.
+X: A=Wrapping scikit-learn in PyTorch: TorchDistributor launches PyTorch processes. A scikit-learn estimator wrapped in a module is still trained on one process' data, and not distributed.
+B=local_mode=True: local mode is not a data-distribution switch, and a 2 TB table is not spread automatically by it. The decision between frameworks is the question.
+D=Sampling is the only way: distributed algorithms for tabular data exist, with Spark ML as the main example, so sampling is a choice and not a necessity.
+T: Classical models on data too big for one node: Spark ML; TorchDistributor, DeepSpeed and Ray are for custom (deep learning) training code.

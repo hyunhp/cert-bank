@@ -1,0 +1,626 @@
+# DBX-MLP b11: Model Deployment (T3.2 rollout strategies, T3.3 custom PyFunc and UC artifacts, T3.4 querying, T3.5 deploying)
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/serve-multiple-models-to-serving-endpoint
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/create-manage-serving-endpoints
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/manage-serving-endpoints
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/custom-models
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/deploy-custom-python-code
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/model-serving-custom-artifacts
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/private-libraries-model-serving
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/score-custom-model-endpoints
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/route-optimization
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/query-route-optimization
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/model-serving-debug
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/store-env-variable-model-serving
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/express-deployments
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/production-optimization
+
+@ DBX-MLP D3 T3.2 advanced use-case
+S: A fraud team wants to run a rewritten model on real production requests for two weeks while no caller ever receives its score. The production endpoint `fraud-prod` serves `current` at 100% of traffic. Which design implements this shadow evaluation?
+A: Add the candidate as a second served entity at a 50% traffic percentage and discard its responses inside the calling service, so that half of all the live requests are scored by the new model
+B: Keep `current` as the only model answering callers, and have the caller send a duplicate of each request to the candidate on its own endpoint, logging that output for offline comparison
+C: Register the candidate under the `champion` alias in Unity Catalog, so that the registry mirrors every production request into the new version for scoring
+D: Enable scale to zero on a second served entity, so that the candidate wakes up only for a sample of the requests and its answers stay hidden from callers
+K: B
+G: ## Three rollout patterns
+- **Canary**: a small share of live requests is answered by the new model, so real users see its output. Risk is limited by the share.
+- **Blue-green**: two full environments exist; clients are switched from one to the other and the old one is kept for rollback.
+- **Shadow**: the new model receives a copy of live traffic but its output is never returned to users, so it carries no user risk.
+## What the traffic split does and does not do
+In Model Serving, `traffic_config` routes each request to exactly one served entity by percentage, and the response of that entity goes back to the caller. It is a canary or A/B tool. It has no mirroring mode. A shadow test therefore needs the duplication to happen outside the split: the caller (or a gateway in front of it) sends the same payload to the candidate, which lives on its own endpoint, or is addressed through the served-model route `/serving-endpoints/<endpoint>/served-models/<name>/invocations`, which ignores traffic settings. Only the production answer is returned, and the candidate's output is stored for comparison against the production output and later labels.
+W: A duplicate request to a separately deployed candidate gives the candidate real inputs while the production entity remains the only source of answers, which is the definition of shadow mode.
+X: A=Served entity at 50%: the split sends each request to one entity and returns that entity's answer to the caller. Half of the users would receive candidate scores, so this is a risky canary, not a shadow test.
+C=Alias mirroring: aliases are named pointers to model versions in Unity Catalog. They do not copy or replay requests, and they have no connection to which requests an endpoint receives.
+D=Scale to zero: this setting only releases compute after idle time and adds cold-start latency. It does not select a sample of requests and does not hide any response from callers.
+T: Shadow mode needs request duplication outside the traffic split, because the split returns the chosen entity's answer.
+V: Model Serving, Unity Catalog
+
+@ DBX-MLP D3 T3.2 advanced troubleshooting
+S: A `challenger` served entity receives 5% of the requests of an endpoint and was created with `scale_to_zero_enabled: true` to save cost. In the canary comparison its p99 latency shows irregular spikes, while `current` is steady, although both models run the same code path. What explains the spikes and what should be changed?
+A: The update that added the challenger is still replacing the configuration, so requests alternate between old and new containers; wait for it to finish, then recompare
+B: The challenger's model signature differs from the current model's, which slows request parsing on that entity only; relog the model with the earlier signature
+C: Route optimization applies only to the `current` entity, so the challenger uses the slower path; enable route optimization on the challenger served entity too
+D: The challenger's low request volume lets it idle and scale to zero, so some requests pay a cold start; turn off scale to zero for the canary so that the latency comparison is fair
+K: D
+G: ## Why a small canary can look slow
+A canary receives a small share of traffic. If scale to zero is on, the served entity scales down after a period of inactivity (about half an hour without requests) and the next request waits for a cold start. Databricks notes that scaling up from zero usually takes 10-20 seconds but can sometimes take minutes and has no latency SLA, and it advises against scale to zero for production workloads that need consistent response times.
+## Compare like with like
+A canary comparison is only meaningful if the entities differ in the model, not in infrastructure behavior. Give the challenger the same availability settings as `current` (scale to zero off), and size it for its own share of traffic.
+## What is endpoint-level
+Route optimization is chosen once for the whole endpoint when it is created, not per served entity. During a configuration update the old configuration keeps serving until the new one is ready, so requests are not mixed between old and new containers.
+W: Cold starts after idle periods hit a lightly loaded entity, and disabling scale to zero on the canary removes that confounder from the comparison.
+X: A=Update still running: during an update the previous configuration keeps serving until the new one is ready. Requests are not split between old and new containers, so this would not give intermittent spikes on one entity.
+B=Signature mismatch: a signature describes the schema that is validated for inputs and outputs. It does not slow one served entity relative to another, and relogging a model is not the remedy for cold-start behavior.
+C=Per-entity route optimization: route optimization is configured for the whole endpoint at creation time. It cannot be switched on for one served entity, so the premise is wrong.
+T: Configure canary and baseline entities with identical availability settings, otherwise cold starts masquerade as model latency.
+V: Model Serving
+
+@ DBX-MLP D3 T3.2 advanced troubleshooting
+S: An engineer submits a configuration update that moves `challenger` from 10% to 50%. While the endpoint shows Not ready (Updating), an alert shows that the error rate of the challenger's current 10% share is rising. The engineer wants to keep the 50% split from going live. What should be done?
+A: Cancel the in-progress update from the endpoint details page; the previous configuration keeps serving, and a new update can then set the split the team really wants
+B: Send a second update that sets `current` back to 100%; the endpoint queues it and applies it ahead of the pending 50% change, so the split never goes live
+C: Stop the endpoint, which discards the pending configuration and restores the 90/10 split when the endpoint is started again after the investigation
+D: Delete the `challenger` served entity through its served-model route, which takes effect immediately and bypasses the configuration update in progress
+K: A
+G: ## Updates are not instant
+Changing a served entity, size or traffic split on a custom model endpoint is a configuration update. It can take many minutes because the new configuration is built and provisioned while the old one keeps serving traffic. You are billed for both until the switch is complete, and if the update fails, the old configuration stays active.
+## While an update is in progress
+- Another update cannot be submitted until the running one finishes.
+- The running update can be cancelled (UI: Cancel update on the endpoint details page).
+- Only an endpoint with no in-progress update can be stopped.
+For a rollback in a release process: cancel the pending update if the risk shows up mid-flight, or submit a new configuration that sets `current` to 100% once the endpoint accepts updates. Because a rollback is itself an update, keep canary shares small so that the damage during the update window stays small.
+W: Cancelling the pending update keeps the already-serving configuration, which is exactly the one the team trusts, and then a new update can follow.
+X: B=Stop the endpoint: stopping is only possible for endpoints without an in-progress update, and it shuts resources down so queries fail with a 400 error. It does not discard configurations to restore a previous split.
+C=Second update: only one update can be in progress at a time, so a second configuration is rejected rather than queued ahead of the pending one.
+D=Deleting via the served-model route: that route is for sending queries to one served entity, with traffic settings ignored. It is not a management API and cannot remove an entity.
+T: A running configuration update is cancelled, not overtaken; the old configuration serves until a successful switch.
+V: Model Serving
+
+@ DBX-MLP D3 T3.2 advanced tradeoff
+S: `recs-api` is a custom model endpoint created without route optimization. Traffic has grown, and the team wants the lower overhead latency of route optimization, with a rollback path that leaves the old service untouched. Which plan fits?
+A: Edit the existing endpoint's configuration to turn on route optimization, and roll back by editing it off again if the latency does not improve for the clients
+B: Add a route-optimized served entity to the existing endpoint at 100% traffic and set the old entity to 0%, which keeps the previous version available for a quick rollback later
+C: Create a new route-optimized endpoint for the same model version, validate it with OAuth test calls to its own URL, move clients over, and keep the old endpoint until confidence is high
+D: Create the route-optimized endpoint and keep clients on personal access tokens, since only the endpoint URL changes and authentication stays as it was before
+K: C
+G: ## Blue-green on Model Serving
+Blue-green means running two complete environments and switching clients between them. On Model Serving the natural form is two endpoints: the live one (blue) and a new one (green) that you validate fully before moving callers.
+## Why route optimization forces it
+Route optimization can only be enabled when an endpoint is created. An existing endpoint cannot be updated to become route optimized, and the setting belongs to the endpoint, not to a served entity. A route-optimized endpoint also changes the client contract:
+- it is queried at its own dedicated URL (`endpoint_url` from the endpoint's details), not at the workspace invocations URL;
+- it accepts only OAuth tokens, not personal access tokens, and a token must carry `authorization_details` for the endpoint.
+Plan for client changes (service principal, token minting, URL) as part of the cutover.
+W: A second, route-optimized endpoint is the only way to adopt the feature, and keeping the first one running gives an immediate rollback target.
+X: A=Editing the existing endpoint: route optimization can be chosen only at creation time. An existing endpoint cannot be switched, so neither the enabling nor the rollback edit exists.
+B=Route-optimized served entity: route optimization is an endpoint property, so a single served entity cannot be route optimized inside a standard endpoint.
+D=Keeping personal access tokens: route-optimized endpoints reject them. Clients need OAuth tokens (a service principal for applications) and the new URL.
+T: Route optimization is fixed at endpoint creation, so adopting it is a blue-green move to a new endpoint with new OAuth clients.
+V: Model Serving
+
+@ DBX-MLP D3 T3.2 advanced tradeoff
+S: An endpoint serves `current` at 95% and `challenger` at 5%. Peak load is 200 requests per second and the model needs about 0.1 s per request. Both entities were created with the same large compute scale-out. Which configuration follows Databricks sizing guidance better?
+A: Give every served entity the concurrency for the full endpoint peak, because the platform may route any request to any entity and each entity must be able to take all of the load alone
+B: Size each served entity from its own share: concurrency is roughly queries per second times execution time, so the challenger needs about 5% of the peak load's concurrency and `current` about 95%
+C: Give the challenger the largest scale-out available, because a new model version is slower on its first requests and needs the extra capacity until it warms up
+D: Use one scale-out value for both entities that is derived from the average of their sizes, so that comparisons of their latency are not distorted by compute differences
+K: B
+G: ## Concurrency per served entity
+Provisioned concurrency is the number of requests a served entity can process in parallel. Databricks gives the estimate: provisioned concurrency is about queries per second times model execution time in seconds. At 200 QPS and 0.1 s per request the whole endpoint needs about 20 concurrent slots at peak.
+## Each entity sees its share
+The traffic split sends each request to one entity, so an entity only needs capacity for its share. A 5% challenger needs about 1 slot, a 95% entity about 19. Oversizing the challenger costs money for compute that the split never uses. If the share is raised later, the same configuration update can resize the entity.
+## Guard rails
+Keep a small margin for bursts: undersizing leads to 429 "Too many concurrent requests" errors, which tell you to raise provisioned concurrency (or let autoscaling raise it up to the configured maximum).
+W: Concurrency is estimated from QPS times execution time and per-entity QPS is the endpoint QPS times its traffic share.
+X: A=Full load on each entity: the split delivers each request to one entity only, so no entity ever receives the whole load. Sizing both for it doubles cost without improving results.
+C=Largest scale-out: warm-up of a new version does not need a bigger entity, and the biggest size multiplies cost for a 5% share of traffic.
+D=Averaged size: an average of two different loads fits neither entity. The 95% entity would be undersized and would return 429 errors at peak.
+T: Size every served entity for its own share of QPS times execution time.
+V: Model Serving
+
+@ DBX-MLP D3 T3.2 advanced use-case
+S: A release plan for a custom model endpoint has three edits: add `challenger` as a served entity, set the split to 90/10, and enlarge the compute size of `current`. The engineer plans to submit them as three consecutive API calls. What is the problem and the better approach?
+A: Only one update can run at a time and each is billed for both configurations while it runs; submit a single configuration update that contains all three changes together
+B: There is no problem, because the platform merges queued updates for the same endpoint into a single rebuild before the new configuration is provisioned
+C: Each call must go to a different endpoint, because a single endpoint accepts exactly one changed property per update to keep rollbacks atomic
+D: Traffic split changes need no configuration update, so only the first and third edits are sent as updates and the split is applied later as a request parameter by clients
+K: A
+G: ## One update at a time
+A custom model endpoint applies a new configuration in the background: the new containers are built and provisioned (this can take many minutes), and the existing configuration serves requests until the new one is ready. During this time you pay for both configurations, and a second update cannot be made until the first finishes.
+## Batch related changes
+The configuration is declarative: `served_entities` and `traffic_config` are sent together in `PUT /api/2.0/serving-endpoints/{name}/config`. Sending the complete target state in a single call:
+- builds and provisions once;
+- avoids a window in which the challenger exists with a split that was never intended;
+- gives one success or failure result, with the old configuration kept if anything fails.
+W: Send the whole desired served_entities and traffic_config in one update, because updates do not queue and each one costs a full build.
+X: B=One property per update: an update carries the full configuration, not a single property, and nothing limits an endpoint to one change per update.
+C=Split as request parameter: the percentages live in `traffic_config` of the endpoint configuration, so changing them is a configuration update. A request body field cannot change the split.
+D=Merged queued updates: updates are not queued. While one is in progress another cannot be made, so consecutive calls collide.
+T: Treat the endpoint configuration as one declarative document and update it once.
+V: Model Serving
+
+@ DBX-MLP D3 T3.2 advanced tradeoff
+S: A challenger model was trained on restricted data, and only the data science group may send requests to it. All application services may query the current model. How should the challenger be exposed for validation?
+A: Add it to the production endpoint as a served entity with a small traffic percentage and set a separate query permission on that served entity for the data science group
+B: Serve it from the production endpoint and restrict EXECUTE on the model in Unity Catalog to the data science group, so other callers are rejected when the split picks it
+C: Deploy it on its own endpoint and grant CAN_QUERY on that endpoint only to the data science group, because permissions are assigned per endpoint, not per served entity
+D: Alias the challenger version as `challenger` and grant the alias to the group; applications calling the endpoint then can never be routed to it by the traffic split
+K: C
+G: ## Where access is enforced
+- **Who may query**: CAN_QUERY (and higher levels) is granted on the serving endpoint. All served entities of an endpoint share the same endpoint permissions.
+- **What the endpoint may read**: the endpoint acts with the identity of its recorded creator, which needs USE CATALOG, USE SCHEMA and EXECUTE on each Unity Catalog model it serves. Callers do not need grants on the model.
+## Consequence for rollouts
+A traffic split mixes models behind one name and one permission set, so every caller of that name can be answered by every entity. If the audience for the new model differs (restricted data, internal testing, a different team), the two models belong on different endpoints. A split is for models that the same audience may use.
+W: Endpoint permissions are per endpoint, so a restricted audience needs a separate endpoint.
+X: A=Entity-level permission: there are no query permissions on individual served entities. Access control is set on the endpoint, so the production audience could still be answered by the challenger.
+B=EXECUTE for callers: EXECUTE on the model is checked for the endpoint's creator when the endpoint is created or updated, not for the callers, so it does not filter who is answered by which entity.
+D=Alias grants: aliases are pointers to model versions and carry no endpoint access rules. A traffic split is also driven by percentages, not by aliases.
+T: Different audiences need different endpoints: access control is per endpoint, and a split puts everyone behind the same permissions.
+V: Model Serving, Unity Catalog
+
+@ DBX-MLP D3 T3.3 advanced troubleshooting
+S: A custom pyfunc model is registered in Unity Catalog. It works in a notebook but fails when served:
+```
+def predict(self, context, model_input):
+    w = torch.load("/Volumes/ml/prod/weights/model.pt")
+    return score(w, model_input)
+```
+Which change makes the file available at serving time?
+A: Grant the endpoint's service principal READ VOLUME on the volume and keep the path in the code, because the endpoint mounts Unity Catalog volumes while it serves
+B: Attach an instance profile to the endpoint so that it can read the volume path directly from cloud storage at request time, then keep the code unchanged
+C: Copy the file to a DBFS root folder and read it from a `/dbfs/...` path inside `predict`, since serving containers share the cluster's mounted file systems
+D: Log the model with `artifacts={"weights": "/Volumes/ml/prod/weights/model.pt"}` and load the file in `load_context` through `context.artifacts["weights"]`
+K: D
+G: ## Why serving cannot read your volume
+Real-time workloads at scale perform best when every dependency is captured statically at deployment. For that reason Model Serving requires files that live in Unity Catalog volumes to be packaged into the model artifact itself. The serving container does not mount your workspace file systems, and fetching files over the network at request time makes startup fragile.
+## The pattern
+`mlflow.pyfunc.log_model(..., artifacts={"name": "<path>"})` copies the files into the model. Inside the model class the copies are reachable at `context.artifacts["name"]`. Load them once in `load_context`, not in `predict`.
+```
+def load_context(self, context):
+    self.w = torch.load(context.artifacts["weights"])
+```
+W: Anything a pyfunc reads at inference must be in the model: pass it through the artifacts argument and read context.artifacts.
+X: A=READ VOLUME grant: the problem is not a missing privilege. Serving requires volume artifacts to be packaged into the model, so a grant does not make the path exist in the container.
+B=Instance profile: it gives the container credentials for AWS resources your code accesses itself, but a volume path is not mounted in the container. It would also be a runtime network dependency.
+C=DBFS path: serving containers do not share the cluster's file systems or mounts, so a path that works in a notebook does not exist there.
+T: Files go into the model with artifacts= and are read from context.artifacts.
+V: Model Serving, Unity Catalog, MLflow
+
+@ DBX-MLP D3 T3.3 advanced tradeoff
+S: A custom pyfunc loads a large embedding file and builds a tokenizer inside `predict` on every call. After deployment, median latency is far above what the same model reaches in a notebook loop. How should the class be restructured?
+A: Build the tokenizer and read the embedding file once in `load_context`, store them on `self`, and keep only the per-request logic in `predict`
+B: Cache the loaded objects in a module-level global of the notebook that logged the model, so every served replica reuses the same in-memory copy
+C: Enable scale to zero so that idle replicas release memory between requests and each new request loads the objects into a freshly started container
+D: Raise the endpoint's request timeout so slow loads in `predict` finish successfully, and size the served entity up to hide the repeated cost
+K: A
+G: ## Two methods, two lifetimes
+A `mlflow.pyfunc.PythonModel` has two required parts:
+- `load_context(self, context)` runs once when the model is loaded into a replica. Put everything that is expensive and request-independent here: reading weights and artifacts, building tokenizers, opening clients.
+- `predict(self, context, model_input)` runs for every request. It should contain only per-request work such as input formatting, calling the model and formatting outputs.
+Databricks calls this out as critical to minimize the work done in `predict`, which speeds up inference.
+## Why other fixes fail
+Objects held in a notebook's memory are not part of the logged model and do not exist in the serving container. Capacity and timeout settings change how long repeated work is tolerated, not whether it repeats.
+W: One-time loading belongs in load_context; predict runs per request and must stay light.
+X: B=Scale to zero: this adds cold starts and reloads the objects whenever a replica restarts, making latency worse. It does not remove repeated work from `predict`.
+C=Notebook global: the serving container runs the logged model in its own process, so notebook memory is not available to it. The code would fail or reload anyway.
+D=Higher timeout and size: the repeated load still happens on every request. A larger entity burns more compute to hide the symptom and the timeout is a ceiling, not a cure.
+T: Heavy initialisation goes in load_context; predict is per-request only.
+V: Model Serving, MLflow
+
+@ DBX-MLP D3 T3.3 advanced troubleshooting
+S: A pyfunc model is logged from a Databricks Runtime ML cluster without `pip_requirements`. Registration in Unity Catalog works, but every endpoint build fails. The model's `conda.yaml` lists `mlflow-skinny`. What is the fix?
+A: Add `mlflow-skinny` to `extra_pip_requirements` with an exact version pin, which makes the container builder accept the skinny package as the MLflow dependency
+B: Move the endpoint to a GPU workload type, whose base image ships the full MLflow package and ignores the model's recorded environment
+C: Log a new model version with `pip_requirements` naming `mlflow==<version>` (the full package) and the other libraries it needs, then serve that version
+D: Remove the model signature and input example, because they pull the skinny package into the environment file during logging
+K: C
+G: ## What the container build needs
+Databricks Runtime ML includes `mlflow-skinny`, not the full `mlflow` package. A pyfunc logged without explicit `pip_requirements` records `mlflow-skinny` in `conda.yaml`. Model Serving requires `mlflow` and cannot build the container image otherwise.
+## The pattern
+```
+mlflow.pyfunc.log_model(
+    name="model", python_model=m,
+    pip_requirements=["mlflow==3.8.1", "scikit-learn"],
+    registered_model_name="ml.prod.scorer")
+```
+Pin versions so serving restores the training environment. Remember that application dependencies must be declared in the model; the base image only has system-level libraries. A new version is required because a logged model's environment file is immutable.
+W: Always declare the full mlflow in pip_requirements for pyfunc models logged on Databricks Runtime ML.
+X: A=Pinned skinny package: the problem is the skinny flavor itself. Pinning it only fixes which skinny version is installed and the build still lacks `mlflow`.
+B=GPU workload: the workload type changes hardware, and the build still uses the environment recorded in the model. It does not replace that environment.
+D=Removing signature: signature and input example are metadata. They do not decide the MLflow package in the environment file, and Unity Catalog requires a signature anyway.
+T: On Databricks Runtime ML log pyfunc models with pip_requirements that include full mlflow, never rely on the default skinny capture.
+V: Model Serving, MLflow
+
+@ DBX-MLP D3 T3.3 advanced comparison
+S: A pyfunc preprocessing module is published as an internal wheel on the company's Artifactory mirror. Policy forbids public internet access from endpoints, and workspace admins have set Artifactory as the workspace default package repository. What is the simplest correct way to include the library?
+A: Package the wheel in a Unity Catalog volume and list the volume path in `extra_pip_requirements`, since serving never uses a configured package mirror
+B: List the library in the model's pip requirements, so that Model Serving installs it from the workspace default package repository while building the container
+C: Run `%pip install` of the wheel in the notebook that logs the model; Model Serving copies the installed packages of the cluster into the container
+D: Set a `PIP_INDEX_URL` environment variable on the served entity, so that the container downloads the wheel from the mirror each time a request arrives
+K: B
+G: ## Two supported ways to ship private libraries
+- **Option 1, private package repository**: workspace admins configure the mirror (such as Nexus or Artifactory) as the default package repository. Model Serving uses that workspace-level configuration when it builds the model environment. You then list the library like any other requirement.
+- **Option 2, wheel files**: when no mirror is reachable, or the library is not in any repository, upload the wheel (to a Unity Catalog volume) and reference it in `extra_pip_requirements`, or pack it with the code-path parameter and reference `code/<wheel>.whl`. `mlflow.models.utils.add_libraries_to_model(<model-uri>)` can also create a new version with all dependencies as wheels.
+## Choosing
+A configured mirror is simplest and keeps one source of truth, so use Option 1. Use wheels when the mirror cannot serve the package. Libraries are resolved at build time, not per request.
+W: With a workspace default repository set, declare the library as a normal requirement and let the build resolve it.
+X: A=Wheel in a volume: this works as Option 2, but the claim that serving never uses a configured mirror is false, and it adds a packaging step that is unnecessary here.
+C=Notebook %pip: a notebook installation affects only that cluster session. The container is built from the requirements recorded in the model, not from the cluster's installed set.
+D=Index URL variable: dependencies are installed when the image is built, not when requests arrive, so an environment variable on the served entity at request time has no effect on installation.
+T: Use the workspace default package repository for private libraries; fall back to wheel files only when the mirror cannot provide them.
+V: Model Serving, MLflow
+
+@ DBX-MLP D3 T3.3 advanced troubleshooting
+S: A pyfunc loads a tokenizer in `load_context`:
+```
+self.tok = AutoTokenizer.from_pretrained("acme/ner-tokenizer")
+```
+Network policies now block outbound internet access from endpoints, and new endpoint versions fail while loading the model. What is the correct redesign?
+A: Keep the download in `load_context` and raise the endpoint's request timeout, because the model load then has more time to reach the public hub
+B: Move the download into `predict` and wrap it in a retry, so that blocked calls are retried until the network policy admits the connection
+C: Store the hub access token in a plain text environment variable of the served entity, so the container is authorized to pass the outbound restriction
+D: Download the tokenizer files at logging time, pass the directory in `artifacts`, and load it from `context.artifacts` with `local_files_only=True`
+K: D
+G: ## Deployment is static
+Databricks says that real-time workloads at scale perform best when all dependencies are captured at deployment time, and that network artifacts loaded with the model, such as Hugging Face tokenizers, should be packaged with the model whenever possible. Restricting outbound access with network policies is also a recommended control for Model Serving endpoints, so runtime downloads are fragile and may be blocked.
+## The pattern
+```
+snapshot at log time -> artifacts={"tok": "./tokenizer_cache"}
+load_context: from_pretrained(..., local_files_only=True, cache_dir=context.artifacts["tok"])
+```
+The artifacts are copied into the model version, so every endpoint build and every replica restart sees the same files, with no dependency on an external service being up.
+W: Package downloaded assets as model artifacts and load them locally, never at serving time from the internet.
+X: A=Longer timeout: a blocked network never answers, so a longer wait only delays the same failure.
+B=Download in predict: this repeats a blocked call on every request and adds latency, while the policy still denies the connection.
+C=Token in an environment variable: a credential authenticates a request but does not open a network path that the policy blocks. A plain text variable would also expose the token.
+T: Capture external assets in the model artifact at log time and load them offline.
+V: Model Serving, MLflow
+
+@ DBX-MLP D3 T3.3 applied troubleshooting
+S: A team registers a pyfunc to Unity Catalog:
+```
+mlflow.set_registry_uri("databricks-uc")
+mlflow.pyfunc.log_model(name="m", python_model=M(),
+    registered_model_name="ml.prod.scorer")
+```
+The call fails with an error saying the model has no signature metadata. What resolves it?
+A: Request the EXECUTE privilege on the schema for the logging identity, since the registration fails until the identity may run models in that schema
+B: Pass a model signature (for example `infer_signature(sample_input, sample_output)`) when logging, because Unity Catalog requires input and output schemas
+C: Register under a two-level name such as `prod.scorer`, because three-level names are only accepted by the legacy workspace model registry
+D: Switch the registry URI to the workspace model registry, because pyfunc models without a signature are accepted only there and not in Unity Catalog
+K: B
+G: ## Signatures in Unity Catalog
+A model signature records the names, types and shapes of inputs and outputs. Unity Catalog models require one: Databricks documentation states that signatures are necessary for logging models to Unity Catalog. A signature also lets serving validate requests and produce the schema of an endpoint.
+## How to provide one
+- `infer_signature(model_input, model_output)` from `mlflow.models.signature`, passing sample data and the model's predictions;
+- an input example logged with the model also documents the format and is shown in the Serving UI query box.
+## Not the problem here
+Registration privileges are different: creating a model version needs CREATE MODEL on the schema (plus USE CATALOG and USE SCHEMA). Unity Catalog uses three-level names `catalog.schema.model`; the workspace registry is the legacy option.
+W: Unity Catalog needs a signature on every logged model, so pass one (or an input example from which it can be inferred) at log time.
+X: A=EXECUTE privilege: EXECUTE is needed on a model by the endpoint creator when serving. A missing signature is a metadata error and a privilege would not change it.
+C=Two-level name: Unity Catalog models are always named with three levels, `catalog.schema.model`. The two-level form would not identify a model in this registry.
+D=Workspace registry: it is the legacy registry and Databricks recommends Unity Catalog. Moving away would only avoid the validation, not satisfy the serving requirement for a documented schema.
+T: Log with a signature; Unity Catalog will not register a model without one.
+V: Unity Catalog, MLflow
+
+@ DBX-MLP D3 T3.3 advanced use-case
+S: Before creating an endpoint for a new pyfunc version, the team wants to detect missing packages and environment errors without deploying anything. Which check matches Databricks guidance?
+A: Run `mlflow.models.predict` with the model URI and a sample input, which executes the model in an environment rebuilt from its recorded requirements
+B: Call `mlflow.pyfunc.load_model` in the logging notebook and invoke `predict`; the notebook has the same packages, so passing proves the container will build
+C: Create the production endpoint with the new version at 100% traffic and read the build logs, since only a real deployment tests the serving container
+D: Compare the model's `requirements.txt` with `pip freeze` output of the logging cluster by eye, since matching version numbers prove that deployment will succeed
+K: A
+G: ## Validate before deploying
+Container builds take minutes and failures often come from missing or conflicting dependencies. Databricks recommends validating that a model can be served before deploying, and points to `mlflow.models.predict` for it.
+## Why the notebook check is not enough
+`load_model` in the logging notebook runs with everything installed in that notebook, so an undeclared dependency is silently satisfied there and fails later in the container, giving "No module named ...". `mlflow.models.predict` builds an environment from the model's recorded requirements and runs the sample input in it, so it surfaces undeclared or conflicting packages.
+## Related debugging steps
+After deployment, container build events appear in the endpoint's event logs, and logic errors in `predict` are easiest to reproduce by loading the model in a notebook and calling it.
+W: Test the logged requirements, not the notebook environment: use mlflow.models.predict before deploying.
+X: B=Notebook load_model: the notebook environment hides undeclared dependencies, so a pass does not prove that the logged requirements are complete.
+C=Production deployment as test: this puts an untested version on live traffic and costs a long build per attempt. Staging and pre-deployment validation exist to avoid it.
+D=Manual comparison: matching version lists do not show missing packages or conflicts at install time, and the check does not run any model code.
+T: Reproduce the recorded environment before deployment with mlflow.models.predict.
+V: Model Serving, MLflow
+
+@ DBX-MLP D3 T3.4 advanced troubleshooting
+S: A pyfunc reads features by position, `model_input.iloc[:, 0]` for age and `iloc[:, 1]` for income. Callers send:
+```
+{"dataframe_records": [{"income": 52000, "age": 34}]}
+```
+Predictions in production differ from the notebook. What is the best fix?
+A: Keep the records format but sort the keys alphabetically in the client, since Databricks reads the keys in sorted order when it builds the DataFrame
+B: Switch the request to the `instances` key, which Databricks documents as the preferred format for tabular models with named columns
+C: Send `dataframe_split` with an explicit `columns` list and have the model select columns by name, because the records format does not guarantee column order
+D: Wrap the same body in the `inputs` key, because that key makes the endpoint apply the model signature's column order to dictionary rows
+K: C
+G: ## Request formats for custom models
+Model Serving accepts a JSON-serialized pandas DataFrame or tensor input:
+- `dataframe_split` (recommended): `{"columns": [...], "data": [[...]]}`. Order of columns is explicit.
+- `dataframe_records`: one JSON object per row. Databricks notes that it does not guarantee the preservation of column ordering, so the split format is preferred.
+- `instances` and `inputs`: tensor formats (row-based and columnar) for TensorFlow- or PyTorch-style models, not for named tabular columns.
+The response is wrapped in a `predictions` key.
+## Defensive design
+A model that depends on column position is fragile in any format. Select columns by name, rely on the logged signature, and have clients use `dataframe_split` so that order and names travel together.
+W: The split format carries the column names and their order together with the data, and selecting columns by name in the model makes the code independent of how any client orders its fields, so predictions match the notebook.
+X: A=Sorted keys: the documentation makes no promise that keys are read in sorted order, so this is a fragile guess that also differs from the training order.
+B=`instances`: it is a tensor format for row-oriented tensors. It is not a preferred format for tabular data and does not bring column names.
+D=`inputs` wrapper: this key is also a tensor format (columnar). Neither key reorders dictionary rows by the signature.
+T: Use dataframe_split with explicit columns; records format does not preserve column order.
+V: Model Serving
+
+@ DBX-MLP D3 T3.4 advanced troubleshooting
+S: A service principal calls a route-optimized endpoint at its dedicated URL with an OAuth token minted using `grant_type=client_credentials&scope=all-apis`. Every call returns 401 with the message that authorization details are missing. What must change?
+A: Replace the OAuth token with a personal access token of a workspace admin, since the dedicated route accepts any token that carries the all-apis scope
+B: Change the token request scope to `serving-endpoints`, because the token endpoint rejects `all-apis` for route-optimized URLs and requires an endpoint scope
+C: Send the request to the workspace invocations URL instead, because endpoints created recently accept only workspace URLs and tokens without detail claims
+D: Request the token with `authorization_details` naming the endpoint ID and the `query_inference_endpoint` action, since a plain `all-apis` token is not scoped to it
+K: D
+G: ## Calling a route-optimized endpoint
+Route optimization changes both URL and authentication:
+- The endpoint has its own URL (the `endpoint_url` returned when you get the endpoint). Endpoints created after September 22, 2025 must be queried only there.
+- Only OAuth tokens are accepted, never personal access tokens.
+- For manually minted tokens, the request to `https://<workspace>/oidc/v1/token` must include `authorization_details` of type `workspace_permission`, object `/serving-endpoints/<endpoint-id>` and the action `query_inference_endpoint` (or `manage_inference_endpoint`). The only supported `scope` is `all-apis`; the endpoint down-scoping is done through the details.
+- The service principal needs CAN_QUERY on the endpoint.
+The Databricks SDK can hide all of this: it resolves the URL and fetches the scoped token from the endpoint name and service principal credentials.
+W: Route-optimized endpoints need an OAuth token down-scoped to the endpoint with authorization_details.
+X: A=Personal access token: route-optimized endpoints accept only OAuth tokens and answer 401 Malformed token to personal tokens, so this swaps one failure for another.
+B=Another scope: `all-apis` is the only supported scope. Other values produce `invalid_scope`, and the endpoint scoping is done by `authorization_details`.
+C=Workspace URL: new route-optimized endpoints are queried exclusively at their dedicated URL, and the workspace URL answers with an error that points to the correct URL.
+T: Mint endpoint-scoped OAuth tokens: scope all-apis plus authorization_details.
+V: Model Serving
+
+@ DBX-MLP D3 T3.4 applied use-case
+S: An external Python service must query a newly created route-optimized endpoint with as little custom auth code as possible. A service principal with CAN_QUERY exists. Which approach fits?
+A: Use a `WorkspaceClient` configured with a personal access token and call `serving_endpoints.query`, because the SDK handles route optimization for personal tokens
+B: Call `ai_query` from a SQL warehouse for each request and return the result to the service, since the function takes care of the URL and the token
+C: Build a Databricks SDK `WorkspaceClient` from the host and the service principal's client ID and secret, then call `serving_endpoints_data_plane.query` with the endpoint name
+D: Send requests to the workspace invocations URL with the service principal's OAuth token, since the same URL serves every endpoint created after the change
+K: C
+G: ## Using the SDK for route-optimized endpoints
+The Databricks SDK offers a data plane client for route-optimized endpoints:
+```
+c = client.Config(host=H, client_id=ID, client_secret=SECRET)
+w = WorkspaceClient(config=c)
+w.serving_endpoints_data_plane.query(name, dataframe_records=rows)
+```
+Given the endpoint name, the SDK looks up the dedicated URL and handles the OAuth M2M token flow for the service principal. Databricks recommends service principals with OAuth for production applications.
+## Why alternatives do not work
+Personal access tokens are rejected, newly created route-optimized endpoints do not accept the workspace URL, and `ai_query` is a SQL function for batch or SQL-side inference, not a client for an external service's requests.
+W: The SDK's data-plane client plus service-principal OAuth resolves URL and token for route-optimized endpoints.
+X: A=Personal access token with the SDK: route-optimized endpoints reject personal access tokens whatever client library sends them.
+B=`ai_query`: a SQL function run on Databricks compute. An external service would need to run a warehouse query for every call and gets no low-latency path.
+D=Workspace URL with OAuth: endpoints created after the cutoff date support only the dedicated URL, so this call is rejected even though the token is valid.
+T: Use the SDK data-plane query with a service principal for route-optimized endpoints.
+V: Model Serving
+
+@ DBX-MLP D3 T3.4 applied comparison
+S: A Python job in a Databricks notebook and a Java web service must both query the same custom model endpoint (not route optimized). Which pairing of methods is right?
+A: Both use `ai_query`, because it is the documented method for application calls to custom model endpoints and accepts the same JSON bodies
+B: The notebook posts raw REST requests only, because the Deployments SDK is limited to external models, and the Java service uses the SDK's Java package
+C: The Java service calls `mlflow.deployments` through a Python subprocess, since REST access to custom model endpoints is limited to code running inside Databricks notebooks
+D: The notebook uses the Deployments SDK client's `predict`, and the Java service posts JSON to `/serving-endpoints/<name>/invocations` with an M2M OAuth token
+K: D
+G: ## Querying methods for custom models
+Databricks lists these options for scoring requests: the Serving UI, the `ai_query` SQL function, the REST API (`POST /serving-endpoints/{name}/invocations`) and the MLflow Deployments SDK `predict()` (MLflow 2.9 or above).
+- **MLflow Deployments SDK**: Python convenience over the same API, handy in notebooks and Python jobs.
+- **REST API**: language-neutral. Any service that can send HTTPS and JSON can call it, authenticated with a bearer token. For production, Databricks recommends machine-to-machine OAuth tokens; for tests, a personal access token of a service principal.
+- **`ai_query`**: SQL function for running inference inside queries and pipelines on Databricks, not an application client.
+```
+client = mlflow.deployments.get_deploy_client("databricks")
+client.predict(endpoint="churn", inputs={"dataframe_split": {...}})
+```
+W: Python on Databricks can use the Deployments SDK; other stacks use REST with OAuth M2M tokens.
+X: A=`ai_query` for both: it is a SQL function, not a client for application code, and a Java service cannot call a SQL function without a query execution path.
+B=SDK limited to external models: the Deployments SDK `predict()` is a documented way to query custom models, and no Java package of it is documented.
+C=Python subprocess: REST access is open to any client with a valid token, so a subprocess adds moving parts without a reason.
+T: SDK for Python convenience, REST for everything else, M2M OAuth in production.
+V: Model Serving, MLflow
+
+@ DBX-MLP D3 T3.4 advanced tradeoff
+S: A pyfunc receives requests with missing columns and currently raises `ValueError`; clients see an unexpected-error response and the on-call rota is paged on server-error rates. How should the model code be changed so that malformed client input does not look like a platform fault?
+A: Catch every exception in `predict` and return an empty prediction list with a 200 status, which keeps the error rate low and lets callers detect any missing output themselves
+B: Validate the input in `predict` and raise `MlflowException` with a clear message, since those errors map to 4xx and 5xx is reserved for faults on the Databricks side
+C: Disable the model signature on the endpoint, because signature validation is what turns malformed requests into server errors on the platform
+D: Wrap the request body in an `inputs` key on the client, since the key makes the endpoint convert all model exceptions into client errors
+K: B
+G: ## How errors are classified
+Databricks documents that errors raised as `MlflowException` from model code are mapped to 4xx responses. They are treated as customer-caused errors, because the caller can resolve them from the message. 5xx codes are reserved for errors where Databricks is at fault.
+## Design for operability
+- Validate inputs at the top of `predict` (columns, types, ranges) and raise `MlflowException` with a message that names the problem.
+- Alert on 5xx for platform or model faults and watch 4xx as client quality. The documented mapping covers `MlflowException`; an exception of another type is not documented to be reported as a client error, so do not rely on it for bad input.
+- Do not hide failures with fake successful responses: callers receive wrong decisions silently, and monitoring loses the error signal.
+For failed requests, the endpoint logs and events help with root cause analysis.
+W: Raise MlflowException for bad input so it surfaces as a 4xx, keeping 5xx meaningful.
+X: A=Empty successful responses: this hides failures, the caller cannot tell a valid empty result from an error, and monitoring no longer sees the problem.
+C=Disabling the signature: signatures validate inputs and help produce schemas. Removing them does not change how model exceptions are classified and weakens validation.
+D=`inputs` wrapper: it is a tensor request format and has no effect on error classification.
+T: Use MlflowException for input errors so they are 4xx, not platform-looking 5xx.
+V: Model Serving, MLflow
+
+@ DBX-MLP D3 T3.4 advanced troubleshooting
+S: Clients of a standard (not route-optimized) endpoint get HTTP 429 with the message `Exceeded max number of parallel requests` while the served entity still shows spare provisioned concurrency. Which remedy does Databricks recommend first?
+A: Create a route-optimized endpoint, where this workspace-level parallel request limit does not apply, and move the clients to it
+B: Raise the provisioned concurrency of the served entity, which lifts the workspace-wide limit on parallel requests that clients may send at once
+C: Turn on scale to zero for the served entity so that idle capacity is released and the workspace limit is shared among fewer replicas
+D: Switch the request body from `dataframe_split` to `dataframe_records`, because the records format sends fewer parallel connections per client
+K: A
+G: ## Two different 429 errors
+- `Too many concurrent requests. Consider increasing the provisioned concurrency of the served entity`: the entity's capacity (about QPS times execution time) is too small. Fix by raising provisioned concurrency, or by enabling autoscaling up to a higher maximum.
+- `Exceeded max number of parallel requests`: the workspace limit on parallel requests sent to standard endpoints was reached. Entity concurrency does not change it. Databricks recommends moving to route-optimized endpoints, where this limit is removed. Other options are fewer concurrent clients or asking the account team for a higher quota.
+## Related quota
+`Workspace exceeded provisioned concurrency quota` is a third error, about the workspace quota on total provisioned concurrency, freed by deleting or stopping unused endpoints.
+W: Parallel-request 429 at workspace level: move to route optimization. Per-entity 429: add concurrency.
+X: B=Provisioned concurrency: this fixes the entity-level 429. The message here is about the workspace-wide limit on parallel requests, which entity size does not move.
+C=Scale to zero: it would add cold starts, and it does not change the parallel request limit.
+D=Records format: the body format does not change how many requests are in flight in parallel.
+T: Match the 429 message to its cause: entity concurrency versus workspace parallel-request limit.
+V: Model Serving
+
+@ DBX-MLP D3 T3.4 applied troubleshooting
+S: A service principal gets `403 Permission denied` from a route-optimized endpoint although its token was minted with `authorization_details`. The principal is a workspace member. What should be checked?
+A: Whether the service principal holds EXECUTE on the served Unity Catalog model, because every caller is checked against model privileges at each single request
+B: Whether the service principal is a workspace admin, because only admins may query route-optimized endpoints at their dedicated URLs with OAuth
+C: Whether the token was issued by a personal access token exchange, because route-optimized endpoints accept only tokens exchanged from user logins
+D: Whether the service principal has CAN_QUERY on the endpoint and whether the action in the token's `authorization_details` matches its granted permission
+K: D
+G: ## 401 versus 403 on route-optimized endpoints
+- **401 Malformed token**: the credential is a personal access token or cluster token instead of an OAuth JWT.
+- **401 Missing authorization details**: the token was not down-scoped with `authorization_details`.
+- **403 Permission denied**: the token is valid and scoped, but the principal lacks permission on the endpoint, or the action in the details does not match the granted level. Grant CAN_QUERY to the service principal and use `query_inference_endpoint`.
+## Model privileges are not the callers' business
+EXECUTE on the Unity Catalog model, USE CATALOG and USE SCHEMA are needed by the endpoint's recorded creator, because the endpoint reads the model with the creator's identity. The query-time permission for a caller is the endpoint permission.
+W: A 403 on a scoped token means endpoint permission or action mismatch, not model privileges.
+X: A=Model privileges for callers: the endpoint uses its creator's grants to access the model. Callers need endpoint permission, not EXECUTE on the model.
+B=Workspace admin: admin rights are not required. A principal with CAN_QUERY can query the endpoint.
+C=Personal token exchange: personal tokens and exchanges from them are not accepted. Route-optimized endpoints take OAuth tokens, typically machine-to-machine for applications.
+T: 403 means missing endpoint permission or a mismatched action, not a model privilege.
+V: Model Serving
+
+@ DBX-MLP D3 T3.5 applied troubleshooting
+S: A deployment script fails to create the endpoint:
+```
+client = mlflow.deployments.get_deploy_client("databricks")
+client.create_endpoint(name="databricks-churn-v2", config={"served_entities": [{
+  "entity_name": "ml.prod.churn", "entity_version": "4",
+  "workload_size": "Small", "scale_to_zero_enabled": False}]})
+```
+Model, version and permissions are correct. What is wrong?
+A: The endpoint name starts with `databricks-`, a prefix reserved for preconfigured endpoints; the name must change
+B: The `entity_name` must be given as a `models:/` URI for Unity Catalog models, so the three-level name is not resolved by `create_endpoint`
+C: The `workload_size` must be omitted when `scale_to_zero_enabled` is `False`, because compute is then sized by autoscaling alone
+D: The client must be created with `get_deploy_client("databricks-uc")`, because the plain `databricks` target only serves workspace registry models
+K: A
+G: ## Creating endpoints in code
+Databricks gives three ways to create a custom model endpoint: the Serving UI, the REST API (`POST /api/2.0/serving-endpoints`) and the MLflow Deployments SDK `create_endpoint`, with the client from `mlflow.deployments.get_deploy_client("databricks")`. The payload is the same:
+- `name`: must not start with `databricks-`, which is reserved for Databricks preconfigured endpoints;
+- `config.served_entities[]`: `name` (optional alias for routing), `entity_name` (three-level Unity Catalog model name), `entity_version`, `workload_size` and `scale_to_zero_enabled`;
+- optional `traffic_config` for several entities, and environment variables.
+## Make deploys robust
+Use a long-lived service principal as creator, and check the status after the call: creation returns before the endpoint is ready.
+W: Endpoint names must not use the databricks- prefix; the rest of the payload is the standard served_entities shape.
+X: B=`models:/` URI: the documented examples use the model's three-level name in `entity_name` together with `entity_version`.
+C=Omitting `workload_size`: size and scale-to-zero are independent settings, and the documented examples set both.
+D=`databricks-uc` client: the target for Databricks workspaces is `databricks`, and the same client handles Unity Catalog models.
+T: Endpoint names cannot start with databricks-.
+V: Model Serving, MLflow
+
+@ DBX-MLP D3 T3.5 advanced troubleshooting
+S: A CI job running as a service principal creates an endpoint for `ml.prod.scorer`. The principal is a workspace member with the workspace-access entitlement, but creation fails with `PERMISSION_DENIED`. Which grants should be added to the principal?
+A: `SELECT` on the tables that were used to train the model and `MODIFY` on the model's schema, because serving replays the training data when the endpoint starts
+B: `USE CATALOG` on the catalog, `USE SCHEMA` on the schema and `EXECUTE` on the model, which are validated at endpoint creation or update for the recorded creator
+C: `CAN_MANAGE` on the workspace's Serving UI and `ALL PRIVILEGES` on the metastore, because endpoint creation checks account-level administration rights
+D: `READ VOLUME` on every volume the model was trained from and `CREATE MODEL` on the schema, because the endpoint copies the training files into the container
+K: B
+G: ## The endpoint acts as its creator
+When an endpoint is created, Databricks records the calling identity as its creator. That identity (typically a service principal) is used to access Unity Catalog resources on behalf of the endpoint and cannot be changed afterwards.
+## What is validated and when
+- Creator must be a workspace member and hold the `workspace-access` entitlement.
+- For each Unity Catalog model: `USE CATALOG`, `USE SCHEMA` and `EXECUTE` on the model, checked at creation or update, failing with `PERMISSION_DENIED`.
+- If the model declares transitive function dependencies, `EXECUTE` on those upstream functions as well.
+- Grants needed only at query time (for example on feature tables) are not validated upfront and appear as runtime errors.
+Updates re-check the creator, so use a long-lived team-owned service principal, not a person.
+W: The creator needs USE CATALOG, USE SCHEMA and EXECUTE on the model, validated when the endpoint is created or updated.
+X: A=Training tables and MODIFY: the endpoint serves the logged model and does not read training data on startup, and MODIFY on the schema has nothing to do with creating an endpoint.
+C=Serving UI and metastore rights: no account or metastore administrator right is required. The checks are on the model and its parent securables.
+D=Volume reads and CREATE MODEL: files used in training are not copied at deployment. Artifacts are packaged inside the model version when it is logged, and CREATE MODEL applies to registering versions.
+T: Endpoint creation validates the creator's USE CATALOG, USE SCHEMA and EXECUTE on the served model.
+V: Model Serving, Unity Catalog
+
+@ DBX-MLP D3 T3.5 advanced troubleshooting
+S: An endpoint created through the SDK stays not ready, and its event log shows that the container image was built. After startup, requests fail with `An error occurred while loading the model. No module named 'acme_prep'`, where `acme_prep` is an internal wheel the model imports. What is the right fix?
+A: Install the wheel with `%pip` on the cluster that runs the deployment script and restart the endpoint, so the loaded model finds the package
+B: Wait for the build to finish, because Databricks asks you to contact support only if the container build shows no result after about ten minutes of waiting
+C: Log a new model version that declares the wheel as a dependency (for example in `extra_pip_requirements`) and update the endpoint to it, which triggers a new build
+D: Increase the served entity's workload size, since a larger container has more preinstalled libraries and may include internal packages
+K: C
+G: ## Where a missing module comes from
+The container includes libraries automatically captured or specified in the MLflow model. System-level dependencies may be in the base image, but application-level dependencies must be declared in the model. A message such as `No module named ...` at load time means a dependency was not recorded, often a custom library.
+## Fix path
+1. Log a new version with the dependency, as `extra_pip_requirements` (wheel path in a volume, or the private repository), or with the code-path parameter for local code.
+2. Optionally validate with `mlflow.models.predict` before deploying.
+3. Update the endpoint to the new version, which triggers a new build and keeps the old configuration serving until the new one is ready.
+For build failures, the event log and build logs show package installation errors.
+W: A load-time No module named means an undeclared dependency: relog the model with it and redeploy.
+X: A=Installing on the deployment cluster: the container is built from the model's recorded requirements and does not copy the cluster's packages.
+B=Waiting: the container build already finished. The documentation suggests contacting support only if no build message appears for about an hour, and it is about build events, not this runtime error.
+D=Larger workload size: size changes compute, not the libraries that the image includes, so the module would still be missing.
+T: Undeclared dependencies cause load-time import errors; relog with them and update the endpoint.
+V: Model Serving, MLflow
+
+@ DBX-MLP D3 T3.5 advanced troubleshooting
+S: A release pipeline updates an endpoint to model version 7 with a configuration call that returns successfully and then marks the deployment finished. An hour later monitoring still shows version 6 answers and the endpoint status reads Ready (Update failed). What does this mean and how should the pipeline be changed?
+A: The endpoint is down for all requests until the update is repeated; the pipeline should call the update again immediately to restore service
+B: Version 7 serves at a reduced rate beside version 6 because the update succeeded partially; the pipeline should wait until the split balances itself
+C: The endpoint accepted version 7 and is only slow to refresh its status label; the pipeline should ignore this status and compare model outputs instead
+D: The update failed and version 6 kept serving; the pipeline should poll the endpoint state until the update ends, fail the release on a failed update, and read the events and logs
+K: D
+G: ## Update semantics on custom model endpoints
+Updates can take many minutes because a new configuration is built and provisioned while the old one serves traffic. If the update fails, the existing active configuration stays effective, as if the update had not happened. The status then reads `Ready (Update failed)` (or `Not ready (Update failed)` if there was no ready configuration before).
+## What a pipeline must do
+- Treat the API response as "accepted", not as "deployed".
+- Poll the endpoint state until the update is no longer in progress, and fail on `Update failed`.
+- Collect events and build logs (missing dependency, container build failure, model failing to load) and surface them in the pipeline output.
+- Databricks also performs maintenance that reloads models; if a model fails to reload, the endpoint update is marked as failed and the existing configuration keeps serving, so model code must be robust to reloading.
+W: Success of the API call is only acceptance: verify the final endpoint state, as a failed update leaves the old version serving.
+X: A=Endpoint down: a failed update keeps the previous configuration active and serving, so there is no outage that a repeated call must repair.
+B=Partial rollout: configurations are switched when the new one is ready. There is no partially applied state that balances itself.
+C=Status refresh lag: the status is the reliable result of the update. Comparing outputs by hand ignores it and would miss which version actually serves.
+T: The old configuration keeps serving after a failed update: verify the final state in the pipeline.
+V: Model Serving
+
+@ DBX-MLP D3 T3.5 applied use-case
+S: A pyfunc calls a partner API with the key from `os.environ["PARTNER_API_KEY"]`. The team deploys it with the SDK and must keep the key out of the model artifact and the endpoint configuration text. What is the right setup?
+A: Keep the key in a Databricks secret scope and set the served entity's environment variable to `{{secrets/partner/api_key}}`; the endpoint creator needs READ on the secret
+B: Set the environment variable to the key as plain text in the served entity, since endpoint configurations are visible only to the endpoint creator
+C: Log the key as an MLflow parameter of the run and read it from `context.model_config` at request time, so it travels with the registered model version everywhere
+D: Place the key in a text file in a volume and pass that file in `artifacts`, since artifacts are encrypted and hidden from endpoint readers
+K: A
+G: ## Two kinds of environment variables
+Model Serving supports plain text environment variables and secrets-based ones. For credentials use secrets:
+1. Create a secret scope and put the key in it (`databricks secrets create-scope`, `put-secret`).
+2. Set the variable in the endpoint configuration (UI, REST, WorkspaceClient or Deployments SDK) using the syntax `{{secrets/<scope>/<key>}}`. Without exactly that syntax the value is treated as plain text.
+3. The endpoint creator must have READ on the referenced secrets. At serving time the platform fetches the secret and fills the variable for your model code.
+## Why not the alternatives
+Anything put in the model artifact or parameters is stored with the model version and visible to everyone who can read it, and plain text environment variables are visible in the configuration. Secrets keep credentials outside both and allow rotation without relogging the model.
+W: Use {{secrets/scope/key}} environment variables so credentials stay out of the model and the config.
+X: B=Plain text variable: a plain text value is part of the endpoint configuration, and anyone who can view the configuration can read it. Secrets exist for credentials.
+C=MLflow parameter: parameters and model config are stored with the run and model version, so the key would sit in registry metadata.
+D=Key file in artifacts: artifacts are copied into the model version and are not encrypted per reader, so anyone who can download the version can read the file.
+T: Reference credentials as {{secrets/scope/key}}; do not bake them into models or plain text variables.
+V: Model Serving, Secrets
+
+@ DBX-MLP D3 T3.5 advanced tradeoff
+S: A team deploys new versions of a custom pyfunc model often. Deployments wait a long time for container image builds, some fail on dependency resolution, and the serving environment sometimes differs from the notebook used for training. Which option addresses all three, and what does it cost?
+A: Enable route optimization on the existing endpoint, which skips the image build and gives the endpoint the notebook's environment, at the price of OAuth-only access for clients
+B: Use express deployments: register the custom model to Unity Catalog from a serverless notebook so the environment is packaged then, and accept a longer registration step
+C: Set scale to zero on the served entity so that the container image is cached between versions, at the price of cold starts on the first request
+D: Pin every dependency to the latest release in `pip_requirements`, which removes dependency resolution from the build, at the price of frequent relogging
+K: B
+G: ## Standard versus express deployments
+- **Standard**: a container image is built at deployment time from the model's recorded requirements. This is slower, can fail in dependency resolution or the image build, and the serving environment might not match the training environment.
+- **Express**: artifacts and the environment are packaged when you register the model (from a serverless notebook, for a custom model in Unity Catalog), so deployment skips the image build. The serving environment is identical to the notebook environment you registered from. Registration takes longer (seconds to a minute), the deployment event log no longer shows image creation events, and there are version requirements for MLflow and the SDK listed on the docs page.
+## Other levers
+Route optimization addresses request latency, not deployment. Scale to zero affects idle behavior. Pinning versions helps reproducibility but still builds an image.
+W: Express deployments move packaging to registration, skipping the container build and matching the notebook environment.
+X: A=Route optimization: it improves request routing and throughput. It cannot be enabled on an existing endpoint and has no effect on image builds or environment consistency.
+C=Scale to zero: this releases compute when idle and adds cold starts. It does not cache images across versions or change what is built.
+D=Latest versions: unpinned or latest releases make the environment less reproducible and do not skip the image build. The build still resolves and installs packages.
+T: Express deployments shift packaging to registration, removing the image build from deploys.
+V: Model Serving, Unity Catalog
+
+@ DBX-MLP D3 T3.5 advanced troubleshooting
+S: After a release, a post-processing step in a pyfunc triples the model execution time per request. Traffic is unchanged, and clients now receive 429 with `Too many concurrent requests. Consider increasing the provisioned concurrency of the served entity`. What is the right remedy?
+A: Enable scale to zero on the served entity, so that the platform keeps fewer idle slots and the pool of slots grows only when 429 errors appear in the client logs
+B: Increase the client request timeout above the model execution time, since a longer wait lets concurrency rise by itself without config changes
+C: Raise the served entity's scale-out (or autoscaling maximum) to about three times the earlier concurrency, since required concurrency is roughly QPS times execution time
+D: Switch the request format to `dataframe_records` so that rows are scored in parallel, which divides the execution time by the number of rows
+K: C
+G: ## Capacity is concurrency
+A served entity's provisioned concurrency is the number of requests it can process at the same time. Databricks estimates it as queries per second times model execution time in seconds, and the Serving UI scale-out sizes (Small, Medium, Large) correspond to ranges of concurrency. At constant QPS, tripling execution time triples the concurrency needed.
+## What the 429 means
+`Too many concurrent requests...` says the entity's current provisioned concurrency cannot handle the load. With autoscaling the platform adds concurrency up to the configured maximum, so raise the maximum or the fixed size. Validate the new value with load testing. Optimizing the new post-processing step (for example moving work into `load_context`) is the other lever, because it lowers the execution time.
+W: Required concurrency = QPS x execution time, so slower inference at the same QPS needs more provisioned concurrency.
+X: A=Scale to zero: this releases capacity when idle and adds cold starts. It does not add slots under load.
+B=Longer client timeout: waiting does not create capacity. Requests that the entity cannot admit still receive 429, and long waits tie up more concurrency.
+D=Records format: the body format does not parallelise the scoring inside the model and does not shorten execution time.
+T: Provisioned concurrency tracks QPS x execution time; slower models need more of it.
+V: Model Serving

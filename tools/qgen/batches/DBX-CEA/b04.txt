@@ -1,0 +1,446 @@
+# src: https://docs.databricks.com/aws/en/generative-ai/tutorials/ai-cookbook/quality-data-pipeline-rag
+# src: https://docs.databricks.com/aws/en/vector-search/vector-search
+# src: https://docs.databricks.com/aws/en/vector-search/query-vector-search
+# src: https://docs.databricks.com/aws/en/generative-ai/agent-framework/unstructured-retrieval-tools
+# src: https://docs.databricks.com/aws/en/generative-ai/agent-framework/agent-authentication
+# src: https://docs.databricks.com/aws/en/mlflow3/genai/eval-monitor/concepts/judges/
+# src: https://docs.databricks.com/aws/en/mlflow3/genai/tracing/app-instrumentation/manual-tracing/fluent-apis
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/certify-deprecate-data
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/tags
+# src: https://docs.databricks.com/aws/en/tables/row-and-column-filters
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/ai_parse_document
+
+@ DBX-CEA D3 T3.5 applied use-case
+S: A coding assistant answers questions from a Python repository stored in a Unity Catalog volume. The pipeline cuts every file into pieces of 60 lines, and traces show retrieved chunks that start inside a function body or hold the end of one function and the start of the next, so the model cannot tell which function a snippet belongs to. Which chunking change fits the structure of source code?
+A: Cut every 30 lines instead of 60, so that fewer functions are split across two chunks and each chunk holds less unrelated code
+B: Embed each whole source file as one chunk, so every function stays together with its neighbors and no definition is ever cut in a result
+C: Split on blank lines and comment lines, so that every block of code becomes a small chunk of its own and statements stay on separate chunks
+D: Split on function and class definitions so each one stays whole, and keep the file path and enclosing class or function name with the chunk
+K: D
+G: ## Chunking follows structure, not an arbitrary line or character count
+Chunking is the pipeline step that breaks parsed documents into pieces that are embedded and retrieved. The Databricks guide on building an unstructured data pipeline for RAG lists these strategies:
+- Fixed-size chunking: split by a set number of characters or tokens. Quick to set up, but it typically does not give semantically coherent chunks.
+- Paragraph-based chunking: use natural paragraph boundaries.
+- Format-specific chunking: formats such as Markdown or HTML have an inherent structure (for example headers) that can define chunk boundaries.
+- Semantic chunking: use topic shifts to find boundaries.
+The guide also asks for chunks that are semantically coherent and can stand independently as a meaningful unit, and for metadata such as the source document name or section heading, because it helps match queries to chunks.
+Source code is not a format the guide names, but the same idea applies: its inherent structure is the function or class definition. Reading task 3.5 this way is the exam's convention: look at the document structure first, then pick the strategy that preserves it, and carry the parent (file path, class name) as metadata.
+W: Splitting on function and class definitions: each chunk is a complete, self-contained unit of code, and the file path and enclosing name tell the retriever and the model which function a snippet comes from.
+X: A=Shorter line windows: a smaller fixed window still cuts at arbitrary lines, so definitions are still split, and shorter pieces lose even more of the surrounding function.
+B=Whole file: a question about one function returns every other function in the file as distraction, spends tokens, and dilutes the single embedding of the file.
+C=Blank and comment lines: these are not definition boundaries, so a function body is split into fragments that cannot stand alone, and the model still cannot tell what they belong to.
+T: Cut where the document's own structure ends a unit (here a definition) and keep its parent name as metadata.
+
+@ DBX-CEA D3 T3.5 advanced troubleshooting
+S: A policy agent embeds 400-token body chunks. Before embedding, the pipeline prepends a 150-token header (document summary, title, section path) to each body. The embedding model's documented maximum input is 512 tokens. Questions about the last part of each body are never retrieved, although the text is in the Delta table, while questions about the first paragraphs work. What is the most direct fix?
+A: Raise `num_results` so that the chunks holding the late content come back, even though their embedded vectors reflect only the header and the early body
+B: Keep header plus body within the embedding model's maximum input, for example by cutting the body to about 350 tokens, or choose a model that accepts longer input
+C: Switch the generation model to one with a larger context window, so that the full chunks can be read in whole by the agent once they are returned
+D: Raise the chunk overlap to 25% so that late sentences of one chunk are also repeated at the start of the next chunk, where they fit within the limit
+K: B
+G: ## The embedding model's input limit applies to everything that is embedded
+An embedding model turns the text it receives into one vector. Each model has a maximum input length in tokens. The Databricks RAG pipeline guide says that if chunks exceed that limit they will be truncated, potentially losing important information. Truncated text is never represented in the vector, so similarity search cannot find it, even though the text sits in the table.
+- What counts is the full text passed to the embedding model: the body plus any prefix the pipeline adds (header, summary, title). Here 150 + 400 = 550 tokens exceeds the 512-token limit, so the tail of every body is cut.
+- Symptom: early content retrievable, late content not.
+- Diagnosis: compare the token count of the exact embedded text with the model's documented maximum input.
+- Fix: size the body so prefix plus body fit (or move the header to metadata columns), or select an embedding model with a longer input, then re-embed.
+The generation model's context window is a separate limit: it decides how much retrieved text the LLM can read, not how much text an embedding can represent.
+W: Fit header plus body in the embedding limit (or use a longer-input model): the late text was truncated before embedding, so only a text that fits entirely gives every part of the chunk a searchable vector.
+X: A=More results: the late content has no vector of its own, so each chunk is ranked by its header and early body only; returning more chunks adds tokens without making the late text findable.
+C=Larger generation window: the failure happens before generation, at embedding time. A bigger LLM window changes nothing about what the vector represents.
+D=More overlap: the overlapping sentences are repeated, but each embedded text is still header plus body over the limit, so its tail is still cut; overlap also adds duplicate text.
+T: Count everything that goes into the embedding call, and keep it inside the model's maximum input.
+
+@ DBX-CEA D3 T3.5 applied comparison
+S: An agent answers questions over 20-page quarterly reports chunked by section. Narrow questions such as "What was churn in the EMEA segment?" work well. Broad questions such as "Summarize the main risks in the Q3 report" retrieve a few arbitrary risk-related sections and the answer misses most of the report. Which change to the index suits both query types?
+A: Add one summary chunk per report, generated at ingestion and linked to the report by an id, next to the existing section chunks
+B: Replace the section chunks by one chunk per sentence, since a very small unit makes broad questions find every sentence about risks
+C: Raise the section chunk size to a whole report, since this alone makes the narrow questions work as well as before for each segment
+D: Raise `num_results` to 40 so that most of the sections of the report are returned for every question, narrow ones included, to cover all risks
+K: A
+G: ## Match the chunk granularity to the query type
+The Databricks RAG pipeline guide states that finding the proper chunking method is iterative and context-dependent and that there is no one-size-fits-all approach. Its trade-off: smaller chunks focus on specific details but lose surrounding context; larger chunks capture more context but can include irrelevant information. The guide also lists content-based metadata such as summaries and topics, stored alongside the chunks.
+- Narrow lookups: the answer sits in one section, so section-level chunks fit.
+- Broad, whole-document questions: no single section holds the answer. A summary chunk written once at ingestion gives the retriever a unit that matches the question and gives the model the report's overall picture at a small token cost.
+Using both granularities for the two query types is the exam's reading of task 3.5 (query type drives chunk design); the docs state the trade-off, not this recipe.
+W: Section chunks plus a per-report summary chunk: narrow questions still match their section, and broad questions match the summary, which covers the whole report in a few tokens.
+X: B=Sentence chunks: a risk is rarely one sentence, so the retrieved fragments cannot stand alone, and narrow questions lose the surrounding context they need.
+C=Whole-report chunks: each report mixes all segments and quarters, so narrow questions return a long text full of unrelated figures, and the single embedding is diluted.
+D=Forty results: this multiplies the tokens and still returns whichever sections score highest; the broad question has no unit that represents the whole report, and narrow questions are flooded.
+T: Offer the granularity each query type needs: sections for lookups, a summary unit for whole-document questions.
+
+@ DBX-CEA D3 T3.5 advanced use-case
+S: A team must choose the chunk size for a new support agent before indexing 100,000 articles. Which TWO inputs should drive the choice? (Select TWO)
+A: The number of articles in the corpus, because a larger corpus always needs a larger chunk size to keep the index small
+B: The maximum input length of the chosen embedding model, which caps the tokens that can be represented in one vector
+C: The file extension of each article alone, because every format has one fixed chunk size that works well for all content
+D: The response speed of the chat model, because chunk size must match how fast the model can write the answer
+E: Where the answers to typical user questions sit in the articles (a sentence, a section or several sections), from sampled questions
+K: B,E
+G: ## What decides the chunk size
+The Databricks RAG pipeline guide says the best chunk size and method depend on the use case and the nature of the data, that the process is iterative, and that there is no one-size-fits-all approach. It lists the factors:
+- Chunk size trade-off: smaller chunks focus on details but lose context; larger chunks carry more context but can include irrelevant information or cost more.
+- Embedding model: chunks that exceed its maximum token limit are truncated, potentially losing important information.
+- Semantic coherence: chunks should be independent, meaningful units, which follows from the structure of the data and from the question types you expect.
+So two inputs matter before choosing: the hard limit of the embedding model, and the span over which answers sit in the documents. The guide describes evaluating chunking iteratively; reading answer spans from sampled questions is the exam's practical form of it.
+W: B=Embedding limit: text beyond the maximum input is not represented in the vector, so the chunk must fit within it.
+E=Answer span: chunks should be about as large as the unit that answers typical questions, so a result holds the answer without much unrelated text.
+X: A=Corpus size: more articles change index size and cost, not the unit that answers a question; a bigger chunk would not make retrieval better.
+C=File extension alone: the format can suggest boundaries (headers, paragraphs), but no format has a fixed best size, since the guide says it depends on the use case and the data.
+D=Chat model speed: the chunk size is set by retrieval needs; output speed does not depend on how the documents were split.
+T: Size chunks from the embedding model's limit and the span where answers actually sit.
+
+@ DBX-CEA D3 T3.5 applied troubleshooting
+S: After a corpus update, an agent's retriever returns 4 chunks per question, each a full 12-page chapter. The trace shows retrieval results that account for most of the prompt, and the answer is usually one sentence located in a single subsection. Answers often cite the right chapter but include unrelated details from other subsections. What should change in the pipeline?
+A: Increase `num_results` to ten so that more of the chapters containing the answer are returned and the model has a better chance of finding the sentence
+B: Chunk by subsection (or paragraph groups) into smaller, semantically coherent chunks and keep the chapter title as metadata
+C: Add a system prompt rule telling the model to ignore the parts of each chapter that are not relevant to the question
+D: Use a reranker on the chapter-sized chunks, since reranking will remove the unrelated subsections from inside each chunk
+K: B
+G: ## Oversized chunks are a context-distraction source
+The Databricks RAG guide says segmenting large documents into smaller, semantically concentrated chunks ensures that retrieved data fits in the LLM's context while minimizing distracting or irrelevant information. When chunks are chapters, every retrieval pulls in large amounts of unrelated text; the model's attention is spread over it. In this exam's vocabulary that is context distraction (the exam's term; the docs describe the effect without the label).
+The remedy is at the source: choose a chunk size aligned with where answers live (subsections), and keep the chapter title as metadata so provenance is not lost.
+W: Subsection-level chunks with chapter metadata: each result now holds the focused text that answers the question, the prompt shrinks, and the chapter title still tells the model and the user where it came from.
+X: A=More results: ten chapter-sized chunks multiply the unrelated text; the failure is chunk size, not recall.
+C=Prompt rule: the text still occupies the window and competes for attention; an instruction does not remove tokens from the prompt.
+D=Reranker on chapters: a reranker reorders whole candidate chunks; it cannot cut unrelated text from inside a chunk, so the oversized chunks remain.
+T: If answers live in subsections, chunk at subsection size and keep the parent title as metadata.
+
+@ DBX-CEA D3 T3.6 applied use-case
+S: A refund agent receives "Refund order 8841, the blender arrived broken" from a signed-in customer. The team wants to assemble the minimum context for the model to scope and complete this task. Which set of context elements is the best fit?
+A: The task instruction with refund policy rules, the order 8841 record and status, the customer's identity, and the refund tool definition
+B: The full conversation history of all customers with the same product, so the agent can see how earlier refunds were handled
+C: The complete policy handbook, every tool the company has registered, and the customer's lifetime order list in case any of them is needed
+D: Only the customer's message, since the model can infer the policy, the order status and the tool to call from the wording alone
+K: A
+G: ## Context elements for scoping and executing a task
+A task has to be scoped (what is asked, what is allowed, who is asking) and executed (the data to act on and the means to act). A practical checklist, which is the exam's own convention rather than a Databricks docs definition:
+- Instruction and constraints: the goal, the rules that bound it (refund policy), the output expected.
+- Task data: the specific record the request names.
+- Identity and permissions: who the user is, what they may do.
+- Tools: only the definitions needed to act, with parameters.
+The same checklist excludes what the task does not need. Everything extra consumes the attention budget; this is why the Databricks tracing pages stress inspecting inputs and token usage of each step.
+W: Task instruction with policy, the specific order, the customer's identity and the refund tool: these four cover scope (what and under what rules), the data to act on and the means to act, and nothing else.
+X: B=Other customers' histories: they are unrelated to this refund, add noise (and privacy exposure), and the policy rules are what decide the outcome.
+C=Everything available: the whole handbook, every tool and the lifetime orders bury the relevant policy and order under irrelevant text and tool definitions.
+D=Message only: the model cannot know the order's status, the current policy or which tool exists; missing context leads to guessing.
+T: Give the task its instruction and constraints, the one record it acts on, the user identity and the needed tools, no more.
+
+@ DBX-CEA D3 T3.6 applied use-case
+S: A scheduling agent must book a meeting after the user says, "Set up 30 minutes with Priya next Tuesday afternoon, my time zone." Which TWO context elements does the agent specifically need to scope and execute this task? (Select TWO)
+A: The calendar history of every employee for the past year, so the agent can learn when people usually accept meetings
+B: The user's time zone and today's date, supplied by the application at request time so "next Tuesday" resolves correctly
+C: A long description of the company's org chart, so the agent knows the reporting line of everybody in the company
+D: The full text of the company's meeting etiquette handbook, in case any etiquette rule might be relevant
+E: The booking tool's definition with its parameter schema, plus Priya's availability for the requested window
+K: B,E
+G: ## Runtime context and task data
+Some context cannot come from a static prompt: the current date, the user's time zone and other session attributes must be supplied at request time, otherwise relative phrases like "next Tuesday" are ambiguous. The agent also needs the means to act (the tool definition with its parameter schema) and the data the action depends on (availability for the window). This is the exam's checklist convention (scope, data, identity/runtime state, tools). Databricks Unity Catalog functions and other tools are described to the model by name, description and parameters, so the definition is part of the context.
+Context that merely might be useful, such as a year of calendars or an org chart, is cost without function.
+W: B=Time zone and date: these runtime values let the agent turn "next Tuesday afternoon, my time zone" into a concrete window.
+E=Tool definition and availability: without the booking tool's schema the agent cannot act, and without Priya's availability for the window it cannot pick a valid slot.
+X: A=Everyone's calendar history: private, large, and irrelevant to one booking; the agent needs availability for the window, not behavior patterns.
+C=Org chart: it does not help resolve the request and spends tokens on facts the task does not use.
+D=Etiquette handbook: a precautionary dump; if a rule matters it should be a short constraint in the instructions.
+T: Supply runtime state (date, time zone), the tool schema and the data the action needs, nothing speculative.
+
+@ DBX-CEA D3 T3.6 applied troubleshooting
+S: A sales agent is asked, "How is my region doing this quarter?" It returns figures for the wrong quarter and for the wrong region on different days. The context holds the system prompt, the question and a tool that queries a revenue table by region and period. Nothing else about the session is passed in. Which missing context element best fixes this?
+A: A longer list of example questions with answers, so that the model learns to guess the likeliest region and period from the wording alone
+B: The full revenue table pasted into the prompt, so that the model can work out the region and the quarter for itself
+C: Runtime session context supplied by the application: the user's region from their profile and the current date or fiscal quarter
+D: A rule that the agent should always ask the user to restate the region and the period before every single question
+K: C
+G: ## Runtime state resolves ambiguous references
+Words like "my region" and "this quarter" depend on who is asking and when. The model cannot know either unless the application provides them, so the agent guesses and results vary by day. Identity attributes and the current date are runtime context: small, cheap and always relevant, so they are injected per request rather than written into a static prompt. Which elements make up a task's context is the exam's convention (generally accepted, not a Databricks docs definition). Databricks tracing records the inputs of every step, so you can check whether the values were present.
+W: Runtime session context: with the user's region and the current quarter in the window, the tool call arguments are determined, and the answers stop varying.
+X: A=More examples: examples show the format of questions but cannot tell the model today's date or this user's region.
+B=Entire table in the prompt: it spends tokens on unrelated rows and still does not say which region is "my" region or which quarter is current.
+D=Always ask the user: the application already knows both facts, so asking adds friction to every question.
+T: Pass who is asking and when as runtime context so relative phrases resolve.
+
+@ DBX-CEA D3 T3.6 applied troubleshooting
+S: An HR benefits agent receives the question "Can I sue my manager for this review?" and starts giving legal-sounding advice. The agent's context contains the benefits documents and a system prompt that says only "You are a helpful HR assistant." Which missing context element most directly fixes the failure?
+A: A larger set of benefits documents, so that the agent has more material to consider when it forms its answer
+B: A prompt telling the model to think step by step before every answer, so that it analyses each incoming question more carefully and thoroughly
+C: Metadata describing the length of each benefits document, so the agent can pick shorter documents first
+D: An explicit scope statement: benefits questions are covered, legal advice is not, and out-of-scope requests are routed to HR or legal
+K: D
+G: ## Scope is context too
+Scoping a task includes telling the agent where its remit ends. A prompt like "helpful HR assistant" says nothing about boundaries, so the model fills the gap from general knowledge. A short scope statement (in scope, out of scope, what to do with the latter) is a low-token element that prevents the agent from performing tasks it was never meant to do. Which elements make up a scope is the exam's convention (not a Databricks docs definition); evaluation with MLflow scorers such as `Guidelines` can check whether answers respect such a rule.
+Adding data or reasoning prompts does not define a boundary.
+W: Scope statement with an out-of-scope path: it states the remit and gives the model a defined behavior for requests outside it, which is exactly what the unscoped prompt lacks.
+X: A=More documents: more benefits text does not tell the model that legal questions are not its job; it only adds tokens.
+B=Step-by-step reasoning: careful reasoning on a question the agent should decline yields a more elaborate but still out-of-scope answer.
+C=Document length metadata: it affects document choice, not the decision to answer a legal question.
+T: State what the agent covers, what it does not and where to send the rest.
+
+@ DBX-CEA D3 T3.6 advanced troubleshooting
+S: A report-drafting agent produces accurate figures from its retrieved sources, but each draft uses a different layout, and downstream automation that parses the drafts fails. The context holds the user request, the source passages and a prompt saying "write a quarterly summary". Which missing element should be added?
+A: More source passages per request, since accurate content implies that the layout will converge once enough sources are included
+B: An output specification: the required sections, a template or schema for the draft, and an example of the expected format
+C: The full history of earlier drafts, so the model infers the layout from whichever earlier drafts happen to be in the window
+D: A second model call that re-reads the draft and rewrites it, without telling the second call which layout is expected
+K: B
+G: ## The expected output is a context element
+Along with instruction, data, identity and tools, the agent needs the shape of the result. Without a template or schema the model chooses a layout each time, and any consumer that parses the output breaks. The element is cheap (a template or schema and perhaps one short example) and is the exam's checklist item for scoping a task: what must the answer look like. Structured output requirements can also be checked with a custom scorer in an MLflow evaluation.
+The content is already right here; adding sources or history does not specify the layout.
+W: Output specification: with required sections, a template or schema and one example, every draft takes the same shape, so downstream parsing works.
+X: A=More sources: the figures are accurate, so more passages add tokens and no layout information.
+C=Earlier drafts: their layouts differ, so including them shows the model several formats and leaves it free to pick any.
+D=Second rewriting call: without an expected layout the rewrite is another arbitrary choice and doubles the model calls.
+T: Tell the model what the finished artifact looks like, not only what it should contain.
+
+@ DBX-CEA D3 T3.7 applied use-case
+S: A product-FAQ chatbot answers customers from a single documentation index. Every question needs documentation to answer correctly, the application cannot tolerate an answer given without retrieval, and the team wants predictable latency with one model call per question. Which retrieval pattern fits?
+A: Just-in-time agentic retrieval, where the model decides on each turn whether to call the search tool and may call it repeatedly while it works
+B: Pre-inference retrieval: the application queries the index with the user's question before the model call and places the top chunks in the prompt
+C: No retrieval, with the full documentation placed in the system prompt so every call already holds everything it could need
+D: Retrieval only after the model has produced a first answer, to check that answer against the index and rewrite it if necessary
+K: B
+G: ## Two retrieval timings
+Retrieval can run in two places. These terms are generally accepted context-engineering vocabulary and the exam's convention; the Databricks docs describe the mechanisms but do not define the terms.
+- Pre-inference retrieval: the application retrieves relevant chunks before calling the model and places them in the prompt. Deterministic, one model call, no dependence on the model choosing to search.
+- Just-in-time (JIT) agentic retrieval: the agent gets a retriever tool and decides when and what to retrieve during its run. Databricks documents this pattern: the AI Bridge `VectorSearchRetrieverTool` exposes an AI Search index as a tool, with a description that tells the agent when to search.
+Choose by use case: when every request needs the same knowledge source and grounding is mandatory, pre-inference retrieval is simple and predictable.
+W: Pre-inference retrieval: the index is queried on every question before the model call, so retrieval always happens, latency stays predictable, and one model call is enough.
+X: A=JIT agentic retrieval: the model might skip the search, or loop, which breaks the guarantee of retrieval on each question and the one-call latency.
+C=Full documentation in the prompt: that spends the attention budget on text that is mostly irrelevant to any one question and does not scale with the corpus.
+D=Retrieve after answering: the first answer is produced without grounding, so ungrounded content can already reach the user, and it adds a second model call.
+T: When every request needs the knowledge, retrieve before inference; let the agent decide only when need varies.
+
+@ DBX-CEA D3 T3.7 applied use-case
+S: A coding-assistant agent works across a large repository, a wiki, a ticket system and release notes. A typical task needs two or three files that cannot be known in advance, and the right next lookup depends on what the previous lookup found. Which retrieval pattern fits best?
+A: Pre-inference retrieval of the top chunks from all four sources for each user message, placed in the prompt before the first model call and the first reasoning step
+B: Loading the whole repository and wiki into the context at the start so that every possible lookup is already available
+C: A fixed query formed from the first message, run once before inference, with the agent not allowed to search again
+D: Just-in-time agentic retrieval: give the agent search and read tools so it fetches what it needs, step by step, using what each result reveals
+K: D
+G: ## When the next lookup depends on the last
+In JIT retrieval the agent keeps lightweight handles (tool descriptions, file paths, queries) and loads data into the context only when a step needs it. That fits open-ended tasks where the needed information cannot be predicted from the first message, and where each result informs the next query. Databricks documents retrieval tools for agents (AI Search retrievers; reading files from Unity Catalog volumes), and MLflow traces record retriever spans. JIT versus pre-inference is the exam's convention for the two timings (generally accepted vocabulary, not a docs definition).
+The cost: extra model round trips and a dependence on the agent choosing to search.
+W: JIT agentic retrieval: the agent explores, reads the two or three files it needs and decides the next lookup from the last result, so only relevant material enters the window.
+X: A=Pre-inference over every source: the first message cannot predict the files; fetching top chunks from four sources floods the prompt before the task is understood.
+B=Load everything: far more than the window can hold or the model can attend to, with most of it irrelevant to the task.
+C=One fixed query: the task needs follow-up lookups guided by results; a single pre-computed query will miss them.
+T: Use JIT retrieval when information needs are unpredictable and each lookup depends on the previous result.
+
+@ DBX-CEA D3 T3.7 advanced troubleshooting
+S: A compliance agent uses just-in-time retrieval with a policy retriever tool. Evaluation traces show that on about a fifth of questions the agent answers from its general knowledge without calling the retriever, and `RetrievalGroundedness` cannot be computed for those runs. Policy citations are mandatory for every answer. What is the most robust change?
+A: Rewrite the system prompt in capital letters, telling the model to always search, and keep the retriever as an optional tool
+B: Add a second retriever tool over the same index with a different name, so the agent has more chances to choose one
+C: Move policy retrieval to pre-inference, so the application always queries the index and injects the chunks before the model call
+D: Increase the number of results per call so that, when the agent does search, it returns more material to cite
+K: C
+G: ## Make mandatory retrieval deterministic
+In a JIT design the model decides whether to call the tool. Databricks documents that the retriever tool's description tells the agent when to search, which means the behavior depends on model judgement and can skip. For answers that must always be grounded, the robust fix is structural: retrieve in application code before inference (the exam's pre-inference pattern). The trace then always contains a retrieval span, and retrieval judges such as `RetrievalGroundedness` and `RetrievalRelevance` (built-in MLflow judges that use the retrieved context) can evaluate every run. Pre-inference versus JIT is the exam's convention for these timings.
+Tool descriptions can be improved, but prompts only make skipping less likely.
+W: Pre-inference retrieval: the application queries the index on every request, so retrieval never depends on the agent's choice and every trace has a retrieval span for judges to score.
+X: A=Louder prompt: a stronger instruction lowers the skip rate but cannot guarantee it, and a mandatory behavior should not rely on model discretion.
+B=Duplicate tool: another tool with the same function adds choices and confusion; the agent can still choose none.
+D=More results: this changes what a search returns, not whether the search happens.
+T: If retrieval must happen every time, do it before inference instead of hoping the agent calls the tool.
+
+@ DBX-CEA D3 T3.7 applied tradeoff
+S: Which TWO statements describe trade-offs of just-in-time agentic retrieval compared with pre-inference retrieval? (Select TWO)
+A: It guarantees that retrieval runs on every single request, because the model always calls a retriever whenever one is registered with it
+B: Each retrieval is an additional tool call and model round trip, so latency and token use can rise on questions that need several lookups
+C: The agent can reformulate its query, or search another source, after reading earlier results, which suits questions that need follow-ups
+D: It removes the need for a good tool name and description, since the model discovers the right source by itself
+E: It makes the prompt larger in every case, because all candidate chunks are loaded before the first model call
+K: B,C
+G: ## What JIT retrieval buys and costs
+With JIT retrieval the model is in the loop: it decides whether to search, with what query, and what to do with the result. That is the strength (adaptive, follow-up queries, fetches only what is needed) and the cost (more tool calls and model round trips; behavior depends on model judgement). Databricks docs show retriever tools whose descriptions tell the agent when to search; MLflow traces show each call. The comparison with pre-inference retrieval is the exam's convention (generally accepted terminology).
+W: B=Extra round trips: each lookup is a tool call followed by another model call, so multi-step questions cost more time and tokens.
+C=Adaptive querying: after reading a result, the agent can refine the query or switch sources, which a single pre-inference query cannot do.
+X: A=Guaranteed retrieval: the opposite is true, since the model may choose not to call the tool; guaranteed retrieval is the property of pre-inference.
+D=No description needed: the tool name and description are what the model uses to decide when to call it, so they matter more in JIT designs.
+E=Larger prompt in every case: loading candidate chunks before the first call describes pre-inference retrieval; JIT loads only what a step fetched.
+T: JIT retrieval trades extra calls and model discretion for adaptive, on-demand context.
+
+@ DBX-CEA D3 T3.7 advanced comparison
+S: A telecom support agent always needs the caller's plan, contract end date and open case number, which sit in one governed table and are looked up by customer id. It also needs knowledge articles, but which article depends on the diagnosis the agent reaches while talking with the caller. Which design fits best?
+A: Inject the three account fields before inference from a keyed lookup, and expose an AI Search retriever tool so the agent fetches articles just in time
+B: Expose both the account lookup and the article search as tools, so that the agent decides every time what to fetch, including the account fields
+C: Run pre-inference retrieval of the top articles for the caller's first sentence, and leave out the account fields until the caller asks
+D: Place all knowledge articles and all account tables in the system prompt, because mixing both types in one place keeps the design simple
+K: A
+G: ## Mixing timings by predictability
+The choice is made per context element, not per agent. Elements that are always needed, small and fetched by a known key (the caller's plan, contract date and open case) are cheap and predictable to load before inference. Elements whose need depends on the conversation (which article) suit a retriever tool the agent calls when the diagnosis is known. Databricks documents retriever tools for agents (AI Bridge `VectorSearchRetrieverTool`); the combination is the exam's convention for pre-inference plus JIT.
+Putting the always-needed facts in the prompt avoids spending a model round trip on information that is certain to be required.
+W: Inject the account fields before inference and give the agent a retriever tool for articles: the predictable, keyed facts are always present, and articles are fetched only when the diagnosis calls for them.
+X: B=All as tools: it forces extra round trips for data that every call needs and risks the agent skipping the account lookup.
+C=Articles up front: the first sentence rarely identifies the diagnosis, so the articles will often be irrelevant, and delaying account fields leaves the agent without facts it always needs.
+D=Everything in the prompt: tables and the article corpus exceed what the model can attend to and would dilute the facts that matter.
+T: Load always-needed keyed facts before inference and leave diagnosis-dependent knowledge to a retriever tool.
+
+@ DBX-CEA D3 T3.8 advanced troubleshooting
+S: An MLflow 3 evaluation of a product agent with ground-truth expectations reports high `RetrievalRelevance` (retrieved chunks are on topic), low `RetrievalSufficiency`, and low Correctness on warranty questions. The trace shows the retrieval span returns on-topic marketing pages, and Unity Catalog metadata shows that the approved warranty terms table is not part of the index's source table. Which failure mode and governance action fit?
+A: Ranking failure; enable the reranker, because the right text is already in the index and only needs a better position
+B: Distraction by oversized chunks; split the marketing pages into smaller chunks, since size is the cause of the low sufficiency
+C: Missing authoritative source; have the data steward add the approved warranty terms to the governed corpus that the index syncs from
+D: Stale source; deprecate the marketing pages in Unity Catalog, because stale content is what makes sufficiency fall below relevance
+K: C
+G: ## Reading judge scores together with Unity Catalog metadata
+Built-in MLflow judges score retrieval separately: `RetrievalRelevance` (is the retrieved context relevant to the request), `RetrievalGroundedness` (is the response grounded in the retrieved context) and `RetrievalSufficiency` (does the retrieved context contain what the expectations need; it requires ground truth). The retrieval span is a `RETRIEVER` span whose output is a list of documents, which makes the retrieved content inspectable in the trace.
+A diagnosis pattern, which names failure modes by the exam's convention (not a Databricks docs taxonomy):
+- Relevant but insufficient: the right topic but not the needed content, so the authoritative source is missing from the corpus.
+- Sufficient but ungrounded: the needed content was retrieved but the answer ignored it, so look at the prompt or model.
+- Relevant and sufficient but ranked low: a ranking problem.
+Unity Catalog metadata (what tables and volumes feed the index, their owners and tags) shows whether the authoritative asset is even in scope. The governance action is to onboard it.
+W: Missing authoritative source: relevance is high but sufficiency is low, and the UC metadata shows the warranty terms table is not in the index source, so the steward must add the approved terms to the governed corpus.
+X: A=Reranker: reranking reorders what is in the index; the warranty text is absent, so nothing to promote.
+B=Smaller chunks: the pages are on topic but do not contain the terms; changing chunk size cannot add missing information.
+D=Deprecate marketing pages: that removes a source of noise but does not supply the missing terms; and the pages are not shown to be stale, just non-authoritative.
+T: High relevance with low sufficiency means the authoritative content is not in the retrievable corpus; fix coverage in governance.
+
+@ DBX-CEA D3 T3.8 advanced use-case
+S: Evaluation of a pricing agent shows correct-looking but outdated answers. In the retrieval spans, the top chunks come from a table called `pricing.archive.price_list_2023`, whose Unity Catalog `system.certification_status` is `deprecated`, while the current `pricing.gold.price_list` is `certified` and is also in the index. Which action resolves the failure?
+A: Add a prompt rule telling the agent to prefer chunks that look recent, so that dates in the text decide the winner
+B: Increase the reranker's candidate pool so that the certified table has more chances to outrank the archive
+C: Delete the evaluation rows that expose the outdated answers so the aggregate scores improve and the failing slice disappears from the report
+D: Remove the deprecated archive from the index source (for example by syncing the index from a materialized view over certified assets) and re-sync
+K: D
+G: ## Certification is a signal; the index source is the control
+Unity Catalog lets stewards flag assets with the `system.certification_status` system tag: `certified` means the asset meets organizational standards, `deprecated` warns that it is outdated and should not be used in new workflows. Setting it needs the ASSIGN permission on that governed tag plus tag privileges on the object. The tag labels an asset; it does not by itself stop a pipeline or an index from reading the table.
+So when traces show retrieval from a deprecated asset, the governance action is to change what the index is built from: exclude deprecated assets from the source table or materialized view (AI Search syncs from Delta tables, streaming tables and materialized views), and re-sync. Failure mode names here (stale source) are the exam's convention.
+W: Remove the deprecated archive from the index source and re-sync: the stale table is what the retriever returns, so taking it out of the corpus (for instance, by indexing a materialized view over certified assets only) removes the failure at its cause.
+X: A=Recency prompt rule: relying on the model to judge dates in text is fragile and the stale chunks still occupy the window.
+B=Larger candidate pool: the archive stays eligible and may still outrank the current data; ranking cannot remove a source.
+C=Delete failing rows: this hides the symptom from the metric and leaves users receiving outdated prices.
+T: When retrieval spans show deprecated assets, change the corpus the index syncs from; the tag alone does not block reads.
+
+@ DBX-CEA D3 T3.8 applied troubleshooting
+S: Traces for an onboarding agent show retrieval spans citing files under `/Volumes/hr/scratch/drafts/`, where employees save personal notes. `RetrievalRelevance` is low for those spans, and answers sometimes contradict the HR handbook. The agent's service principal holds `READ VOLUME` on the whole `hr` catalog's volumes. Which governance action addresses the cause?
+A: Limit the service principal's read access to the curated handbook volume, so the drafts volume is no longer a possible source
+B: Ask employees to stop saving notes in the drafts volume, because a naming convention on personal files is enough to protect the agent
+C: Tell the model in the system prompt that files under drafts are unreliable, and keep the broad read grant in place
+D: Lower the number of results per query so that the draft files rarely fall within the returned results
+K: A
+G: ## Retrieval can only be as authoritative as the access it is given
+Unity Catalog privileges decide which volumes and tables a principal can read. Reading volume files requires `USE CATALOG`, `USE SCHEMA` and `READ VOLUME`. A service principal granted read on every volume in a catalog can reach personal scratch space, and an unscoped pipeline or tool can then index or fetch it. Databricks recommends least privilege for agent identities: grant only what the agent needs, with a dedicated service principal per app.
+The failure mode (retrieval from non-authoritative sources) is the exam's convention; the control is the grant boundary.
+W: Limit the service principal to the curated volume: the agent can no longer read the drafts, so draft files cannot enter the retrieval results, whatever the model or the ranking would do.
+X: B=Ask employees: a convention does not enforce anything, and nothing prevents the files from being read.
+C=Prompt rule: the unreliable files still enter the window and compete with the handbook; an instruction is not an access boundary.
+D=Fewer results: this only lowers the chance of seeing draft chunks; the source remains reachable.
+T: Fix non-authoritative retrieval at the grant boundary, not with prompts or ranking.
+
+@ DBX-CEA D3 T3.8 advanced troubleshooting
+S: A shared HR assistant queries one AI Search index with its app's service principal for every employee. The index is synced from a table that holds both employee-handbook text and compensation-band documents. Review of a trace shows that a regular employee received chunks from compensation bands that only the HR team may see. Retrieval quality scores are good. Which governance change resolves this at its source?
+A: Build the assistant's index only from the employee-facing handbook table, and keep compensation bands in a separate index that only the HR group can query
+B: Add a system prompt rule that forbids the assistant from ever revealing compensation data to people who are not on the HR team, wherever it appears
+C: Increase the reranker's strictness so that compensation chunks are ranked lower for questions that are not about pay or salary bands in any way
+D: Split the compensation bands into smaller chunks so that each chunk contains too little text to identify a role or a person in the results
+K: A
+G: ## Decide the audience of a corpus before you index it
+Retrieval returns whatever the index contains and the caller's identity can read. With the default app authorization in Databricks Apps, the app authenticates with an automatically created service principal and all users share its permissions. So an index that mixes content for different audiences hands the restricted content to every user of the shared agent. Querying an AI Search index requires `USE CATALOG`, `USE SCHEMA` and `SELECT` on the index.
+The governance action is to separate the corpus by audience: general content goes into the index the shared agent may query, restricted content goes into its own index, and `SELECT` on that index is granted only to the group entitled to it. Quality scores say nothing about entitlement: a perfectly relevant chunk can still be one the user may not see.
+Per-user identity (user authorization) is documented for agents on Databricks Apps but is marked Public Preview, so the exam key here rests on corpus separation. Treating this as a failure of the wrong source being in scope is the exam's convention.
+W: Separate indexes by audience: the shared assistant's index contains only handbook content, so compensation chunks cannot be retrieved for it, and Unity Catalog privileges on the HR-only index decide who may query pay data.
+X: B=Prompt rule: the sensitive chunks are already in the window when the rule is read, and a prompt can be ignored or bypassed; it is not an access control.
+C=Stricter reranking: ranking is about relevance, not entitlement; a question about pay from a non-HR user will still rank those chunks high.
+D=Smaller chunks: the content is still retrieved, and smaller pieces do not change who is entitled to see it.
+T: Keep restricted content out of the shared agent's corpus and grant it to its audience in Unity Catalog, not with prompts or ranking.
+
+@ DBX-CEA D3 T3.8 applied troubleshooting
+S: A procurement agent sometimes gives conflicting answers. Retrieval spans show two supplier-policy documents in different Unity Catalog volumes: `/Volumes/proc/policy/v2024/` and `/Volumes/proc/legal/copy_of_policy/`. Both are indexed, neither carries a certification status, and no steward is recorded for either. Which governance action resolves the conflict at its source?
+A: Raise the retrieval result count so that both versions always appear and the model can pick whichever it judges to be more recent
+B: Rewrite the system prompt to say that when sources disagree the agent should refuse to answer the procurement question
+C: Designate one owner and one authoritative version, certify it, deprecate the other, and rebuild the index from the certified source only
+D: Fine-tune the generation model on the latest policy text so that it overrides whatever retrieval returns about suppliers
+K: C
+G: ## Conflicting sources are a governance problem
+When two documents say different things and both are in scope, retrieval faithfully returns both and the model sees a clash (the exam's term for contradictory content in the window). Prompts can only choose between them at inference time; governance removes the ambiguity. In Unity Catalog the steward role can flag assets with the `system.certification_status` tag (`certified` or `deprecated`), which needs ASSIGN on that governed tag. Marking one version certified and the other deprecated records the decision; the index must then be rebuilt from the certified source to enforce it.
+Having an accountable owner per authoritative asset is a practice, not a docs rule; the failure-mode names are the exam's convention.
+W: Pick an owner and authoritative version, certify it, deprecate the copy and rebuild the index from the certified source: the contradiction is removed from the corpus itself, and the decision is recorded in Unity Catalog metadata.
+X: A=Show both versions: returning more results guarantees the conflict reaches the model, which must then guess.
+B=Refuse on disagreement: the agent becomes unusable on any question where the copy disagrees, and the root cause stays.
+D=Fine-tuning: it bakes one policy snapshot into the model and goes stale; retrieval still returns the conflicting copy.
+T: Resolve contradictory sources by certifying one and deprecating the other, then rebuild the index from the certified corpus.
+
+@ DBX-CEA D3 T3.9 advanced use-case
+S: A bank is preparing a customer-policy agent for deployment. Policy documents live in many Unity Catalog volumes, some drafts, some archived. Compliance requires that the agent cite only approved policy. Which pre-deployment strategy achieves this?
+A: Put every policy volume into one AI Search index and ask the agent to cite the most official-looking source in each answer it gives
+B: Rely on the evaluation set alone: if the answers score well on correctness, the sources must have been approved ones
+C: Index everything but rank approved policy higher by boosting the words "approved" and "official" in each query
+D: Create a curated schema holding only approved policy, certify its assets, index only that source, and grant the agent access to it alone
+K: D
+G: ## Constrain the corpus before deployment
+The strongest way to keep an agent on authoritative sources is to control what is retrievable, as follows:
+- Curate: one governed location (schema or volume) holds approved documents, with stewards responsible for it.
+- Label: certify the approved assets with the `system.certification_status` system tag (`certified`); deprecate superseded ones. Assigning needs ASSIGN on the governed tag.
+- Constrain: build the AI Search index only from the curated source, and grant the agent's service principal least privilege on it (Databricks recommends least privilege and a dedicated service principal per app).
+This is the exam's task 3.9: a strategy, set before deployment, that limits retrieval to authoritative sources.
+W: Curated, certified source with an index built from it and access limited to it: the agent cannot retrieve drafts or archives because they are neither in the index nor within the identity's grants, so every citation comes from approved policy.
+X: A=Everything indexed and a prompt: the model cannot reliably tell official from unofficial text, and drafts remain retrievable.
+B=Correctness scores: a correct answer can still cite a draft; scores do not verify provenance, which the trace's retrieved documents show.
+C=Boosting words: keyword boosting does not identify approval status, and drafts that use the words "official" would be favoured.
+T: Constrain retrieval by curating, certifying and granting: the corpus, not the prompt, defines what is authoritative.
+
+@ DBX-CEA D3 T3.9 advanced use-case
+S: A release checklist for a retrieval agent is being drafted. Which TWO checks, performed before deployment, best confirm that retrieval is restricted to authoritative sources? (Select TWO)
+A: Confirm that the agent's average response latency stays below the team's target on every query in the evaluation set
+B: Review the index's source tables and volumes in Unity Catalog, confirming that each has an owner and a `certified` status, and that no deprecated or draft asset feeds the index
+C: Run the evaluation set with tracing and inspect the source path in each retrieval span to confirm every cited document is approved
+D: Check that the system prompt includes the sentence "only use official documents" in a prominent position
+E: Compare the number of indexed chunks with the previous release and accept the release if the count has grown since the last deployment
+K: B,C
+G: ## Verify provenance, not just quality
+A pre-deployment governance review needs two kinds of evidence:
+- Declared scope: which assets feed the index, who owns them, and what their certification status is (Unity Catalog metadata and the `system.certification_status` tag).
+- Observed behavior: what the agent actually retrieved. MLflow tracing records retrieval as `RETRIEVER` spans that output a list of documents, with metadata such as the document URI, so evaluation traces show which sources were used.
+Latency, prompt wording and chunk counts are useful but do not prove source restriction. The checks are the exam's convention for a release gate.
+W: B=Source metadata review: the owner and certification status of everything that feeds the index show that only approved assets are in scope.
+C=Trace inspection: the retrieval spans of the evaluation run show the documents that were actually returned, which confirms the declared scope in practice.
+X: A=Latency: a performance property; fast retrieval from a draft is still a violation.
+D=Prompt sentence: an instruction, not a control; it cannot show what was retrieved.
+E=More chunks: a larger index can mean more unapproved content, so size says nothing about authority.
+T: Gate the release on the declared sources and on retrieved sources seen in traces.
+
+@ DBX-CEA D3 T3.9 applied tradeoff
+S: A company keeps all finance documents in one catalog. To deploy a budget-planning agent safely, an engineer proposes granting its service principal `SELECT` and `READ VOLUME` on the whole catalog "so it never hits a permission error". Only about a tenth of the catalog is approved planning material. What is the better strategy?
+A: Keep the broad grant, since permission errors in production cause outages, and tell the prompt to avoid the unapproved folders and schemas
+B: Grant the service principal access only to the approved planning schema and volume (and the AI Search index built from them), using a dedicated principal for this agent
+C: Grant access to the whole catalog for the test phase only and remove it after launch, because testing needs full visibility to find every gap in the corpus
+D: Give the agent a user's personal credentials so the access stays with a human who understands which folders are approved
+K: B
+G: ## Least privilege defines the retrieval boundary
+Databricks recommends the principle of least privilege for agents: grant only the permissions the agent needs, with a dedicated service principal per app. In Unity Catalog, reading tables, volumes and indexes needs explicit privileges (for example `USE CATALOG`, `USE SCHEMA`, `SELECT`, `READ VOLUME`), so the grant list is effectively the list of sources the agent can retrieve from. A permission error on an unapproved source is the control working, not an outage.
+W: Scoped grants for a dedicated principal: the agent can only reach the approved schema, volume and index, so retrieval cannot leave authoritative sources, while permission errors elsewhere are intended.
+X: A=Broad grant plus prompt: the broad grant lets the unapproved material be retrieved, and a prompt is no access control.
+C=Broad grant in testing only: testing with wider access hides the permission failures that production will show, and the evaluation then measures behavior that will not exist.
+D=Personal credentials: a user's credentials give the agent that person's entire access, break audit trails and break when the person leaves.
+T: The agent's grants are its retrieval boundary: give the minimum and dedicate the principal.
+
+@ DBX-CEA D3 T3.9 applied troubleshooting
+S: A data steward certified the approved `claims.gold` tables, and the team assumed that the claims agent would therefore retrieve only from certified data. A trace shows the agent returning rows from `claims.staging.raw_claims`, which is uncertified, because the agent's service principal has `SELECT` on the whole `claims` catalog. What is the correct conclusion?
+A: The tag only labels assets and does not restrict reads, so the grants and the data sources the agent uses must be limited to certified assets
+B: Certification has failed, and the steward should reapply the tag to the staging table so that Unity Catalog starts to block reads of it
+C: The tag only takes effect once the agent's prompt mentions the certification status in its instructions and names the tag key
+D: Unity Catalog will block reads of uncertified tables once a propagation delay passes, so the staging reads should stop
+K: A
+G: ## A label is not an enforcement
+The Databricks page on flagging data as certified or deprecated describes `system.certification_status` as a system tag whose values `certified` and `deprecated` signal quality or lifecycle status; certified assets show a check mark, deprecated ones a restricted icon, and the tag supports search by `certificationStatus`. Nothing on the page says the tag blocks queries. Access is governed by privileges, and ABAC policies can use tags as attributes (the tags page describes tag inheritance during ABAC evaluation), but only where such policies are defined.
+So certification must be paired with scoped grants (or a tool or index built from the certified assets) to limit the agent's retrieval.
+W: Tag is a label and does not restrict reads: the agent's `SELECT` on the whole catalog still permits staging reads, so the fix is to limit grants and tool sources to the certified assets.
+X: B=Reapply tag: the staging table is uncertified, and tagging it would label it, not block anything; the tag is not an enforcement mechanism.
+C=Prompt mentions the tag: a prompt cannot make Unity Catalog enforce anything, and the model has no direct view of tags unless a tool returns them.
+D=Propagation delay: the docs mention a short delay for search results after tag changes, not an access block; reads depend on privileges.
+T: Certification signals trust; enforcement comes from grants and from what the retriever is built on.
+
+@ DBX-CEA D3 T3.9 advanced tradeoff
+S: In a knowledge-management workspace the ASSIGN permission on the `system.certification_status` governed tag was granted to all account users, and several teams have certified their own working copies. The governance lead wants "certified" to mean "approved by data stewards" so the agent's retrieval corpus can be built from certified assets only. Which control gives the tag that meaning?
+A: Document in the team wiki that only stewards should certify assets, and review the tags once a year
+B: Add a rule to the agent prompt that rejects chunks from tables whose owners are not on the stewards list
+C: Restrict the ASSIGN permission on the `system.certification_status` governed tag to the stewards group
+D: Rename the working-copy tables with a `_draft` suffix so that engineers recognise them as unapproved
+K: C
+G: ## Governed tags make the label trustworthy
+The `system.certification_status` tag is a system-governed tag. To apply it you must have the ASSIGN permission on the governed tag, plus either ownership of the object or `APPLY TAG`, `USE SCHEMA` and `USE CATALOG` (the privileges listed on the Databricks certify and deprecate page). Governed tags exist so that the allowed keys and values and the identities that may assign them are controlled centrally. If ASSIGN on the tag is limited to the stewards group, "certified" can be set only by them, so a corpus built from `certified` assets is a corpus approved by stewards.  The page points to "Manage permissions on governed tags" for who holds ASSIGN.
+ASSIGN on the tag is therefore the lever; granting it broadly is what let teams self-certify.
+W: Limit ASSIGN on the governed tag to stewards: only that group can mark assets certified, so the tag carries the meaning "steward-approved" and can safely drive the corpus.
+X: A=Wiki and annual review: an unenforced policy leaves the tag settable by anyone for most of the year.
+B=Prompt rule on owners: the chunks have already been retrieved, a prompt cannot reliably evaluate table ownership, and it does not fix the tag's meaning.
+D=Rename with suffix: a naming convention is not enforced and is unrelated to certification status.
+T: Control who may assign the governed certification tag, and the tag becomes a trustworthy basis for the retrieval corpus.

@@ -1,0 +1,594 @@
+# DBX-ASD batch 03: D2 (T2.2 SQL on files and save modes, T2.3 persistent tables with bucketing, sorting and partitioning, T2.4 temporary views), single answer, detailed explanations
+# src: https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html
+# src: https://spark.apache.org/docs/latest/sql-data-sources-parquet.html
+# src: https://spark.apache.org/docs/latest/sql-getting-started.html
+# src: https://spark.apache.org/docs/latest/configuration.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrameWriter.insertInto.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrameWriter.bucketBy.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.createTempView.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.createGlobalTempView.html
+
+@ DBX-ASD D2 T2.2 applied use-case
+S: A directory `/data/events` holds JSON Lines files. An analyst wants a DataFrame with all rows, using SQL and without first reading the files into a DataFrame or registering a view. Which call does that?
+A: spark.sql("SELECT * FROM '/data/events' USING json")
+B: spark.sql("SELECT * FROM json.'/data/events'")
+C: spark.sql("SELECT * FROM json.`/data/events`")
+D: spark.sql("SELECT * FROM file('/data/events', 'json')")
+K: C
+G: ## Run SQL on files directly
+Spark SQL can query a file without a read call or a view. The table identifier is the data source name, a dot, and the path in backticks:
+- `SELECT * FROM parquet.`/data/users.parquet``
+- `SELECT * FROM json.`/data/events``
+The source name before the dot (`parquet`, `json`, `csv`, `orc`, `text`) tells Spark which reader to use, and the backticks mark the path as one identifier. `spark.sql(...)` returns a normal DataFrame, so you can keep transforming it.
+## What this form does not give you
+The files are read with the default options of that source. If you need options such as a header, a delimiter or an explicit schema, use `spark.read.option(...).schema(...)` instead.
+W: Source name plus backticked path: `json.` followed by the path in backticks is the documented "run SQL on files directly" form, and the result is a DataFrame.
+X: A=USING clause: `USING json` belongs to `CREATE TABLE` and `CREATE TEMPORARY VIEW` statements; it is not valid inside a plain SELECT, so the query fails to parse.
+B=Single quotes: a quoted string is a literal, not an identifier. The path has to sit in backticks after the source name, so this statement is a syntax error.
+D=file() function: Spark SQL has no table function with this name for reading paths. Direct file queries use the `source.`path`` identifier.
+T: Query a file in place with `SELECT ... FROM format.`path``; backticks, not quotes, and default reader options only.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.2 applied troubleshooting
+S: A nightly job runs the line below. The first run on a fresh path succeeds. The next night, the same line runs again with a new DataFrame and the path already contains the first night's files.
+```
+df.write.parquet("/out/daily")
+```
+What happens on the second run?
+A: It fails with an AnalysisException, because the default mode raises an error when data exists, and the old files stay
+B: It succeeds and appends the new rows next to the first night's files, because adding files is the default behavior of a path write
+C: It succeeds and replaces the first night's files, because a write without options overwrites the target path directory
+D: It succeeds without writing anything, because the default save mode skips the write when data already exists at the path
+K: A
+G: ## Save modes
+`DataFrameWriter.mode()` tells Spark what to do when the target already holds data. The four modes:
+- `errorifexists` (also `error`, the default): throw an exception if data exists.
+- `append`: add the DataFrame's rows to the existing data.
+- `overwrite`: replace the existing data with the DataFrame.
+- `ignore`: do nothing if data exists, like `CREATE TABLE IF NOT EXISTS`.
+## Why the default matters
+A script that works the first time and fails the second is the signature of the default mode. Nothing is written by the failing call, so the old output is still there.
+W: Default errorifexists: with no `mode()` call the writer uses `errorifexists`, so the second write sees data at `/out/daily` and throws an exception before changing anything.
+X: B=Append: appending needs an explicit `mode("append")`; it is not the default, and a silent append would duplicate rows on every rerun.
+C=Overwrite: overwriting also needs `mode("overwrite")`. Replacing data without being asked would be dangerous, which is why the default refuses.
+D=Ignore: skipping an existing target is what `mode("ignore")` does. The default does not skip quietly; it raises an error so the failure is visible.
+T: No `mode()` means `errorifexists`: a rerun on the same path fails instead of appending, overwriting or skipping.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.2 applied use-case
+S: `/out/ref` already holds a reference dataset with 100 rows from a previous load. A job holds a DataFrame `df` with 500 different rows and runs the line below. The call returns without an error.
+```
+df.write.mode("ignore").parquet("/out/ref")
+```
+What does `spark.read.parquet("/out/ref").count()` return afterwards?
+A: 600, because ignore keeps the existing rows and adds the new ones
+B: 500, because ignore resolves the conflict in favor of the new data
+C: An exception, because writing to an existing path always fails unless the mode is set to overwrite or append
+D: 100, because ignore leaves existing data alone and does not write the DataFrame
+K: D
+G: ## What ignore means
+`ignore` is the "create if not exists" save mode. If data is already present at the target, the writer neither fails nor changes anything; the DataFrame is simply not saved. If the target is empty or missing, the write happens as usual.
+## When to use it
+It fits one-time seeding of a reference dataset, where reruns must be harmless. It is a poor fit for incremental loads, because new rows are dropped without any message.
+W: Ignore skips the write: because `/out/ref` already has data, Spark leaves the 100 existing rows as they are and discards the 500 new ones, so the count stays 100.
+X: A=Append result: adding rows to existing data is `mode("append")`. Ignore never touches the existing data, so no rows are added.
+B=Overwrite result: replacing the data with the new rows is `mode("overwrite")`. Ignore never deletes anything, so the old rows are not replaced.
+C=Exception: raising an exception on existing data is the `errorifexists` mode. Ignore was chosen here exactly so that the call succeeds silently.
+T: `ignore` = write only if nothing is there yet; otherwise do nothing and report no error.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.2 applied troubleshooting
+S: A load job writes `df` (3 rows) with the line below. The job's scheduler retries it once after a transient network error that occurred after the write had already finished. Both attempts ran to completion.
+```
+df.write.mode("append").json("/out/orders")
+```
+How many rows does `spark.read.json("/out/orders")` return, assuming the path was empty before the first attempt?
+A: 3, because append merges rows that are identical to ones already stored
+B: 6, because each completed attempt appended its own copy of the 3 rows
+C: 3, because the second attempt is skipped when the output path already exists
+D: 0, because a path written twice is invalidated until it is repaired
+K: B
+G: ## Append is not idempotent
+`append` adds new files next to the old ones. Spark does not compare rows, and a plain file source has no primary key or transaction log that recognizes a repeated batch. Running the same write twice therefore stores the data twice.
+## Consequences for retries
+- Retrying an `append` job after it already finished duplicates data.
+- To make reruns safe, overwrite a deterministic location (for example one folder per batch date), or deduplicate on a key when reading.
+- Transactional table formats can add idempotent writes; with plain files you design it yourself.
+W: Append twice: two successful runs add two sets of files, so the 3 rows are stored twice and the read returns 6.
+X: A=Row merging: Spark does not deduplicate on append and never compares new rows with stored rows, so identical rows are kept.
+C=Skipping: skipping an existing output belongs to `mode("ignore")`. Append writes new files whenever it is called.
+D=Invalidated path: no such state exists for a file path. Readers simply see all part files that are present.
+T: `append` is not idempotent: a retried successful write doubles the rows unless you deduplicate or overwrite a fixed location.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.2 advanced troubleshooting
+S: A job rebuilds a plain Parquet dataset with `df.write.mode("overwrite").parquet("/out/sales")`. One night the executors are lost halfway through the write and the job fails. The team assumed that the previous night's data would still be there. What does the Spark documentation say about this situation?
+A: The previous data is intact, because Spark writes into a temporary directory and swaps it in atomically after the last task
+B: The previous data is restored by Spark, because a failed write is rolled back using the transaction log of the output path
+C: The old data may already be gone, because overwrite is not atomic, takes no lock and deletes the old data first
+D: The previous data is kept in a hidden backup folder, which Spark deletes only after the next successful overwrite of the path
+K: C
+G: ## Save modes are not transactions
+The Spark guide states two warnings about save modes: they "do not utilize any locking and are not atomic", and when performing an `Overwrite`, "the data will be deleted before writing out the new data".
+## What that means for a plain file path
+- A crash between the delete and the end of the write leaves no complete old copy and no complete new copy.
+- Readers that run at the same time can see missing or partial data.
+- Safer patterns: write to a new, dated location and switch readers to it afterwards, or use a table format with transactions (such as Delta) so a failed write leaves the last committed version intact.
+W: Delete first, no atomicity: Spark clears the target before writing, so a failure halfway through can leave the previous night's data missing or the output partial, and the documented behavior gives no rollback.
+X: A=Atomic swap: a temporary-directory swap would make overwrite atomic, which the guide says it is not. Writing happens at the target path.
+B=Rollback from a log: plain Parquet paths have no transaction log. Only transactional table formats provide that, not the generic `overwrite` mode on files.
+D=Hidden backup: Spark creates no backup copy of overwritten data. Once deleted, the old files are not recoverable through Spark.
+T: Overwrite on a file path is delete-then-write, not atomic and not locked; a mid-write failure can lose the old data.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.2 advanced use-case
+S: `/out/events` is written with `partitionBy("dt")` and currently has the partitions dt=2024-01-01, dt=2024-01-02 and dt=2024-01-03. Each night a job recomputes only the latest day and runs the line below with the default Spark configuration. After the run, only dt=2024-01-03 remains and the older days are gone.
+```
+new_day.write.mode("overwrite").partitionBy("dt").parquet("/out/events")
+```
+Which change makes the job replace only the partitions that appear in `new_day`?
+A: Add `.option("partitionOverwriteMode", "dynamic")` to the writer or set it as a session conf
+B: Change the mode to `append`, because append replaces any partition that has the same name
+C: Change the mode to `ignore`, because ignore keeps old partitions and rewrites only the matching ones
+D: Call `new_day.coalesce(1)` first, because one write task only touches its own partition
+K: A
+G: ## Static and dynamic partition overwrite
+For a partitioned data source, `spark.sql.sources.partitionOverwriteMode` controls what an overwrite deletes:
+- `STATIC` (the default): Spark deletes the matching target before writing, which for a plain `overwrite` with `partitionBy` means every existing partition.
+- `dynamic`: Spark does not delete ahead of time and overwrites only the partitions that receive data at runtime.
+The setting can also be passed as a writer option, `partitionOverwriteMode`, and the option takes precedence over the session setting.
+## Why not other modes
+`append` and `ignore` change what happens to existing data in the whole target; neither means "replace the partitions I have data for".
+W: Dynamic mode: with `partitionOverwriteMode=dynamic` only dt=2024-01-03 is rewritten and the other days stay, because Spark overwrites just the partitions that hold rows in the DataFrame.
+X: B=Append: append adds files to dt=2024-01-03 beside the old ones instead of replacing them, so a rerun would double that day.
+C=Ignore: ignore skips the whole write because the path already has data, so tonight's day would never be written.
+D=coalesce(1): reducing the number of write tasks changes file counts, not which directories are deleted. In static mode the delete still happens first.
+T: Replace only the partitions you have data for with `partitionOverwriteMode=dynamic`; static overwrite removes all of them.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.2 applied troubleshooting
+S: `/data/people.csv` has a header line `id,name` followed by data lines. An analyst runs the query below and receives an AnalysisException saying that column `id` cannot be resolved.
+```
+spark.sql("SELECT id FROM csv.`/data/people.csv`")
+```
+What is the cause?
+A: The file must first be registered as a temporary view, because `csv.` paths can only be queried by name
+B: Direct SQL uses the source's default options, so no header is used: columns are `_c0` and `_c1` and the header is data
+C: The csv source supports direct queries only for whole directories, so a single file path must be wrapped in a glob pattern
+D: Column names in CSV files are case sensitive, so the query would work as `ID`
+K: B
+G: ## Default options apply
+When you query `csv.`path``, Spark reads the file with the CSV source's default options. The `header` option defaults to `false`, so the first line is a data row and the columns are named `_c0`, `_c1`, ... with string type.
+## How to get proper names
+- Read with options: `spark.read.option("header", True).csv(path)` (optionally with `inferSchema` or an explicit schema), then register a temporary view if you want SQL.
+- Or keep the direct query and select `_c0`, `_c1`, accepting the header as a row. That is rarely what you want.
+W: Defaults only: the header option is false by default, so `id` and `name` are not column names; Spark exposes `_c0` and `_c1`, and the unresolved `id` raises the exception.
+X: A=View required: direct file queries need no view. The same statement works, but with default-named columns.
+C=Directories only: a single file path is accepted. The path can also be a directory or a glob; that is not the reason for the error.
+D=Case sensitivity: Spark SQL resolves column names case-insensitively by default, and the problem is that no column called `id` exists at all.
+T: SQL on a CSV file uses default reader options (no header), so columns are `_c0`, `_c1`; use `spark.read.option("header", True)` to get real names.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.2 applied use-case
+S: `/logs/app` is a directory of plain text files. An engineer wants the number of lines containing `ERROR`, using direct SQL on files. Which query is correct?
+A: spark.sql("SELECT count(*) FROM text.`/logs/app` WHERE line LIKE '%ERROR%'")
+B: spark.sql("SELECT count(*) FROM text.`/logs/app` WHERE _c0 LIKE '%ERROR%'")
+C: spark.sql("SELECT count(*) FROM text.`/logs/app` WHERE text LIKE '%ERROR%'")
+D: spark.sql("SELECT count(*) FROM text.`/logs/app` WHERE value LIKE '%ERROR%'")
+K: D
+G: ## The text source schema
+The `text` data source reads each line of every file as one row with a single string column called `value`. When partition directories are present, partition columns are added to it. Everything the other sources infer (types, headers, field names) does not exist for text, so you parse `value` yourself with `split`, `regexp_extract` or `from_json`.
+## Contrast with CSV
+CSV direct queries expose `_c0`, `_c1`, ...; JSON exposes the field names found in the data. Text always exposes `value`.
+W: The value column: `text.` returns lines in a single string column named `value`, so filtering on `value LIKE '%ERROR%'` and counting rows gives the number of matching lines.
+X: A=line: no column called `line` exists for the text source, so the query fails to resolve it.
+B=_c0: `_c0` is the first column name produced by the CSV source with no header; the text source does not use positional names.
+C=text: the source name is not a column name. The query would fail with an unresolved column.
+T: Reading text files gives one string column named `value` per line.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.2 applied definition
+S: A developer misremembers the writer API and calls `df.write.mode("replace").parquet("/out/x")`. Which statement describes what Spark does?
+A: It treats replace as a synonym for overwrite because the writer accepts common aliases of the four modes
+B: It treats replace as append when the path exists and as a normal write when the path does not exist
+C: It raises an error, because replace is not a save mode name that the writer accepts at all
+D: It falls back to the default mode, writing the data if the path is empty or failing if it is not
+K: C
+G: ## Valid save mode names
+The writer accepts exactly the save modes in the Spark guide:
+- `error` or `errorifexists` (default)
+- `append`
+- `overwrite`
+- `ignore`
+Any other string is rejected with an error that lists the accepted modes. Spark does not guess intent from a near-synonym.
+## Useful habit
+Pass the mode as a string from this list, or in Scala/Java use the `SaveMode` enum, so that typos fail early rather than changing behavior.
+W: Unknown mode name: replace is not in the list of save modes, so Spark rejects it with an error instead of mapping it to overwrite.
+X: A=Aliases: the only alternative spellings are `error` for `errorifexists`; there is no alias like replace for overwrite.
+B=Mixed behavior: no mode behaves as "append when exists, plain write otherwise" other than the append mode itself, and replace is not recognized.
+D=Silent fallback: Spark does not fall back to the default for an unrecognized name; a misspelled mode is an error.
+T: Only error/errorifexists, append, overwrite and ignore are valid; other strings raise an error.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.2 applied troubleshooting
+S: A DataFrame `df` has columns `id` (int) and `msg` (string). The developer runs `df.write.text("/out/msgs")` and the job fails with an AnalysisException. What is the cause and the fix?
+A: The text sink takes one string column only; combine columns with `concat_ws`, or write a format such as CSV or JSON
+B: The text sink writes every column separated by tabs, but the target directory must be created first with `mkdir`
+C: The text sink supports only the first column, so Spark drops `msg`; the exception warns about data loss and `mode("overwrite")` suppresses it
+D: The text sink needs the `header` option for multi-column data, so adding `.option("header", True)` fixes the write
+K: A
+G: ## The text writer is single column
+The `text` source reads each line as one string column named `value`, and writes in the mirror image: the DataFrame must have exactly one column of string type, and each row becomes one line. A DataFrame with two columns is rejected before anything is written.
+## Ways to write several fields
+- Build one string column (`concat_ws(",", "id", "msg")`) and write it as text. You then own quoting and escaping.
+- Use `csv` or `json` writers, which handle several columns, headers and quoting.
+W: Single string column only: the text writer cannot represent two columns, so the analysis fails; concatenating into one string column or choosing CSV/JSON solves it.
+X: B=Tab separation and mkdir: the text writer never joins columns with tabs, and Spark creates output directories itself, so the missing folder is not the problem.
+C=Drop the second column: Spark does not silently truncate columns; the writer rejects the schema, and the save mode does not affect schema checks.
+D=header option: `header` is a CSV option. The text source has no header concept.
+T: `write.text` needs exactly one string column; join columns into one or use csv/json.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.2 advanced troubleshooting
+S: A job reads a dataset and rewrites it in place after filtering:
+```
+df = spark.read.parquet("/out/orders")
+df.filter("status = 'OK'").write.mode("overwrite").parquet("/out/orders")
+```
+What is the outcome?
+A: It succeeds, because Spark buffers the filtered rows in memory before it deletes the target path
+B: It fails with an AnalysisException saying the path is also being read from; the rows must go to a different location
+C: It succeeds, because the filter is pushed down so only the matching files are touched and the other files stay in place
+D: It succeeds but returns an empty dataset, because overwrite always deletes the data before the filter runs
+K: B
+G: ## Reading and writing the same path
+DataFrames are lazy: `spark.read.parquet(path)` does not read data until an action runs, and the write is that action. Overwrite deletes the target before writing, so the reader would find its own input deleted.
+In practice the analyzer refuses this plan with an `AnalysisException` along the lines of "Cannot overwrite a path that is also being read from" (the Spark SQL guide does not list this check; it only warns that overwrite deletes data first). For plain files, write to a new path (or a staging path) and switch consumers after the job succeeds.
+W: Self overwrite is refused: the query both reads and overwrites `/out/orders`, so Spark rejects it before data is lost instead of reading from files it just deleted.
+X: A=Memory buffering: Spark does not hold the whole result in memory in order to delete its own input; output is produced by distributed tasks reading the files.
+C=Filter pushdown: pushdown limits which row groups are read, not which files overwrite deletes. Overwrite removes the whole target path.
+D=Empty result: Spark's analysis step catches the conflict first, so the job fails instead of finishing with an empty dataset.
+T: You cannot overwrite a file path you are lazily reading from: write elsewhere, then switch.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.3 applied comparison
+S: A program runs these two statements in a session that has a Hive metastore and a warehouse directory configured. Then the application stops and a new application starts against the same metastore.
+```
+df.createOrReplaceTempView("t1")
+df.write.saveAsTable("t2")
+```
+Which statement is true in the new application?
+A: Both t1 and t2 can be queried, because the metastore stores all views and tables registered in a session
+B: Only t1 can be queried, because views are stored as query plans, which are cheap to keep, whereas tables cannot be recovered
+C: Neither can be queried, because tables created from DataFrames last only as long as their session
+D: Only t2 can be queried, because saveAsTable writes the data and a metastore entry, while a temp view lives in its session
+K: D
+G: ## saveAsTable versus a temporary view
+- `saveAsTable("name")` writes the DataFrame's data to files (under the warehouse directory unless a `path` option is given) and creates a table entry in the metastore. It survives application restarts as long as the same metastore is used, and it can be read again with `spark.table("name")`.
+- `createOrReplaceTempView("name")` registers a name for the DataFrame's query plan in the current session only. No data is written, and the name disappears when the session ends.
+No Hive installation is needed: by default Spark creates a local metastore.
+W: Persistent table: t2 has real files and a metastore entry, so it remains after the first application ends; the temporary view t1 was only a session-scoped name.
+X: A=Both survive: a temporary view is never written to the metastore, so it cannot be found by another application.
+B=Only the view: this reverses the behavior. The view holds a plan inside session memory, and the table is the object that persists.
+C=Neither survives: tables created by `saveAsTable` are persistent, which is the point of the call; session-only lifetime applies to temporary views.
+T: `saveAsTable` = data plus metastore entry that outlives the session; a temp view = a session-scoped name for a plan.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.3 applied troubleshooting
+S: A developer wants the user table to be bucketed on `user_id` and writes:
+```
+df.write.bucketBy(8, "user_id").parquet("/out/users")
+```
+What happens?
+A: The write fails with an AnalysisException, because bucketing needs a persistent table from `saveAsTable`
+B: The write succeeds and creates eight bucket files per DataFrame partition under the output path
+C: The write succeeds and ignores `bucketBy`, because bucket information cannot be stored without a table
+D: The write succeeds only if `sortBy("user_id")` is also called, since buckets need sorted files
+K: A
+G: ## Bucketing needs a table
+The guide says that for file-based data sources "bucketing and sorting are applicable only to persistent tables". The bucket count and columns are stored as table metadata in the metastore; later queries use that metadata to avoid shuffles. A plain path write has no place to keep it, so `save`-style methods (`parquet(path)`, `save(path)`) reject `bucketBy`.
+## Correct form
+```
+df.write.bucketBy(8, "user_id").sortBy("user_id").saveAsTable("users")
+```
+`sortBy` is optional and sorts rows within each bucket. It can be used only together with `bucketBy`.
+W: Persistent tables only: bucketBy requires `saveAsTable`, so a path-based Parquet write is rejected with an AnalysisException.
+X: B=Bucket files per partition: a bucketed table does hold bucket files, but Spark creates them only through `saveAsTable`.
+C=Silent ignore: Spark does not drop a layout request quietly; it raises an error because the metadata could not be stored.
+D=sortBy requirement: the dependency runs the other way. `sortBy` needs `bucketBy`, while `bucketBy` works alone with a table.
+T: `bucketBy` (and `sortBy`) work only with `saveAsTable`; path writes raise an error.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.3 advanced use-case
+S: `orders` and `customers` were both written with `bucketBy(16, "cust_id").sortBy("cust_id").saveAsTable(...)`. A job joins them on `cust_id` with `spark.sql.autoBroadcastJoinThreshold` set to -1 and bucketing left at its defaults. What does the physical plan show?
+A: A broadcast hash join of customers, because the broadcast threshold only applies to tables that are not bucketed
+B: A sort-merge join with an Exchange (shuffle) on both inputs, because bucket metadata is used only for filters and never for joins
+C: A sort-merge join with no Exchange on either input, because both tables are bucketed on the join key into the same number of buckets
+D: A shuffled hash join where only the larger table is shuffled, because bucketing replaces the shuffle for the smaller table
+K: C
+G: ## Bucketing and joins
+A bucketed table stores rows in a fixed number of files chosen by a hash of the bucket column. If two tables use the same bucket column (the join key) and the same bucket count, then rows with equal keys are already in matching buckets. Spark can join bucket i with bucket i and skip the shuffle that would otherwise be inserted as an `Exchange` before a sort-merge join.
+- The setting `spark.sql.sources.bucketing.enabled` is `true` by default; when it is `false`, bucketed tables are treated as normal tables.
+- Sorting within buckets (`sortBy`) can also save the local sort.
+- Check the result with `df.explain()`: no `Exchange hashpartitioning(cust_id)` below the join.
+## Why mention the broadcast threshold
+Setting it to -1 turns off automatic broadcast joins, so the plan shows a sort-merge join and the benefit of bucketing is visible.
+W: Co-bucketed join: both tables share the join key and bucket count 16, so Spark reads matching buckets together and the plan has a sort-merge join with no shuffle for either side.
+X: A=Broadcast: the threshold is -1, so no automatic broadcast happens, and the threshold has nothing to do with bucketing.
+B=Always shuffles: that is the unbucketed behavior. Bucket metadata is used for joins and aggregations on the bucket columns precisely to avoid the shuffle.
+D=Half shuffle: when both sides are compatibly bucketed no side needs a shuffle; a one-sided shuffle occurs only if just one table is bucketed.
+T: Same bucket column and count on both tables = shuffle-free sort-merge join.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.3 advanced tradeoff
+S: A table of 50 million devices is queried by `device_id`, and the team also joins it on `device_id`. A developer proposes `partitionBy("device_id")` when saving it as a table. Which assessment is correct?
+A: It is the best choice, because one directory per device makes every device lookup read exactly one file
+B: It creates millions of tiny directories and files; `bucketBy` on `device_id` gives a fixed layout for a high-cardinality key
+C: It fails, because partitionBy is allowed only for string columns and `device_id` is numeric
+D: It hashes devices into 200 partitions automatically, so the number of directories is bounded by `spark.sql.shuffle.partitions`
+K: B
+G: ## Partitioning versus bucketing
+- `partitionBy(col)` writes one directory per distinct value (`device_id=123/`). It gives partition pruning for filters on that column, but the directory count equals the number of distinct values. The guide notes it "has limited applicability to columns with high cardinality".
+- `bucketBy(n, col)` hashes the column into a fixed number `n` of buckets. It "can be used when the number of unique values is unbounded", and helps joins and aggregations on that column.
+## Rule of thumb
+Partition on low-cardinality columns that queries filter on (date, country). Bucket on high-cardinality keys used for joins or lookups (user id, device id).
+W: Too many directories: partitionBy on 50 million values makes millions of small directories and files, which overloads listing and the metastore; bucketBy gives a fixed layout for a column with unbounded values.
+X: A=One file per device: each directory holds at least one small file, but the cost of listing and tracking millions of them outweighs the pruning benefit.
+C=String only: numeric, date and timestamp columns can be partition columns, and automatic type inference exists for them.
+D=200 partitions: the shuffle partition setting concerns shuffles, not the output directory layout. partitionBy writes a directory per value.
+T: Partition by low-cardinality filter columns; bucket by high-cardinality key columns.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.3 applied definition
+S: A DataFrame `sales` contains the columns `country`, `year` and `amount`. It is saved with the line below. In which directory does a row with country `KR` and year `2025` end up?
+```
+sales.write.partitionBy("country", "year").parquet("/out/s")
+```
+A: /out/s/KR/2025/part-...parquet, because partition values become plain nested folder names
+B: /out/s/year=2025/country=KR/part-...parquet, because Spark orders directories alphabetically by column name
+C: /out/s/country=KR_year=2025/part-...parquet, because Spark joins all partition columns into one folder name
+D: /out/s/country=KR/year=2025/part-...parquet, because folders follow the partitionBy order in column=value form
+K: D
+G: ## Hive-style partition directories
+`partitionBy` creates one directory level per column, in the order the columns are listed, and each level is named `column=value`. Example layout:
+```
+/out/s/country=KR/year=2025/part-00000-....parquet
+/out/s/country=KR/year=2026/...
+/out/s/country=US/year=2025/...
+```
+The column order matters for the layout: put the column most often used in filters first, and the one with the fewest distinct values at the top to avoid too many directories at the first level.
+## Why this format
+All built-in file sources can discover these `name=value` directories and infer the partition columns when they read the root path.
+W: Order and name=value: partitionBy("country","year") produces `country=KR` first and `year=2025` under it, which readers use to rebuild both columns.
+X: A=Plain nesting: without `column=` prefixes the partition values could not be recovered by partition discovery.
+B=Alphabetical order: Spark uses the order in which you list the columns, not alphabetical order.
+C=Single folder name: each partition column gets its own directory level; Spark does not combine them with underscores.
+T: `partitionBy(a, b)` writes `a=<v>/b=<v>/` folders in the listed order.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.3 applied use-case
+S: The dataset from the previous write, with `country` and `year` partition columns, is read with `spark.read.parquet("/out/s").printSchema()`. The Parquet files themselves do not contain `country` or `year` values. What does the schema show?
+A: country (string) and year (integer) appear after the data columns, rebuilt from the directory names
+B: Only the data columns appear, because partitionBy removes the partition columns from the dataset permanently
+C: country and year appear as the first columns, both typed as string, because directory names are always text
+D: country and year appear only if the reader sets `mergeSchema` to true, because partition columns are treated as a schema change
+K: A
+G: ## Partition discovery
+When Spark reads the root of a partitioned dataset it parses the `column=value` directory names, adds those columns to the schema (after the columns stored in the files) and uses them for pruning.
+- Numeric, date, timestamp and string partition values get their types inferred automatically. For example `year=2025` becomes an integer.
+- `spark.sql.sources.partitionColumnTypeInference.enabled` (default `true`) can be turned off, and then all partition columns are strings.
+So no information is lost by `partitionBy`: the values are stored in the folder names instead of in the files.
+W: Discovered columns: Spark reads `country=KR/year=2025` names, adds country as string and year as an integer at the end of the schema, and the files stay smaller.
+X: B=Dropped for good: the values live in the directory names and come back on a read of the root path.
+C=First and all strings: partition columns are appended after the data columns, and numeric values are inferred as numeric types by default.
+D=mergeSchema: `mergeSchema` merges differing Parquet file schemas. Partition discovery is a separate, always-on feature.
+T: Read the root path of a partitioned dataset and `name=value` folders come back as extra columns, with inferred types.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.3 advanced troubleshooting
+S: A developer loads one partition folder directly with `spark.read.parquet("/out/s/country=KR")` and finds that the `country` column is missing. How can the column be kept while still reading only that folder?
+A: It is always present as a constant column, so the developer should look for a typo in the column name
+B: Add `.option("mergeSchema", True)`, so Spark adds the column found in the folder name
+C: Set the `basePath` option to `/out/s/` so discovery starts at the table root and sees `country`
+D: Rename the folder to `country_KR`, because partition columns are read only from underscore-separated names
+K: C
+G: ## Where discovery starts
+Since Spark 1.6, partition discovery finds partitions only under the paths you pass. If you point at `/out/s/country=KR`, the `country=KR` part is above the starting point, so it is not a partition column.
+- To keep it, set `basePath` in the reader options: `spark.read.option("basePath", "/out/s/").parquet("/out/s/country=KR")`.
+- Alternatively read the root and filter on `country`; partition pruning then reads only that folder.
+W: basePath: it declares the table root, so the `country=KR` folder is treated as a partition level and the column is added to the result.
+X: A=Constant column: the column is not added because the starting path is below the partition level, so there is nothing to look for in the code.
+B=mergeSchema: this merges schemas found in Parquet files; the partition value comes from the path and not from the file schema.
+D=Underscore names: the only recognized form is `name=value`; renaming would break discovery.
+T: Reading a single partition folder drops the partition column unless `basePath` points to the table root.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.3 applied definition
+S: A team runs the line below and later executes `DROP TABLE sales_ext`. What happens to the data files in `/lake/ext/sales`?
+```
+df.write.option("path", "/lake/ext/sales").saveAsTable("sales_ext")
+```
+A: They are deleted together with the table, because dropping a table always removes its files
+B: They stay in place, because a custom-path table is external and DROP TABLE removes only its metadata
+C: They are moved to a trash folder under the warehouse directory, so the table can be restored
+D: They stay in place but become unreadable, because the metastore holds the encryption layout of the files
+K: B
+G: ## Managed and external tables
+- Without a `path` option, `saveAsTable` writes under the warehouse directory. This is a managed table, and dropping it removes the table's default path too.
+- With `df.write.option("path", "/some/path").saveAsTable("t")`, the data lives at a location you choose. When the table is dropped, "the custom table path will not be removed and the table data is still there".
+This matters when other jobs share the files, or when you want accidental drops not to destroy data.
+W: External table: with a custom path, Spark keeps the files at `/lake/ext/sales` and drops only the metadata, so the data can be reattached to a new table.
+X: A=Always delete: only the default warehouse path is deleted on drop; custom paths are kept.
+C=Trash folder: Spark has no recycle bin for table files. A dropped table's files are either removed (default path) or left as they are (custom path), never moved aside.
+D=Unreadable: the metastore stores only table metadata; the files remain ordinary Parquet files that a new table or reader can use.
+T: `option("path", ...)` makes the table external: DROP TABLE leaves the files.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.3 advanced troubleshooting
+S: An external table `sales_ext` was created over `/lake/ext/sales`, which is partitioned by `dt`. Another tool writes new folders such as `dt=2024-05-02`. Files exist in storage, but `SELECT count(*) FROM sales_ext WHERE dt = '2024-05-02'` returns 0. Which statement brings the partition into the table?
+A: ANALYZE TABLE sales_ext COMPUTE STATISTICS
+B: spark.catalog.clearCache()
+C: spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+D: MSCK REPAIR TABLE sales_ext
+K: D
+G: ## Partition metadata in the metastore
+Persistent datasource tables keep per-partition metadata in the metastore, so queries fetch only the needed partitions instead of listing all folders. The guide notes: "partition information is not gathered by default when creating external datasource tables (those with a `path` option). To sync the partition information in the metastore, you can invoke `MSCK REPAIR TABLE`."
+## What the other commands do
+- `ANALYZE TABLE ... COMPUTE STATISTICS` records size and row-count statistics for the optimizer; it does not discover partitions.
+- Clearing the cache drops cached data, not metastore partition entries.
+- `partitionOverwriteMode` changes how an overwrite treats partitions when writing.
+W: MSCK REPAIR TABLE: it scans the table location, finds the new `dt=` folders and registers them as partitions, after which the filter finds the data.
+X: A=ANALYZE: statistics help planning and are separate from partition registration, so the new folder is still unknown.
+B=clearCache: this evicts cached data and does not add partitions to the metastore.
+C=partitionOverwriteMode: this setting applies to overwrite writes; the table is only being read here.
+T: Partitions added to an external table behind Spark's back must be registered with `MSCK REPAIR TABLE`.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.3 advanced troubleshooting
+S: A table `people(first STRING, last STRING)` already exists. A DataFrame `df` has the columns `(last, first)` with the single row `("Kim", "Ana")`. A developer appends it with `df.write.insertInto("people")`. What does the table contain afterwards?
+A: One row with `first`=`Kim` and `last`=`Ana`, because insertInto matches by position and swaps the values
+B: One row where `first` is `Ana` and `last` is `Kim`, because insertInto matches the DataFrame columns to table columns by name
+C: No new row, because insertInto fails when the DataFrame column order differs from the table's
+D: One row with null values, because columns that cannot be matched by name are filled with nulls
+K: A
+G: ## insertInto is position based
+`DataFrameWriter.insertInto(table)` writes into an existing table and "ignores the column names and just uses position-based resolution", unlike `saveAsTable`, which resolves columns by name. Both columns here are strings, so no type error warns you: the first DataFrame column goes into the first table column.
+## Safe habits
+- Reorder before writing: `df.select("first", "last").write.insertInto("people")`.
+- Or append through `saveAsTable` with `mode("append")`, which matches by name.
+- Check the schema of the target with `spark.table("people").printSchema()` first.
+W: Positional insert: `last` (Kim) lands in the first table column and `first` (Ana) in the second, producing a swapped but valid row.
+X: B=By name: that is how saveAsTable behaves, not insertInto; the doc states names are ignored.
+C=Failure: matching types at the same position are accepted, so Spark finds nothing to reject.
+D=Nulls: nothing is unmatched; every DataFrame column maps to a table column by position.
+T: `insertInto` is positional, `saveAsTable` is by name; reorder columns before inserting.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.3 applied comparison
+S: A table `sales` was saved with `partitionBy("dt")`. A developer compares two queries. Query 1 filters `WHERE dt = '2024-06-01'`. Query 2 filters `WHERE amount > 100`. Which statement about the files read is correct?
+A: Both queries read only the files that match their filters, because Spark keeps an index for every column of a table
+B: Neither query avoids reading all folders, because pruning only works for tables that are also bucketed
+C: Query 1 reads only the dt=2024-06-01 folder (partition pruning), while query 2 has to consider the files of every partition
+D: Query 2 reads fewer folders than query 1, because numeric filters use the sort order of the files
+K: C
+G: ## What a partition column buys you
+Partition directories encode the value, so a filter on the partition column lets Spark skip all non-matching directories before opening any file. In `explain()` the scan shows `PartitionFilters: [dt = 2024-06-01]`.
+A filter on an ordinary column such as `amount` cannot skip directories. Parquet statistics may let Spark skip row groups inside files (pushed filters), but the files of all partitions still need to be opened.
+## Choosing the column
+Partition by the column most queries filter on and that has a modest number of distinct values.
+W: Pruning only on the partition column: the `dt` filter selects one directory; the `amount` filter is a data filter that is evaluated inside each file.
+X: A=Index on every column: Spark does not build indexes. Skipping works from directory names and file statistics.
+B=Bucketing needed: partition pruning needs only the partitioned layout; bucketing is a separate feature.
+D=Numeric ordering: the filter on `amount` cannot choose folders. Sorting by `sortBy` applies to buckets and does not make folder-level decisions.
+T: Filter on the partition column to prune directories; other filters only skip data inside files.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.4 applied use-case
+S: A notebook runs the following code. What does the final query return?
+```
+spark.range(3).createOrReplaceTempView("t")
+spark.range(5).createOrReplaceTempView("t")
+spark.sql("SELECT count(*) AS n FROM t").collect()
+```
+A: [Row(n=3)], because the first registration of a name wins
+B: [Row(n=5)], because registering the same name again replaces the earlier view
+C: [Row(n=8)], because both DataFrames are stored under the name and queried together
+D: An AnalysisException, because the view name already exists in the session
+K: B
+G: ## createOrReplaceTempView versus createTempView
+- `createOrReplaceTempView(name)` creates a session-scoped view, or replaces an existing view with the same name.
+- `createTempView(name)` fails with a `TempTableAlreadyExistsException` (an AnalysisException) if the name already exists.
+Replace semantics make re-running a notebook cell safe, which is why the "OrReplace" form is the usual choice.
+## What the name points to
+A temporary view is one name for one query plan. Registering the same name again swaps the plan; it does not combine them.
+W: Replace: the second call replaces the plan behind `t`, so the count is over `range(5)` and the result is 5.
+X: A=First wins: nothing keeps the first registration when the "replace" variant is used.
+C=Union of both: a view holds a single plan; Spark never merges plans registered under one name.
+D=Name conflict: that error belongs to `createTempView`. The replace variant is designed not to raise it.
+T: `createOrReplaceTempView` swaps the plan behind a name; `createTempView` errors if it exists.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.4 advanced troubleshooting
+S: A job builds `df = spark.read.parquet(p).join(dim, "k").groupBy("c").count()`, registers it with `df.createOrReplaceTempView("agg")`, and then runs three separate `spark.sql` queries on `agg`. The Spark UI shows the full scan, join and aggregation three times. Why, and what avoids it?
+A: The view materializes the result when registered, so the three executions come from a bug in the queries
+B: Spark caches a view automatically at the first query, but the cache is lost whenever a different filter is used
+C: Temporary views are written to the warehouse, so every query reads and rewrites those files
+D: A temporary view stores only the plan, so each query recomputes it; call `df.cache()` and run an action first
+K: D
+G: ## Views are names for plans
+`createOrReplaceTempView` registers a logical plan under a name. No data is computed or stored; each query that uses the view is planned together with the view's plan, so the scan, join and aggregation run again each time (lazy evaluation).
+## Reuse results
+- `df.cache()` / `df.persist(level)` keeps computed partitions in memory or on disk after the first action; queries on the view then use the cached data.
+- `CACHE TABLE agg` in SQL does the same for the view's name.
+- Write the result with `saveAsTable` if it must survive the session.
+W: Plan only: the view recomputes the full lineage on each query, so caching the DataFrame (or the view) after one action lets the next queries read from the cache.
+X: A=Eager materialization: that would make the view a table. Spark registers the plan lazily and runs nothing at registration.
+B=Automatic caching: Spark never caches a view on its own; the cache must be requested.
+C=Writing to the warehouse: a temporary view does not write anything to storage; persisting data is done by `saveAsTable`.
+T: A temp view is a lazy name for a plan: cache the DataFrame to avoid recomputing it per query.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.4 applied comparison
+S: An application starts a second session with `s2 = spark.newSession()` and wants it to read a DataFrame `df` that was created in the first session. Which pair of statements works?
+A: In the first session `df.createGlobalTempView("t")`, in `s2` `s2.sql("SELECT * FROM global_temp.t")`
+B: In the first session `df.createOrReplaceTempView("t")`, in `s2` `s2.sql("SELECT * FROM global_temp.t")`
+C: In the first session `df.createGlobalTempView("t")`, in `s2` `s2.sql("SELECT * FROM t")`
+D: In the first session `df.createTempView("global_t")`, in `s2` `s2.sql("SELECT * FROM global_t")`
+K: A
+G: ## View scopes
+- A regular temporary view (`createOrReplaceTempView`, `createTempView`) is scoped to the session that created it.
+- A global temporary view is "shared among all sessions and keep[s] alive until the Spark application terminates". It lives in the system database `global_temp`, so you "must use the qualified name" such as `SELECT * FROM global_temp.view1`.
+It still lasts only for the application. For a name that survives restarts, use a table (`saveAsTable`).
+W: Global view plus qualified name: `createGlobalTempView` makes the view visible to every session in the application, and `global_temp.t` is the required way to reference it.
+X: B=Session view with global_temp: a regular temp view does not live in `global_temp`, so the second session finds nothing.
+C=Unqualified name: global temporary views are found only under `global_temp`; the bare name `t` is looked up in the session's own catalog.
+D=Name that sounds global: the name `global_t` has no special meaning, and `createTempView` is still session scoped.
+T: Share a view across sessions with `createGlobalTempView` and query `global_temp.<name>`.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.4 applied use-case
+S: What does this code print?
+```
+df = spark.createDataFrame([("a", 1), ("b", 2), ("a", 3)], ["k", "v"])
+df.createOrReplaceTempView("t")
+q = "SELECT k, sum(v) AS s FROM t GROUP BY k HAVING sum(v) > 2 ORDER BY k"
+print(spark.sql(q).collect())
+```
+A: [Row(k='a', s=4), Row(k='b', s=2)], because HAVING only labels the groups and does not remove any of them
+B: [Row(k='b', s=2)], because HAVING keeps the groups whose sums fall below the limit of two
+C: [Row(k='a', s=4)], because the groups are summed first and HAVING then keeps those whose sum is above 2
+D: [Row(k='a', s=2)], because sum(v) counts the rows in each group instead of adding the values
+K: C
+G: ## SQL on a view
+`spark.sql(...)` runs a SQL statement and returns a DataFrame; the temporary view `t` is just the DataFrame under another name. The usual SQL evaluation order applies: `WHERE` filters rows before grouping, `GROUP BY` forms groups, aggregates are computed, `HAVING` filters groups on aggregate results, `ORDER BY` sorts.
+Here the groups are `a` with values 1 and 3 (sum 4) and `b` with value 2 (sum 2). Only `a` has a sum greater than 2. The sum of integers is a long, shown as `s=4`.
+W: HAVING on the aggregate: group `a` sums to 4 and passes, group `b` sums to 2 and is removed, so one row `Row(k='a', s=4)` is printed.
+X: A=HAVING ignored: HAVING removes groups, so b with sum 2 does not appear.
+B=Reversed condition: HAVING keeps rows where the condition is true, which means sums greater than 2.
+D=Row count: `sum(v)` adds the values (1 + 3 = 4), while `count(*)` would return the number of rows (2).
+T: SQL on a temp view evaluates GROUP BY, then HAVING on the aggregates; `spark.sql` returns a DataFrame.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.4 applied troubleshooting
+S: After the code below runs, which statement is true?
+```
+df.createOrReplaceTempView("t")
+spark.catalog.dropTempView("t")
+spark.sql("SELECT * FROM t")
+```
+A: `df` becomes unusable, because dropping the view deletes the data it was built from
+B: The query fails with an AnalysisException because the table or view cannot be found, while `df` is still usable
+C: The query still succeeds, because dropped views remain visible until the session ends
+D: `dropTempView` raises an exception, because temporary views can only be removed by stopping the session
+K: B
+G: ## Dropping a temporary view
+`spark.catalog.dropTempView(name)` removes the name from the session catalog and returns `True` if a view was dropped (`False` if none existed). It removes only the registration: the DataFrame object and the underlying data are unaffected, and the DataFrame keeps working.
+Any SQL that still refers to the name fails at analysis time with an `AnalysisException` (table or view not found). `createOrReplaceTempView("t")` can register the DataFrame again.
+## Related
+If the view was cached by name, `dropTempView` also uncaches it. Global views use `spark.catalog.dropGlobalTempView`.
+W: Name removed, DataFrame kept: the SQL cannot resolve `t` anymore, so it raises an AnalysisException, but `df` still holds its own plan and data source and can be used.
+X: A=Data deleted: a temporary view never owns data; it is a name for a plan, so nothing is deleted.
+C=Visible until session end: the call removes the view immediately.
+D=Cannot drop: dropping is exactly what the catalog method is for, and it returns a boolean.
+T: `dropTempView` removes only the SQL name; the DataFrame survives and the SQL on the name fails.
+V: Spark SQL

@@ -1,0 +1,734 @@
+# DBX-ASD batch 07: D4 T4.2 AQE (6), T4.3 driver/executor logs and monitoring (7), D5 T5.1 streaming engine (6), T5.2 writing streams, output modes and sinks (6), T5.3 basic stream operations (5); single answer, detailed explanations
+# src: https://spark.apache.org/docs/latest/sql-performance-tuning.html
+# src: https://spark.apache.org/docs/latest/tuning.html
+# src: https://spark.apache.org/docs/latest/monitoring.html
+# src: https://spark.apache.org/docs/latest/configuration.html
+# src: https://spark.apache.org/docs/latest/streaming/getting-started.html
+# src: https://spark.apache.org/docs/latest/streaming/apis-on-dataframes-and-datasets.html
+
+@ DBX-ASD D4 T4.2 applied definition
+S: A colleague says that Adaptive Query Execution (AQE) can pick a better plan than the one built before the query started. Which statement describes what AQE actually does?
+A: It rewrites the logical plan at analysis time by using column statistics that were computed earlier with ANALYZE TABLE on the source tables
+B: It re-optimizes the rest of the plan while the query runs, by using accurate statistics from shuffle stages that have already finished
+C: It adds executors to the cluster during a long stage, so that a slow stage gets more cores without any change to the query plan
+D: It caches the output of every finished stage on the executors, so that a failed task never has to recompute any upstream data
+K: B
+G: ## Static plan versus adaptive plan
+Before a query runs, the optimizer builds a physical plan from estimates: file sizes, table statistics, default selectivity guesses. Estimates are often wrong, especially after filters, joins and user code.
+Adaptive Query Execution (AQE) is a Spark SQL feature that uses runtime statistics to choose a more efficient plan. It is enabled by default since Spark 3.2.0 and is controlled by the umbrella setting `spark.sql.adaptive.enabled`.
+## How it works
+- A shuffle ends a stage and writes map output files, so Spark knows the real size of every shuffle partition when the stage finishes.
+- AQE uses those numbers to re-plan the stages that have not started yet.
+- Its three main optimizations are: coalescing small post-shuffle partitions, switching a join strategy (sort-merge join to broadcast hash join), and splitting skewed partitions in a sort-merge join.
+W: Runtime re-optimization: the setting is described as re-optimizing the query plan in the middle of execution based on accurate runtime statistics, which become available once a shuffle stage has finished.
+X: A=Table statistics: statistics from ANALYZE TABLE feed the static, cost-based planning that happens before execution. AQE is the opposite idea: it uses what it measures while the query runs.
+C=Adding executors: growing or shrinking the executor set is dynamic allocation, a cluster resource feature. AQE changes the query plan, not the number of cores.
+D=Caching stage output: AQE does not cache stage results for recovery. Shuffle files do survive on executors, but that is normal fault tolerance and has nothing to do with choosing a better plan.
+T: AQE re-plans the remaining stages with real shuffle statistics; it is on by default and changes plans, not cluster size.
+V: Spark SQL
+
+@ DBX-ASD D4 T4.2 applied use-case
+S: A daily job groups about 30 MB of aggregated sales rows by `store_id`. The Spark UI shows that the stage after the shuffle ran far fewer than 200 tasks, although `spark.sql.shuffle.partitions` has the default of 200 and nobody changed any adaptive setting. What explains the small task count?
+```
+daily = (sales.groupBy("store_id")
+         .agg(F.sum("amount").alias("total")))
+daily.write.mode("overwrite").parquet(out)
+```
+A: Spark reduces `spark.sql.shuffle.partitions` automatically at session start by looking at the number of input files that the query is going to read
+B: The optimizer pushed the aggregation into the Parquet scan, so each file produced its own output partition and the data was never shuffled
+C: Dynamic allocation released most executors, so only 3 of the 200 shuffle partitions could be read, and the rest were processed inside those tasks
+D: AQE coalesced contiguous small shuffle partitions after the shuffle stage, based on the partition sizes it measured in the map output
+K: D
+G: ## Why 200 partitions are often too many
+A wide transformation such as `groupBy` creates `spark.sql.shuffle.partitions` post-shuffle partitions (default 200). With 30 MB of data that means about 150 KB per task: scheduling cost is larger than the work.
+## What AQE does about it
+When `spark.sql.adaptive.enabled` and `spark.sql.adaptive.coalescePartitions.enabled` are true (both default to true), AQE reads the map output statistics and merges contiguous small partitions. By default `spark.sql.adaptive.coalescePartitions.parallelismFirst` is true, so Spark ignores the advisory size (`spark.sql.adaptive.advisoryPartitionSizeInBytes`, 64 MB) and only respects the minimum partition size (`spark.sql.adaptive.coalescePartitions.minPartitionSize`, 1 MB) to keep parallelism high; with it set to false the advisory size is the target. The starting number of partitions is `spark.sql.adaptive.coalescePartitions.initialPartitionNum`; if unset it equals `spark.sql.shuffle.partitions`.
+The result is that you do not have to tune the shuffle partition count to fit each dataset.
+W: Partition coalescing: the 200 initial shuffle partitions were tiny, so AQE merged contiguous ones after the shuffle and the next stage needed far fewer than 200 tasks.
+X: A=Automatic setting change: `spark.sql.shuffle.partitions` is a plain configuration value that Spark does not recompute from the input file count. The reduction happens after the shuffle, per query, by AQE.
+B=Aggregation pushdown: a full aggregation across files cannot be done inside the scan, because rows of one store sit in many files. A shuffle is still required, which is why a post-shuffle stage exists at all.
+C=Dynamic allocation: executors do not decide how many partitions exist. Fewer executors would make tasks queue up, not merge 200 partitions into a few tasks.
+T: With AQE on, a high initial shuffle partition count is safe because small post-shuffle partitions are coalesced at runtime.
+V: Spark SQL
+
+@ DBX-ASD D4 T4.2 applied use-case
+S: A join of a large `orders` table with a `regions` table is planned as a sort-merge join, because without statistics Spark assumes `regions` is large. The filter below keeps only a small slice, and after the first shuffle stage AQE sees that this side is only a few MB. What can AQE do with the remaining plan?
+```
+eu = regions.filter("continent = 'EU'")
+res = orders.join(eu, "region_id")
+res.write.mode("overwrite").parquet(out)
+```
+A: Convert the sort-merge join into a broadcast hash join, because the runtime size of one side is below the adaptive broadcast threshold
+B: Keep the sort-merge join, because a join strategy is chosen once during planning and cannot change after the first stage has run
+C: Replace the join with a cross join, because small tables can be matched against every large row without the key in the join condition
+D: Cancel the shuffle stage that has already finished and restart the query with the small side broadcast from the very beginning
+K: A
+G: ## Join strategy and size estimates
+A broadcast hash join sends the small side to every executor, so the large side is not shuffled. It is the cheapest strategy, but Spark picks it at planning time only when its size estimate is under the broadcast threshold. After filters, joins or UDFs the estimate is often far too high, so the planner falls back to a sort-merge join.
+## Converting at runtime
+AQE converts a sort-merge join to a broadcast hash join when the runtime statistics of either join side are smaller than the adaptive broadcast threshold. The setting `spark.sql.adaptive.autoBroadcastJoinThreshold` defaults to the value of `spark.sql.autoBroadcastJoinThreshold`.
+The documentation notes that this is not as efficient as planning a broadcast join from the start, but it is better than continuing with the sort-merge join, because both sides do not need sorting and, with the local shuffle reader enabled (default), the shuffle files can be read locally.
+W: Runtime join conversion: the measured size of the filtered side is under the adaptive broadcast threshold, so AQE switches the remaining join to a broadcast hash join and reads the existing shuffle files locally.
+X: B=Fixed strategy: this describes the behaviour without AQE. With AQE enabled, the join selection for stages that have not started can be changed from runtime statistics.
+C=Cross join: the join condition is part of the query semantics. AQE changes the physical strategy only; it never changes the logical result.
+D=Restart: AQE does not throw away finished shuffle stages. It reuses their output files, which is how it can read them locally after the conversion.
+T: AQE can turn a sort-merge join into a broadcast hash join when real sizes turn out small, reusing the shuffle output it already has.
+V: Spark SQL
+
+@ DBX-ASD D4 T4.2 advanced use-case
+S: A join on `user_id` is slow because 90% of the rows in `events` share one `user_id` value. One task in the shuffle stage reads far more data than the others. AQE is enabled. How does AQE's skew handling deal with this sort-merge join?
+```
+res = events.join(users, "user_id")
+res.write.mode("overwrite").parquet(out)
+```
+A: It adds a random suffix to the skewed key on both sides, performs the join on the salted keys and then removes the suffix again
+B: It broadcasts the rows of the skewed key to every executor and runs a separate map-side join for them, leaving the other keys alone
+C: It splits the oversized partition into smaller sub-partitions and replicates the matching partition of the other side
+D: It drops the skewed partition from the join as soon as it exceeds the median size by the configured skew factor, to protect the stage
+K: C
+G: ## Data skew in a sort-merge join
+In a sort-merge join both sides are shuffled by the join key, so all rows of one key land in one partition. If one key holds most of the rows, one task does most of the work while the other cores wait.
+## AQE skew join
+When `spark.sql.adaptive.enabled` and `spark.sql.adaptive.skewJoin.enabled` are true (the defaults), AQE splits skewed partitions of a sort-merge join into roughly evenly sized tasks and replicates the matching data of the other side if needed.
+- A partition counts as skewed when it is larger than `spark.sql.adaptive.skewJoin.skewedPartitionFactor` (5) times the median partition size and also larger than `spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes` (256 MB).
+- The target size of the pieces is guided by `spark.sql.adaptive.advisoryPartitionSizeInBytes`.
+- It works for sort-merge joins, and it is handled automatically; no code change is needed.
+W: Splitting and replicating: AQE cuts the huge partition of the skewed side into several sub-partitions, each joined with a copy of the matching partition of the other side, so many tasks share the work.
+X: A=Salting: manual key salting is a code-level technique that developers add themselves. AQE splits partitions by size and does not rewrite keys.
+B=Separate broadcast path: AQE does not route one key through a different join. The skewed partition stays in the same sort-merge join, only divided into parts.
+D=Dropping data: removing a partition would give wrong query results. The skew thresholds only decide which partitions are split.
+T: AQE skew join splits an oversized sort-merge join partition into smaller tasks and replicates the other side, without changing the result.
+V: Spark SQL
+
+@ DBX-ASD D4 T4.2 advanced tradeoff
+S: Daily input for one pipeline varies from 1 GB to 2 TB. The team runs on Spark with AQE at its default and wants good task sizes without editing configuration every day. Which setup fits AQE's design best?
+A: Set `spark.sql.shuffle.partitions` to a small value such as 20, because AQE will split the partitions on large days up to the advisory size
+B: Disable AQE and compute the partition count in driver code from the input size, then call `spark.conf.set` before each query
+C: Set the advisory partition size to 1 byte, so that AQE always creates one task per row range and never leaves any partition too large
+D: Set a high initial partition count that suits the biggest day and leave coalescing on, so that small days are merged at runtime
+K: D
+G: ## Coalescing only goes down
+AQE's coalescing merges contiguous small shuffle partitions after the shuffle. It starts from `spark.sql.adaptive.coalescePartitions.initialPartitionNum` (or `spark.sql.shuffle.partitions` if unset) and can only reduce that number. It does not add partitions to get below the advisory size (default 64 MB) on a huge day; splitting happens only for skewed join partitions.
+## The consequence for tuning
+The documentation says you do not need to set the right shuffle partition number for each dataset: set a large enough initial number and let Spark pick the proper number at runtime.
+- 1 GB day: thousands of tiny initial partitions are merged into a few tasks.
+- 2 TB day: the high initial count keeps each partition manageable.
+W: High initial count plus coalescing: the starting number covers the largest day, and AQE merges partitions on small days, so no daily tuning is needed.
+X: A=Low initial count: coalescing cannot increase the count. With only 20 partitions, a 2 TB day gives huge partitions that risk spilling or running out of memory.
+B=Manual computation: this brings back the daily tuning that AQE removes, and turning AQE off also loses join conversion and skew handling.
+C=Tiny advisory size: this is a nonsensical value; the advisory size is the target for merged partitions, and a tiny target would keep every partition unmerged and tasks tiny, which is the opposite of what is wanted.
+T: Coalescing only reduces the partition count, so start high enough for the largest input and let AQE shrink it for small ones.
+V: Spark SQL
+
+@ DBX-ASD D4 T4.2 applied troubleshooting
+S: A developer expects AQE to speed up the job below. The input is two large gzip-compressed CSV files, the Spark UI shows 2 tasks in the only stage, and no shuffle happens. AQE is on. Why does AQE not add parallelism here?
+```
+df = spark.read.csv(path, header=True)
+out = df.filter("amount > 0")
+out.write.mode("overwrite").parquet(dest)
+```
+A: AQE re-optimizes plans around shuffle boundaries, and this plan has none, so the number of scan partitions stays as the file layout gives it
+B: AQE is disabled automatically whenever the source format is CSV, because text sources do not report any size statistics to the engine
+C: AQE only starts after the first 1,000 tasks have finished, and this job has not reached that task count yet so no change is allowed
+D: AQE splits scan partitions only when the output format is Delta, so the Parquet write in this snippet receives no adaptive treatment
+K: A
+G: ## Where AQE works
+AQE uses statistics from finished shuffle stages. Its optimizations act on shuffle partitions (coalescing), on joins (strategy switch, skew splitting) and on the plan between stages.
+A map-only job has no exchange: the scan partitions are determined by the files and by settings such as `spark.sql.files.maxPartitionBytes`. Gzip-compressed files cannot be split, so two files give two scan tasks and AQE has nothing to adapt.
+## What to do instead
+- Increase the number of partitions with `repartition(n)` after reading (this adds a shuffle, so later stages run wider).
+- Store the data in a splittable format such as Parquet or uncompressed CSV so files can be divided by size.
+W: No shuffle boundary: AQE needs map output statistics from a finished shuffle stage, so a plan without exchanges keeps the scan parallelism that the files provide.
+X: B=CSV disables AQE: AQE does not depend on the file format being CSV or not. The reason here is the lack of any shuffle in the plan.
+C=Task count threshold: there is no minimum count of finished tasks before AQE acts. It acts when a shuffle stage completes and statistics exist.
+D=Delta only: AQE is a Spark SQL feature, independent of the output format. A Parquet write is eligible in the same way as any other write.
+T: AQE tunes what happens after shuffles; it does not change scan parallelism, so use repartition or a splittable input for that.
+V: Spark SQL
+
+@ DBX-ASD D4 T4.3 applied troubleshooting
+S: A notebook runs `rows = big_df.collect()` and the job aborts with the message "Total size of serialized results of 480 tasks is bigger than spark.driver.maxResultSize". The next step needs only the number of rows per country. What is the best fix?
+A: Raise `spark.executor.memory`, because the serialized results are held in the executors until the action returns them to the driver
+B: Set `spark.driver.maxResultSize` to 0 and keep the code, so that results of any size can be pulled back to the driver
+C: Aggregate on the cluster with `groupBy("country").count()` and collect only that small result, or write the data out
+D: Call `coalesce(1)` before `collect()`, so the data is delivered to the driver as one partition instead of 480 results
+K: C
+G: ## What collect() does
+`collect()` is an action that sends the serialized result of every task to the driver and builds one list there. The setting `spark.driver.maxResultSize` (default 1g) limits the total size of those serialized results for each action; above it, the job is aborted. The documentation also warns that a high limit may cause out-of-memory errors in the driver, so the limit protects it.
+## Developer rule
+Do heavy work where the data lives. Reduce data with filters and aggregations first, then collect a small result; or write large results to storage instead of bringing them to the driver.
+```
+counts = big_df.groupBy("country").count()
+rows = counts.collect()   # a few hundred small rows
+```
+W: Aggregate before collecting: the cluster computes the counts and the driver receives only one row per country, so the limit is never approached.
+X: A=Executor memory: the failure is a size check at the driver. More executor memory does not shrink the data that must be sent back.
+B=Unlimited result size: setting the limit to 0 removes the check, but the same volume will then sit in driver memory, risking a driver out-of-memory error. It hides the problem instead of removing it.
+D=Single partition: `coalesce(1)` makes one big task result, which is the same total size, and it removes parallelism from the stage before it.
+T: A driver result-size error means too much data is pulled to the driver; aggregate or write on the cluster instead of raising limits.
+V: Apache Spark
+
+@ DBX-ASD D4 T4.3 applied troubleshooting
+S: A join stage fails with `java.lang.OutOfMemoryError: Java heap space` inside tasks. Only 40 shuffle partitions are used and each one holds roughly 20 GB. The driver is healthy. Which change addresses the cause?
+A: Raise `spark.driver.maxResultSize`, because the shuffle partitions are collected by the driver when the join stage starts
+B: Increase the number of shuffle partitions, so that every reduce task builds its hash table from a smaller share of the data
+C: Call `cache()` on both inputs first, so that the shuffle reads come from memory instead of building new hash tables
+D: Reduce the number of executor cores to one, so that the cluster has fewer parallel tasks reading shuffle files at the same time
+K: B
+G: ## Why reduce tasks run out of memory
+Shuffle operations such as `join`, `groupBy` and `sortBy` build a hash table (or sort buffer) in each task for its share of the data. If a task's partition is huge, that structure exceeds the executor's memory.
+The Spark tuning guide says the simplest fix is to increase the level of parallelism so each task's input is smaller. Spark handles short tasks well, and you can go above the number of cores.
+## In practice
+- Raise `spark.sql.shuffle.partitions` or use `repartition(n)` before the wide operation.
+- With AQE, raise the initial partition count and let coalescing merge small ones.
+- Increasing executor memory also helps, but smaller partitions address the cause.
+W: More shuffle partitions: with more tasks, each one processes a smaller slice and its in-memory hash table stays under the executor's limit.
+X: A=Driver result size: that setting only limits what actions return to the driver. The error here is an executor heap error inside tasks, and the driver is healthy.
+C=Caching both inputs: caching stores the input in memory, which competes with execution memory and does not shrink the 20 GB a single task must process.
+D=One core per executor: this reduces concurrency and gives each task more memory, but the partition size stays at 20 GB and the job gets much slower. It treats a symptom.
+T: Executor out-of-memory inside a shuffle stage usually means partitions are too big; increase parallelism so each task handles less data.
+V: Apache Spark
+
+@ DBX-ASD D4 T4.3 applied troubleshooting
+S: A cluster with 8 executors of 4 cores each (32 cores) processes the pipeline below. The Stages tab shows only 4 tasks in the long UDF stage, and the Executors tab shows most cores idle. What diagnosis and fix is correct?
+```
+df = spark.read.parquet(src).coalesce(4)
+res = df.withColumn("score", slow_udf("text"))
+res.write.mode("overwrite").parquet(dest)
+```
+A: Executors are too small; add more executors so the 4 tasks can be spread over additional machines and finish sooner
+B: Executor memory is too low for the UDF; raise `spark.executor.memory` so the 4 tasks stop waiting for free memory
+C: The Python worker is the bottleneck; enable Kryo serialization so the 4 tasks can use the idle cores for a shared pool
+D: Only 4 partitions exist, so at most 4 tasks run at once; repartition to a multiple of the 32 cores before the UDF
+K: D
+G: ## Parallelism equals partitions
+A stage runs one task per partition, and a task occupies one core. With 4 partitions at most 4 cores are busy, regardless of cluster size. This is underutilization: the Executors tab shows idle cores while the Stages tab shows few tasks.
+`coalesce(4)` is a narrow transformation that reduces partitions without a shuffle; it propagates upstream, so the expensive UDF also runs with 4 partitions.
+## Fix
+```
+df = spark.read.parquet(src).repartition(96)   # 2-3x the 32 cores
+```
+The tuning guide notes that Spark supports short tasks well, so using more partitions than cores is safe and keeps all cores busy.
+W: Too few partitions: the stage cannot run more tasks than partitions, so repartitioning to a multiple of the available cores lets every core work on the UDF.
+X: A=More executors: extra machines add cores that still have no tasks to run, since the stage has only 4 tasks. Cost goes up and runtime stays the same.
+B=More executor memory: the symptom is idle cores and a small task count, not tasks waiting for memory. Nothing in the stem points to memory pressure.
+C=Kryo serialization: this affects how JVM objects are serialized and does not create tasks or let a Python UDF stage use more cores.
+T: If cores sit idle in a stage with few tasks, increase the partition count; adding executors does not add tasks.
+V: Apache Spark
+
+@ DBX-ASD D4 T4.3 applied troubleshooting
+S: On Kubernetes, executors of a PySpark job disappear mid-stage. The driver log reports that the executor pods were killed for exceeding their memory limit, and the executor logs show no `OutOfMemoryError`. The job uses Python UDFs and large native libraries. Which setting should be raised first?
+A: `spark.executor.logs.rolling.maxSize`, which sets the file size at which executor log files are rolled over to a new file
+B: `spark.driver.maxResultSize`, which limits the total size of serialized task results that the driver may accept in one action
+C: `spark.eventLog.compress`, which controls whether the Spark event log is compressed before it is written to storage
+D: `spark.executor.memoryOverhead`, which sizes the non-heap memory per executor for native allocations and the Python worker processes
+K: D
+G: ## Heap versus container memory
+An executor runs in a container whose limit is the JVM heap (`spark.executor.memory`) plus extra non-heap memory. When the process uses more than the container limit, the cluster manager kills it. The JVM never gets a chance to throw `OutOfMemoryError`, so the executor log shows nothing.
+`spark.executor.memoryOverhead` is the additional memory per executor for VM overheads, interned strings and other native overheads. It defaults to executor memory times `spark.executor.memoryOverheadFactor` (0.10), with a minimum, and the option is supported on YARN and Kubernetes. Python workers and native libraries use this non-heap space.
+## Diagnose from the logs
+- Driver log or cluster manager events: "killed by the cluster manager / exceeding memory limits".
+- Executor log: no Java heap error.
+W: Memory overhead: the pods exceeded their container limit through non-heap use by Python and native code, so more overhead memory is the targeted fix.
+X: A=Log rolling size: log rolling controls the size of the log files on disk, not the memory the executor process is allowed to use.
+B=Result size limit: this applies to results sent back to the driver after an action. It has no effect on executor pod memory.
+C=Event log compression: this only changes how event log files are stored; it neither reduces memory use nor changes pod limits.
+T: A container kill without a Java heap error points to non-heap memory; raise spark.executor.memoryOverhead.
+V: Apache Spark
+
+@ DBX-ASD D4 T4.3 applied use-case
+S: Yesterday's batch job on a self-managed cluster ran slowly, but the team cannot open the Spark UI at port 4040 of the driver because the application has finished. They want to inspect stages, tasks and executors of past runs from now on. What should they set up?
+A: Keep the driver alive with a `time.sleep` loop at the end of each job, so that port 4040 stays reachable for later analysis
+B: Set `spark.executor.logs.rolling.strategy` to time, so that the live web UI remains available after the application stops
+C: Increase `spark.driver.maxResultSize`, because the web UI is deleted when the results of the last action exceed the limit
+D: Set `spark.eventLog.enabled` to true with a shared `spark.eventLog.dir`, and point a Spark History Server at that directory
+K: D
+G: ## The web UI lives and dies with the application
+Every SparkContext starts a web UI, by default on port 4040, that shows stages and tasks, RDD sizes and memory usage, environment information and the running executors. By default this information is available only while the application runs.
+## Keeping history
+- Set `spark.eventLog.enabled` to true before the application starts. Spark then writes events that encode the UI information to persistent storage.
+- Set `spark.eventLog.dir` to a shared directory, for example on HDFS or object storage; the default is a local `file:///tmp/spark-events` folder.
+- Start the Spark History Server with `spark.history.fs.logDirectory` pointing to the same directory. It rebuilds the UI of each finished application.
+W: Event logging plus History Server: the event log persists what the UI displays, and the History Server reconstructs the UI for applications that have ended.
+X: A=Sleep loop: this occupies the cluster to keep a driver alive, wastes resources and still loses the data on the next failure or restart. The event log is the supported mechanism.
+B=Executor log rolling: rolling splits executor stdout/stderr files by time or size. It does not keep the web UI of a finished application.
+C=Result size limit: this limit has nothing to do with the web UI lifetime. The UI is simply served by the driver process, which ends with the application.
+T: To analyze finished Spark applications, enable event logging to shared storage and read it through the History Server.
+V: Apache Spark
+
+@ DBX-ASD D4 T4.3 applied troubleshooting
+S: Executor logs of a long job show that a full garbage collection ran several times before a single task completed, and task times are growing. What does the Spark tuning guide say this means?
+A: The network is saturated, so shuffle fetches are retried and objects pile up in the heap while waiting for remote blocks
+B: Too many tiny partitions exist, so the scheduler creates more task objects than the driver is able to garbage collect
+C: There is not enough memory available for executing tasks, so consider more memory or less memory used for caching
+D: The old generation is empty, which shows that all cached data was evicted and the job can safely keep running unchanged
+K: C
+G: ## Reading GC evidence
+Spark runs on the JVM, and tasks create many short-lived objects. The Spark tuning guide recommends collecting GC statistics to see how often collection happens and how much time it takes.
+- Too many minor GCs but not many major ones: give the young generation more space.
+- A full GC invoked several times before a task finishes: there is not enough memory for task execution.
+- Old generation close to full: reduce the memory used for caching, for example by lowering `spark.memory.fraction`; it is better to cache fewer objects than to slow down tasks.
+## What a developer can do
+Give executors more memory, reduce cached data, or make partitions smaller so each task needs less working memory.
+W: Insufficient execution memory: repeated full GCs before a task completes mean the task's working set does not fit, which is the guide's signal to add memory or cache less.
+X: A=Network saturation: network trouble shows up as fetch failures and long shuffle read times, not as repeated full garbage collections inside the executor heap.
+B=Too many small partitions: many tiny tasks create scheduling overhead on the driver side; they do not cause repeated full GCs within one executor task.
+D=Empty old generation: the guide reads a nearly full old generation as the warning sign. An empty one would not cause repeated full collections.
+T: Several full GCs before one task finishes means tasks lack execution memory; add memory, cache less or shrink partitions.
+V: Apache Spark
+
+@ DBX-ASD D4 T4.3 applied troubleshooting
+S: The driver log of a job shows the warning that a stage contains a task of very large size. The job passes a 400 MB Python dictionary into a UDF by referencing it directly inside the function. What is the likely cause and the standard remedy?
+A: The dictionary is serialized into every task along with the function, so it should be sent once to each executor as a broadcast variable
+B: The dictionary is stored in the driver's event log, so reducing `spark.eventLog.dir` retention will make the task size smaller
+C: The UDF runs on the driver, so its memory should be raised with `spark.driver.maxResultSize` to allow the larger objects
+D: The dictionary was cached by the optimizer, so calling `unpersist()` on the DataFrame removes the object from task payloads
+K: A
+G: ## Closures travel with tasks
+When a UDF references a driver-side object, Spark serializes that object with the function and ships it in every task. If the object is large, each task payload becomes large: the driver sends the same 400 MB again and again, scheduling slows down and memory is used on both sides.
+The Spark tuning guide says that broadcast variables can greatly reduce the size of each serialized task. Spark prints the serialized size of each task on the master, so you can check whether tasks are too large; tasks above about 20 KiB are probably worth optimizing.
+## Fix
+```
+bc = spark.sparkContext.broadcast(big_dict)
+lookup = F.udf(lambda k: bc.value.get(k), "string")
+res = df.withColumn("v", lookup("key"))
+```
+The broadcast copy is sent once per executor and read from there by all tasks.
+W: Large closure: the dictionary rides inside every task, so a broadcast variable ships it once per executor and keeps the task payload small.
+X: B=Event log retention: the event log records what happened; it does not feed task payloads. Changing its directory has no influence on task size.
+C=Driver result size: this setting limits data returned from executors to the driver, and UDFs run on the executors, not on the driver.
+D=unpersist: the object is part of the function closure, not a cached DataFrame block, so unpersisting a DataFrame does not remove it from the tasks.
+T: A large-task warning in the driver log points to big objects captured in closures; use a broadcast variable.
+V: Apache Spark
+
+@ DBX-ASD D5 T5.1 applied definition
+S: A developer used to batch DataFrames asks how Structured Streaming expects a running per-device count to be written. Which statement matches the Structured Streaming programming model?
+A: Write the same DataFrame operations on a streaming DataFrame, and the engine runs them incrementally on the data that keeps arriving
+B: Write a custom function that updates a hand-managed dictionary of counts, because the engine keeps no running state for you
+C: Write RDD transformations on discretized batches, because DataFrame operations are not available on streaming input
+D: Commit the Kafka offsets in application code after each count, because the engine does not track which input it has processed
+K: A
+G: ## The unbounded table model
+Structured Streaming treats a live data stream as a table that is being continuously appended. A streaming query on the input table is expressed with the same DataFrame or SQL operations as a batch query, and Spark runs it as an incremental query on the unbounded table, producing a result table that is updated as new rows arrive.
+The programming guide points out that this model differs from many other engines: those require users to maintain running aggregations themselves and to reason about fault tolerance and consistency (at-least-once, at-most-once, exactly-once). Here Spark is responsible for updating the result table.
+## Example
+```
+events = spark.readStream.format("rate").load()
+counts = events.groupBy((F.col("value") % 3).alias("k")).count()
+```
+W: Same DataFrame API: the query is written like a batch query and the engine keeps the running state and updates the result incrementally.
+X: B=Hand-managed state: the model removes that burden for built-in aggregations; the engine stores running aggregates in its state store and checkpoint.
+C=RDD batches: that is the older DStream API based on discretized streams. Structured Streaming is the DataFrame-based engine and uses DataFrame operations.
+D=Manual offsets: the engine records the offset range of each trigger in its checkpoint, so the application does not commit offsets for processing progress.
+T: In Structured Streaming you write batch-style DataFrame code on a stream, and the engine incrementally maintains the result table.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.1 applied comparison
+S: A team wants end-to-end exactly-once results from a Structured Streaming query after any failure and restart. Which combination of source, sink and engine features delivers this guarantee?
+A: A socket source with a console sink and a trigger interval short enough that no data arrives between two micro-batches
+B: A replayable source with offsets, an idempotent sink, and a checkpoint with write-ahead logs that record the offsets of each trigger
+C: Any source, provided the sink uses complete output mode so that every micro-batch rewrites the whole result table from scratch
+D: A fault-tolerant sink alone, because the sink can compare the final table with the source and repair whatever differs after a restart
+K: B
+G: ## Three ingredients
+Delivering end-to-end exactly-once semantics was a key goal of Structured Streaming. The design combines:
+- Sources that are replayable: each has offsets (like Kafka offsets or Kinesis sequence numbers) so the engine can re-read exactly the same range after a failure.
+- The engine: it uses checkpointing and write-ahead logs to record the offset range of the data processed in each trigger.
+- Sinks that are idempotent: writing the same batch twice leaves the same result, so reprocessing after a crash does not duplicate data.
+With replayable sources and idempotent sinks, the engine can ensure exactly-once under any failure.
+## Where it breaks
+A source that cannot replay, or a sink that is not idempotent (for example a foreachBatch that appends without using the batch id), reduces the guarantee, typically to at-least-once.
+W: Replay plus checkpoint plus idempotence: offsets are logged before processing, the same range can be re-read, and re-writing it does not change the result.
+X: A=Socket and console: the socket source gives no end-to-end fault tolerance and the console sink does not persist anything. Short intervals do not remove that weakness.
+C=Complete mode: the output mode defines what is written, not whether a restart can lose or repeat input. A source that cannot replay still loses data.
+D=Sink alone: Spark does not reconcile the sink with the source. Exactly-once comes from tracking offsets and replaying, which needs the source and the checkpoint.
+T: Exactly-once needs a replayable source, checkpointed offsets and an idempotent sink working together.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.1 applied use-case
+S: A stateful streaming count writes to an idempotent sink with `checkpointLocation` set to a durable path. The driver crashes, and the team restarts the same code with the same checkpoint location. What happens?
+A: The query starts reading from the earliest available input again and rebuilds all counts, because the counts were kept only in memory
+B: The query resumes after the last committed batch with its saved state, and replays any batch that was planned but not completed
+C: The query drops the micro-batch that was running at the crash, so those input rows are never counted in any later result
+D: The query refuses to start until the checkpoint directory is deleted, because a previous run left a lock on it
+K: B
+G: ## What the checkpoint stores
+The checkpoint location holds the progress of the query: the offset range of each trigger (written ahead of processing in an offset log) and, for stateful queries, the running aggregates (state). The path must be on an HDFS-compatible, fault-tolerant file system.
+## Restart behaviour
+- The engine reads the last committed batch id from the checkpoint and restores the state.
+- If a micro-batch was planned (its offsets logged) but not committed, it runs again on the same offsets. Because the sink is idempotent, the repeated write does not duplicate data.
+- A new empty checkpoint directory would instead start as a fresh query.
+W: Resume from checkpoint: committed progress and state are restored, and the unfinished batch is replayed from the logged offsets, which keeps results exactly-once.
+X: A=Restart from earliest: that is what happens with a new or lost checkpoint. State is persisted in the checkpoint, not just kept in memory.
+C=Dropping the batch: offsets are logged before processing so that an unfinished batch can be replayed. Input is not skipped.
+D=Lock on the directory: the checkpoint is designed to be reused by the restarted query. A crash does not leave a state that blocks restart.
+T: A restart with the same checkpoint continues from committed offsets and state; unfinished batches are replayed.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.1 applied troubleshooting
+S: A prototype reads text lines with `spark.readStream.format("socket")` and works well in tests. The team wants to run it in production with fault-tolerance guarantees after failures. Which change helps?
+A: Add a `checkpointLocation`, since checkpoints let the engine re-request the exact lines of the socket after a restart
+B: Switch the source to the rate source, because it generates replayable rows with a stable offset per micro-batch
+C: Switch the sink to console, because it prints every row to stdout and therefore preserves a copy of the input
+D: Switch to a replayable source such as Kafka or files, because the socket source cannot give end-to-end fault tolerance
+K: D
+G: ## Test sources versus production sources
+The programming guide lists built-in sources:
+- File source: reads files placed atomically in a directory, tracked by file modification time.
+- Kafka source: reads from Kafka with offsets.
+- Socket source (for testing): reads UTF-8 text from a socket whose server runs at the driver. It does not provide end-to-end fault-tolerance guarantees.
+- Rate and rate-per-micro-batch sources (for testing): generate rows with a timestamp and a value for testing and benchmarking.
+## Why a checkpoint is not enough
+A checkpoint records what has been processed, but recovery also needs the ability to read the same data again. A socket stream is gone once it is read; there are no offsets to replay.
+W: Replayable source: Kafka (offsets) or a file directory (files stay in place) lets the engine re-read the data after a failure, which the socket cannot.
+X: A=Checkpoint on socket: the checkpoint can remember a position but the socket cannot re-send earlier data, so lost lines stay lost.
+B=Rate source: it is meant for testing and benchmarking. Its generated rows are not business data.
+C=Console sink: console output is for debugging, is not fault-tolerant, and does not feed anything back to the source.
+T: Production streams need replayable sources; socket and rate are for testing only.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.1 advanced troubleshooting
+S: A streaming query writes each micro-batch to an external database inside `foreachBatch`. After an executor failure the database contains duplicate rows for one micro-batch. Which statement explains the duplicates and how to avoid them?
+```
+def write_batch(df, batch_id):
+    df.write.mode("append").jdbc(url, "events", props)
+q = stream.writeStream.foreachBatch(write_batch).start()
+```
+A: The engine guarantees exactly-once for any foreachBatch function, so the duplicates must come from the source producing the rows twice
+B: A micro-batch can be re-executed after a failure, so use the batch id in the function to skip or upsert batches that are already written
+C: Append mode is not allowed for foreachBatch, so switch the write to complete mode to remove the duplicate rows
+D: The duplicates come from the checkpoint, so deleting the checkpoint directory before every restart removes them
+K: B
+G: ## foreachBatch gives you the batch
+`foreachBatch` runs a function on the output of each micro-batch. The function receives the micro-batch DataFrame and a unique batch id. It lets you use batch writers that streaming sinks do not support, such as JDBC.
+## Delivery guarantee
+By default `foreachBatch` provides only at-least-once write guarantees, because a batch can be replayed after a failure. The batch id is the key to idempotent writes: it is the same on the retry, so you can record it (for example in a table with the last batch id) or upsert, and skip data that was already written.
+```
+def write_batch(df, batch_id):
+    df.withColumn("batch_id", F.lit(batch_id)).write.mode("append").jdbc(url, "events", props)
+```
+The target can then ignore or replace rows with a batch id that exists.
+W: Batch id for idempotence: replays carry the same batch id, so the function can check or upsert by it and make the write effectively exactly-once.
+X: A=Guaranteed by the engine: the guide states the default for foreachBatch is at-least-once; end-to-end exactly-once needs an idempotent write.
+C=Complete mode: output mode does not change retry behaviour of the function, and it would rewrite the whole result each trigger rather than remove duplicates.
+D=Deleting the checkpoint: this removes the progress record and would reprocess input from scratch, creating more duplicates, not fewer.
+T: foreachBatch is at-least-once by default; make it idempotent with the batch id.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.1 applied use-case
+S: A query uses a fixed-interval trigger of 10 seconds. One micro-batch takes 25 seconds because of a burst of input. What does the engine do next?
+```
+q = (df.writeStream.format("console")
+       .trigger(processingTime="10 seconds").start())
+```
+A: It starts the next micro-batch immediately after the slow one completes, and does not wait for another interval boundary
+B: It waits until the next full 10-second boundary after the slow batch completes, and ignores the data that arrived in between
+C: It skips the missed intervals permanently and drops the input that arrived while the slow micro-batch was still running
+D: It runs three micro-batches in parallel to catch up, one for each interval that was missed during the 25 seconds
+K: A
+G: ## Fixed-interval triggers
+With `trigger(processingTime="10 seconds")` micro-batches are started at the user-specified intervals:
+- If the previous micro-batch finishes within the interval, the engine waits until the interval is over before starting the next one.
+- If the previous micro-batch takes longer than the interval (an interval boundary is missed), the next micro-batch starts as soon as the previous one completes.
+- If no new data is available, no micro-batch is started.
+## Defaults and other triggers
+Without a trigger, micro-batches are generated as soon as the previous one has completed. `availableNow` processes everything available and then stops.
+Micro-batches never overlap; one query runs one at a time, in order.
+W: Immediate start: when a boundary is missed the next batch begins right after the slow one ends, and it processes the input that accumulated meanwhile.
+X: B=Waiting for the boundary: waiting happens only when the batch finished early. After an overrun the engine catches up at once.
+C=Dropping input: no input is lost. Offsets of the unprocessed data are simply included in the next micro-batch.
+D=Parallel catch-up: micro-batches of one query run sequentially, so three missed intervals do not trigger three concurrent batches.
+T: A missed trigger interval means the next micro-batch starts as soon as the previous one ends; batches never overlap.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.2 applied troubleshooting
+S: A developer starts a streaming read of JSON files and gets an error that mentions the schema. What is the cause and the usual fix?
+```
+events = (spark.readStream.format("json")
+          .load("/data/events"))
+```
+A: File-based streaming sources need a schema by default; pass `.schema(...)` or enable `spark.sql.streaming.schemaInference`
+B: Streaming reads require `format("cloudFiles")` for JSON, because the plain JSON reader only works for static batch input
+C: The path must contain `key=value` subdirectories, because streaming file sources cannot read an unpartitioned folder
+D: A `checkpointLocation` option is required on the read side, because the schema is stored in that checkpoint
+K: A
+G: ## Why file streams ask for a schema
+By default, Structured Streaming from file-based sources requires you to specify the schema instead of inferring it. The reason is consistency: the same schema is used for the whole query, even after failures and restarts. For ad-hoc work you can re-enable inference with `spark.sql.streaming.schemaInference` set to `true`.
+## Fixed code
+```
+schema = "device STRING, signal INT, ts TIMESTAMP"
+events = (spark.readStream.schema(schema)
+          .format("json").load("/data/events"))
+```
+Partition discovery works when subdirectories follow `/key=value/`, but it is optional.
+W: Explicit schema: file stream sources do not infer schema by default, so the query would otherwise fail; a DDL string or StructType fixes it.
+X: B=cloudFiles: that is a Databricks Auto Loader format. Open source Spark reads JSON files as a stream with the `json` format and a schema.
+C=Partition folders: partitioned folders are supported but not required; an unpartitioned directory reads fine.
+D=Read-side checkpoint: checkpointLocation belongs to the write side (`writeStream`), and it does not hold a schema for the source.
+T: Give file-based streaming reads an explicit schema (or turn on schemaInference for ad-hoc use).
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.2 applied troubleshooting
+S: A developer writes a running count per device to the console in append mode and the query fails with an `AnalysisException`. What is the reason, and which output modes would be accepted?
+```
+counts = events.groupBy("device").count()
+q = (counts.writeStream.outputMode("append")
+       .format("console").start())
+```
+A: Console only supports complete mode, so no other mode works with it, and the code must switch to a file sink first
+B: Append needs a checkpoint on the console sink, and the sink only creates one when complete mode is already set
+C: Aggregation counts can be changed by later rows, so append is rejected without a watermark; use complete or update
+D: Complete and update are both invalid for aggregations, which is why the stream must be written with a join
+K: C
+G: ## Output modes
+- Append (default): only new rows added to the result table since the last trigger are written. Supported only when rows never change afterwards.
+- Complete: the whole result table is written after every trigger; supported for aggregation queries.
+- Update: only rows updated since the last trigger are written. Without aggregations it is equivalent to append.
+## Aggregations without watermark
+For aggregations with no watermark, the supported modes are complete and update. Append is not supported because an aggregate can still change when new rows arrive, which would break the append contract. With a watermark on the event-time column, append becomes possible: the row is emitted once the watermark passes the end of its window.
+W: Append not allowed: an unwatermarked count may still change, so the engine only accepts complete or update for it.
+X: A=Console only complete: the console sink supports append, update and complete. The failure comes from the query type, not the sink.
+B=Console checkpoint: the sink does not decide the allowed modes by creating a checkpoint. Compatibility depends on the query.
+D=Complete and update invalid: these are exactly the supported modes for an aggregation without watermark. A join is a different query type that supports only append.
+T: Streaming aggregations without a watermark support complete and update; append needs a watermark or non-aggregating logic.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.2 applied use-case
+S: During development an engineer wants to query the latest counts of a small streaming aggregation with SQL inside the same session. What does `queryName("counts")` do in this code?
+```
+q = (counts.writeStream.outputMode("complete")
+       .format("memory").queryName("counts").start())
+spark.sql("SELECT * FROM counts").show()
+```
+A: It names the checkpoint folder, which the SQL statement reads to find the latest saved state of the aggregation
+B: It registers the in-memory result table under that name, so SQL can query it; it is meant for debugging on small data
+C: It publishes the table to the metastore as a managed table, so other sessions can query it after a restart
+D: It labels the query in the Spark UI only, and the SQL statement works because of the aggregation column names
+K: B
+G: ## Memory sink
+The memory sink stores the output as an in-memory table, and the table name is the query name. It supports append and complete modes. It is for debugging: the entire output is collected and kept in the driver's memory after every trigger, so it must be used on low data volumes.
+## Fault tolerance
+It is not fault-tolerant, because it does not guarantee persistence of the output. In complete mode a restarted query recreates the full table.
+Related debugging sink: the console sink prints to stdout on each trigger (with `numRows` default 20 and `truncate` true), also not fault-tolerant.
+W: In-memory table name: the query name becomes the table name that SQL reads; it lives in the driver's memory and is meant for small test data.
+X: A=Checkpoint folder: the checkpoint location is a separate option, and SQL does not read the checkpoint directly.
+C=Metastore table: the memory sink does not create persistent catalog entries; the table disappears with the session and the data is not saved.
+D=Label only: the name has a real effect here, because it is the table name used by the SQL statement.
+T: The memory sink exposes results as a table named by queryName; use it only for small debugging runs.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.2 applied troubleshooting
+S: A developer writes the running counts of an unwatermarked aggregation to a Parquet directory with the file sink and the job fails at start. Which fact explains why?
+```
+q = (counts.writeStream.format("parquet")
+       .option("path", out)
+       .option("checkpointLocation", chk)
+       .outputMode("complete").start())
+```
+A: Parquet cannot store counts of an aggregation, so the sink would need to be changed to Avro or ORC before the result persists
+B: The file sink needs `trigger(once=True)`, since continuous micro-batch writes to files are not allowed
+C: The file sink supports only append mode, and an unwatermarked aggregation cannot use append, so this combination is rejected
+D: The file sink needs a Kafka source on the input side, and the combination with an aggregation is invalid
+K: C
+G: ## Sink capabilities
+The documented sink table lists the output modes each sink supports:
+- File sink: append only; fault-tolerant, exactly-once; options `path` (required) plus format options; supports partitioned output.
+- Kafka sink: append, update, complete; at-least-once.
+- Foreach sink: append, update, complete; at-least-once.
+- foreachBatch: append, update, complete; guarantee depends on your implementation.
+- Console: append, update, complete; not fault-tolerant.
+- Memory: append, complete; not fault-tolerant.
+## Combining with query types
+An aggregation without a watermark supports only complete and update. The file sink supports only append. No overlap, so the query cannot be written directly to files.
+## Options for the developer
+Use an event-time window with a watermark so append works, or use `foreachBatch` to write each micro-batch yourself.
+W: Append-only sink: the file sink accepts only append, and the aggregation cannot append without a watermark, so Spark rejects the pairing.
+X: A=Parquet cannot store counts: Parquet stores any columnar data including counts; the format is not the problem.
+B=Trigger once: the file sink works with micro-batch triggers of all documented kinds; nothing requires a one-time run.
+D=Kafka source: sources and sinks are independent. A file sink can read from any source.
+T: The file sink supports only append mode, so unwatermarked aggregations need foreachBatch or a watermarked window instead.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.2 applied definition
+S: A stream applies only a filter and a select, with no aggregation, and writes to the console using update mode. What does each micro-batch print?
+```
+q = (events.select("device", "signal").where("signal > 10")
+       .writeStream.outputMode("update").format("console").start())
+```
+A: Only the rows that are new in that micro-batch, because without an aggregation update mode is equivalent to append mode
+B: The entire result table so far, because update mode rewrites everything that was ever emitted whenever any row arrives
+C: Nothing at all, because update mode only produces output for queries that contain a stateful aggregation
+D: An error, because update mode is available only for aggregations and joins and never for a plain filter
+K: A
+G: ## Update mode
+Update mode (available since Spark 2.1.1) writes only the rows of the result table that changed since the last trigger. For a stateless query such as a select and a filter, rows never change after being produced: the only changed rows are the new ones. The guide says that if the query does not contain aggregations, update mode is equivalent to append mode.
+## Where modes differ
+- Aggregation without watermark: update prints only the groups whose count changed; complete prints all groups.
+- Other queries (select, filter, map): append and update behave the same; complete is not supported because keeping all unaggregated data in the result table is infeasible.
+W: Same as append: new rows are the only rows that change, so each micro-batch prints just the filtered rows that arrived in it.
+X: B=Whole table: that is complete mode, and complete is not even supported for a stateless filter.
+C=No output: update mode supports "other queries" and produces the new rows for them.
+D=Error: the compatibility matrix lists append and update for other queries, so this query is valid.
+T: Without aggregation, update mode behaves like append; complete mode is only for aggregations.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.2 applied use-case
+S: A running count per device is written to the console in update mode. Micro-batch 1 contains devices A, A, B and prints A=2 and B=1. Micro-batch 2 contains devices A and C. What does micro-batch 2 print?
+```
+q = (events.groupBy("device").count()
+       .writeStream.outputMode("update")
+       .format("console").start())
+```
+A: Only the group C=1, since update mode prints groups that did not exist before and never repeats a group that was printed earlier
+B: Only the changed groups A=3 and C=1, while B=1 is left out because its count did not change in this micro-batch
+C: All three groups A=3, B=1 and C=1, since update mode rewrites the whole result table after every micro-batch
+D: Only the two new input rows A and C as raw rows, because update mode writes input rows instead of aggregates
+K: B
+G: ## Update mode with an aggregation
+The result table holds one row per device. Update mode writes only the rows of the result table that changed since the last trigger. The documentation describes it as outputting only the rows that were updated, and it differs from complete mode in exactly this way.
+## Walk through
+- Micro-batch 1: A is counted twice and B once, so both rows are new and printed: A=2, B=1.
+- Micro-batch 2: A rises to 3 (changed), C appears with 1 (new), B stays at 1 (unchanged and not printed).
+```
+Batch: 2
+A=3
+C=1
+```
+## Compare the modes
+- Append: not allowed for this query, because an unwatermarked count can still change.
+- Complete: prints A=3, B=1, C=1 every trigger.
+- Update: prints A=3 and C=1.
+W: Changed groups only: A changed from 2 to 3 and C is new, so both are printed, while B is untouched and skipped.
+X: A=New groups only: update mode also emits groups whose value changed, and A went from 2 to 3.
+C=Whole table: that is complete mode. Update mode skips groups whose count did not change in this trigger.
+D=Raw input rows: the sink receives rows of the result table, which are aggregates here, not the input rows.
+T: Update mode on an aggregation prints only the groups that were created or changed in that trigger.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.3 applied troubleshooting
+S: A developer wants to know how many events have arrived so far and writes the first line below. It fails with an `AnalysisException`. Which replacement produces a running count on a stream?
+```
+n = events.count()                 # fails on a stream
+```
+A: `events.collect()` followed by `len(rows)`, which gathers the rows continuously on the driver
+B: `events.limit(1)` followed by a console write, which shows the newest number of events
+C: `events.groupBy().count()` written with complete or update output mode, which emits a running total
+D: `events.distinct().count()` before the write, which removes the repeated events and then counts them
+K: C
+G: ## Actions do not work on streams
+Some Dataset methods do not work on streaming data because they are actions that immediately run a query and return a result, which makes no sense for an unbounded stream. The guide lists `count()` (cannot return a single count), `foreach()` (use `writeStream.foreach`) and `show()` (use the console sink).
+## The streaming alternative
+`ds.groupBy().count()` returns a streaming Dataset that contains a running count. You then start a query with `writeStream`; an aggregation without watermark uses complete or update mode.
+```
+total = events.groupBy().count()
+q = total.writeStream.outputMode("complete").format("console").start()
+```
+W: Global aggregation: `groupBy().count()` is a transformation that yields a streaming DataFrame with one row, updated each trigger.
+X: A=collect: it is also an action that runs immediately, so it is not supported on a streaming Dataset.
+B=limit: limit and take of the first N rows are not supported on streaming Datasets.
+D=distinct: distinct operations on streaming Datasets are not supported, and it still ends in an action.
+T: Use groupBy().count() with a sink for a running count; count(), show() and collect() are not supported on streams.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.3 applied use-case
+S: A team wants the stream of device counts sorted by count in the console output. Which query is valid in Structured Streaming?
+A: `events.orderBy("ts")` written in append mode, because sorting by an event column only needs the rows of one micro-batch
+B: `events.groupBy("device").count().orderBy("count")` written in complete mode, because sorting after an aggregation is allowed there
+C: `events.orderBy("device").groupBy("device").count()` written in update mode, because the sort happens before the aggregation
+D: `events.sort("signal").limit(10)` written in append mode, because a limit makes the sort bounded and therefore streamable
+K: B
+G: ## Sorting on streams
+Sorting is supported on streaming Datasets only after an aggregation and in complete output mode. Sorting the raw input stream is not supported, because it would require tracking all data received so far, which is fundamentally hard to do efficiently.
+## Other unsupported operations
+- `limit` and take the first N rows.
+- `distinct`.
+- Some outer joins; see the join support matrix.
+- Chaining several stateful operations in update or complete mode.
+Trying one of these raises an `AnalysisException` saying the operation is not supported with streaming DataFrames.
+```
+(events.groupBy("device").count().orderBy("count")
+   .writeStream.outputMode("complete").format("console").start())
+```
+W: Sort after aggregation in complete mode: the result table holds the whole aggregated result, so it can be ordered at each trigger.
+X: A=Sort on raw input: sorting a stream without aggregation is not supported, regardless of the output mode.
+C=Sort before aggregation: it is still a sort on the unaggregated stream, and the aggregation does not make it supported.
+D=Sort with limit: limit is not supported on streaming Datasets, and the sort is still on raw input.
+T: Streaming sorts are allowed only after an aggregation, with complete output mode.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.3 applied use-case
+S: Events arrive with a `ts` timestamp column. The query below counts events per sliding window of 10 minutes that advances every 5 minutes. In how many windows is an event with `ts` = 12:07 counted?
+```
+w = (events.groupBy(F.window("ts", "10 minutes", "5 minutes"))
+           .count())
+```
+A: Two windows, 12:00 to 12:10 and 12:05 to 12:15, because windows overlap when the slide is shorter than the window length
+B: One window, 12:05 to 12:15, because Spark assigns each event only to the window that starts closest to its timestamp
+C: Three windows, 12:00 to 12:10, 12:05 to 12:15 and 12:10 to 12:20, because the slide interval adds one more window
+D: Zero windows until the watermark passes 12:07, because windowed counts are emitted only after the event is late
+K: A
+G: ## Window types
+Spark supports three kinds of time windows:
+- Tumbling (fixed): non-overlapping, contiguous intervals; each event belongs to exactly one window. Example: `window("ts", "10 minutes")`.
+- Sliding: fixed size but overlapping when the slide is smaller than the window length; an event can fall into several windows.
+- Session: dynamic size depending on the input (`session_window`).
+## The example
+For windows of 10 minutes sliding every 5 minutes, the windows start at 12:00, 12:05, 12:10 and so on. An event at 12:07 is inside 12:00 to 12:10 and inside 12:05 to 12:15, and not inside 12:10 to 12:20. The programming guide uses exactly this case: the word received at 12:07 increments the counts of both windows.
+W: Overlapping windows: the 12:07 event lies in two windows because the slide is half of the window length; the engine updates both counts.
+X: B=One window: that is tumbling behaviour. With a slide shorter than the window, an event belongs to every window that contains its time.
+C=Three windows: the window starting at 12:10 begins after the event time, so the event does not belong to it.
+D=No window yet: the engine updates the windows immediately; a watermark only decides when state is dropped or when append output is released.
+T: With a sliding window, an event counts in every window that contains its time; window length divided by slide gives the maximum number.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.3 applied comparison
+S: A product team wants to group each user's clicks into activity bursts: a burst ends when the user is silent for 5 minutes, so bursts have different lengths. Which grouping fits the requirement?
+A: A tumbling window with `window("ts", "5 minutes")`, which creates fixed non-overlapping 5-minute buckets for each user
+B: A sliding window with `window("ts", "5 minutes", "1 minute")`, which creates overlapping windows that start every minute
+C: A global aggregation with `groupBy("user").count()`, which keeps one running row per user and never ends a burst
+D: A session window with `session_window("ts", "5 minutes")`, which extends a window while events arrive within the gap
+K: D
+G: ## Session windows
+Tumbling and sliding windows have a fixed length. A session window has a dynamic size that depends on the input: it starts with an event and expands while later events arrive within the gap duration. With a static gap, the session closes when no event arrives within the gap after the last one.
+## Use
+```
+sessions = (events.groupBy("user", F.session_window("ts", "5 minutes"))
+            .count())
+```
+- Fixed buckets answer "how many per interval".
+- Session windows answer "how many per burst of activity".
+W: Session window: its length follows the data, growing with each event within 5 minutes of the last one, which matches variable-length bursts.
+X: A=Tumbling: fixed 5-minute buckets cut bursts at arbitrary boundaries and ignore silence between events.
+B=Sliding: overlapping fixed windows count events several times and still have a fixed length.
+C=Global count: it has no time dimension, so it cannot separate bursts.
+T: Use session_window for activity bursts separated by inactivity; window() gives fixed-size buckets.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.3 applied troubleshooting
+S: A developer wants windowed counts to be finalized in append mode. The query is rejected, or never frees state, because of the order of the calls. What is wrong?
+```
+agg = (events.groupBy("ts").count()
+             .withWatermark("ts", "1 minute"))
+agg.writeStream.outputMode("append").format("console").start()
+```
+A: `withWatermark` must come before the aggregation, on the same event-time column that the aggregation groups by
+B: `withWatermark` must be written after `writeStream`, as an option of the sink, to take effect in append mode
+C: The watermark delay must be larger than the window length, otherwise append mode rejects the query at start
+D: `withWatermark` works only with the `update` output mode, so append mode is never valid with a watermark
+K: A
+G: ## Watermark rules for state cleanup
+The programming guide lists the conditions for a watermark to clean aggregation state:
+- Output mode must be append or update (complete keeps everything).
+- The aggregation must use the event-time column, or a `window` on it.
+- `withWatermark` must be called on the same column as the timestamp used in the aggregate. `df.withWatermark("time", "1 min").groupBy("time2").count()` is invalid in append mode.
+- `withWatermark` must be called before the aggregation. `df.groupBy("time").count().withWatermark("time", "1 min")` is invalid in append mode.
+## Correct code
+```
+agg = (events.withWatermark("ts", "1 minute")
+             .groupBy(F.window("ts", "5 minutes")).count())
+```
+W: Watermark first: applied after the aggregation it has no effect on the state, which is the documented invalid pattern for append mode.
+X: B=After writeStream: the watermark is a DataFrame transformation defined on the input side, not a sink option.
+C=Delay longer than window: the delay is a lateness tolerance; there is no rule that it must exceed the window size.
+D=Update only: watermarks are valid with append and update; only complete mode cannot use them.
+T: Call withWatermark before the aggregation, on the same event-time column, or state is not cleaned and append is invalid.
+V: Structured Streaming

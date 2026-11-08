@@ -1,0 +1,555 @@
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/time-series
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/concepts
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/feature-tables-uc
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/online-feature-store
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/on-demand-features
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/feature-function-serving
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/automatic-feature-lookup
+# src: https://spark.apache.org/docs/latest/streaming/apis-on-dataframes-and-datasets.html
+
+@ DBX-MLP D1 T1.18 advanced troubleshooting
+S: A churn model trains on `ml.crm.customer_features`, a table with one row per `customer_id` that a nightly job overwrites in place. Labels span the last 12 months and carry `churn_event_ts`. Offline AUC is 0.97, but the endpoint reaches only 0.71. What is the right repair?
+A: Add `lookback_window=timedelta(days=7)` to the existing `FeatureLookup` so that feature values older than a week are excluded from the joined training set
+B: Keep every nightly row in a time series feature table keyed `(customer_id, ts TIMESERIES)` and pass `timestamp_lookup_key="churn_event_ts"` in the `FeatureLookup`
+C: Repartition the label DataFrame by `customer_id` before `create_training_set` so each label is joined to the feature row computed on its own executor
+D: Raise the number of cross-validation folds and stratify by the churn label so that the rows whose features leak the outcome are spread evenly across folds
+K: B
+G: ## Why the offline score is too good
+A feature table that is overwritten nightly holds only the newest value per entity. Joining 12 months of labels to it gives every old label the feature values computed today, which can include behavior that happened after the churn event. The model learns from information it will never have at prediction time. This is data leakage, and it shows up as a large gap between offline and production quality.
+## Point-in-time correctness
+Databricks Feature Store solves this with time series feature tables: a Unity Catalog Delta table whose primary key includes one `DATE` or `TIMESTAMP` column declared `TIMESERIES` (or `timeseries_columns` in `FeatureEngineeringClient.create_table`). Every nightly row is kept. In `create_training_set`, a `FeatureLookup` on such a table names a `timestamp_lookup_key`, a column of the label DataFrame. The join is an AS OF join: for each label it returns the latest feature row at or before that timestamp, or `null` if none exists.
+- This is unrelated to Delta Lake time travel; it is a feature-store join.
+- The same metadata is packaged with the model, so `score_batch` repeats the logic at inference.
+W: A time series feature table that keeps each nightly row, queried with `timestamp_lookup_key` set to the label's event time, returns for every label only the feature values known before the churn event, which removes the leakage.
+X: A=lookback_window on the overwritten table: the window only drops values older than a limit from rows that already exist. The table still has just today's row per customer, so the future values stay in every training row.
+C=Repartitioning labels: partitioning changes where the join runs, not which feature version a label receives. Results are identical, so the leakage and the gap remain.
+D=More folds and stratification: cross-validation only re-splits data that already contains leaked features. Every fold sees the same leaked values, so offline scores stay inflated.
+T: Leakage from overwriting features is fixed by keeping history in a time series feature table and joining with `timestamp_lookup_key`, never by tuning the split.
+V: Databricks Feature Store, Unity Catalog
+
+@ DBX-MLP D1 T1.18 advanced use-case
+S: A fraud model was trained with `FeatureLookup(table_name="ml.risk.acct_features", feature_names=["spend_30d"], lookup_key="acct_id", timestamp_lookup_key="txn_ts", lookback_window=timedelta(days=7))`. In training, accounts with no feature row in the prior 7 days got `null`. In production, the endpoint returns 40-day-old `spend_30d` for dormant accounts and scores shift. What explains this and what should the team do?
+A: The window is enforced online once the online table is republished in `SNAPSHOT` mode, so schedule a nightly snapshot publish to apply the limit
+B: The endpoint enforces the window when a request carries a `txn_ts` field, so add the transaction time to each scoring request
+C: The online store retains every historical row, so add the current date to the lookup key and make the application pass today's date with each request
+D: The window applies to training and batch scoring only; online lookups always return the latest value, so the team must flag stale values itself, e.g. with a last-updated feature
+K: D
+G: ## What lookback_window does
+`lookback_window` is a `datetime.timedelta` on a `FeatureLookup` of a time series feature table. During `create_training_set` and `score_batch` it excludes feature values older than the window from the as-of join, so a very old value becomes `null` instead of being treated as current. The default is `None`: every value counts regardless of age.
+## Where it does not apply
+The documentation states that during online inference the latest feature value is always used, regardless of the lookback window. An online store keeps the latest value per entity (published time series tables are deduplicated to the latest row), so no timestamp request can change what is returned.
+That creates a training-serving skew whenever stale values are possible: training sees `null` after 7 days, serving sees the old number. Typical remedies are a feature that carries its age (a last-updated timestamp turned into "days since update" by an on-demand function), or a pipeline that writes an explicit default after the cut-off.
+W: The seven-day window is not applied online, where the latest value is always returned. Aligning training and serving therefore needs an explicit staleness signal or default written by the pipeline, since the endpoint will not null old values.
+X: A=Snapshot republish: the publish mode controls how rows are copied (full copy versus incremental), not what age is allowed. A snapshot of the same latest rows still contains the 40-day-old value.
+B=Timestamp in the request: the online lookup is keyed on the entity, not on a time, so the extra field changes nothing about which stored value is returned.
+C=Date in the key: that turns the table into an exact-match store with a changed schema and breaks the model's lookup metadata. It also does not recreate the window behavior used in training.
+T: `lookback_window` works in training and batch scoring only; online inference returns the latest value, so staleness must be handled in the data.
+V: Databricks Feature Store, Model Serving
+
+@ DBX-MLP D1 T1.18 advanced troubleshooting
+S: A time series feature table `ml.iot.room_features` has key `(room, ts TIMESERIES)` and features `temp`, `co2`, `light`. A temperature job writes rows with only `room`, `ts` and `temp`. Training sets now show `null` for `co2` on many rows although a valid `co2` row exists a few minutes earlier. What is the cause and the fix?
+A: As-of lookup takes the latest row at or before the label time and keeps its nulls, so write complete rows with every feature per timestamp
+B: As-of lookup skips null cells only when `lookback_window` is set, so set a one-day window on the `FeatureLookup` and the earlier `co2` value is selected again
+C: `write_table` in merge mode cannot target a time series feature table, so switch the job to overwrite so that nulls are replaced with the last known readings
+D: Features are joined per column, so list `co2` as a separate primary key column and the join then falls back to an earlier timestamp
+K: A
+G: ## One row, all features
+In a time series feature table the as-of join selects one row per label: the latest row whose timestamp is not later than the label timestamp. The row is taken as a whole. The documentation states that point-in-time lookup does not skip rows with `null` feature values.
+That is why writes to a time series table must supply values for all features of the table, unlike regular feature tables where partial `merge` updates are fine. If a job writes only `temp`, the new row has `co2 = null`, and a label that falls after it receives `null` for `co2` even though an earlier `co2` is stored.
+## Practical pattern
+- Compute all features in one pipeline per timestamp, or join the source readings first and forward-fill missing sensor values before `write_table`.
+- Stream or batch writes are both supported, but each row must be complete.
+W: Because the lookup treats a row as a unit and keeps null cells, partial rows mask earlier values. Writing complete rows (all features at each timestamp, with missing readings filled upstream) restores the expected values.
+X: B=lookback_window skips nulls: the window only drops values older than a limit. It never skips a null in a newer row, so the earlier `co2` value stays hidden.
+C=Overwrite instead of merge: merge works with time series tables, and overwrite would delete the history needed for training. It also would not fill any nulls.
+D=Feature as a primary key: making measurements part of the key breaks the entity design and the model metadata. The join still takes a whole row by key and timestamp.
+T: As-of joins return whole rows and keep nulls, so every write to a time series feature table must carry all features.
+V: Databricks Feature Store
+
+@ DBX-MLP D1 T1.18 applied use-case
+S: A model was trained from a time series feature table using `FeatureLookup(..., lookup_key="cust_id", timestamp_lookup_key="order_ts")`, and logged with `fe.log_model`. The nightly batch DataFrame has `cust_id` and `order_date` (a `DATE` column). What must the DataFrame passed to `fe.score_batch` contain?
+A: Only `cust_id`, because `score_batch` uses the time of the scoring job as the as-of time for every row that it looks up
+B: `cust_id` and any `DATE` or `TIMESTAMP` column, because `score_batch` finds the time column by type and casts it as needed
+C: `cust_id` and a timestamp column named `order_ts` with the same data type used when the training set was created
+D: `cust_id` plus the feature table's own `ts` column, because the batch rows must carry the timeseries key of the stored table
+K: C
+G: ## How batch scoring finds features
+A model logged with `FeatureEngineeringClient.log_model` carries the `FeatureLookup` definitions it was trained with. `score_batch` replays them: it looks up each feature by the lookup keys in the incoming DataFrame and joins offline-store values before calling the model, so callers pass only keys (plus raw columns the model needs).
+## Time series tables add one requirement
+For a time series feature table, the lookup is a point-in-time one, so the incoming DataFrame must contain a timestamp column with the same name and data type as the `timestamp_lookup_key` used at training time. Here that is `order_ts`. The values define for which instant the latest feature values are fetched. A column with another name or type is not matched by position or type.
+W: The DataFrame needs the lookup key and a timestamp column called `order_ts` of the same data type used during training, so the stored point-in-time lookup can run exactly as it did for the training set.
+X: A=Only the key: batch scoring never substitutes the current time. A time series lookup needs a timestamp per row, and without it the lookup cannot run.
+B=Any date or timestamp column: the column is matched by name, not discovered by type. A differently named column is not used, and a different type is not silently cast.
+D=The table's `ts` column: that is the stored feature timestamp, and rows to score do not have one. The name that must match is the label-side `timestamp_lookup_key`.
+T: `score_batch` needs a column named like the training `timestamp_lookup_key`, with the same type, to run point-in-time lookups.
+V: Databricks Feature Store
+
+@ DBX-MLP D1 T1.18 advanced tradeoff
+S: A time series feature table with 8 billion rows is joined to 200 million labels through `create_training_set`. Training-set builds are slow. The table has primary key `(user_id, ts TIMESERIES)`. Which change best speeds up the point-in-time joins without changing results?
+A: Partition the table by date and by `user_id` so that every as-of lookup scans a single small partition for its timestamp
+B: Enable liquid clustering on the table, use a current `databricks-feature-engineering`, and pass `use_spark_native_join=True` on Photon-enabled compute
+C: Add `hour` and `minute` columns to the primary key so that each lookup matches a narrower key before the timestamp comparison
+D: Declare the table as a regular feature table keyed `(user_id, ts)` as strings so that lookups become exact matches that are simpler to execute
+K: B
+G: ## Why as-of joins are expensive
+An AS OF join matches on the entity key and then finds the latest timestamp at or before each label timestamp. With billions of feature rows, file layout decides how much data is read per lookup.
+## Documented guidance
+- Databricks recommends liquid clustering on time series feature tables (client 0.6.0 and later) and data skipping for better point-in-time lookup performance.
+- With Photon enabled, `use_spark_native_join=True` in `create_training_set` (and `score_batch`) uses a faster join; it needs `databricks-feature-engineering` 0.6.0 or above.
+- A time series feature table must have one timestamp key and cannot have partition columns, and Databricks recommends at most two primary key columns for performant writes and lookups.
+W: Liquid clustering lays out data for key and time ranges, and the native Spark join speeds the lookup itself. Both are documented for point-in-time joins and keep the result the same.
+X: A=Partition columns: a time series feature table cannot have partition columns, and partitioning on a high-cardinality `user_id` would create far too many small partitions anyway.
+C=Longer primary key: the guidance is at most two primary key columns, and each timestamp part makes the key wider while still needing the as-of comparison on top.
+D=String keys with exact match: string keys give exact-match semantics, which would return nothing for labels between feature timestamps and so change the results.
+T: Speed up point-in-time joins with liquid clustering and `use_spark_native_join`, not with partitions or a longer key.
+V: Databricks Feature Store, Photon
+
+@ DBX-MLP D1 T1.18 advanced comparison
+S: A reviewer suggests dropping time series feature tables: "read the single-row feature table with `VERSION AS OF` at each label's date and union the results." Why is Delta time travel not a replacement for a point-in-time join in a feature store?
+A: Time travel reads the whole table at one commit per query, while an as-of join picks the latest row per key for each label, and time travel depends on log retention
+B: Time travel cannot read tables that have a primary key constraint, so feature tables are excluded from older-version reads and only plain tables qualify
+C: Time travel returns data only for the 30 most recent commits, which is shorter than any labeling period, whereas as-of joins keep every historical row
+D: Time travel and as-of joins are the same operation, so the union of versions gives identical results, only slower because every version is read separately
+K: A
+G: ## Two features with similar names
+The docs note that point-in-time lookup is sometimes called "time travel" but is not related to Delta Lake time travel.
+- **Delta time travel** queries a table as it was at a version or timestamp of its transaction log. One query sees one consistent snapshot, and reachable history depends on log retention and `VACUUM`.
+- **Point-in-time (as-of) join** in Feature Store joins every label row to the latest feature row at or before that row's own timestamp, in one pass, using the timeseries key.
+Reproducing 12 months of labels through time travel would need one query per snapshot, retained history for the whole period, and manual matching of labels to snapshots. The feature-store join also stores the metadata so that `score_batch` repeats the logic.
+W: Time travel reads whole-table snapshots at chosen versions and depends on retention, while a time series feature table matches each label to its own latest earlier row in a single join, with the lookup recorded in the model.
+X: B=Primary key blocks time travel: constraints do not prevent reading an older Delta version. The reason lies in the semantics, not in a restriction on constraints.
+C=30 commits limit: there is no fixed commit count; history depends on retention settings. Unlimited history is also not a property of as-of joins.
+D=They are the same: they are different operations with different outputs, and the claim of identical results is false whenever labels fall between two commits.
+T: Delta time travel gives table snapshots; a time series feature table gives per-row as-of matching.
+V: Databricks Feature Store, Delta Lake
+
+@ DBX-MLP D1 T1.19 advanced use-case
+S: `ml.sales.store_stats` is an existing Delta table with no constraints, owned by the analyst. Its `store_id` and `snap_ts TIMESTAMP` columns are nullable and hold 14 months of hourly history. It must become a point-in-time feature table in place, without copying the data. Which sequence works?
+A: Run `ALTER TABLE ... ADD CONSTRAINT store_stats_pk PRIMARY KEY (store_id, snap_ts TIMESERIES)` directly, because Unity Catalog sets key columns to NOT NULL while it adds the constraint
+B: Create a new table with `CREATE TABLE AS SELECT` that declares the key and `TIMESERIES` in its DDL, because a primary key can only be declared when a table is first created
+C: Add `PRIMARY KEY (store_id, snap_ts)` after setting both columns to NOT NULL, then pass `timeseries_columns="snap_ts"` in every `FeatureLookup` so that the lookups run as of the label time
+D: Run `ALTER COLUMN ... SET NOT NULL` on both key columns, then `ADD CONSTRAINT ... PRIMARY KEY (store_id, snap_ts TIMESERIES)`, which makes it a time series feature table
+K: D
+G: ## Turning an existing Delta table into a feature table
+Any Unity Catalog Delta table with a primary key constraint can serve as a feature table. A table without a key is converted in place with two kinds of statements, and only the table owner can declare the constraint.
+- Key columns must be `NOT NULL`: run `ALTER TABLE <t> ALTER COLUMN <col> SET NOT NULL` for each key column first.
+- Add the constraint: `ALTER TABLE <t> ADD CONSTRAINT <name> PRIMARY KEY (store_id, snap_ts TIMESERIES)`. The `TIMESERIES` keyword on one key column (Databricks Runtime 13.3 LTS or above) is what makes the table a time series feature table.
+## Where the time designation lives
+Point-in-time behavior is a property of the table key, not of the lookup. The `FeatureLookup` only names `timestamp_lookup_key`, a column of the label DataFrame. Once the constraint exists, the table appears in the Features UI and works with `create_training_set` and `score_batch`.
+W: Setting the key columns to NOT NULL and then adding a primary key with `TIMESERIES` on the timestamp converts the existing table in place and keeps all its history.
+X: A=Constraint only: the documented procedure sets each key column to NOT NULL first, and a key over nullable columns is not accepted, so the single statement does not work on this table.
+B=Copy with CTAS: a constraint can be added to an existing table with `ALTER TABLE`, so copying 14 months of history is unnecessary and the stem asks for an in-place change.
+C=Designation in the lookup: `timeseries_columns` belongs to table creation. A plain key without `TIMESERIES` gives no as-of join, and a `DATE` or `TIMESTAMP` key left undeclared is rejected by `create_training_set`.
+T: Convert a Delta table in place with SET NOT NULL, then `PRIMARY KEY (..., ts TIMESERIES)`; the time designation sits in the key.
+V: Databricks Feature Store, Unity Catalog
+
+@ DBX-MLP D1 T1.19 advanced troubleshooting
+S: A feature job keeps daily history in `ml.crm.cust_daily` with primary key `(cust_id, snap_date DATE)`. The key was created without the `TIMESERIES` keyword, and `create_training_set` now raises an error about the `DATE` key column. Each label must receive the latest snapshot on or before its own date. What is the fix?
+A: Declare `snap_date` as the `TIMESERIES` key column of the table and set `timestamp_lookup_key` on the `FeatureLookup` to the label's date column
+B: Change `snap_date` to `STRING`, which keeps all the history and makes each lookup return the most recent earlier snapshot for the label
+C: Remove `snap_date` from the key and overwrite the table every night, so that each label is joined to the single newest row of its customer
+D: Upgrade `databricks-feature-engineering`, because newer releases treat any `DATE` key column as a time series column without a declaration
+K: A
+G: ## Date keys must be declared
+A `DATE` or `TIMESTAMP` primary key column that is not declared as a time series column cannot be used with `create_feature_spec()`, `create_training_set()` or `publish_table()`. These APIs require every such column to be declared as a timeseries column.
+- A date as a plain part of the key gives only exact-match semantics. Databricks documents this for use cases that really need exact matching: change the column to `STRING`.
+- For as-of semantics, mark the column `TIMESERIES` in the key (`PRIMARY KEY (cust_id, snap_date TIMESERIES)`, or `timeseries_columns` in `create_table`) and name `timestamp_lookup_key` in the lookup.
+## Why the other designs fail
+Exact matching returns nothing for a label on a day without a snapshot, and a single overwritten row per customer brings back leakage.
+W: Declaring the date as the time series key gives the as-of join the label needs, and the existing history is kept.
+X: B=STRING key: this is the documented route for plain exact-match lookups, so labels on dates without a snapshot receive nothing instead of the latest earlier one.
+C=Overwrite with one row: it deletes the history and every old label then sees the newest values, which is the leakage that point-in-time joins prevent.
+D=Newer client: the requirement is part of the API contract, so no release infers the designation. Only the table definition can declare it.
+T: A DATE or TIMESTAMP key column needs the TIMESERIES declaration for as-of joins; STRING gives exact matches only.
+V: Databricks Feature Store, Unity Catalog
+
+@ DBX-MLP D1 T1.19 advanced tradeoff
+S: A time series feature table for ad impressions has key `(region, advertiser_id, campaign_id, ts TIMESERIES)` and 6 billion rows. Writes and training-set lookups are slower than expected. Which redesign follows Databricks guidance for performant writes and lookups?
+A: Partition the table by `region` and by `ts` so that every as-of lookup reads only the partition that matches its label timestamp
+B: Declare `campaign_id` as a second `TIMESERIES` column so that the as-of join can also match the campaign by recency
+C: Merge the three entity columns into one entity key column and keep `(campaign_key, ts TIMESERIES)` as a two-column key with liquid clustering
+D: Move `ts` out of the key into an ordinary feature column, so that lookups need only the entity columns and run as exact matches
+K: C
+G: ## Key design of time series feature tables
+A time series feature table has exactly one timestamp key and cannot have partition columns. Databricks recommends no more than two primary key columns, so that writes and lookups stay performant, and liquid clustering (client 0.6.0 and later) for faster point-in-time lookups.
+- Entity columns that always travel together are combined into one entity key, for example a concatenated or hashed `campaign_key` computed in the feature pipeline and in the label DataFrame.
+- The timestamp stays in the key, because the as-of join needs it.
+## Result
+A two-column key plus liquid clustering matches the guidance. The model records the lookup key, so training and serving use the same combined column.
+W: A single entity key with the timestamp gives the recommended two-column key, and liquid clustering supports the as-of lookups without partitions.
+X: A=Partitioning: a time series feature table cannot have partition columns, and the clustering recommendation replaces partitions for this layout.
+B=Second TIMESERIES column: the table must have one timestamp key, and a campaign identifier has no meaning as a time to match by recency.
+D=Timestamp as a feature: without the timeseries key there is no as-of join, so each label would need an exact timestamp match or would receive leaked values.
+T: Time series feature tables take one timestamp key and at most two key columns; combine entity columns and cluster instead of partitioning.
+V: Databricks Feature Store, Unity Catalog
+
+@ DBX-MLP D1 T1.19 advanced troubleshooting
+S: A Lakeflow Job task writes hourly rows to the time series table `ml.ops.store_hourly` (key `(store_id, hour_ts TIMESERIES)`) with `fe.write_table(name=..., df=hour_df, mode="merge")`. After a transient failure the task is retried and re-writes hours that were already stored. What happens, and what must stay true?
+A: Rows are appended a second time, since a time series table is append-only, so the job needs an extra step that removes the duplicates
+B: Rows with the same `(store_id, hour_ts)` are matched and updated, so the retry is safe while each row still carries every feature
+C: The retry fails on the first repeated row with a key violation, so the job must delete the stored hours before it runs again
+D: Rows already stored are skipped and keep their old values, so corrected values from the retry never reach the table
+K: B
+G: ## Merge matches on the whole primary key
+`write_table(mode="merge")` updates rows whose primary key already exists in the table and inserts the rest. In a time series feature table the timestamp is part of the key, so a retried batch hits the same `(store_id, hour_ts)` keys and replaces those rows instead of adding new ones. Rows with other keys stay unchanged.
+## Condition
+In a time series feature table the DataFrame must supply values for all features of the table, because the as-of lookup takes whole rows and keeps nulls. A retry that rewrites only part of the columns would store nulls over the earlier values.
+W: Merge matches on `(store_id, hour_ts)`, so a retried write updates the same rows, and complete rows keep the as-of lookups correct.
+X: A=Append-only: merge upserts by key and the table is an ordinary Delta table, so repeated keys are updated in place and no duplicate rows appear.
+C=Key violation: the merge handles existing keys as updates, so the retry does not fail and no manual delete is needed.
+D=Skipped rows: matched rows are updated with the new values, so a corrected value in the retry does replace the old one.
+T: Merge on a time series table is idempotent per (entity, timestamp), provided each row holds all features.
+V: Databricks Feature Store, Lakeflow Jobs
+
+@ DBX-MLP D1 T1.19 applied use-case
+S: A platform team wants to expose the view `ml.crm.v_cust_orders`, defined as `SELECT c.id, SUM(o.amt) spend FROM customers c JOIN orders o USING(id) GROUP BY c.id`, as a feature table. Registering it fails. What is the correct approach?
+A: Add a `PRIMARY KEY (id)` constraint directly on the view, then reuse it in `create_training_set` with no change to its definition
+B: Upgrade `databricks-feature-engineering` to a newer release, because every Unity Catalog view with a key column is accepted from that version onward
+C: Wrap the view in a SQL UDF and pass it as a `FeatureFunction` so the aggregation runs on every lookup of the table
+D: Compute the aggregation into a Delta table with a primary key on `id` in a scheduled job, and use that table; only simple SELECT views qualify
+K: D
+G: ## Views as feature tables
+A Unity Catalog view can act as a feature table only if it is a simple SELECT view: created from a single Delta table that itself can be a feature table, with primary keys selected without `JOIN`, `GROUP BY` or `DISTINCT`. Allowed keywords are `SELECT`, `FROM`, `WHERE`, `ORDER BY`, `LIMIT` and `OFFSET`. It needs `databricks-feature-engineering` 0.7.0 or later, and view-backed feature tables do not appear in the Features UI.
+## Aggregations
+An aggregate over several tables is a feature computation. Materialize it into a Delta table with a primary key, refresh it with `write_table(mode="merge")` in a scheduled job, and register that table. The result is also stable for training, point-in-time use and publishing to an online store.
+W: A join with a group-by is outside the simple SELECT view rule, so the aggregate should be materialized in a Delta table with a primary key and refreshed on a schedule.
+X: A=Constraint on the view: the view still contains a JOIN and a GROUP BY, which are not allowed for a feature table, so a constraint does not help.
+B=Newer client: the client version raises support for simple views only. It does not remove the JOIN and GROUP BY restriction.
+C=FeatureFunction: a function runs per request over its inputs and is not a table scan with a join. It would be slow and could not be published to an online store.
+T: Only simple SELECT views can be feature tables; materialize joins and aggregations into a keyed Delta table.
+V: Databricks Feature Store, Unity Catalog
+
+@ DBX-MLP D1 T1.19 advanced use-case
+S: Training rows have `user_id`, `ad_id`, `session_start_ts` and `impression_ts`. User features (time series table) must be as of the session start; ad features (another time series table) as of the impression. How should the training set be built?
+A: Create two training sets, one per feature table with its own timestamp, then union the outputs and drop the duplicate label rows
+B: Choose one `timestamp_lookup_key` for the whole call and shift the other timestamp in the source data so that both tables agree
+C: Define one `FeatureLookup` per table, each with its own `timestamp_lookup_key`, and pass both to a single `create_training_set` call
+D: Put both timestamp columns into the primary key of each feature table and join on the composite key in the label DataFrame
+K: C
+G: ## Independent as-of lookups
+Each `FeatureLookup` describes one join: the feature table, the features, the `lookup_key` columns of the label DataFrame, and for time series tables a `timestamp_lookup_key`. `create_training_set` accepts a list of lookups and performs each join independently on the same label DataFrame. Different tables can therefore use different timestamp columns, and different keys (`user_id`, `ad_id`).
+## Why not alternatives
+Splitting the work into two calls and unioning produces mismatched column sets, not a join. Changing the data to fit a single timestamp alters meaning, and the model would be packaged with the wrong lookup metadata. The lookups recorded by `fe.log_model` repeat the same per-table settings at inference.
+W: Separate lookups with their own timestamp keys are evaluated independently in one call, so each feature table is joined as of the right moment and the model records both definitions.
+X: A=Two training sets and a union: a union stacks rows rather than adding columns, so the features end up in separate rows, and the label rows could not be matched to both.
+B=One shared timestamp: shifting data changes the business meaning of the timestamps and loses the true difference between session start and impression.
+D=Timestamps in the primary key: the timeseries column is the only time key in each table, and putting several would stop as-of matching and break the recommended key design.
+T: Give each `FeatureLookup` its own `timestamp_lookup_key` when tables need different as-of times.
+V: Databricks Feature Store
+
+@ DBX-MLP D1 T1.20 advanced tradeoff
+S: A feature table with 40 million customers is recomputed every night and about 80% of the rows change. The online store must reflect the new values by morning, and no updates arrive during the day. Which publish mode is the best fit?
+A: `SNAPSHOT`, which copies all data from the source table in one sync and suits runs where many existing rows change between syncs
+B: `CONTINUOUS`, which keeps a streaming pipeline running all day to apply each source change to the online store as it happens
+C: `TRIGGERED`, because incremental sync is always faster than a full copy, even when most rows change between two runs
+D: `CONTINUOUS` for the first week, then `TRIGGERED`, because the mode can be switched in place once enough data has been loaded
+K: A
+G: ## Three publish modes
+`publish_table` on `FeatureEngineeringClient` syncs an offline feature table to an online store. The `publish_mode` options are:
+- `TRIGGERED` (default): incremental updates, run by API or on a schedule; needs Change Data Feed on the source table.
+- `CONTINUOUS`: a streaming pipeline updates the online store as soon as the offline table changes; also needs Change Data Feed.
+- `SNAPSHOT`: a one-time copy of all source data; documented as efficient when there are many updates to existing rows between two syncs.
+## Choosing
+Mostly changed data per cycle makes change tracking pointless: a full copy is simpler. A stream running all day for one nightly change wastes capacity. Mode changes are not in-place: changing between modes needs recreating the online table, which has its own consequences for live endpoints.
+W: Nightly changes touching most rows between syncs are the case that `SNAPSHOT` is documented for, and no all-day pipeline is needed.
+X: B=Continuous: a streaming sync would sit idle between nightly loads, keeping a pipeline running without benefit, since nothing changes during the day.
+C=Triggered always faster: incremental syncing helps when few rows change. With 80% changed rows, tracking and applying the changes costs about as much as a copy.
+D=Switch in place: changing the sync mode cannot be done in place and requires recreating the online table, so a week-long plan like that is not viable.
+T: Many rows changing per cycle with no intraday updates points to `SNAPSHOT`; small frequent changes point to `TRIGGERED` or `CONTINUOUS`.
+V: Databricks Online Feature Stores, Lakebase
+
+@ DBX-MLP D1 T1.20 advanced troubleshooting
+S: Two Lakeflow Job tasks, each ending with `fe.publish_table(online_store=store, source_table_name="ml.crm.cust_features", online_table_name="ml.crm.cust_features_online")`, sometimes log: "Skipping publishing to online table ... because the feature sync pipeline is already running." What is the recommended design?
+A: Add `time.sleep(600)` to the second task so the first has finished, and retry the publish call in a loop up to three times
+B: Create a second online table for the second task so that each notebook has its own sync pipeline to write into without waiting
+C: Publish from one place, such as a single final task, or wait with `get_status()` for the running sync before calling again
+D: Switch the table to `SNAPSHOT` mode, which allows several simultaneous syncs because it only copies the data once per run
+K: C
+G: ## One sync at a time
+Each online table has one sync pipeline, and only a single sync operation can run on it at a time to avoid data conflicts. A second `publish_table` while one is running is skipped with the message above.
+## Recommended pattern
+Databricks recommends a single `publish_table` command, for instance one task at the end of a job. If workflows cannot be arranged like that, call `get_status()` to wait until other publish commands finish before triggering a new one.
+W: Serializing the publish step (one final task, or a `get_status()` wait) respects the one-sync-at-a-time rule without guessing durations.
+X: A=Sleep and retry: a fixed delay is a guess; syncs vary in length, so the second call can still collide, or wait much longer than needed.
+B=Second online table: this duplicates data, and endpoints resolve to the oldest online table of a feature table, so the new one would not even be the one served.
+D=Snapshot mode: every mode uses a single sync operation per online table, and snapshot would copy everything again each time.
+T: Publish from one place or wait on `get_status()`; an online table accepts only one sync at a time.
+V: Databricks Online Feature Stores, Lakeflow Jobs
+
+@ DBX-MLP D1 T1.20 advanced use-case
+S: A production online feature store runs without high availability. The team now needs HA, and disabling or changing it on the live store would disconnect Feature Serving and Model Serving endpoints that read from it. How should they change the configuration with the least disruption?
+A: Change the setting on the live store in a maintenance window, then wait for the connected endpoints to reconnect without any manual action
+B: Delete only the published online tables, change the store setting, then run `publish_table` again so the same tables return to service
+C: Put a second endpoint on the same store with a larger workload size so requests can fail over to it while the setting is changed
+D: Create a new store with the target settings, publish the tables, point new endpoints at it, validate, then retire the old endpoints and store
+K: D
+G: ## Why in-place changes are risky
+Changing high availability on an online store can break connectivity for serving endpoints that read from it, and the docs say to restart affected endpoints. Online tables and endpoints are also resolved at build time, and endpoints pick the oldest online table of a feature table.
+## The documented blue/green sequence
+- Create a new online store with the target configuration.
+- Publish the feature tables to the new store.
+- Point new serving endpoints to the new store.
+- Validate the connection between the new store and the new endpoints.
+- Turn off the old endpoints and the old online store.
+W: A parallel store with new endpoints lets the team validate before switching traffic, and the old store only goes off after the new one works.
+X: A=In-place change: connectivity breaks, and endpoints do not reconnect on their own; the documentation says they must be restarted.
+B=Delete online tables: deleting tables under a live endpoint breaks lookups, and recreating them creates new securables whose grants do not carry over.
+C=Bigger endpoint: workload size changes compute for the endpoint, not the store; the endpoints still lose connectivity to the store during the change.
+T: Change HA by blue/green: new store, publish, new endpoints, validate, retire the old one.
+V: Databricks Online Feature Stores, Model Serving
+
+@ DBX-MLP D1 T1.20 applied use-case
+S: To cut cost, an engineer drops an unused online table with `DROP TABLE ml.crm.cust_features_online` and sees no savings on the Lakebase side. Which statement is correct and what should be done?
+A: Dropping with SQL is correct, and the savings appear after the next sync cycle clears the database pages that the table had used
+B: Use the SDK method `delete_online_table`, which removes the table from Unity Catalog and the database; a SQL drop leaves the data in place
+C: Delete the source offline feature table, because the online table is removed when the table that it was published from disappears
+D: Set the store to scale to zero, which releases the stored data of every unused online table while the store itself stays available
+K: B
+G: ## Deleting online tables
+An online table lives in two places: as a Unity Catalog entity and as a table in the Lakebase database behind the store. Databricks states that `WorkspaceClient().feature_store.delete_online_table(online_table_name=...)` is the only recommended deletion method: it removes the table from Unity Catalog and the database. A `DROP TABLE` in SQL, or the Python SDK command to delete a synced table, does not delete it from the underlying database storage.
+## Related facts
+- Deleting a table that endpoints still use causes failures downstream; check dependencies first.
+- Online stores incur cost while they exist, so delete stores that are not needed. Lakebase scale-to-zero is not supported for online feature stores.
+W: Only `delete_online_table` clears both the catalog entry and the stored data, so cost drops only when that method is used.
+X: A=SQL drop: the storage remains in the database whatever happens on later syncs, so no savings appear.
+C=Delete the source: removing the offline table does not remove published online copies, and it destroys the training and lineage source.
+D=Scale to zero: the limitation list states scale-to-zero is not supported for online feature stores, and it would not free data anyway.
+T: Delete online tables with the SDK `delete_online_table`; SQL `DROP TABLE` leaves data in the database.
+V: Databricks Online Feature Stores, Lakebase
+
+@ DBX-MLP D1 T1.20 advanced troubleshooting
+S: A team deleted and recreated the online table `ml.crm.cust_features_online` (same name) under a live Feature Serving endpoint. The endpoint reports Ready and the sync pipeline succeeds, but lookups fail with "password authentication failed". What is the cause and recovery?
+A: The sync pipeline stopped, so run `publish_table` again until the status reaches `AVAILABLE` and the endpoint recovers by itself without changes
+B: The endpoint cache is stale, so stopping and starting the endpoint, or redeploying it unchanged, rebuilds it and re-resolves the table
+C: The new table is a new securable and the endpoint lost its `SELECT` grant; serving a new `FeatureSpec` rebuilds the endpoint
+D: The online store password expired, so rotate the Lakebase credentials in the store settings and keep the same endpoint configuration
+K: C
+G: ## Dependencies are resolved at build time
+When a Feature Serving endpoint is created, Model Serving grants its service principal `USE CATALOG`, `USE SCHEMA` and `SELECT` on the online table (and `EXECUTE` on UDFs in the FeatureSpec). These permissions are fixed at build time. Recreating an online table, even with the same name, creates a new Unity Catalog securable, so the grant does not carry over. OAuth token minting fails, the connection falls back to password authentication, and lookups fail with `KeyError: 'OAUTH_TOKEN'` or `password authentication failed`. The endpoint can still report Ready.
+## Recovery and prevention
+- Rebuild by changing what the endpoint serves: create a new `FeatureSpec` (or register a new model version for Model Serving) and update the endpoint; this provisions a new service principal and re-runs permission setup. Stopping, starting, plain redeploys or an environment-variable change do not reliably rebuild it.
+- Prevention: use a versioned migration with a new table, new `FeatureSpec` and new endpoint, then move traffic. Changing a sync mode needs a recreated table and has the same risk.
+W: The recreated table has no grant for the endpoint's service principal, so the endpoint must be rebuilt with a changed served entity, ideally through a versioned migration.
+X: A=Publishing again: the sync succeeds already; the problem is access to the new securable, not freshness of the data.
+B=Restart or redeploy: the documentation lists stopping and starting, plain redeploys and environment-variable changes as not reliably rebuilding the endpoint.
+D=Expired password: the password path is only a fallback after token minting fails because of the lost grant; rotating credentials does not restore the grant.
+T: Never recreate an online table under a live endpoint; if it happened, serve a new FeatureSpec to rebuild, and migrate by versions.
+V: Databricks Online Feature Stores, Model Serving, Unity Catalog
+
+@ DBX-MLP D1 T1.20 advanced use-case
+S: A feature table was published to a second online table in a new store during a migration. Weeks later, the Model Serving endpoint still returns values that match the old store, not the new one. Why?
+A: The endpoint resolves to the oldest online table of that feature table, so migrate with a new feature table version to move traffic
+B: The new store is still replicating, so the endpoint will switch over by itself once the first full sync has completed without any errors
+C: Endpoints always read from the newest online table, so the new table must be failing silently and its sync pipeline must be restarted
+D: The endpoint keeps a fixed copy of the feature values taken at deployment, so only redeploying with a larger workload size reloads the values
+K: A
+G: ## Which online table an endpoint reads
+An endpoint does not name an online table. It looks up features through the offline feature table named in its FeatureSpec or model metadata. When that feature table is published to more than one online table, model serving and feature serving endpoints always resolve to the oldest online table, by creation timestamp. Specifying a particular online table is not supported, and publishing to a second table does not move an endpoint.
+## Migration pattern
+Version the offline feature table too (for example `customer_features_v2`), publish it to a new online table, create a new FeatureSpec and endpoint, move traffic, and then delete the old endpoint and online table.
+W: Resolution picks the oldest online table, so the new one is ignored until a versioned migration (new feature table, FeatureSpec and endpoint) or removal of the old table.
+X: B=Replication wait: the choice of table is a creation-time rule, not a function of sync progress, so waiting never changes it.
+C=Newest table: the rule is the opposite, the oldest by creation timestamp, so the new table is not the one read, whatever its sync state.
+D=Fixed copy at deployment: the endpoint does look up live values from the online table; workload size has nothing to do with which table is read.
+T: With several online tables for one feature table, endpoints read the oldest; migrate by versioning the feature table.
+V: Databricks Online Feature Stores, Model Serving
+
+@ DBX-MLP D1 T1.21 advanced use-case
+S: A fraud model needs per-card velocity features updated within seconds of a transaction, served by Model Serving with automatic lookup, and reproducible for training. The events arrive on a streaming source. Which design satisfies all three needs?
+A: Use a scheduled `TRIGGERED` publish every minute from a notebook that recomputes the velocity features for all cards over their full history
+B: Stream events into the offline table with `write_table(mode="merge")` and publish it `CONTINUOUS`, with Change Data Feed enabled
+C: Write the streaming results directly into Lakebase tables and have the endpoint query them by hand with custom code inside the model
+D: Compute velocity on demand from the raw transaction list that the caller sends in each request, and skip stored features entirely
+K: B
+G: ## Pieces of a real-time feature path
+- **Ingest and compute:** a Structured Streaming query transforms raw events into feature rows.
+- **Offline table:** `write_table` accepts a streaming DataFrame, so a Unity Catalog feature table is updated continuously. It is the training and lineage source.
+- **Online sync:** `publish_table(..., publish_mode="CONTINUOUS")` runs a streaming pipeline that pushes each change from the offline table to the online store. Change Data Feed must be on, and the primary key columns must be non-null.
+- **Serving:** a model logged with `fe.log_model` looks features up in the online store automatically.
+## Why not other designs
+Scheduled triggered syncs are minutes apart and only one sync can run at a time. A feature path that bypasses the offline table loses training reproducibility.
+W: Streaming `write_table` into the offline table, plus a continuous publish, gives second-level freshness online, automatic lookup through the logged model, and the same table for training.
+X: A=Minute-level triggered publish: one sync at a time and a full recompute over history make freshness of seconds unrealistic and costly.
+C=Direct Lakebase writes: the endpoint's automatic lookup works from published online feature tables, and bypassing the offline table loses lineage and training data.
+D=Caller-supplied history: the application would have to keep and send card history, and training would not reproduce the logic from stored features.
+T: Real-time features: stream into the offline feature table, publish `CONTINUOUS`, and let the logged model do the lookup.
+V: Databricks Feature Store, Databricks Online Feature Stores, Structured Streaming
+
+@ DBX-MLP D1 T1.21 advanced tradeoff
+S: A fraud model needs `txn_count_10min` per card and `amount_ratio` (current amount divided by the card's 30-day average). Cards produce thousands of events per second. Which split is best?
+A: Compute both on demand in a Unity Catalog Python function at request time, using the raw event history of the card as an input to the function
+B: Precompute both in the stream and store them in a feature table, since a stored feature is always faster than a function evaluated per request
+C: Compute both in a nightly batch job and publish them online, because the model only needs daily freshness for fraud decisions
+D: Stream `txn_count_10min` and the 30-day average into a feature table with a watermark, and compute `amount_ratio` on demand from the request
+K: D
+G: ## Precompute what depends on history, compute on demand what depends on the request
+- **Windowed aggregates** such as a 10-minute count need event history. Computing them at request time would mean sending or reading all recent events per call. Instead run a Structured Streaming aggregation with `withWatermark` so state stays bounded, write the results to a feature table, and publish it online.
+- **Request-dependent values** such as the current transaction amount do not exist until the request. A Python UDF registered in Unity Catalog and used as a `FeatureFunction` computes the ratio at inference from the request amount and the looked-up 30-day average.
+Both paths use one definition in training (through `create_training_set`) and serving.
+W: History-based aggregates are best streamed into a feature table with bounded state, while the ratio needs the request amount, so an on-demand function combines it with the stored average.
+X: A=All on demand: the function would need the raw history of every card at request time, which is expensive and slow at thousands of events per second.
+B=Everything stored: `amount_ratio` depends on the amount of the transaction being scored, which is unknown until the request, so it cannot be precomputed.
+C=Nightly batch: fraud decisions need minutes-level or fresher velocity features, so daily recomputation scores each transaction with outdated counts.
+T: Stream the history-based aggregates; compute request-dependent features with an on-demand function.
+V: Databricks Feature Store, Structured Streaming
+
+@ DBX-MLP D1 T1.21 advanced troubleshooting
+S: A stream upserts the latest `last_login_ts` per user into a plain feature table (key `user_id`) through `write_table(mode="merge")`. Late-arriving events overwrite newer values with older ones. Which change handles out-of-order data best?
+A: Key a time series table `(user_id, event_ts TIMESERIES)`, so each event is its own row and lookups return the latest row by event time
+B: Increase the stream trigger interval so that late events always arrive before the micro-batch is processed and merged into the table
+C: Add `event_ts` as an ordinary column and trust the merge to keep whichever row has the higher value in that column
+D: Sort the stream by arrival time with `orderBy` before the merge so that the last arrival is always the newest event
+K: A
+G: ## The problem with upserts
+Merge by `user_id` overwrites the stored row with whichever event is processed last. In a stream with delays that is not necessarily the newest event. A column holding the event time does not change merge semantics by itself.
+## Using the timeseries key
+In a time series feature table, the timestamp is part of the key, so an out-of-order event adds a row at its own timestamp instead of replacing a later one. Training and batch lookups then return the latest row at or before each label's time, and publishing to an online store keeps the latest value per entity (deduplicated by the timestamp key). Streaming writes to time series feature tables are supported.
+## Reminder
+Each row written to a time series table must contain all features.
+W: Keying by event time turns late events into correct historical rows, and the as-of lookups and the online publish both pick the latest by timestamp instead of the latest to arrive.
+X: B=Longer trigger: delay in the source is unbounded, so a longer interval only reduces some collisions and adds latency, without guaranteeing order.
+C=Ordinary event_ts column: a merge replaces the row unless the condition says otherwise, and `write_table` does not compare the column, so older data still wins.
+D=Sorting by arrival: sorting by arrival time reproduces the arrival order, which is the problem. Streaming queries also do not support a global sort on this kind of input.
+T: Out-of-order streaming updates need event time in the key (a time series table), not a different trigger or an ordinary timestamp column.
+V: Databricks Feature Store, Structured Streaming
+
+@ DBX-MLP D1 T1.21 advanced troubleshooting
+S: Peak traffic raises p99 latency of feature lookups from an online feature store (created with `create_online_store`), while the streaming writes keep up. CPU on the primary is saturated by reads. What is the best response?
+A: Increase the shuffle partitions of the streaming query so that writes finish faster and free up resources on the online store
+B: Switch the publish mode to `SNAPSHOT` to reduce the number of small incremental writes that compete with reads on the primary
+C: Publish the same feature table to a second online table in the store so that endpoints share read traffic between both tables
+D: Add read replicas with `read_replica_count` (up to three) and, if needed, more capacity, so read traffic is spread
+K: D
+G: ## Scaling reads on an online feature store
+The online store runs on Lakebase. For high-concurrency read workloads, read replicas offload read traffic from the primary; traffic is distributed across them automatically. A store supports up to 3 read replicas (4 compute instances including the primary), and the replicas also provide high availability by taking over if the primary fails. `capacity` (CU_1 to CU_8) sets the compute of the store. Read replicas cannot be added to an Autoscaling project that was created with the projects API or the UI, which also ignores `capacity`.
+## Why other levers fail
+Write-side tuning does not affect read saturation. A second online table for the same feature table is ignored by endpoints, which read the oldest table.
+W: Reads are the bottleneck, so read replicas add capacity for reads and spread the load, with larger capacity as an extra option.
+X: A=Shuffle partitions: this speeds the streaming job, not lookups. Writes already keep up, so the saturated resource is unaffected.
+B=Snapshot mode: this changes how data is copied, not how many readers share the primary, so read saturation persists.
+C=Second online table: endpoints resolve to the oldest online table, so the second table would not receive any traffic.
+T: Read-bound online lookups scale with read replicas (up to three) and capacity, not with write-side or publish-mode changes.
+V: Databricks Online Feature Stores, Lakebase
+
+@ DBX-MLP D1 T1.21 advanced use-case
+S: A source delivers transactions at least once, so the same `txn_id` can appear twice within minutes. A streaming job computes `txn_count_10min` per card, which is inflated. Which fix bounds state while removing duplicates before aggregation?
+A: Replace `merge` with `append` in `write_table`, since appended rows are deduplicated by primary key when the table is read
+B: Apply `withWatermark("event_ts", "10 minutes")` and `dropDuplicates(["txn_id", "event_ts"])` before the windowed count
+C: Call `distinct()` on the stream in each micro-batch so that the repeated events from the previous batches are also removed
+D: Deduplicate after the aggregation by dividing the count by the average number of repeats observed in a sample
+K: B
+G: ## Deduplicating streams
+In Structured Streaming, `dropDuplicates` on a stream keeps all seen identifiers in state. Without a watermark the state grows forever. With a watermark and the event-time column included in the subset (`dropDuplicates(["guid", "eventTime"])`), Spark can drop state for rows older than the watermark, so duplicates arriving within the delay threshold are removed and state stays bounded. `dropDuplicatesWithinWatermark` can deduplicate on the identifier alone, with the event time allowed to differ between duplicates.
+## Order of operations
+Deduplicate before the aggregation: counts computed from duplicated events cannot be corrected afterwards.
+```
+(events.withWatermark("event_ts","10 minutes")
+  .dropDuplicates(["txn_id","event_ts"])
+  .groupBy("card_id", F.window("event_ts","10 minutes")).count())
+```
+W: The watermark limits state and the dedupe key with event time removes repeated events first, so the windowed counts are accurate.
+X: A=Append: a feature table's key does not deduplicate on read, and the counts would already be computed incorrectly upstream.
+C=distinct per batch: `distinct()` is not supported as a streaming deduplication, and it would see only one micro-batch rather than earlier duplicates.
+D=Statistical correction: scaling by a sampled rate gives approximate and drifting counts, and it fails for bursts of retries.
+T: Deduplicate streams before aggregation with a watermark plus `dropDuplicates` on id and event time to keep state bounded.
+V: Databricks Feature Store, Structured Streaming
+
+@ DBX-MLP D1 T1.22 advanced use-case
+S: A pricing model needs `bid_ratio = request_bid / avg_bid_30d`. The 30-day average is a stored feature; `request_bid` exists only in the request. The ratio must be computed identically in training, batch scoring and Model Serving. What is the best implementation?
+A: Compute `bid_ratio` in the training notebook with pandas, and ask client applications to compute the same ratio before they call the endpoint
+B: Store `bid_ratio` in the feature table and refresh it hourly, so the endpoint can look up the ratio like any other feature
+C: Register a Python UDF in Unity Catalog, bind it with a `FeatureFunction`, and log the model with `fe.log_model(..., training_set=training_set)`
+D: Add the ratio logic inside a custom pyfunc and keep training on columns that were computed separately in a notebook
+K: C
+G: ## On-demand features
+In Databricks, on-demand features are computed at inference time with Python user-defined functions. They are for values not known ahead of time that depend on request-time inputs. The UDF is a Unity Catalog function (three-level name), governed and discoverable in Catalog Explorer.
+## Workflow
+- In `create_training_set`, pass a `FeatureFunction(udf_name=..., input_bindings={...}, output_name=...)` next to the `FeatureLookup`s.
+- Log with the Feature Store `log_model` so the model evaluates the UDF automatically.
+- `score_batch` computes on-demand features too, and Model Serving runs the UDF for each request.
+This gives one definition across training and inference, which removes training-serving skew.
+W: A Unity Catalog UDF in a `FeatureFunction`, with a model logged through `fe.log_model`, is evaluated identically in training, `score_batch` and serving.
+X: A=Pandas plus client code: each caller reimplements the logic, which is the classic source of skew and cannot be governed centrally.
+B=Stored ratio: the request bid is not known in advance, so the ratio cannot be stored in advance; a stale value would be wrong for each request.
+D=Logic in pyfunc only: training would use separately computed columns, so the logic exists in two places and the lineage tracking of the function is missing.
+T: Features that need request-time inputs are on-demand UDFs in Unity Catalog, bound with `FeatureFunction`.
+V: Databricks Feature Store, Unity Catalog, Model Serving
+
+@ DBX-MLP D1 T1.22 advanced troubleshooting
+S: An on-demand UDF takes `x`, a value from a `FeatureLookup`, and returns `x * x`. Batch scoring works. For brand-new users, the online endpoint returns errors, though the same users score in batch. What is the likely cause and fix?
+A: Online serving requires scalar UDFs to be written in SQL, so rewrite the function as a SQL expression without any Python
+B: The online store rejects new users, so rerun `publish_table` in `SNAPSHOT` mode until the new users appear in the table
+C: Missing lookups reach the UDF as `None` in `score_batch` but as `float("nan")` online, so the function must handle both cases
+D: Python UDFs cannot read values from `FeatureLookup`, so pass the lookup value in the request payload as a raw input
+K: C
+G: ## Missing lookup values
+When an on-demand UDF depends on a `FeatureLookup` and the requested key is not found, the value is environment dependent: with `score_batch` it is `None`; with online serving it is `float("nan")`. A UDF that only tests `x is None` raises or returns `nan` online.
+```
+CREATE OR REPLACE FUNCTION square(x INT) RETURNS INT LANGUAGE PYTHON AS $$
+import numpy as np
+if x is None or np.isnan(x): return 0
+return x * x
+$$
+```
+You can also set `default_values` on the `FeatureLookup` to give a missing key a fixed value; with `rename_outputs`, use the renamed names.
+W: The UDF receives `None` offline and `nan` online for unknown keys, so checking both (or using `default_values`) removes the online failure.
+X: A=SQL only: Python UDFs are the documented mechanism for on-demand features and are executed by Model Serving.
+B=Rejecting new users: a missing key is a normal lookup miss rather than an online-store rejection, and snapshot republish does not add keys that do not exist.
+D=No lookup in UDFs: UDFs can take the results of lookups as input bindings; that is the documented pattern (the ratio example combines a lookup and a request input).
+T: On-demand UDFs must handle `None` (batch) and `nan` (online) for missing lookups, or use `default_values`.
+V: Databricks Feature Store, Model Serving
+
+@ DBX-MLP D1 T1.22 advanced troubleshooting
+S: An on-demand UDF imports `scipy` for a statistic. The model trains and scores in a notebook, but the Model Serving deployment fails during the build. What is the correct fix?
+A: Declare the package with `extra_pip_requirements` in `fe.log_model`, or when creating the FeatureSpec for Feature Serving
+B: Install `scipy` on the cluster used for training as a cluster library, which Model Serving copies into the endpoint at deployment
+C: Add `import scipy` to the top of the Unity Catalog function, because the serving image installs imported modules at startup
+D: Remove the import and send precomputed statistics from the client, since UDFs may only use the Python standard library
+K: A
+G: ## Dependencies of UDFs
+A UDF registered in Unity Catalog runs in an isolated way inside the serving image. If it imports Python packages, you must list them: `extra_pip_requirements=[...]` in `fe.log_model` for model serving, and in `fe.create_feature_spec` for Feature Serving (client 0.17.0 or above). Entries are PyPI requirement strings or paths to `.whl` files in a Unity Catalog volume (the endpoint creator needs `READ VOLUME`, `USE CATALOG` and `USE SCHEMA`).
+Dependencies in a UDF's `ENVIRONMENT` clause apply to offline SQL execution; Feature Serving does not copy them, so declare every package including those used by upstream UDFs. Build logs show installation errors and version conflicts.
+W: The serving build installs only what is declared, so `scipy` goes into `extra_pip_requirements`, in the logged model or in the FeatureSpec.
+X: B=Cluster library: training clusters and serving images are separate environments; cluster libraries are not copied into the endpoint.
+C=Import line only: imports are not resolved into installs; the build only installs declared requirements, so the missing module still fails.
+D=Standard library only: UDFs may use third-party packages if they are declared, so there is no need to avoid them.
+T: Declare UDF package dependencies with `extra_pip_requirements` at logging or FeatureSpec creation.
+V: Databricks Feature Store, Model Serving
+
+@ DBX-MLP D1 T1.22 advanced comparison
+S: A rules engine (not an ML model) needs `spending_gap = ytd_spend - average_yearly_spend` for a user on every call, where `ytd_spend` comes from the caller and the average from a feature table. A data scientist suggests deploying a dummy model. What is the better design?
+A: Deploy a dummy model that returns its input unchanged, because only Model Serving endpoints can host Unity Catalog UDFs
+B: Query the offline Delta table through a SQL warehouse on every call, because Feature Serving endpoints cannot read online tables
+C: Create the feature table as a view and let the rules engine compute the gap in its own application code on every call
+D: Create a `FeatureSpec` with a lookup and a function, publish the table online, and serve it through a Feature Serving endpoint
+K: D
+G: ## Two ways to serve features
+- **Model Serving** deploys a model trained on feature tables; the same endpoint looks up or computes features and returns predictions. Recommended when features are ultimately used for model inference.
+- **Feature Serving** deploys a `FeatureSpec` directly, without a model; the endpoint returns the requested feature outputs. Use it when an application needs feature values.
+A `FeatureSpec` is a Unity Catalog entity that combines `FeatureLookup`s and `FeatureFunction`s. The tables it references must be published to an online store (Databricks Online Feature Store or a third-party store). Both approaches support precomputed and on-demand features.
+## Here
+The gap needs the caller's `ytd_spend` and a stored average: a FeatureSpec with lookup and function, served by a Feature Serving endpoint, returns it without a model.
+W: A FeatureSpec combines the lookup and the UDF, and a Feature Serving endpoint returns the computed value from the online store, no model required.
+X: A=Dummy model: Feature Serving exists for needs without a model, and a dummy model adds an artifact to maintain without extra capability.
+B=Warehouse queries: this gives up the low-latency online path, and Feature Serving endpoints read published online tables precisely for that purpose.
+C=View plus application code: the logic is again outside governed Unity Catalog functions, so every consumer reimplements it, and views are not served online.
+T: Applications that need feature values, not predictions, use Feature Serving with a `FeatureSpec`.
+V: Databricks Feature Store, Model Serving
+
+@ DBX-MLP D1 T1.22 advanced use-case
+S: A model was trained with features that are looked up from an online store. For one request, the caller already has a fresher value of a stored feature, `cart_value`, from its own session. How can the caller use it without changing the model?
+A: Retrain the model with `cart_value` as an on-demand feature so that the caller can send it in the request in future releases
+B: Include the feature value in the request payload; it overrides the looked-up value and must match the data type the model expects
+C: Write the value into the feature table, publish it in `CONTINUOUS` mode, and send the request after the sync finishes
+D: Send the value in a custom HTTP header, which Model Serving maps onto the stored feature by name automatically
+K: B
+G: ## Overriding looked-up features
+With a model logged by `fe.log_model`, Model Serving looks up every required feature from the online store automatically. To override a feature value when scoring through the REST API, include that feature in the API payload. The new value must conform to the data type the model expects for that feature.
+## When to use it
+Overrides suit what-if checks or a caller that knows a fresher value for this one call. If the value is always supplied by the request, an on-demand feature (a `FeatureFunction`) or a plain model input is the cleaner long-term design, but it is not required here.
+W: Putting the value in the payload overrides the lookup for that request, with no change to the model, as long as the type matches.
+X: A=Retrain first: retraining is not needed; the lookup override works for the current model.
+C=Write and publish: this changes the stored value for all callers and adds sync latency, while the need is one request's fresher value.
+D=Custom header: Model Serving does not map headers onto features; overrides are carried in the request payload.
+T: Override a looked-up feature per request by sending it in the payload, with the expected data type.
+V: Databricks Feature Store, Model Serving

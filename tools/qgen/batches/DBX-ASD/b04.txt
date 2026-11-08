@@ -1,0 +1,581 @@
+# DBX-ASD batch 04: D2 T2.4 (temporary views), D3 T3.1 (withColumn/drop/explode/split), T3.2 (dropDuplicates and validation), T3.3 (count/approx_count_distinct/summary), single answer, detailed explanations
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.createOrReplaceTempView.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.dropDuplicates.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.summary.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.describe.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.withColumn.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.withColumns.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.drop.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.functions.explode.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.functions.split.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.functions.approx_count_distinct.html
+# src: https://spark.apache.org/docs/latest/sql-ref-name-resolution.html
+# src: https://spark.apache.org/docs/latest/sql-error-conditions.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.SparkSession.sql.html
+
+@ DBX-ASD D2 T2.4 applied troubleshooting
+S: A notebook cell registers a DataFrame three times in the same session, in this order:
+```
+df.createTempView("v")
+df.createOrReplaceTempView("v")
+df.createTempView("v")
+```
+What happens when the cell runs?
+A: The first two lines succeed and the third raises an AnalysisException, because createTempView refuses an existing name
+B: All three lines succeed, because a temporary view with the same name is overwritten by any of the registration methods
+C: The second line raises the AnalysisException, because a name that already has a view can never be registered again in a session
+D: Only the first line succeeds; the later lines are ignored with a warning and the view keeps the first registration
+K: A
+G: ## Two ways to register a temporary view
+A local temporary view is a name in the session catalog that points to a logical plan. PySpark offers two calls:
+- `df.createTempView("v")` creates the view and fails with an `AnalysisException` if a temporary view called `v` already exists in the session.
+- `df.createOrReplaceTempView("v")` creates it, or replaces the existing plan under that name.
+## Why the difference matters
+Notebook cells are re-run all the time. The OrReplace form is idempotent, so a cell can be run again. The strict form is useful when a second registration under a name would be a bug you want to catch.
+W: createTempView on a taken name: the first line creates `v`, the second replaces it silently, and the third asks for a plain create on a name that is already registered, so the analyzer rejects it.
+X: B=Overwrite assumption: only the OrReplace form overwrites. The plain create form is strict by design, so it cannot be treated as an alias.
+C=Second line: this is the OrReplace form, which exists exactly to swap the plan under a taken name, so it succeeds.
+D=Silent ignore: Spark does not skip duplicate registrations quietly. The strict call fails loudly and the OrReplace call really replaces the plan.
+T: Use createOrReplaceTempView for re-runnable code; plain createTempView fails if the name is taken.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.4 applied use-case
+S: A table `orders` exists. A developer runs the two statements below and then wants to continue in the DataFrame API.
+```
+spark.sql("CREATE OR REPLACE TEMP VIEW big AS SELECT * FROM orders WHERE amt > 100")
+df2 = spark.table("big")
+```
+What is `df2`?
+A: A Python list of Row objects holding the filtered orders, because the view definition was executed when the statement ran
+B: An error, because a view created in SQL can be read only with SQL and not with a DataFrame call
+C: A DataFrame with a stored copy of the filtered rows, so later changes to `orders` never reach it
+D: A lazy DataFrame over the view's query, so transformations such as `df2.groupBy(...)` can follow and nothing runs until an action
+K: D
+G: ## SQL and DataFrames are two front ends
+`spark.sql(...)` and `spark.table(...)` both return DataFrames. A `CREATE TEMP VIEW ... AS SELECT` statement registers a name for a query in the session catalog; `spark.table("big")` then returns a DataFrame whose logical plan reads that view.
+## Laziness still applies
+Neither call starts a job. Filters, joins and aggregations on `df2` are merged into the same plan and optimized together when an action runs.
+W: spark.table on a view: the call resolves the name in the catalog and returns a DataFrame whose plan is the view's query. SQL and the DataFrame API share one catalog and one optimizer, so both can be mixed.
+X: A=Eager list: only `collect()` returns Row objects. A view stores a query, and creating it computes nothing.
+B=SQL-only claim: views created with SQL are ordinary catalog entries, and `spark.table` reads tables and views alike.
+C=Stored copy: a temporary view does not store data. Without caching, each action re-reads `orders` through the view's plan.
+T: A temp view is a named query; spark.table returns it as a lazy DataFrame you can keep transforming.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.4 advanced comparison
+S: A table `default.sales` has 1,000 rows. In the same session a developer runs:
+```
+spark.range(3).createOrReplaceTempView("sales")
+a = spark.sql("SELECT count(*) AS n FROM sales").first().n
+b = spark.sql("SELECT count(*) AS n FROM default.sales").first().n
+```
+What are `a` and `b`?
+A: a is 1000 and b is 1000, because a persistent table always wins over a temporary view with the same name
+B: a is 3 and b is 3, because registering the view overwrites the persistent table's data in the metastore
+C: a is 3 and b is 1000, because the temp view wins for the unqualified name and the qualified name reaches the table
+D: Both statements fail with an AnalysisException, because a view and a persistent table cannot share a name in one session
+K: C
+G: ## Temporary views and tables live in different namespaces
+A temporary view belongs to the session, not to a database. When SQL refers to a single-part name, the analyzer checks the session's temporary views before the current database. A qualified name such as `default.sales` is looked up in that database only.
+## Practical consequence
+A forgotten temp view can silently change the meaning of a query that works in a fresh session. Qualify table names in shared code, or use distinct view names.
+W: Name resolution: an unqualified name is looked up among the session's temporary views first. A name qualified with a database skips them and reaches the table.
+X: A=Table wins: it is the reverse. A temporary view shadows a persistent table of the same unqualified name.
+B=Overwrites the table: a temp view lives only in the session and never touches the metastore entry or its files.
+D=Name clash: Spark allows the pair. The view sits in the session's temporary namespace and the table in a database, so no clash.
+T: An unqualified name resolves to the temp view first; a database-qualified name reaches the table.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.4 applied use-case
+S: A DataFrame has the ids 1, 2, 3, 4 and 5 in a column `id`. What does this code return?
+```
+spark.range(1, 6).createOrReplaceTempView("t")
+spark.sql("SELECT count(*) AS n FROM t WHERE id > :lo",
+          args={"lo": 3}).collect()
+```
+A: [Row(n=3)], because the bound value is included and the ids 3, 4 and 5 qualify
+B: [Row(n=2)], because `:lo` is bound to 3 and the ids 4 and 5 pass the strict comparison
+C: An error, because `args` accepts only a list of values and a dict cannot be passed to spark.sql at all
+D: [Row(n=5)], because parameter markers are ignored and the predicate is not applied
+K: B
+G: ## Parameterized queries
+`spark.sql(query, args=...)` accepts parameter markers so that values are passed as typed literals instead of being pasted into the SQL text.
+- Named markers use `:name` with a dict, for example `args={"lo": 3}`.
+- Positional markers use `?` with a list, for example `args=[3]`.
+This avoids quoting mistakes and SQL injection from user input, which string formatting of the query does not.
+## The example
+`spark.range(1, 6)` gives ids 1 to 5. With `id > 3`, only 4 and 5 remain, so the count is 2.
+W: Named parameter: `:lo` is a parameter marker, a dict in `args` supplies the values by name, and `id > 3` keeps 4 and 5.
+X: A=Inclusive bound: the operator is `>`, not `>=`, so the value 3 itself is excluded.
+C=Wrong container: a dict binds named markers (`:name`) and a list binds positional markers (`?`). Both are accepted.
+D=Ignored marker: the marker is replaced by the supplied literal during analysis. A missing value would raise an error rather than skip the filter.
+T: Pass values with spark.sql(..., args=) and :name markers; do not paste user input into the text.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.4 applied troubleshooting
+S: A job registers a view in one application: `df.createOrReplaceTempView("daily")`. A scheduled second `spark-submit` application then runs `spark.table("daily")` and fails with a table or view not found error. What is the cause and the fix?
+A: The view expired because the default time to live is one day; raise the setting for view lifetime in the session configuration
+B: A temporary view lives only in the session that created it; write the data with `saveAsTable` or to files and let the second application read that
+C: The second application needs `spark.table("global_temp.daily")`, because the global_temp prefix makes any view visible to every application
+D: The name `daily` is a reserved keyword; rename the view and both applications will then find it
+K: B
+G: ## Scope of a temporary view
+- A local temporary view is visible to one `SparkSession` only.
+- A global temporary view (`createGlobalTempView`, read with the `global_temp.` prefix) is visible to all sessions of the same Spark application.
+- Neither survives the application. Data that must outlive the application or be shared with another one has to be written: `saveAsTable` registers a table in the metastore, and `write.parquet(path)` leaves files.
+W: Session scope: the view is a catalog entry in memory of one application. Another application has its own empty catalog, so only persisted data or a metastore table can be shared.
+X: A=TTL idea: temporary views have no time to live. They last until the session ends or the view is dropped.
+C=global_temp: global temporary views are shared by sessions of the same application only, and disappear when it ends.
+D=Reserved name: the failure comes from scope, not spelling. A renamed view would be just as invisible to a different application.
+T: Views end with the application; share across applications by persisting a table or files.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.4 advanced definition
+S: A developer runs the code below. The data in `df` has five rows, and the filter keeps only two of them.
+```
+df.createOrReplaceTempView("t")
+df = df.filter("x > 10")
+spark.sql("SELECT count(*) FROM t").show()
+```
+Which statement about the count in the output is correct?
+A: It counts all five rows, because the view captured the original plan and reassigning the variable does not change it
+B: It counts two rows, because a view follows the latest value of the Python variable that was registered under its name
+C: It counts two rows, because Spark pushes any later filter back into every view that was built from the same DataFrame object
+D: It fails, because a view can no longer be queried once the DataFrame it was created from has been reassigned in Python
+K: A
+G: ## DataFrames are immutable
+Every transformation returns a new DataFrame with a new logical plan; the original is untouched. `createOrReplaceTempView("t")` registers the plan of the DataFrame at that moment.
+## What the example shows
+After `df = df.filter(...)`, the name `df` points to a new object. The view `t` still has the plan without the filter, so the count is 5. To get the filtered data into SQL, register the new DataFrame again under the same name.
+W: Immutable plan: `filter` returns a new DataFrame. The name `t` still points to the plan that was registered before the reassignment.
+X: B=Variable link: the view stores a plan, not the Python variable name. Rebinding `df` has no effect on the catalog.
+C=Pushdown into views: optimizer rules rewrite the plan of one query only. They never edit another registered plan.
+D=Dangling view: the old DataFrame object is only a handle. The plan lives in the catalog and stays valid.
+T: A view captures the plan at registration; reassigning the variable does not update it.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.1 applied definition
+S: A DataFrame has one row with `s = 'a-b-c-d'`. A developer evaluates this:
+```
+from pyspark.sql import functions as F
+df.select(F.split("s", "-", 2).alias("p")).first().p
+```
+What does the expression return?
+A: ['a', 'b'], because the limit discards everything after the second element
+B: ['a', 'b', 'c', 'd'], because the limit is only used when the pattern is written as a regular expression
+C: ['a-b', 'c-d'], because a limit of 2 splits the string into two equal parts
+D: ['a', 'b-c-d'], because a limit of 2 caps the array length and the last element keeps the rest of the string
+K: D
+G: ## split(str, pattern, limit=-1)
+`F.split` returns an array of strings. The pattern is a Java regular expression, and `limit` controls how often it is applied:
+- `limit > 0`: the array has at most `limit` elements and the last one holds all input after the last match.
+- `limit <= 0` (default -1): the pattern is applied as many times as possible.
+## The example
+With limit 2 the pattern is applied once. The first element is `a`, the second is the rest, `b-c-d`.
+W: The limit argument: with a positive limit the pattern is applied at most limit minus one times, and the last entry holds everything after the last match.
+X: A=Truncation: nothing is discarded. The last element carries the unsplit remainder.
+B=Limit ignored: the limit applies to every pattern, and a plain dash is also treated as a regex.
+C=Equal halves: split works left to right on matches and has no notion of balanced parts.
+T: split with a positive limit keeps the remainder in the last array element.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.1 applied use-case
+S: `df` has the columns `id` and `tags` (array of strings) with three rows: `(1, ['x','y'])`, `(2, [])` and `(3, NULL)`. A report must contain one row per tag and must still list ids 2 and 3. The developer runs `df.select("id", F.explode("tags").alias("tag"))`. What is the result and what fixes the requirement?
+A: Ids 1, 2 and 3 appear, with null tags for 2 and 3; no change is needed
+B: The query fails because explode cannot take a null array; replace the null with an empty array and the problem is solved
+C: Only id 1 appears, in two rows; use explode_outer to keep ids 2 and 3 with a null tag
+D: Only id 1 appears, in two rows; use posexplode, which also keeps rows whose array is empty or null
+K: C
+G: ## Generators and empty arrays
+`explode` is a generator: each input row produces zero or more output rows.
+- `explode(col)` returns a row per array element (or per map entry) and produces no rows for an empty or null collection, so the parent row disappears.
+- `explode_outer(col)` returns one row with null for an empty or null collection, so the parent row stays.
+- `posexplode` and `posexplode_outer` do the same and add a `pos` column.
+## Check for silent row loss
+When a join key or id suddenly goes missing after a flatten step, an inner-style explode is the usual cause.
+W: explode vs explode_outer: explode emits one row per element and nothing for an empty or null array. The outer variant emits one row with null for those cases.
+X: A=Null rows: that is the outer behavior. Plain explode produces no row at all for an empty or null array.
+B=Null failure: explode accepts nulls without error. An empty array would be dropped as well, so the replacement would not keep id 3.
+D=posexplode: it adds a position column but drops empty and null arrays just like explode. Its outer variant is the one that keeps them.
+T: explode drops rows with empty or null arrays; explode_outer keeps them with a null value.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.1 applied definition
+S: A DataFrame has the columns `id`, `price`, `qty` in this order. A developer runs:
+```
+out = df.withColumn("price", F.col("price") * 2)
+print(out.columns)
+```
+What is printed?
+A: ['id', 'price', 'qty', 'price'], because withColumn always appends and leaves duplicate names
+B: ['id', 'qty', 'price'], because the replaced column moves to the end of the schema
+C: ['id', 'price', 'qty'], because a column with an existing name is replaced in its current position
+D: An error, because the name price already exists and a new column needs a unique name
+K: C
+G: ## withColumn semantics
+`DataFrame.withColumn(name, expr)` returns a new DataFrame that adds the column, or replaces the existing column of that name. The expression must refer to columns of this same DataFrame.
+## Order
+A replaced column stays where it was. A new column goes to the end. If you need a different order, finish with `select(...)`.
+W: Replace in place: withColumn adds a column or replaces the one with the same name, and the replaced column keeps its position.
+X: A=Duplicate column: withColumn does not create a second column with the same name. It replaces.
+B=Moved to end: the position is kept. Use a `select` when you need a specific order.
+D=Name clash: replacing is the documented behavior, and no error occurs.
+T: withColumn with an existing name replaces that column in place and adds no duplicate.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.1 applied troubleshooting
+S: A DataFrame has the columns `id`, `amount` and `ts`. A cleanup step runs `df.drop("amount", "typo_col").columns`. What happens?
+A: It raises an AnalysisException for typo_col, and no columns at all are dropped, so amount stays in the schema too
+B: It returns ['id', 'ts'], because drop ignores a column name that is not in the schema instead of raising an error
+C: It returns ['id', 'ts', 'typo_col'], because unknown names are added to the schema as empty placeholder columns
+D: It returns ['id', 'amount', 'ts'], because a drop with an unknown name is cancelled
+K: B
+G: ## drop is forgiving, select is not
+`DataFrame.drop(*cols)` returns a new DataFrame without the named columns, and it is a no-op for names that are not in the schema. `select("typo")` or `col("typo")` on a missing column fails at analysis.
+## Consequence
+A misspelled name in `drop` does not fail the job, and the column you meant to remove stays in the output, perhaps even into a written file. Compare the schema after the cleanup, or select the columns you want to keep.
+W: Quiet no-op: the documented behavior of drop is to ignore names that do not exist. A typo therefore goes unnoticed.
+X: A=Strict drop: that is how select behaves. For drop, an unknown name is simply skipped.
+C=Added column: drop only removes columns from the schema. It never creates new ones, empty or otherwise.
+D=All or nothing: Spark does not cancel the call. The valid name is still removed.
+T: drop ignores unknown names silently; validate the schema if a cleanup must really remove a column.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.1 applied definition
+S: `df` has the columns `id` and `xs` (array of strings), and a row `(1, ['a','b'])`. A developer runs `df.select("id", F.posexplode("xs")).columns`. What are the column names of the result?
+A: ['id', 'pos', 'col'], because posexplode adds a position column and names the element column col by default
+B: ['id', 'xs'], because explode functions only change the number of rows in the output and never the schema
+C: ['id', 'index', 'value'], because the generator names its outputs index and value
+D: ['id', 'col'], because the position of an element is available only through a separate window function
+K: A
+G: ## Generator column names
+- `explode(arr)` outputs one column named `col`.
+- `posexplode(arr)` outputs `pos` (zero-based index) and `col`.
+- `explode(map)` outputs `key` and `value`.
+Use `.alias(...)` (with a tuple of names for two columns, `.alias("pos", "tag")`) to give them clear names.
+W: Default names: posexplode on an array returns the index as `pos` and the element as `col`.
+X: B=Same schema: a generator replaces the array column with its output columns.
+C=index and value: those are not the default names. For a map the pair is key and value.
+D=Window position: the position comes from the generator itself, no window is needed.
+T: posexplode on an array yields the columns pos and col.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.1 advanced tradeoff
+S: A feature-engineering step adds 300 derived columns with a Python loop, `for c in cols: df = df.withColumn(c + "_z", expr(c))`. The job takes minutes to plan before any data is read. What is the best change?
+A: Call `df.cache()` after each loop pass so every projection is stored and need not be planned again
+B: Raise `spark.sql.shuffle.partitions` so that the planning work is spread across many more executor tasks
+C: Replace the loop with a `repartition(300)` call so that one task runs for each new derived column
+D: Build the expressions first and add them in one `withColumns` or `select` call, so the plan has one projection
+K: D
+G: ## Where the time goes
+Transformations are lazy, but analysis is not: each `withColumn` creates a new logical plan that the analyzer resolves against the previous one. Hundreds of chained calls produce a deep plan and slow driver-side planning.
+## What to do
+Create the column expressions in a Python list or dict, and add them together:
+- `df.withColumns({name: expr, ...})` (available since Spark 3.3), or
+- `df.select("*", *exprs)`.
+The result is the same data with one projection.
+W: Single projection: each withColumn call adds a projection that the analyzer must resolve again. One call with all expressions keeps the plan small.
+X: A=Cache: caching stores data after an action, and the planning cost is paid before data is touched. It also fills the storage memory.
+B=Shuffle partitions: planning runs on the driver and has nothing to do with the number of shuffle tasks.
+C=repartition: it changes data layout at run time. The slow part here is the analysis on the driver.
+T: Add many columns in one withColumns or select call, not in a long withColumn loop.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.1 advanced troubleshooting
+S: `df` has two array columns, `a` and `b`. A developer writes `df.select(F.explode("a"), F.explode("b"))` to get all combinations of their elements, and the query is rejected at analysis. What is the correct way to get the combinations?
+A: Wrap both columns in `F.array(...)` and explode the result once, which pairs every element of a with one of b
+B: Set `spark.sql.allowMultipleGenerators` to true, then the same select works
+C: Use `posexplode` for both columns, which accepts two array columns in a single call
+D: Explode one array per step, for example `df.withColumn("x", F.explode("a")).withColumn("y", F.explode("b"))`
+K: D
+G: ## One generator per select
+Spark allows only one generator (`explode`, `posexplode`, ...) in a select list. Two in the same select fail analysis.
+## Combinations
+Applying the generators in separate steps works. The first step multiplies rows by the length of `a`; the second multiplies again by the length of `b`, so a row with 2 and 3 elements gives 6 rows. Use `explode_outer` if rows with empty arrays must survive.
+W: One generator per projection: two generators in one select are not allowed. Chained steps each hold one, and the second multiplies the rows of the first.
+X: A=Array of arrays: one explode over that array gives two rows holding whole arrays, not the pairing of single elements.
+B=No such setting: Spark does not ship a switch that permits several generators in one select.
+C=posexplode: it takes one collection, like explode. Two calls in a single select hit the same rule.
+T: Only one explode per select; chain them to produce the cross product of two arrays.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.2 applied troubleshooting
+S: A cleanup step runs `df.dropDuplicates(["id", "typo_col"])` on a DataFrame whose columns are `id`, `amount` and `ts`. A colleague expects it to ignore the unknown name the way `drop("typo_col")` does. What happens?
+A: It runs and compares rows on `id` alone, because names missing from the schema are skipped as they are in drop
+B: It returns the DataFrame unchanged, because a subset that contains an unknown column turns the deduplication off
+C: It raises an AnalysisException, because every column in the subset must resolve against the schema, unlike the names passed to drop
+D: It runs and treats `typo_col` as NULL in every row, so only rows that repeat the same `id` are removed
+K: C
+G: ## Subset names are checked
+`dropDuplicates(subset)` groups the rows by the listed columns, so each name has to resolve to a column of the DataFrame. An unknown name fails analysis with an error that lists the available columns.
+## Compare with drop
+`drop("typo_col")` is a no-op for a missing name, which hides typos. `dropDuplicates`, `select`, `filter` and `withColumn` expressions all fail loudly instead. Prefer a loud failure in validation code: a deduplication that silently used only `id` would delete rows that differ in the other key column.
+W: Name resolution: the subset becomes the grouping key of the deduplication, so a name that is not in the schema is an analysis error and the job stops before any data is read.
+X: A=Skipped name: that is the drop behavior. For dropDuplicates a name that is missing from the schema is an error, so the key never silently shrinks to `id`.
+B=Deduplication off: Spark has no rule that disables deduplication for a bad subset. It rejects the call instead.
+D=NULL column: a column that does not exist is never substituted by NULL values. The name must match the schema (case rules follow `spark.sql.caseSensitive`).
+T: dropDuplicates validates its subset names and fails on an unknown column; drop silently ignores them.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.2 applied comparison
+S: `df` has the columns `id`, `name`, `ts` and the rows `(1,'a',10)`, `(1,'a',20)`, `(2,'b',30)`. What do `df.distinct().count()` and `df.dropDuplicates(["id","name"]).count()` return?
+A: 2 and 2, because distinct also looks only at the key columns that are listed elsewhere
+B: 3 and 2, because distinct compares all columns while the subset version compares only id and name
+C: 3 and 3, because dropDuplicates with a subset keeps all rows and only changes the column order
+D: 2 and 3, because dropDuplicates removes rows with the same id and distinct then removes none
+K: B
+G: ## Two deduplication calls
+- `distinct()` removes rows that are identical in every column. It is the same as `dropDuplicates()` without arguments.
+- `dropDuplicates(subset)` compares only the listed columns and returns the full rows, with one row kept per distinct combination.
+## The example
+All three rows are different when `ts` is compared, so distinct gives 3. With subset `id` and `name`, the first two rows form a single group, so 2 rows remain.
+W: Whole row versus subset: all three rows differ in at least one column, but two share id and name.
+X: A=Key-only distinct: distinct has no subset. It always compares every column.
+C=Subset ignored: the subset limits the comparison, and rows matching on it are reduced to one.
+D=Reversed: it is distinct that removes none of these rows, and the subset call that merges the first two.
+T: distinct compares every column; dropDuplicates(subset) compares only the listed ones.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.2 applied definition
+S: `df` has the columns `id` (int) and `v` (string) and the rows `(1, NULL)`, `(1, NULL)` and `(2, 'x')`. What does `df.dropDuplicates().count()` return?
+A: 2, because for duplicate detection two NULLs count as equal, so the first two rows collapse
+B: 3, because NULL is not equal to NULL and rows that hold a NULL value are never treated as duplicates
+C: 1, because rows with NULL are all removed and a single non-null row remains
+D: An error, because dropDuplicates needs a non-null subset and the call has none
+K: A
+G: ## NULL in comparisons and in grouping
+In a filter, `NULL = NULL` is unknown, so such a row does not pass. Grouping, `distinct` and `dropDuplicates` follow another rule: NULLs belong to the same group.
+## The example
+Rows 1 and 2 are the same row `(1, NULL)`, so one is kept. With row 3 the result has 2 rows. If NULL should mean "unknown, keep both", fill the column with a distinguishing value first.
+W: NULL equality in dedup: grouping and distinct operations treat NULLs as the same value, unlike the `=` operator.
+X: B=SQL comparison logic: `NULL = NULL` is not true in a filter, but deduplication uses grouping semantics, which put NULLs together.
+C=Null removal: dropDuplicates does not drop nulls. Null handling is `dropna`.
+D=No error: without arguments all columns are compared and null values are allowed.
+T: dropDuplicates treats NULLs as equal, unlike a filter with =.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.2 applied use-case
+S: `df` has the columns `id`, `c1`, `c2` and the rows `(1,'a','b')`, `(2,NULL,NULL)`, `(3,'x',NULL)`. A validation step runs `df.dropna(how="all", subset=["c1","c2"])`. Which ids remain?
+A: Ids 1 and 3, because a row is dropped only when every listed column is NULL
+B: Only id 1, because any NULL in the listed columns removes the row
+C: Ids 1, 2 and 3, because dropna with a subset reports problems and does not remove rows
+D: Only id 3, because how=all keeps the rows that are partly NULL and removes the complete ones
+K: A
+G: ## dropna parameters
+`df.dropna(how, thresh, subset)` (also `df.na.drop`):
+- `how="any"` (default) drops a row if any examined column is NULL; `how="all"` drops it only if all examined columns are NULL.
+- `thresh=n` keeps rows with at least n non-null values and overrides `how`.
+- `subset` limits the columns that are examined; other columns are ignored.
+## The example
+With subset `c1`, `c2` and `how="all"`, only row 2 has no value in either column.
+W: how=all: only row 2 has NULL in both c1 and c2. Row 3 has one non-null value among the listed columns, so it stays.
+X: B=how=any: that is the default behavior, and it would drop rows 2 and 3.
+C=Report only: dropna really removes the rows that match its rule and returns a smaller DataFrame, it does not flag them.
+D=Reversed: rows 1 and 3 are not removed. Row 1 has no NULL at all and stays.
+T: dropna(how=all, subset=...) drops rows only if all listed columns are NULL.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.2 applied troubleshooting
+S: A validation job needs the ids that occur more than once in `df`, as a DataFrame with the ids and their number of occurrences. Which code does that?
+A: `df.dropDuplicates(["id"])`, because the removed rows show which ids occurred more than once
+B: `df.distinct().filter("count > 1")`, because distinct adds a count column to each row
+C: `df.groupBy("id").count().filter("count = 1")`, because duplicated ids are listed with count 1
+D: `df.groupBy("id").count().filter("count > 1")`
+K: D
+G: ## Finding duplicates versus removing them
+`dropDuplicates` answers "give me one row per key". To find the keys that repeat, aggregate:
+- `groupBy("id").count()` returns one row per id with a `count` column.
+- `filter("count > 1")` keeps the repeated ids.
+Another quick check compares `df.count()` with `df.dropDuplicates(["id"]).count()`: a difference means duplicates exist, though not which ones.
+W: Count per group: grouping by id and counting gives the occurrences, and the filter keeps groups with more than one.
+X: A=Unique rows: the result holds one row per id, and the removed rows are not returned. Nothing indicates which ids had duplicates.
+B=No count column: distinct returns only the original columns, so the filter cannot be resolved.
+C=Unique ids: this keeps ids that appear only once, the opposite of the goal.
+T: Find duplicate keys with groupBy().count() and a filter on count > 1.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.2 applied troubleshooting
+S: A customer table has emails such as `Ana@x.com`, `ana@x.com ` (with a trailing blank) and `ana@x.com`. A job calls `df.dropDuplicates(["email"])` and still finds the same customer three times. What fixes it?
+A: Set `spark.sql.caseSensitive` to false, which makes string values compare without regard to letter case
+B: Use `distinct()` instead, which ignores differences in case and in blanks for string columns
+C: Normalize first, for example `withColumn("email", F.lower(F.trim("email")))`, because values compare by exact characters
+D: Add `sort("email")` before the call, so that near-equal strings sit side by side and are merged
+K: C
+G: ## Deduplication is exact equality
+`dropDuplicates` and `distinct` compare values exactly. `Ana@x.com`, `ana@x.com` and `ana@x.com ` are different strings.
+## Clean first, then deduplicate
+Put a normalization step in front: `F.lower`, `F.trim`, `F.regexp_replace` for other patterns. Do it in a new or replaced column, then deduplicate on that column.
+The setting `spark.sql.caseSensitive` concerns identifiers (column names), not data.
+W: Exact comparison: dedup compares strings byte for byte, so case and whitespace differences make the values distinct until they are normalized.
+X: A=caseSensitive: this setting controls how column names resolve. It does not change string value comparison.
+B=distinct: it compares exactly as dropDuplicates does. The three values stay different.
+D=Sorting: ordering does not merge values. dedup works on equality, not on neighbors.
+T: Normalize case and whitespace first; dedup compares exact values.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.2 advanced troubleshooting
+S: A validation step splits records into valid and invalid sets:
+```
+ok  = df.filter(F.col("age").between(0, 120))
+bad = df.filter(~F.col("age").between(0, 120))
+```
+Rows with a NULL `age` are in neither set, and `ok.count() + bad.count()` is lower than `df.count()`. What is the reason and the fix?
+A: The between function excludes both bounds, so ages 0 and 120 are missing; use two comparisons with >= and <= instead
+B: A NULL age makes the predicate NULL, and a negated NULL is still NULL, so filter drops it; include `age.isNull()` in the invalid set
+C: Filter runs lazily, so the two counts were computed on different snapshots of the data; call cache() before both
+D: The invalid rows are written to a bad-records folder by the reader and never reach the DataFrame
+K: B
+G: ## Three-valued logic in filters
+In SQL and in Spark, comparisons with NULL yield NULL (unknown). `filter` keeps only rows where the condition is `true`. `NOT NULL` is still NULL, so the row fails both a condition and its negation.
+## Writing a complete split
+Make the rule total: `bad = df.filter(F.col("age").isNull() | ~F.col("age").between(0, 120))`, or compute the flag once with `coalesce(cond, F.lit(False))`. A final check that the two sets add up to `df.count()` shows silent losses.
+W: Three-valued logic: filter keeps a row only when the predicate is true. NOT of NULL is NULL, so the row is lost in both branches.
+X: A=Bounds: between is inclusive on both ends. NULL ages are the rows that vanish.
+C=Snapshots: both filters read the same plan. Missing NULL rows are a logic outcome, not a timing effect.
+D=Bad-records folder: that is a different feature of the file reader. A filter has no such side effect.
+T: A filter and its negation both drop NULL rows; handle NULL explicitly in validation splits.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.3 applied comparison
+S: `df` has a column `x` with the values 1, NULL, 3, 5. What does the following code return?
+```
+df.agg(F.count(F.col("x") > 2)).first()[0]
+```
+A: 4, because count of an expression counts every row whatever the value of the expression is
+B: 3, because the comparison is false for 1 and NULL for the missing value, and count skips only the NULL
+C: 2, because only the rows where the comparison is true are counted
+D: 1, because count returns the number of rows for which the comparison is NULL
+K: B
+G: ## count counts non-NULL results
+`F.count(expr)` counts the rows where `expr` is not NULL. A comparison returns a boolean, and `false` is a value just like `true`, so it is counted. Only a NULL result is skipped.
+- `x > 2` gives false for 1, NULL for the NULL row, and true for 3 and 5, so the count is 3.
+- To count the rows that satisfy a condition, turn the false case into NULL: `F.count(F.when(F.col("x") > 2, 1))` returns 2, because `when` without `otherwise` yields NULL.
+- `F.sum(F.when(cond, 1).otherwise(0))` gives the same number and also works when no row matches.
+## Related forms
+`count("*")` and `count(F.lit(1))` count all rows; `count("x")` counts non-NULL values.
+W: Boolean results are values: false is counted and only the NULL from the NULL input is skipped, so three of the four rows are counted.
+X: A=Every row: only count("*") or count of a constant gives 4. A comparison on a NULL input is NULL and is skipped.
+C=True only: that needs `when(cond, 1)` so that false becomes NULL. A bare comparison keeps false as a countable value.
+D=NULL rows: count never counts NULLs, and only one row here gives NULL.
+T: count(expr) skips only NULL results; false is counted, so wrap the condition in when() to count matches.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.3 applied comparison
+S: `df` has the column `x` with the values 1, 1, NULL, 2, NULL. Which statement about these two results is correct?
+`a = df.select(F.count_distinct("x")).first()[0]` and `b = df.select("x").distinct().count()`
+A: a is 2 and b is 3, because count_distinct ignores NULL and distinct keeps it as a value
+B: a is 3 and b is 3, because both count NULL as one extra distinct value
+C: a is 2 and b is 2, because both ignore NULL values completely
+D: a is 3 and b is 2, because the aggregate keeps NULL as a value and distinct drops the NULL row
+K: A
+G: ## Two ways to count distinct values
+- `F.count_distinct("x")` (also `countDistinct`) is an aggregate. It counts distinct non-null values, like SQL `COUNT(DISTINCT x)`. With several columns, rows where any column is NULL are not counted.
+- `df.select("x").distinct().count()` first creates the distinct rows, where NULL is a value, and then counts them.
+## The example
+Distinct non-null values: 1 and 2, so a is 2. Distinct rows: 1, 2 and NULL, so b is 3.
+W: NULL handling: the aggregate counts non-null distinct values; distinct returns rows, and NULL is one of the distinct rows.
+X: B=Aggregate with NULL: count_distinct follows the rule of count and skips NULLs.
+C=distinct: it returns the NULL row, so the row count has 3 entries.
+D=Reversed: the aggregate skips NULL and the row-based distinct keeps it.
+T: count_distinct skips NULL; distinct().count() counts NULL as a row.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.3 advanced tradeoff
+S: A dashboard shows the number of unique visitors from a table with billions of events. Exact values are not needed, but memory use and shuffle volume matter. The team wants to tighten the accuracy from the default. Which call fits?
+A: `F.approx_count_distinct("visitor_id", rsd=0.5)`, which makes the estimate more exact because it samples half of the rows
+B: `F.count_distinct("visitor_id")`, because the approximate function cannot take an accuracy argument
+C: `df.sample(0.01).select(F.count_distinct("visitor_id"))`, because a sample gives a count within one percent
+D: `F.approx_count_distinct("visitor_id", rsd=0.01)`, which trades a larger sketch for a lower error than the 5% default
+K: D
+G: ## Exact versus approximate distinct counts
+`count_distinct` must track every distinct value, so Spark shuffles values by key and the memory use grows with the number of distinct values.
+`approx_count_distinct(col, rsd)` uses the HyperLogLog++ algorithm: each partition builds a small, fixed-size sketch, and sketches are merged. The default maximum relative standard deviation is 5%.
+## Tuning
+A smaller `rsd` (for example 0.01) improves accuracy, and the sketch grows, so it costs more memory than at the default but still far less than exact counting for high-cardinality columns.
+W: HyperLogLog++ sketch: the rsd parameter sets the target relative standard deviation. A smaller value gives more accurate results with a bigger sketch.
+X: A=Larger rsd: a higher value allows more error. It is not a sample fraction.
+B=No argument: approx_count_distinct accepts rsd, so the claim is wrong and exact counting is costlier.
+C=Sampling: the distinct count of a sample is not scaled to the full table, so the estimate is far too low.
+T: approx_count_distinct with a smaller rsd tightens the error; it stays cheaper than exact counting.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.3 applied use-case
+S: A data-quality check on a numeric column `x` needs only the count, the median and the maximum in one small result. Which call returns exactly those?
+A: `df.describe("count", "50%", "max")`
+B: `df.describe().filter("summary in ('count', '50%', 'max')")`
+C: `df.summary("count", "50%", "max")`
+D: `df.agg(F.median("x"))`, because it returns count, median and maximum together
+K: C
+G: ## summary versus describe
+- `df.describe(*cols)` computes count, mean, stddev, min and max for the listed columns (all numeric and string columns by default).
+- `df.summary(*statistics)` computes the same, plus approximate percentiles. Without arguments it returns count, mean, stddev, min, the 25%, 50% and 75% percentiles, and max. Pass names to choose: `summary("count", "50%", "max")`.
+Both are meant for exploration; the schema of the result is not guaranteed to be stable, so do not build pipelines on them.
+W: summary takes statistic names: count, mean, stddev, min, max and percentages such as 50%. The median is the 50% percentile.
+X: A=describe takes column names. These strings are looked up as columns and fail to resolve.
+B=describe output: describe has no percentile rows, so the median row never exists in its result.
+D=One value: the median function returns a single value. It does not add a count or a maximum.
+T: summary(*statistics) chooses statistics including percentiles; describe takes columns instead.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.3 applied definition
+S: `df` has 6 rows and the column `k` has three distinct values. A developer runs `r = df.groupBy("k").count()` and then `n = r.count()`. What are `r` and `n`?
+A: r is the integer 6 and n fails, because an integer has no count method
+B: r is a DataFrame and n is 6, because the second count returns the rows of the original df
+C: r is a DataFrame with one row per key and a count column, and n is 3, the number of groups
+D: r is a DataFrame and n is 1, because count after groupBy produces a single total row
+K: C
+G: ## Same name, different objects
+- `df.count()` is an action on a `DataFrame`: it runs a job and returns a Python int.
+- `df.groupBy("k")` returns a `GroupedData`. Its `.count()` is not an action; it returns a DataFrame with the key and a `count` column, one row per key.
+## The example
+`r` has 3 rows. Calling `r.count()` runs a job and returns 3, the number of groups. The total of 6 rows would come from `df.count()` or `r.agg(F.sum("count"))`.
+W: Two different counts: GroupedData.count() is a transformation that returns a DataFrame; DataFrame.count() is an action that returns the row count of that DataFrame.
+X: A=Integer: groupBy().count() does not return a number. It returns a DataFrame.
+B=Original rows: the second call counts the rows of r, which are the groups.
+D=Single total: one row per key is produced. A single total would need `agg` without a grouping key.
+T: groupBy().count() returns a DataFrame; DataFrame.count() is the action that returns an int.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.3 advanced comparison
+S: `df` has the columns `store` and `customer` and the rows ('s1','c1'), ('s1',NULL), ('s1','c1') and ('s2','c2'). What does the following code return?
+```
+df.select(F.count_distinct("store", "customer")).first()[0]
+```
+A: 3, because the pair ('s1', NULL) is a third distinct combination and NULL is counted as a value
+B: 4, because with several columns the function counts every row and only checks the first column for repeats
+C: 1, because only the combination that occurs twice is counted
+D: 2, because a row with NULL in any listed column is skipped, which leaves ('s1','c1') and ('s2','c2')
+K: D
+G: ## count_distinct with several columns
+`F.count_distinct(col1, col2, ...)` counts the distinct combinations of the listed columns, like SQL `COUNT(DISTINCT col1, col2)`. A row is counted only if none of the listed columns is NULL.
+## The example
+Row ('s1',NULL) is skipped. The rows ('s1','c1') twice and ('s2','c2') once leave two distinct combinations.
+## Contrast
+`df.select("store","customer").distinct().count()` returns 3, because `distinct` keeps NULL as a value in a row. Use the aggregate when NULL means "unknown, do not count"; use distinct when a NULL combination should count as its own row.
+W: Combination counting with NULL rule: count_distinct counts distinct non-null combinations, so the row with a NULL customer drops out and two combinations remain.
+X: A=NULL as a value: that is what distinct().count() does (3). The aggregate skips rows with a NULL in any listed column.
+B=Row count: duplicates are removed over the whole combination, not only for the first column. Counting all rows would be plain count.
+C=Repeated only: distinct counting returns the number of different combinations, whether they occur once or many times.
+T: count_distinct over several columns counts distinct combinations and skips rows with a NULL in any of them.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.3 applied use-case
+S: A report needs, per `store`, the number of different `customer` values. Which code is correct?
+A: `df.groupBy("store").agg(F.count_distinct("customer").alias("customers"))`
+B: `df.distinct().groupBy("store").count()`, because distinct on the whole table counts each customer once per store
+C: `df.groupBy("store").count()`, because count returns the number of different customers
+D: `df.agg(F.count_distinct("store", "customer"))`, because it returns one count for every store
+K: A
+G: ## Distinct counting per group
+To count different values inside groups, use a grouped aggregate:
+`df.groupBy("store").agg(F.count_distinct("customer"))`.
+- `groupBy().count()` counts rows, so repeated customers are counted again.
+- `df.distinct()` works on whole rows. If the table has other columns such as order id, nothing is removed.
+- `agg` without `groupBy` gives one result for the whole table.
+For very large groups, `approx_count_distinct` is the cheaper alternative.
+W: Grouped aggregate: count_distinct is evaluated inside each store group and returns one row per store.
+X: B=Whole-row distinct: it removes only identical rows across all columns, so rows that differ in other columns stay and are counted.
+C=Row count: it counts rows per store, so a customer with ten orders counts ten times.
+D=One total: without a grouping key the result is a single number of distinct store and customer pairs.
+T: Use groupBy().agg(count_distinct(col)) for distinct values per group.
+V: Spark SQL

@@ -1,0 +1,558 @@
+# src: https://docs.databricks.com/aws/en/generative-ai/agent-framework/author-agent-model-serving
+# src: https://docs.databricks.com/aws/en/generative-ai/agent-framework/log-agent
+# src: https://docs.databricks.com/aws/en/generative-ai/agent-framework/deploy-agent
+# src: https://docs.databricks.com/aws/en/generative-ai/agent-framework/agent-authentication-model-serving
+# src: https://docs.databricks.com/aws/en/mlflow3/genai/
+# src: https://docs.databricks.com/aws/en/mlflow3/genai/eval-monitor/concepts
+# src: https://docs.databricks.com/aws/en/mlflow3/genai/eval-monitor/concepts/judges/
+# src: https://docs.databricks.com/aws/en/mlflow3/genai/eval-monitor/run-scorer-in-prod
+# src: https://docs.databricks.com/aws/en/genie/conversation-api
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/deploy-custom-models
+# src: https://docs.databricks.com/aws/en/security/auth/access-control/index
+
+@ DBX-GAI D3 T3.11 applied use-case
+S: A team has a working LangGraph agent that calls a foundation model and two Unity Catalog functions. They want to run it on Databricks with built-in tracing, a signature that MLflow infers by itself, and compatibility with AI Playground and agent evaluation, without rewriting the graph. What should they do?
+A: Rewrite the graph as a plain MLflow `ChatModel` subclass, because only that interface is compatible with AI Playground and the evaluation tooling
+B: Wrap the existing agent in a `mlflow.pyfunc.ResponsesAgent` subclass and convert the messages inside `predict`
+C: Keep the graph unchanged and log it as a generic pyfunc model, then define the input and output signature by hand for every new version
+D: Replace the graph with the OpenAI Agents SDK, because `ResponsesAgent` only accepts agents that were written with that SDK
+K: B
+G: ## Authoring interface for agents
+Databricks recommends the MLflow interface `ResponsesAgent` for production agents. It is framework neutral: you build the agent with LangGraph, the OpenAI SDK, DSPy or pure Python, and `ResponsesAgent` is the adapter that connects it to Databricks logging, tracing, evaluation, deployment and monitoring. Its schema is compatible with the OpenAI Responses schema.
+## Wrapping an existing agent
+You do not rewrite an existing LangChain or LangGraph agent. You write a wrapper class that inherits from `mlflow.pyfunc.ResponsesAgent`, keep the agent as an attribute (`self.agent`), and implement `predict` (and `predict_stream` for streaming). Inside `predict` you convert the incoming `ResponsesAgentRequest` messages into what the agent expects and convert its output into a `ResponsesAgentResponse`.
+Databricks now recommends the Agent Bricks CLI and Databricks Apps for new agents; the Model Serving path shown here is still documented.
+## What you get
+MLflow infers a valid signature automatically at logging time, traces `predict` and `predict_stream` automatically, and the agent works with AI Playground and agent evaluation. The older `ChatAgent` and `ChatModel` interfaces still work but are not the recommended choice for new agents.
+W: The wrapper class keeps the LangGraph code intact and gives the agent the `ResponsesAgent` contract, which brings automatic signature inference, automatic tracing and out-of-the-box compatibility with AI Playground and evaluation.
+X: A=Rewrite as ChatModel: `ChatModel` and `ChatAgent` are older interfaces that are still supported, but they are not the recommended one for new agents and no rewrite is needed.
+C=Generic pyfunc with manual signature: this works technically, but it throws away the automatic signature inference and the tracing of streamed output that `ResponsesAgent` provides, and adds hand-maintained signatures.
+D=Move to the OpenAI Agents SDK: `ResponsesAgent` lets you use any third-party framework, so no framework migration is required.
+T: Wrap an existing agent in `ResponsesAgent` instead of rewriting it, and Databricks infers the signature and traces it for you.
+V: MLflow, Mosaic AI Agent Framework
+
+@ DBX-GAI D3 T3.11 applied use-case
+S: A registered agent already runs on a Model Serving endpoint that `agents.deploy()` created. The team registers a new version in Unity Catalog and calls `agents.deploy()` again with the same model name and no other changes, and in-flight requests must not be interrupted. What happens?
+A: The call fails because an endpoint for that model already exists, so the team has to delete the endpoint and deploy again from scratch
+B: A second endpoint with a new name is created for the new version, and every client application has to be switched to the new URL
+C: The new version is added to the existing endpoint and traffic shifts to it once it is ready, while the old version keeps serving until then
+D: The new version replaces the old one immediately, and requests that arrive during the container build return errors until it finishes
+K: C
+G: ## What deploy() does
+`agents.deploy(uc_model_name, version)` from `databricks.agents` creates a Model Serving endpoint for a Unity Catalog agent model, provisions authentication for the resources the agent declared, turns on MLflow tracing and monitoring integration, and sets up the Review App. The agent must be registered in Unity Catalog first.
+## Updating a deployment
+When you call `deploy()` with the same Unity Catalog model name as an existing deployment, the new model version is added to the existing serving endpoint and traffic shifts to it after it is ready. The previous version keeps serving requests during the rollout. For a zero-downtime update, change nothing except the model version (do not change `endpoint_name` or the model name).
+## Current guidance
+Databricks now recommends the Agent Bricks CLI and Databricks Apps for new agents; the Model Serving path with `deploy()` is still documented and is what this question covers.
+W: Deploying a new version under the same model name adds it to the existing endpoint and moves traffic after it is ready, so users see no interruption.
+X: A=Delete and redeploy: no deletion is needed, the same call updates the existing deployment in place.
+B=Second endpoint: the same model name reuses the existing endpoint, so clients keep the same URL.
+D=Immediate replacement: the previous version keeps serving during the rollout, so requests are not dropped while the new container builds.
+T: Re-running `agents.deploy()` for a new version of the same model rolls it out on the same endpoint without downtime.
+V: Mosaic AI Agent Framework, Model Serving
+@ DBX-GAI D3 T3.11 advanced use-case
+S: A company needs an assistant that answers HR policy questions from documents and also computes headcount figures from governed tables. The two skills have different tools, prompts and test sets, and the team wants to improve and trace each skill on its own. Which agent system design fits best?
+A: A supervisor agent that routes each request to specialized worker agents, one for document question answering and one for table queries, each evaluated separately
+B: One agent with every tool and both prompts merged into a single long system prompt, so the model decides what to do from context alone
+C: A fixed chain that always runs retrieval and a table query for every request and passes both results into one prompt
+D: Two separate chat applications, with the user choosing which one to open before asking a question
+K: A
+G: ## Multi-agent systems
+A multi-agent system has several agents with specialized capabilities that work together. A common pattern is a **supervisor** agent that directs requests and manages context for specialized **worker** agents. Each worker has its own tools, instructions and quality metrics.
+The Agent Bricks Supervisor Agent product is marked Legacy in the docs; this question covers the supervisor and worker design pattern, not that product.
+## Why split here
+The document skill (retrieval over unstructured text) and the table skill (queries over structured data) fail in different ways. With a supervisor and two workers you can trace each worker separately, build one evaluation set per skill and change one prompt without retesting the other.
+Agents built with `ResponsesAgent` support multi-agent designs, and a supervisor can call workers that are deployed agents, retrieval agents or a Genie Agent for structured data.
+W: The supervisor routes by intent to specialized workers, so every skill keeps its own tools, prompt and evaluation set, and traces show which worker handled the request.
+X: B=One merged agent: mixing all tools and prompts makes tool choice less reliable and prevents measuring or changing one skill in isolation.
+C=Fixed chain: running both retrieval and table queries for every request wastes latency and cost, and unrelated context can distract the model.
+D=Two applications: this pushes routing onto the user and gives no single assistant that can combine information from both sources.
+T: Use a supervisor with specialized workers when skills need different tools and separate evaluation.
+V: Mosaic AI Agent Framework, MLflow
+
+@ DBX-GAI D3 T3.11 applied troubleshooting
+S: A streaming `ResponsesAgent` emits `output_text.delta` events with a fresh random `item_id` for each chunk and never sends a closing event. Users see text arriving, but the trace and the aggregated inference-table record show no complete answer. What is the fix?
+A: Turn streaming off and return the whole answer from `predict_stream` in one piece, because tracing only works for non-streamed output
+B: Emit one delta event per word, because the trace only aggregates events that contain a single word
+C: Reuse one `item_id` for all deltas and end with a `response.output_item.done` event holding the full text under that `item_id`
+D: Write the final answer to the `custom_outputs` field only, since tracing is read from that field
+K: C
+G: ## Streaming contract of ResponsesAgent
+To stream with `ResponsesAgent` you emit a series of delta events and then a final event:
+- **Delta events**: several `output_text.delta` events that share one `item_id`, each carrying a chunk of text for the client.
+- **Done event**: a final `response.output_item.done` event with the same `item_id`, containing the complete final output text.
+## Why the done event matters
+The done event tells Databricks to trace the agent's output with MLflow tracing, to aggregate the streamed response in AI Gateway inference tables (now documented under Unity Gateway), and to show the complete output in AI Playground. Without a matching done event, the pieces are never joined into one answer.
+W: Matching `item_id` values tie the deltas to one output item, and the done event with the full text is what lets tracing and inference tables record the complete response.
+X: A=Disable streaming: streaming is supported; the problem is the missing closing event, and `predict_stream` exists for streamed output.
+B=One delta per word: chunk size is irrelevant. What matters is that the deltas share an `item_id` and are closed by a done event.
+D=`custom_outputs` only: that field carries extra outputs such as source links; it is not where the answer is aggregated for tracing.
+T: Stream deltas with one `item_id` and end with `response.output_item.done` carrying the full text.
+V: MLflow, Mosaic AI Agent Framework
+
+@ DBX-GAI D3 T3.11 applied definition
+S: Which TWO statements describe what the `ResponsesAgent` interface gives an agent author on Databricks? (Select TWO)
+A: MLflow infers a valid model signature automatically when the agent is logged, so none has to be written by hand
+B: The agent code must be written with LangGraph, because other frameworks cannot return a `ResponsesAgentResponse`
+C: The class removes the need to declare Databricks resources such as an AI Search index when logging the agent
+D: The agent can return several messages, including intermediate tool-calling messages, and can stream its output in chunks
+E: The agent is served only through the legacy ChatCompletion schema, which keeps old clients unchanged
+K: A,D
+G: ## What the interface provides
+`ResponsesAgent` is the recommended MLflow interface for production agents. Its documented benefits include:
+- **Advanced agent capabilities**: multi-agent support, streaming output, a comprehensive tool-calling message history (several messages including intermediate tool calls), tool-calling confirmation and long-running tools.
+- **Streamlined development and deployment**: any framework can be wrapped, typed Python classes help the IDE, MLflow infers the signature automatically, `predict` and `predict_stream` are traced automatically, and AI Gateway inference tables (now under Unity Gateway) are enabled for deployed agents.
+## What it does not do
+It does not replace dependency declaration: resources an agent needs at serving time are still declared with the `resources` argument at logging time so that credentials can be provisioned.
+W: A=Automatic signature inference: MLflow produces a valid signature for a `ResponsesAgent` when it is logged, so the manual signature step can be skipped.
+D=Message history and streaming: the interface returns multiple messages, including intermediate tool-calling messages, and supports streamed output in smaller chunks.
+X: B=Only LangGraph: any third-party framework can be used; the agent is wrapped, not rewritten in one specific library.
+C=No resource declaration: resources are still declared at logging time for automatic authentication passthrough.
+E=Legacy schema only: the schema is compatible with the OpenAI Responses schema, and the ChatCompletion-style interfaces are the older ones.
+T: `ResponsesAgent` adds automatic signatures, tool-call history and streaming to any framework.
+V: MLflow, Mosaic AI Agent Framework
+
+@ DBX-GAI D3 T3.12 applied comparison
+S: A team has two candidate prompt versions for a support agent and must pick one before the release. They have 200 curated questions with reference answers. Which lifecycle activity answers "which version is better?", and how is it run?
+A: Production monitoring of live traffic, by sending half of the users to each prompt and waiting for scorers to sample their traces
+B: Tracing alone, by reading a handful of traces for each version and choosing the one that looks better
+C: Evaluation, by running the same scorers over the curated dataset for each version with `mlflow.genai.evaluate()` and comparing the results
+D: Data profiling of the training tables, by comparing column statistics between the two versions
+K: C
+G: ## Evaluation versus monitoring
+Agent quality is a loop. **Evaluation** happens before release: you run scorers (LLM judges and code-based checks) over a fixed, curated dataset with `mlflow.genai.evaluate()` and compare app versions on the same inputs, so any difference comes from the change and not from different traffic. **Monitoring** happens after release: the same scorers run on traces from real traffic.
+## Which fits the question
+Choosing between two candidates before launch is a controlled comparison, which is evaluation. The dataset with reference answers also lets ground-truth judges such as `Correctness` run.
+W: Evaluation scores each version on the same curated inputs with the same scorers, so the comparison is repeatable and needs no real users.
+X: A=Live traffic split: this exposes real users to the weaker prompt, and traffic differs between the groups, so it is not a controlled comparison before release.
+B=Reading a few traces: tracing is essential for debugging, but a handful of hand-picked traces is neither systematic nor repeatable.
+D=Data profiling: profiling tracks data tables and tables of model inputs and outputs, and does not rank two prompt versions by answer quality.
+T: Evaluation compares versions on a fixed dataset before release.
+V: MLflow
+
+@ DBX-GAI D3 T3.12 applied use-case
+S: A released agent scored well in evaluation. Three weeks later users start asking about a new product line that the evaluation set never covered, and answer quality drops. Which practice detects such regressions as they happen?
+A: Run scorers on a sample of production traces, so quality is measured on real questions as they arrive
+B: Re-run the original evaluation dataset every night, because a passing result proves live quality is unchanged
+C: Increase the retrieval top-k permanently, which is enough to keep quality from dropping on any new topic
+D: Disable tracing in production to reduce noise, and rely on the score that was recorded at release time
+K: A
+G: ## Why evaluation is not enough
+An evaluation dataset is a snapshot of the questions you expected at release. Real traffic shifts: new products, new phrasing, new failure modes. A fixed dataset cannot show that.
+## Monitoring in the quality loop
+The quality loop continues after release: **monitor production by running scorers against live traffic**, so that a regression is caught and the next issue can be fixed. In practice this means tracing the deployed agent and scoring a configurable sample of its traces. Sampling trades coverage against compute cost. Note that production monitoring of agents is documented as a Beta feature at the time of writing, so check the status before relying on it; the concept (score live traces with the same scorers) is what the exam objective tests.
+W: Scoring a sample of live traces with the same scorers measures quality on real, changing traffic, so the drop on the new product line is seen without waiting for complaints.
+X: B=Nightly re-run of the fixed set: the dataset has no questions about the new product line, so it keeps passing while real quality falls.
+C=Larger top-k: more retrieved chunks may or may not help and cannot be called a prevention; without measuring, you do not know whether quality recovered.
+D=Turning tracing off: traces are the data scorers read; removing them leaves no evidence about production quality.
+T: Monitoring scores sampled live traces to catch drift that a fixed evaluation set cannot see.
+V: MLflow
+
+@ DBX-GAI D3 T3.12 applied use-case
+S: A team scores the live traces of a deployed agent with LLM judges. Request volume is high and the judge cost is growing, but they still want a continuing view of production quality and do not need every request judged. Which change fits?
+A: Lower the sampling rate of the production scorers, so that only a configured fraction of the traces is scored
+B: Stop recording traces for the deployed agent, so that the judges have nothing to read and no cost appears
+C: Replace the production scorers with the curated evaluation dataset, which is run once for each incoming request
+D: Score only the first request of each day, because a single request is a sufficient sample of the day's quality
+K: A
+G: ## Cost and coverage in monitoring
+Monitoring runs scorers (LLM judges or code checks) on traces from real traffic. Each LLM-judge call costs compute, so scoring every trace on a busy agent is expensive. The scorer has a **sampling rate**, the fraction of traces it evaluates, which trades coverage against cost: a lower rate is cheaper but can miss rare failures, a higher rate sees more but costs more.
+## Status note
+Production monitoring of agents is documented as Beta at the time of writing. The idea tested here, sampling live traces with the same scorers used in evaluation, is the concept from the quality loop; re-check the feature status before relying on it.
+W: A lower sampling rate scores fewer traces, so judge cost drops while a representative sample of real traffic still shows how quality moves.
+X: B=No traces: scorers read traces, so removing them ends production quality measurement instead of reducing its cost.
+C=Evaluation dataset per request: the curated set is a fixed pre-release snapshot and does not measure the real questions users ask.
+D=One request a day: a sample that small cannot represent daily traffic and would miss most regressions.
+T: Tune the scorer sampling rate to trade monitoring coverage against judge cost.
+V: MLflow
+@ DBX-GAI D3 T3.12 applied use-case
+S: Production scorers flag a cluster of low-groundedness answers about a refund policy that changed last month. The team fixes the retrieval source and wants to be sure the fix works and does not break other topics. What is the best use of the monitoring finding?
+A: Delete the flagged traces from the experiment and wait for the monitoring score to improve by itself over time
+B: Turn the failing traces into evaluation records, then re-run evaluation on the fixed agent and compare versions
+C: Change the production traffic split and the welcome message so that users no longer ask about refunds
+D: Lower the monitoring sampling rate so that fewer of the low scores are reported to the team
+K: B
+G: ## Closing the loop between monitoring and evaluation
+The quality loop in Databricks MLflow guidance is: trace the agent, find an issue, collect feedback and curate a dataset, write a scorer, fix the agent, evaluate the fix, and monitor production again. Production traces that fail are the best raw material for evaluation data because they are real examples of the issue.
+Production monitoring of agents is documented as Beta at the time of writing, so re-check its status; the loop itself (turn failed traces into evaluation data, re-evaluate) uses GA evaluation.
+## What the team should do
+Review the flagged traces, add representative failures (with the correct expected facts) and known-good examples to an evaluation dataset, then run the evaluation on the new and previous versions. The fix is confirmed on the failure cases, and the rest of the dataset shows that nothing else regressed.
+W: Failed traces become regression test cases, so the evaluation proves the fix and guards other topics, and monitoring then keeps watching.
+X: A=Delete traces: removing evidence does not change agent behavior, and the score would stay low for new questions.
+C=Steering users: hiding a topic is not a fix and hurts the product.
+D=Lower sampling: this reports fewer problems, but the answers stay wrong; sampling controls coverage and cost, not quality.
+T: Turn failing production traces into evaluation data and re-evaluate the fix.
+V: MLflow
+
+@ DBX-GAI D3 T3.12 applied definition
+S: Which TWO statements correctly distinguish the evaluation phase from the monitoring phase of a generative AI application lifecycle? (Select TWO)
+A: Evaluation runs on live user traffic only after release, while monitoring runs on a curated dataset before release
+B: Evaluation scores app versions on a fixed curated dataset, often with expected answers, so versions can be compared repeatably
+C: Monitoring applies scorers to a sample of real production traces to catch quality drops as traffic changes
+D: Evaluation and monitoring need separately written scorers, so a judge defined for one cannot be reused in the other
+E: Monitoring requires a reference answer for every production request, because scorers cannot run without it
+K: B,C
+G: ## Two phases, one set of scorers
+- **Evaluation** (development): `mlflow.genai.evaluate()` runs scorers over an evaluation dataset against an app version. Inputs are fixed, so versions are comparable and experiments are repeatable. Expected answers allow ground-truth judges.
+- **Monitoring** (production): scorers run automatically on a sample of production traces, which shows how quality moves as real traffic changes. A sampling rate balances coverage against compute cost. Results are attached to traces as feedback.
+Databricks documents the same scorers for both phases, so a judge written for evaluation can be moved to monitoring. Production monitoring of agents is documented as Beta today, so treat the feature status as something to re-check.
+W: B=Evaluation on a dataset: a fixed curated dataset makes version comparison repeatable and allows expected answers.
+C=Monitoring on live traces: scorers on sampled real traces show quality changes in production.
+X: A=Reversed phases: evaluation is the controlled, pre-release comparison, and monitoring is the one that watches live traffic.
+D=Separate scorers: the same scorers can be reused in both phases, which keeps measurement consistent.
+E=Reference per request: live traffic has no expected answers, so monitoring uses reference-free judges.
+T: Evaluate on a fixed dataset before release; monitor sampled live traces after.
+V: MLflow
+
+@ DBX-GAI D3 T3.13 applied use-case
+S: A supervisor agent calls a Genie Agent as a tool. A user asks "Revenue by region for last quarter?" and then "Now only for EMEA." The second question must use the context of the first. How should the integration call the Genie Agents API?
+A: Send each question as a fresh one-off request, and add the previous answer by hand to every new prompt
+B: Cache the first SQL statement in the supervisor and re-execute it with an extra WHERE clause generated by regex
+C: Create a new Genie Agent for every user turn, so each follow-up question starts clean
+D: Use the Chat mode APIs, which keep a stateful conversation so follow-up questions use the earlier history
+K: D
+G: ## Genie Agents API
+Genie Agents (formerly called Genie spaces) can be integrated into your own chatbot, agent or application through the Genie Agents API. It has three groups of capabilities:
+- **Chat mode APIs**: natural-language data querying in applications and agent frameworks. They support stateful conversations, where users ask follow-up questions and explore data over time.
+- **Agent mode APIs**: send prompts in Agent mode, stream reasoning and SQL results and receive final reports with citations.
+- **Management APIs**: create, configure and deploy Genie Agents across workspaces, for CI/CD and version control.
+## Why stateful chat
+The follow-up "Now only for EMEA" is ambiguous without the earlier question. A conversation in Chat mode holds the history, so Genie resolves the reference itself.
+W: Chat mode conversations are stateful, so the second question is interpreted with the first, and the supervisor does not manage context by hand.
+X: A=One-off requests with pasted context: this rebuilds by hand what a Chat mode conversation already stores and risks wrong or truncated context.
+B=Regex on cached SQL: this bypasses Genie's understanding of the data and breaks as soon as the question is phrased differently.
+C=New agent per turn: an agent is a configured data context (tables, instructions, examples), not a conversation, and creating one per turn loses history and is wasteful.
+T: Use Chat mode conversations for stateful follow-ups with a Genie Agent.
+V: Genie Agents, Genie API
+
+@ DBX-GAI D3 T3.13 applied troubleshooting
+S: A supervisor agent sends a question to a Genie Agent through the Chat mode APIs. The message is accepted at once, but generating and running the SQL takes a while, and the supervisor must return a result without flooding the API. How should the client wait for the answer?
+A: Resend the same message every second until data comes back, because the API ignores duplicates and returns the first finished result
+B: Keep a single HTTP connection open until Genie writes the answer, because the API streams the result in the same call
+C: Wait a fixed ten minutes before reading the message, because Genie always takes about that long to finish a question
+D: Poll the message status with delays that grow by exponential backoff until it is COMPLETED, FAILED or CANCELLED, and give up with a timeout after a limit
+K: D
+G: ## Asynchronous messages in the Genie Agents API
+Chat mode messages are processed asynchronously: the client sends a message and then reads its status until a conclusive state is reached. The Databricks best practices for the Genie API are:
+- Poll for status updates every 1 to 5 seconds until a conclusive status such as `COMPLETED`, `FAILED` or `CANCELLED`, and limit polling to 10 minutes for most queries; after that, stop and return a timeout error.
+- Use exponential backoff for polling, increasing the delay up to a maximum of one minute.
+- Add your own retry logic with exponential backoff, because the API does not retry failed requests for you.
+- Start a new conversation for each session; reusing threads across sessions can reduce accuracy.
+W: Polling the message status with growing delays gets the result as soon as it is ready, keeps the request rate low and ends cleanly on failure or timeout.
+X: A=Resending the message: this creates new messages and new work for Genie each time; the documented approach is to poll the one message that was sent.
+B=Open connection: results are read by polling the message status, not by holding a connection until the answer is written.
+C=Fixed wait: duration depends on the question, so a fixed delay wastes time on fast queries and still misses slow ones.
+T: Poll the Genie message status with exponential backoff until a conclusive state or a timeout.
+V: Genie Agents, Genie API
+@ DBX-GAI D3 T3.13 applied troubleshooting
+S: A supervisor agent was logged and deployed to a serving endpoint. In the notebook it queried a Genie Agent successfully, but the deployed endpoint returns permission errors whenever it calls Genie. The Genie Agent was not mentioned when the agent was logged. What is the best fix?
+A: Share the Genie Agent with all workspace users, so any caller can read it
+B: Declare the Genie Agent as a logged resource, give the endpoint creator CAN RUN on it, and redeploy
+C: Hard-code a personal access token in the agent code, so every request is made as that person
+D: Package the Genie Agent inside the serving endpoint's container image so that it runs without needing any permissions at all
+K: B
+G: ## Resources and automatic authentication passthrough
+A deployed agent runs on a serving endpoint, not as the notebook user. For Databricks-managed resources, the agent declares its dependencies at logging time with the `resources` parameter (for a Genie Agent the resource class is `DatabricksGenieSpace`, named after Genie spaces). At deployment Databricks checks that the endpoint creator can access every declared dependency, creates a service principal for the agent model version, grants it access, and injects short-lived credentials that it rotates.
+## Permission needed
+For a Genie Agent the endpoint creator needs `CAN RUN`. Other supported resources have their own permission, for example `Can Use` on an AI Search index and `EXECUTE` on a Unity Catalog function. A resource that was never declared gets no such credential, so the call fails.
+W: Declaring the Genie Agent at logging time lets Databricks provision credentials for it, and the creator's CAN RUN is what allows that access to be granted.
+X: A=Share with everybody: this widens access for all users to fix one service, and the endpoint still would not hold a declared, managed credential.
+C=Hard-coded personal token: a long-lived credential in code is the manual method with the highest risk, and the automatic passthrough was designed to avoid it.
+D=Embed Genie in the container: Genie Agents are workspace objects; they are reached through the API, not packaged into an image.
+T: Declare Genie Agents (and other resources) when logging so the endpoint gets managed credentials.
+V: Mosaic AI Agent Framework, Genie Agents
+
+@ DBX-GAI D3 T3.13 applied use-case
+S: A team curated a Genie Agent in a development workspace, with its tables, instructions, example SQL and benchmarks. They now want the same configuration deployed to several production workspaces by a CI/CD pipeline instead of being rebuilt by hand. Which part of the Genie Agents API fits?
+A: Chat mode APIs, because starting a conversation also copies the agent's configuration into the workspace that runs it
+B: Management APIs, which create, configure and deploy Genie Agents across workspaces for CI/CD and version control
+C: Agent mode APIs, because the final reports with citations include a copy of the agent's configuration
+D: No part of it, because a Genie Agent can only be created in the user interface and each workspace needs a manual rebuild
+K: B
+G: ## Three groups of Genie API capabilities
+- **Chat mode APIs**: stateful natural-language data querying with follow-up questions and history.
+- **Agent mode APIs**: send prompts in Agent mode, stream the reasoning and SQL results, and receive final reports with citations.
+- **Management APIs**: programmatic creation, configuration and deployment of Genie Agents across workspaces, for CI/CD pipelines, version control and automated management.
+## Creating an agent in code
+The Create Genie Agent API (`POST /api/2.0/genie/spaces`) takes a title, a SQL warehouse and a serialized definition (`serialized_space`) that holds the tables, instructions, example SQL, join specs and SQL snippets, so one reviewed definition can be applied to many workspaces. Creating or updating needs CAN USE on a pro or serverless SQL warehouse and SELECT on the data.
+W: The Management APIs exist for CI/CD and cross-workspace deployment, so a pipeline can apply one reviewed definition to every production workspace.
+X: A=Chat mode: these APIs run conversations against an existing agent and do not copy its configuration anywhere.
+C=Agent mode: they return reasoning, SQL and cited reports for prompts, not a deployable copy of the configuration.
+D=UI only: agents can be created and updated programmatically through the Create Genie Agent API.
+T: Use the Genie Management APIs to deploy agents across workspaces in CI/CD.
+V: Genie Agents, Genie API
+@ DBX-GAI D3 T3.13 applied use-case
+S: A multi-agent system must support long investigations over company data. The calling application wants to stream Genie's reasoning and SQL results as they appear and finish with a report that includes citations. Which Genie Agents API capability fits?
+A: Chat mode APIs, because they are the only mode that can stream intermediate reasoning and attach citations to a report
+B: Management APIs, because they stream results while the agent is being configured and deployed
+C: Agent mode APIs, which send prompts in Agent mode, stream reasoning and SQL results and return a final report with citations
+D: The SQL warehouse query history alone, because Genie reasoning steps are exposed only there after the run
+K: C
+G: ## Chat mode versus Agent mode
+- **Chat mode APIs**: stateful conversations in which users ask follow-up questions; you retrieve the generated SQL, query results and visualizations.
+- **Agent mode APIs**: send prompts in Agent mode, stream the reasoning and SQL results while they are produced, and receive a final report with citations.
+Both need at least CAN VIEW on the Genie Agent and SELECT on the data it uses, and data access is evaluated with the caller's own Unity Catalog permissions.
+## Choosing
+A short follow-up question inside a conversation suits Chat mode. A deeper investigation whose progress and cited conclusion the application wants to show suits Agent mode.
+W: Agent mode is the documented way to stream reasoning and SQL results and to receive a final report with citations.
+X: A=Chat mode: it returns SQL, results and visualizations for conversational follow-ups; streamed reasoning and cited reports belong to Agent mode.
+B=Management APIs: they create and deploy agents and do not answer prompts.
+D=Query history: the Agent mode API streams the reasoning and results to the caller directly.
+T: Use Agent mode APIs for streamed reasoning and cited reports; use Chat mode for follow-ups.
+V: Genie Agents, Genie API
+@ DBX-GAI D4 T4.1 applied use-case
+S: A text-classification model expects cleaned, tokenized input, and the consuming application wants a label plus a confidence string rather than raw logits. The team must serve both steps behind a single endpoint. How should the chain be packaged?
+A: Subclass `mlflow.pyfunc.PythonModel` so `predict` preprocesses, calls the model and post-processes, then log it as pyfunc
+B: Log the raw model and ask every client application to repeat the same cleaning and result formatting code on its side
+C: Serve the raw model and add a second endpoint for post-processing that clients must call after the first returns
+D: Store the preprocessing code in a Git repository and ask the endpoint to pull it at request time
+K: A
+G: ## Custom pyfunc models
+MLflow's Python function (`pyfunc`) flavor lets you deploy any piece of Python code or Python model. Typical reasons are: the model needs preprocessing before its predict function, the framework is not natively supported by MLflow, the raw output needs post-processing, the model has per-request branching logic, or you are deploying fully custom code.
+## The two required functions
+- `load_context`: anything that must be loaded only once, such as weights or a tokenizer.
+- `predict`: all logic that runs for every request. Here you format inputs, call the model and format outputs.
+Logging this class gives one artifact and one endpoint that contains the whole chain.
+W: A pyfunc class holds preprocessing, model call and post-processing in `predict`, so one served artifact returns the final label with its confidence.
+X: B=Clients repeat the logic: duplicated preprocessing in many apps drifts and breaks consistency between training and serving.
+C=Second endpoint: two network hops, two things to deploy and version, and clients must orchestrate the sequence themselves.
+D=Pull at request time: this adds latency and a runtime dependency, and the logged model no longer captures what ran.
+T: Put pre- and post-processing inside a custom pyfunc model's `predict`.
+V: MLflow, Model Serving
+
+@ DBX-GAI D4 T4.1 applied use-case
+S: A chain-based agent calls a chat model endpoint and uses a system prompt. The team wants the development, staging and production versions to differ only in the endpoint name and the prompt text, with no code edits between environments. What should they do?
+A: Keep one copy of the agent file per environment and edit the constants in each copy before logging the model
+B: Put the values in a `ModelConfig` (dictionary or YAML file), read them with `model_config.get()` and pass `model_config` when logging
+C: Set environment variables in the development notebook, because a logged model captures the variables of the notebook session
+D: Store the values in a Git repository and let the serving endpoint pull the file at request time, so they stay editable
+K: B
+G: ## Parameters without code changes
+Agent code often has values that change between environments: the model endpoint name, prompt text, retriever settings. MLflow `ModelConfig` is a set of key-value parameters you define in a Python dictionary or a `.yaml` file. In the agent code you create `mlflow.models.ModelConfig(development_config=...)` and read values with `model_config.get("name")` (or convert with `to_dict()`). When you log the agent you pass the `model_config` parameter to `log_model`, which sets the parameters used when the logged agent is loaded.
+## Why it helps
+During development you can use a dictionary, then move to a YAML file for production and CI/CD. The code file stays the same, and the logged model records the parameters it was built with.
+W: `ModelConfig` separates parameters from code, and the `model_config` argument to `log_model` fixes the values the logged agent will use.
+X: A=Copies per environment: duplicated code drifts and every change needs edits in several places.
+C=Notebook environment variables: the logged model does not capture notebook session variables, so the endpoint would not see them.
+D=Git pull at request time: this adds latency and a runtime dependency, and the logged model no longer records what ran.
+T: Use `ModelConfig` and the `model_config` argument of `log_model` to change agent parameters without editing code.
+V: MLflow, Mosaic AI Agent Framework
+@ DBX-GAI D4 T4.1 applied troubleshooting
+S: A custom pyfunc chain reranks passages with a weights file and reads a prompt template file. Both files sit in a Unity Catalog volume during development. The serving endpoint must have them without relying on the notebook environment. How should they be packaged?
+A: Pass them in the `artifacts` argument of `log_model` and read their paths from `context.artifacts` in `load_context`
+B: Point `load_context` at their paths on the notebook driver's local disk, because the endpoint shares that disk with the notebook
+C: List the file names in `pip_requirements`, so that the container installs them from the package index as dependencies
+D: Keep a copy in each client application, and have the client send the file content inside every request to the endpoint
+K: A
+G: ## Files needed at inference time
+When a model needs files during inference, package them into the model artifact when you log it. With `mlflow.pyfunc.log_model` you pass the `artifacts` parameter, a dictionary that maps names to paths (for example files in a Unity Catalog volume or a local directory). In a pyfunc model the paths are then available from the `context` object under `context.artifacts`, and you load them in `load_context` the usual way for that file type.
+## Why
+A serving endpoint runs in its own container. The notebook driver's disk does not exist there, and downloading files from the internet at startup can fail or be blocked. Packaging files with the model makes the logged version self-contained.
+W: The `artifacts` argument bundles the files with the logged model, and `context.artifacts` gives `load_context` their paths inside the serving container.
+X: B=Driver local disk: the endpoint runs in a separate container that does not share the notebook driver's disk, so those paths do not exist.
+C=`pip_requirements`: it lists Python packages to install, not data files such as weights or templates.
+D=Files from clients: this sends large content on every call, duplicates it in many apps and is not part of the logged model.
+T: Package inference-time files with the `artifacts` argument and read them through `context.artifacts`.
+V: MLflow, Model Serving
+@ DBX-GAI D4 T4.1 applied use-case
+S: Which TWO situations from a GenAI project make a custom `pyfunc` model the right way to package the chain for Model Serving? (Select TWO)
+A: The model is a standard scikit-learn classifier that is served unchanged, with no extra logic around it
+B: The incoming text must be cleaned and formatted before it reaches the model's predict function
+C: The team wants to skip Unity Catalog registration because pyfunc models need no registry
+D: The raw model output must be post-processed into the shape the consuming application expects
+E: The team wants to avoid declaring any Python dependencies, because pyfunc captures none
+K: B,D
+G: ## When to reach for pyfunc
+The Databricks guide lists these scenarios for a custom Python function model: the model requires preprocessing before inputs reach its predict function; the framework is not natively supported by MLflow; the application requires the model's raw outputs to be post-processed; the model has per-request branching logic; or you are deploying fully custom code.
+## What pyfunc does not change
+A pyfunc model is still logged with its dependencies, registered in Unity Catalog and served like any other model. A natively supported flavor that needs no extra logic does not need the wrapper.
+W: B=Preprocessing: input cleaning before `predict` is a documented pyfunc scenario.
+D=Post-processing: reshaping raw outputs for the consumer is the other documented scenario.
+X: A=Unmodified standard model: a native flavor can be logged and served without a wrapper.
+C=Skip registration: pyfunc models are registered and served like others and the registry step stays.
+E=No dependencies: pyfunc logs requirements, and `pip_requirements` is how you control them.
+T: Use pyfunc for pre- and post-processing, unsupported frameworks and custom branching logic.
+V: MLflow, Model Serving
+
+@ DBX-GAI D4 T4.2 applied use-case
+S: An internal web application must send questions to a production model serving endpoint through its service principal. Security requires that this principal cannot change the endpoint's configuration, delete it or change its permissions. Which endpoint permission level should it receive?
+A: CAN MANAGE, because the application needs to reach the endpoint at all times
+B: CAN VIEW, which allows querying the endpoint but nothing else
+C: CAN QUERY, which allows sending requests but not updating, deleting or re-permissioning the endpoint
+D: No endpoint permission, because the workspace allows any user to query every endpoint by default
+K: C
+G: ## Serving endpoint permission levels
+A serving endpoint has an ACL with four levels, in increasing power:
+- **No permissions**: nothing.
+- **CAN VIEW**: get the endpoint and list endpoints.
+- **CAN QUERY**: everything CAN VIEW allows, plus querying the endpoint.
+- **CAN MANAGE**: everything above plus updating the endpoint configuration, deleting it and modifying its permissions.
+## Least privilege
+A client application that only sends requests needs CAN QUERY. CAN MANAGE belongs to the owners who change or delete the endpoint. CAN VIEW alone is not enough to query.
+W: CAN QUERY allows requests to the endpoint and nothing that changes it, which matches least privilege for a calling application.
+X: A=CAN MANAGE: it would let the application update, delete or re-permission the endpoint, exactly what security forbids.
+B=CAN VIEW: it only allows getting and listing the endpoint; querying requires CAN QUERY.
+D=No permission: with no permission a principal cannot query; access is granted through the ACL.
+T: Give calling apps CAN QUERY on a serving endpoint, and keep CAN MANAGE for owners.
+V: Model Serving, Unity Catalog
+
+@ DBX-GAI D4 T4.2 applied use-case
+S: A RAG agent is deployed to a serving endpoint and must read an AI Search index and call a Unity Catalog function at runtime. The team wants short-lived, automatically rotated credentials and no secrets in code. Which approach does Databricks recommend?
+A: Declare the index and the function as resources at logging time, so automatic passthrough provisions credentials
+B: Store a developer's personal access token in a secret scope and read it in the agent code
+C: Open the index and function to all workspace users, so the endpoint can use any identity
+D: Run the agent only in notebooks, where the notebook user's identity already has the access
+K: A
+G: ## Authentication choices for deployed agents
+- **Automatic authentication passthrough**: the agent runs with the permissions of the user who deployed it, through credentials Databricks manages. You declare dependencies at logging time. Low setup, short-lived credentials, automatic rotation. Recommended when all resources support it.
+- **Manual authentication**: you provide credentials, for example in environment variables. These are long-lived and need rotation management.
+- On-behalf-of-user authentication runs as the end user, which is for per-user access control or user-attributed auditing. It is a separate option and is documented as Public Preview for Model Serving.
+## How passthrough works
+At deployment Databricks verifies the endpoint creator can access each declared resource, creates a service principal for the agent model version, grants it read access to those resources, and injects short-lived M2M OAuth tokens it rotates. The behavior resembles "Run as owner" for dashboards.
+W: Declared resources are exactly the input that automatic passthrough needs to give the endpoint short-lived, rotated credentials with least-privilege access.
+X: B=Personal token in a secret scope: a long-lived credential tied to a person that must be rotated by hand; this is the manual route passthrough replaces.
+C=Open to everyone: this removes least privilege for every user and still does not give the endpoint a managed identity.
+D=Notebook only: the requirement is a deployed endpoint; the notebook identity does not exist there.
+T: Declare resources at logging time for automatic authentication passthrough.
+V: Mosaic AI Agent Framework, Model Serving
+
+@ DBX-GAI D4 T4.2 advanced troubleshooting
+S: A data scientist logs an agent that declares a Unity Catalog function and an AI Search index and then calls `agents.deploy()`. Deployment fails because the creator lacks access to the declared function. The data scientist asks an admin for the minimum fix. What must be granted?
+A: Workspace admin rights, so that the data scientist bypasses all checks
+B: CAN MANAGE on the AI Search index, which also provides execute rights on functions
+C: CAN QUERY on the serving endpoint that the deployment will create, because the endpoint does not exist yet and must be callable
+D: EXECUTE on the function, plus USE SCHEMA on its schema and USE CATALOG on its catalog, to the data scientist
+K: D
+G: ## The creator's permissions matter
+With automatic passthrough, Databricks first verifies that the endpoint creator can access every dependency declared at logging time, and then grants a created service principal access to them. So the person calling `deploy()` needs the permission for each resource type:
+- Unity Catalog function: `EXECUTE`
+- Unity Catalog table: `SELECT`
+- AI Search index: `Can Use`
+- Model Serving endpoint: `Can Query`
+- Genie Agent: `Can Run`
+- SQL warehouse: `Use Endpoint`
+Unity Catalog resources also require `USE SCHEMA` on the parent schema and `USE CATALOG` on the parent catalog.
+## Minimum fix
+Grant exactly what the failing resource needs, no more.
+W: The function needs `EXECUTE`, and Unity Catalog objects also need `USE SCHEMA` and `USE CATALOG` on the parents, so granting those lets the creator pass the check.
+X: A=Workspace admin: it is far beyond the minimum fix and unnecessary for a single function.
+B=CAN MANAGE on the index: the index permission applies to the index, not to the function the error names.
+C=CAN QUERY on the endpoint: the endpoint is created by the deployment itself, and the failing check is about the function.
+T: The deploying user needs each declared resource's permission, plus USE SCHEMA and USE CATALOG for UC objects.
+V: Unity Catalog, Mosaic AI Agent Framework
+
+@ DBX-GAI D4 T4.2 applied definition
+S: An agent that uses a Genie Agent, an AI Search index and a SQL warehouse is deployed with automatic authentication passthrough. Which TWO resource and permission pairs match what the endpoint creator needs? (Select TWO)
+A: Genie Agent with `Can Run`
+B: SQL warehouse with `Can Manage`
+C: AI Search index with `Can Use`
+D: Model Serving endpoint dependency with `Can Manage`
+E: Unity Catalog function with `SELECT`
+K: A,C
+G: ## Permission by resource type
+For automatic authentication passthrough the creator needs the following (Unity Catalog resources also need `USE SCHEMA` and `USE CATALOG` on the parents):
+- SQL warehouse: `Use Endpoint`
+- Model Serving endpoint: `Can Query`
+- Unity Catalog function: `EXECUTE`
+- Genie Agent: `Can Run`
+- AI Search index: `Can Use`
+- Unity Catalog table: `SELECT`
+Each permission is the least privilege that allows the declared use.
+W: A=Genie Agent: `Can Run` is the documented permission for a Genie Agent resource.
+C=AI Search index: `Can Use` is the documented permission for an AI Search index.
+X: B=Warehouse with Can Manage: the requirement is `Use Endpoint`, which is less than managing it.
+D=Endpoint dependency with Can Manage: a model serving endpoint needs `Can Query`.
+E=Function with SELECT: functions use `EXECUTE`; `SELECT` is for tables.
+T: Match each resource to its least-privilege permission, such as Can Run for Genie and Can Use for AI Search.
+V: Mosaic AI Agent Framework, Unity Catalog
+
+@ DBX-GAI D4 T4.3 applied use-case
+S: A knowledge-base assistant must always do the same four things for each question: retrieve passages from an index, insert them into a prompt template, call a chat model and return plain text. Which order builds the chain correctly?
+A: Chat model, then retriever, then prompt template, then output parser
+B: Prompt template, then chat model, then retriever, then output parser
+C: Retriever, then prompt template, then chat model, then output parser
+D: Output parser, then retriever, then prompt template, then chat model
+K: C
+G: ## Components of a simple RAG chain
+A chain connects components in a fixed order, each consuming the previous one's output:
+1. **Retriever**: finds relevant passages for the question (for example from a vector index).
+2. **Prompt template**: merges the question and the retrieved context into the final prompt.
+3. **Chat model**: generates the answer from that prompt.
+4. **Output parser**: converts the model's message into the shape the caller needs, here a plain string.
+In LangChain expression language this reads like `retriever | prompt | model | parser`. The question and the retrieved text both flow into the prompt before the model sees them.
+## Source note
+This is generic LangChain expression language (LCEL) behavior and is not described on the Databricks docs pages; it is not a Databricks-specific feature.
+W: The model can only use context that already sits in the prompt, so retrieval and prompt building come first, and parsing the answer comes last.
+X: A=Model first: the model would run without context or a prompt.
+B=Model before retriever: the retrieved passages would arrive after the answer has been generated.
+D=Parser first: a parser works on a model's output, so it belongs at the end.
+T: A RAG chain runs retriever, prompt template, chat model, then output parser.
+V: LangChain, AI Search
+
+@ DBX-GAI D4 T4.3 applied tradeoff
+S: Every request to a billing assistant follows the same path: look up the customer's plan with a fixed SQL function, then answer from a prompt using that result. No step depends on the model deciding what to call next. Latency and predictable behavior matter. What is the best design?
+A: A tool-calling agent that chooses among many tools and loops until it decides it is done
+B: A simple chain with the fixed lookup step, then the prompt and model, keeping the path predictable
+C: A supervisor with three worker agents, one for lookups, one for answers and one for formatting
+D: A fine-tuned model that memorizes all customers' plans so no lookup is needed
+K: B
+G: ## Chain or agent
+- A **chain** has a fixed sequence of steps decided by the developer. Behavior is predictable, latency is bounded and each step is easy to evaluate.
+- An **agent** lets the model decide which tools to call and how many times, which suits tasks where the path is not known in advance. That flexibility costs extra model calls, variance and evaluation effort.
+## Applying it
+The billing flow is always the same, so there is nothing for the model to decide. A chain with a fixed lookup step, a prompt template and a model matches the requirement with the least complexity.
+## Source note
+This is generic LangChain expression language (LCEL) behavior and is not described on the Databricks docs pages; it is not a Databricks-specific feature.
+W: The path is fixed, so a simple chain gives bounded latency and predictable behavior and is easy to test.
+X: A=Free tool-calling loop: extra model calls and variance for a decision that never needs making.
+C=Supervisor with workers: multi-agent routing adds latency and complexity for a flow without branching.
+D=Memorizing plans: plan data changes and is private per customer, so a model cannot hold it reliably; the lookup returns current data.
+T: Use a simple chain when the steps are fixed; use an agent when the model must choose the path.
+V: LangChain, Mosaic AI Agent Framework
+
+@ DBX-GAI D4 T4.3 applied troubleshooting
+S: A developer builds this chain and it fails at runtime with a missing-variable error.
+```
+prompt = ChatPromptTemplate.from_template(
+    "Context: {context}\nQuestion: {question}")
+chain = prompt | model | StrOutputParser()
+chain.invoke({"query": "How do I reset my password?"})
+```
+What is the correct fix?
+A: Add `temperature=0` to the model, which supplies the missing variable
+B: Wrap the parser in a retry so the prompt is rendered again with the same input until it succeeds
+C: Replace the string parser with a JSON parser, because the missing-variable error comes from the parsing stage at the end
+D: Map the input to the template's names and feed `context` from the retriever with a step before the prompt
+K: D
+G: ## Input contract of a chain
+The first component of a chain defines the keys it needs. A prompt template with `{context}` and `{question}` expects a mapping with exactly those keys. Invoking with `{"query": ...}` supplies neither, so rendering fails before the model is called.
+## Repair
+Place a mapping step in front of the prompt, for example a dictionary of runnables such as `{"context": retriever, "question": itemgetter("query")}`, so the retriever produces `context` and the incoming `query` becomes `question`. The error is raised while rendering the prompt, so model or parser settings are not involved.
+## Source note
+This is generic LangChain expression language (LCEL) behavior and is not described on the Databricks docs pages; it is not a Databricks-specific feature.
+W: The prompt needs `context` and `question`, so a mapping step must create them from the incoming input and the retriever.
+X: A=Temperature: a sampling parameter of the model; it cannot supply variables for a template.
+B=Retry the parser: the failure happens when the prompt is rendered, before any parsing, and the same input fails again.
+C=JSON parser: the parser is the last step and was never reached.
+T: Match the chain's input keys to the prompt template variables, with a mapping step if needed.
+V: LangChain
+
+@ DBX-GAI D4 T4.3 applied use-case
+S: A chain answers product questions with a chat model. A downstream job needs the result as JSON with the keys `answer` and `source_ids`, and currently crashes on free-form sentences. What is the simplest change that meets the requirement inside the chain?
+A: State the two keys in the prompt and end the chain with an output parser that validates the JSON
+B: Ask the downstream job to extract the keys with regular expressions from whatever sentence comes back
+C: Fine-tune a separate model on thousands of JSON examples before changing anything else
+D: Lower the model's maximum output length so that the answers become short enough to parse
+K: A
+G: ## Output shaping in a chain
+Chains end with an **output parser** that converts the model's message into the form the next system needs: plain text, JSON or a typed object. To get structured output, the prompt states the required format, and the parser validates and converts the response; many chat models also support structured-output or JSON mode, which can be bound to the model in the same chain.
+## Why not push it downstream
+Downstream regex extraction is brittle and spreads format knowledge across systems. The chain is the right place to enforce the contract, and it is a small change compared with training a model.
+## Source note
+This is generic LangChain expression language (LCEL) behavior and is not described on the Databricks docs pages; it is not a Databricks-specific feature.
+W: A format instruction in the prompt plus a parsing step at the end of the chain makes the output contract explicit and fails early if the shape is wrong.
+X: B=Regex downstream: sentences change with every answer, so the extraction is brittle.
+C=Fine-tune first: heavy and slow for a requirement that a prompt and a parser can meet.
+D=Shorter output: length does not make text valid JSON, and it can truncate the answer.
+T: Enforce structured output inside the chain with a format instruction and an output parser.
+V: LangChain

@@ -1,0 +1,538 @@
+# src: https://docs.databricks.com/aws/en/machine-learning/mlops/mlops-workflow
+# src: https://docs.databricks.com/aws/en/machine-learning/mlops/deployment-patterns
+# src: https://docs.databricks.com/aws/en/notebooks/testing
+# src: https://docs.databricks.com/aws/en/dev-tools/bundles/resources
+# src: https://docs.databricks.com/aws/en/dev-tools/bundles/mlops-stacks
+# src: https://docs.databricks.com/aws/en/dev-tools/bundles/run-as
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/serve-multiple-models-to-serving-endpoint
+
+@ DBX-MLP D2 T2.5 applied use-case
+S: An ML team promotes code through development, staging and production. Before a release branch is cut, CI must show that the feature pipeline, the training pipeline, the batch inference pipeline and the monitoring setup work correctly together. Which integration test design follows Databricks guidance?
+A: Run the unit tests of every function in the staging workspace, because passing unit tests already prove that the pipelines cooperate
+B: Trigger all pipelines in the staging environment against its own staging catalog, in pipeline order, and check the output of each stage
+C: Train the model in the development workspace, copy the artifact to staging, and skip the feature and inference pipelines because they did not change
+D: Run the pipelines against the production catalog with a test flag, so that the data volume and values match production exactly
+K: B
+G: ## What an integration test covers
+A unit test checks one function in isolation. An integration test runs the real pipelines together so that the hand-offs between them are exercised: feature tables written by the feature pipeline, read by training, a model registered in Unity Catalog, loaded by inference, and monitoring tables created for the outputs.
+## Where it runs
+In the Databricks MLOps workflow, the staging environment exists to test the ML pipeline code. It has its own catalog in Unity Catalog, so tests can write tables and register models without touching production. The staging environment should match production as closely as is reasonable. Integration tests run all pipelines (feature engineering, model training, inference and monitoring), and the assets they write are temporary and kept only until testing is complete.
+W: Running every pipeline in staging against the staging catalog tests the interfaces between the stages with production-like configuration, and a failure points to the stage whose output was wrong, without any risk to production data or models.
+X: A=Unit tests only: they validate functions in isolation and cannot reveal a schema mismatch between a feature table and the training code, or a model that fails to load in inference.
+C=Copying a dev artifact: this is the deploy-models shortcut. It skips the feature and inference code that must also be reviewed and tested, and the artifact was never produced by the staging pipelines.
+D=Production catalog with a test flag: tests would write temporary tables and model versions into production assets, which breaks the isolation of environments and risks polluting real data and registered models.
+T: Integration tests run all ML pipelines together in staging against the staging catalog.
+V: Unity Catalog, MLflow, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.5 advanced tradeoff
+S: A model takes nine hours to train on the full dataset. Pull-request integration tests must finish within about 30 minutes, but must still run the training code, register the model and feed it to the inference pipeline. Which approach keeps the test meaningful?
+A: Replace the training task with a check that the training notebook parses without syntax errors, and register a model from the previous release
+B: Skip integration testing for training code and rely on the first production retraining run to reveal any failure after release
+C: Train once a week on the full dataset and let every pull request reuse that model, without executing the changed training code
+D: Run the same training pipeline in staging on a small data sample or with fewer iterations, accepting lower model quality but executing every step
+K: D
+G: ## Fidelity versus speed
+An integration test is a smoke test of the whole chain, not a measurement of model quality. Databricks guidance says some steps can trade off fidelity of testing against speed or cost: if models are expensive or time-consuming to train, use small subsets of data or run fewer training iterations.
+## What must stay real
+The code path must still run. The same training pipeline is triggered, metrics are logged, the model is registered to the staging catalog, and the next pipeline loads it. Only the data volume and the number of iterations shrink.
+W: A reduced sample or fewer iterations keeps the training code, logging, registration and hand-off to inference all executing, so a pull request that breaks any of them fails within the time budget.
+X: A=Syntax check: a notebook can parse and still fail at runtime on schema, permissions, library versions or model logging, and reusing an old model means the changed code is never executed.
+B=Test in production: the point of staging is to find failures before release. Waiting for production retraining exposes users and downstream consumers to the failure.
+C=Reuse a weekly model: the pull request's training changes never run, so the test passes even when the new code is broken. It validates an older version of the code.
+T: Shrink data or iterations, not the steps: keep every pipeline executing in the integration test.
+V: MLflow, Unity Catalog
+
+@ DBX-MLP D2 T2.5 applied use-case
+S: A real-time application will call a Model Serving endpoint in production. The team wants the staging integration test to cover the serving path of the release candidate. Which test design is the best fit?
+A: Run the deployment pipeline in staging so it creates a temporary endpoint with the model, send small test requests, then remove it
+B: Load the model in the CI runner with `mlflow.pyfunc.load_model` and call `predict` locally, because the endpoint serves the same artifact
+C: Create the production endpoint from the pull request branch and watch its error rate for a few minutes before the merge
+D: Unit-test the JSON request schema with a mocked HTTP client, because network calls to real endpoints do not belong in automated tests
+K: A
+G: ## Serving is part of the pipeline
+For an application with real-time inference, the serving infrastructure itself can fail: the endpoint may not build, the model may not load in the serving container, or the request and response format may not match the client. A local `predict` call cannot detect those problems.
+## The Databricks approach
+In the staging environment you trigger the model deployment pipeline, which creates a serving endpoint in staging and loads the model. Depending on production requirements you can do full-scale load testing, or only send small batch jobs or requests to a temporary endpoint. The second option keeps cost and duration low.
+W: Running the real deployment pipeline against a temporary staging endpoint tests endpoint creation, model loading and the request path, while small test requests keep the cost low and nothing in production is touched.
+X: B=Local `predict`: it proves the artifact works in a Python process, not that the serving environment can build, load and answer requests, so the deployment pipeline stays untested.
+C=Endpoint in production: a candidate that has not passed staging would be exposed to live traffic. Testing belongs before the release, in an environment that matches production.
+D=Mocked HTTP client: a mock only checks the test's own assumptions about the schema. It never exercises the real endpoint, so deployment errors and runtime failures pass undetected.
+T: Test real-time inference by deploying a temporary staging endpoint and sending small requests.
+V: Model Serving, MLflow
+
+@ DBX-MLP D2 T2.5 applied troubleshooting
+S: A staging integration test ends with the following code and always passes, even when the training task of the same CI run fails to register a new model version.
+```
+model = mlflow.pyfunc.load_model("models:/prod.ml.churn@champion")
+sample = spark.table("staging.ml.test_sample").toPandas()
+preds = model.predict(sample)
+assert len(preds) == len(sample)
+```
+What is the flaw?
+A: `predict` on a pandas DataFrame never keeps the row count, so the assertion must compare with a Spark DataFrame instead
+B: Tables in the staging catalog cannot be read from CI, so the sample must be exported to a parquet file before it is loaded
+C: It loads the production champion, so it tests the old model; it should load the version URI the staging training task produced
+D: The URI should use the legacy stage form `models:/churn/Staging`, so that the registry stage matches the environment under test
+K: C
+G: ## Test the artifact the run produced
+An integration test must exercise the output of the pipeline run under test. In the recommended workflow the training task yields a model URI, and later tasks (validation, deployment, inference) use it, for example passed with task values. The environment decides which catalog the version is registered to: a staging run registers into the staging catalog.
+## Why the snippet is blind
+An alias such as `champion` points to a version that was released earlier. Loading it tests yesterday's model against today's sample, so the assertion succeeds whether or not the new training code works.
+W: The test never touches the new version. Reading the URI emitted by the training task, in the staging catalog, makes the assertion depend on the candidate that the pipeline just produced.
+X: A=Row counts: `predict` on a pandas DataFrame returns one prediction per input row for ordinary models, so the comparison is valid and is not what makes the test pass wrongly.
+B=Staging read access: reading a staging table with `spark.table` works for principals that have privileges on it. Exporting to parquet adds work and does not touch the real flaw.
+D=Legacy stage URI: workspace registry stages are legacy. Unity Catalog uses catalogs for environments and aliases or version numbers, and a stage name would still not select the new version.
+T: Integration tests load the model URI produced by the run under test, never a released alias.
+V: MLflow, Unity Catalog
+
+@ DBX-MLP D2 T2.5 advanced tradeoff
+S: Several pull requests run integration tests at the same time. All of them write to the fixed names `staging.ml.features` and `staging.ml.churn`, so runs overwrite each other and fail randomly. The team wants pull requests to keep testing in parallel. What should they do?
+A: Give every pull request its own workspace and metastore, and copy the staging catalog into each of them before the test starts
+B: Point the integration tests at the dev catalog, where data scientists already overwrite tables freely, instead of the staging catalog
+C: Create a uniquely named schema per CI run, for example with the run ID, in the staging catalog, write all assets there, and drop it afterwards
+D: Cap the integration job at one concurrent run so that tests queue up, and keep the fixed table and model names
+K: C
+G: ## Staging assets are temporary
+The staging catalog exists for testing ML pipelines and registering test models. Assets written there are generally temporary and retained only until testing finishes. That makes it safe to create and drop them automatically.
+## Isolating parallel runs
+Collisions come from shared names, not from shared compute or the shared catalog. Parameterising the schema (a run-unique name passed to every pipeline) lets each run own its tables and model, and a final cleanup step drops the schema. Runs stay parallel and the catalog stays tidy.
+W: A schema per run gives every pipeline run separate tables and models inside the staging catalog, so parallel pull requests no longer overwrite each other, and cleanup keeps the temporary assets from accumulating.
+X: A=Workspace and metastore per pull request: this is heavy, slow and expensive, and a separate metastore cannot share the governed staging assets. Unique names inside one catalog solve the problem.
+B=Dev catalog: it is meant for free experimentation and the same overwrite problem would continue there. It also defeats the purpose of testing in a production-like staging environment.
+D=Concurrency of one: it removes the collision but also removes parallelism, which the team wants to keep, and long-running tests would make every pull request wait in a queue.
+T: Give each integration run its own schema in the staging catalog and drop it afterwards.
+V: Unity Catalog, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.5 applied use-case
+S: The main branch receives many concurrent pull requests. Each pull request passes its integration test, but now and then the combination of merged changes breaks the training pipeline, and the break is noticed only after the release branch is cut. What should the team add?
+A: Schedule periodic integration tests on the main branch in staging, so interactions between merged changes show up before release
+B: Require two human approvals on each pull request so reviewers can spot interactions between concurrent changes
+C: Remove integration tests from pull requests and run them once per quarter against production, where all merged changes are present
+D: Rerun the unit tests twice on every pull request, since a flaky unit test is the only way a merged combination fails
+K: A
+G: ## Tests pass alone, fail together
+Each pull request is tested against the main branch as it was when the test ran. Two pull requests that each pass can still conflict after both are merged, for example one renames a feature column and the other adds a new use of it.
+## Periodic tests on main
+Databricks guidance suggests scheduling periodic integration tests on the main branch when it is updated frequently by concurrent pull requests from multiple users. The scheduled run tests the merged state in staging and fails before a release branch exists.
+W: A scheduled integration test on main exercises the merged state of the code in staging, so combinations that no single pull request test saw are caught before the release branch is created.
+X: B=More approvals: review helps with quality but cannot execute pipelines, so subtle interactions between concurrent changes still reach the release.
+C=Quarterly production run: moving tests to production and to a long interval delays detection by months and risks production assets. Pull request tests are still valuable.
+D=Unit tests twice: unit tests are deterministic checks of single functions. Repeating them does not run the pipelines together, which is where the merged combination fails.
+T: Add scheduled integration tests on main when concurrent pull requests make merged states unpredictable.
+V: Lakeflow Jobs, Databricks Git folders
+
+@ DBX-MLP D2 T2.5 applied comparison
+S: The team designs the CI stage that guards the merge into the main branch. Which sequence follows the Databricks MLOps workflow?
+A: Run integration tests on every commit and unit tests only when the release branch is cut, because integration tests are the stronger check
+B: Run unit tests and integration tests as one combined step after the merge, and report failures in a daily summary
+C: Merge first, then run unit and integration tests on main, and revert the merge if either of them fails
+D: Run unit tests on the pull request and reject it if they fail, then run integration tests in staging, and merge only when both pass
+K: D
+G: ## Cheap checks first
+Unit tests are fast and are continuously added during development, so they run as soon as a pull request is opened. If they fail, the pull request is rejected. Only then do the slower integration tests run in the staging environment, which matches production as closely as is reasonable.
+## Gate the merge
+If all tests pass, the code is merged to the main branch. If any test fails, the CI/CD system should notify users and post the results on the pull request. A release branch, created afterwards, triggers the update of production jobs.
+W: Unit tests on the pull request filter out cheap failures, integration tests in staging then validate the pipelines together, and the merge happens only after both pass, with failures reported where the author sees them.
+X: A=Integration first: slow, expensive runs would fail on trivial errors a unit test catches in seconds, and skipping unit tests until release lets broken functions into main.
+B=Combined after the merge: main would already contain failing code, and a daily summary delays feedback so far that the author has moved on.
+C=Merge then test: broken code reaches main and blocks everyone else. Testing is meant to gate the merge, not to clean up after it.
+T: Unit tests on the pull request, then integration tests in staging, then merge; report failures on the pull request.
+V: Databricks Git folders, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.6 applied use-case
+S: A Python team has cleaning functions used by notebooks in three projects and by a Python script task in a job. They want pytest to discover and run unit tests in CI. How should they organize functions and tests?
+A: Keep each function and its unit tests in the same notebook, because a single file is the easiest to track
+B: Store the functions and their tests as Python files in a Git folder, import them from notebooks and tasks, and run them with pytest
+C: Store the functions in one notebook and the tests in another, and load the functions into other notebooks with the `%run` magic
+D: Copy the functions into every notebook that needs them, so that each notebook is self-contained and does not depend on shared files
+K: B
+G: ## Three ways to organize functions and tests
+Databricks describes common layouts for Python, R and Scala code, and each has benefits and challenges.
+- Outside notebooks: functions and tests in files. Callable from notebooks and from anywhere else; test frameworks are designed to run tests outside notebooks, and the workspace has tools to discover, run and track Python unit tests. The cost is more files to maintain.
+- Functions in one notebook, tests in another: easier to reuse across notebooks, but more notebooks to maintain, functions are not usable outside notebooks and are harder to test outside them.
+- Both in one notebook: easy to track, harder to reuse across notebooks, not usable outside notebooks.
+For Python and R notebooks, Databricks recommends storing functions and unit tests outside of notebooks.
+W: Files in a Git folder can be imported by notebooks and by a job script task, and pytest discovers them in CI, which matches the requirement of reuse inside and outside notebooks.
+X: A=Same notebook: simple to track, but the functions cannot be used outside notebooks, so the script task cannot import them, and reuse across the three projects is harder.
+C=Function and test notebooks with `%run`: reusable between notebooks, but the functions remain notebook code that a script task cannot use, and testing them outside notebooks is awkward.
+D=Copies everywhere: three copies drift apart, and a bug fix has to be repeated in each, which makes testing and maintenance worse than a shared module.
+T: For Python, keep functions and tests in files outside notebooks so that they are shared and pytest can run them.
+V: Databricks Git folders
+
+@ DBX-MLP D2 T2.6 applied troubleshooting
+S: A team keeps its feature functions in a notebook `lib` and the unit tests in a notebook `test_lib`, loaded with `%run`. Now a Python wheel task in a job needs the same functions and the team wants to run tests in CI outside Databricks notebooks. What is the main limitation of the current layout?
+A: The functions live in a notebook, so they cannot be used outside notebooks and are harder to test with frameworks outside notebooks
+B: The `%run` magic isolates the Spark session, so the tests cannot read tables that the function notebook created
+C: Notebook functions cannot be called from any other notebook, so every notebook needs its own copy of the function
+D: Tests kept in a separate notebook run only on all-purpose clusters, so it is impossible to schedule them in a job at all
+K: A
+G: ## Benefits and challenges of the separate-notebook layout
+Putting functions in one notebook and tests in another is easy to reuse across notebooks, and it avoids mixing test code into library code. The cost is more notebooks to maintain, and the functions can be used only from notebooks. They are also more difficult to test with frameworks that expect ordinary modules.
+## Consequence for this team
+A wheel task and CI both live outside notebooks. They need importable modules, which is why Databricks recommends files outside notebooks for Python.
+W: The reuse benefit stops at the notebook boundary: a wheel task and an external CI runner cannot import notebook functions, which is the documented challenge of this layout.
+X: B=Session isolation: `%run` executes the other notebook in the same context and session, so tables and functions are shared. That is not a limitation of this layout.
+C=No cross-notebook calls: reuse across notebooks is exactly the benefit of this layout, so notebooks can load the functions and do not need copies.
+D=All-purpose clusters only: notebooks can be run as job tasks on job compute, so scheduling is not the issue. The real issue is where the code lives.
+T: Functions kept in notebooks cannot be used outside notebooks, which limits reuse and external test frameworks.
+V: Databricks Git folders
+
+@ DBX-MLP D2 T2.6 applied comparison
+S: A data scientist keeps one notebook for a one-off analysis. The notebook defines a small helper function and the unit tests for it in the same notebook. Which statement describes the trade-off of this layout?
+A: It makes the function easier to reuse in other notebooks and in Python scripts, but the tests cannot be run from the notebook
+B: It needs the most files to maintain, but gives full pytest discovery and lets scripts import the function
+C: It requires a separate repository for the tests, and the function cannot be called from the notebook that defines it
+D: It is easy to track as one notebook, but the function is harder to reuse across notebooks and cannot be used outside them
+K: D
+G: ## Same-notebook layout
+Storing functions and their unit tests within the same notebook keeps everything in one place, which makes tracking and maintenance simple. The challenges are the mirror image of the benefit: the functions are harder to reuse across notebooks, they cannot be used outside notebooks, and they are harder to test outside notebooks.
+## When it fits
+It suits small, single-notebook work. When several projects or non-notebook tasks need the code, a file-based layout is the better design.
+W: One notebook is the simplest to maintain, and reuse across notebooks and outside notebooks is the price, which matches the described one-off analysis.
+X: A=Reuse claim reversed: functions embedded in a notebook with their tests are harder, not easier, to reuse, and tests can be run from the notebook.
+B=File-based layout: more files and full pytest discovery describe storing functions and tests outside notebooks, not a single notebook.
+C=Separate repository: nothing in this layout requires one, and a notebook can call a function it defines in its own cells.
+T: Same-notebook layout: simplest to maintain, hardest to reuse or test outside notebooks.
+V: Databricks Notebooks
+
+@ DBX-MLP D2 T2.6 applied definition
+S: A team writes feature transformations in Scala notebooks. Which organization of functions and unit tests does Databricks recommend, and why?
+A: Functions and tests in Scala files outside notebooks, because ScalaTest discovers them exactly as pytest discovers Python files, as for Python
+B: Functions in one notebook and tests in a separate one, because storing functions outside notebooks is unsupported for Scala
+C: Functions and tests in the same notebook, because Scala notebooks cannot call functions defined in other notebooks
+D: Functions as SQL UDFs in a schema, because Scala has no framework for unit testing
+K: B
+G: ## Recommendation differs by language
+For Python and R notebooks Databricks recommends functions and unit tests outside of notebooks. For Scala notebooks it recommends functions in one notebook and unit tests in a separate notebook. The reason is that the outside-notebook approach is not supported for Scala notebooks.
+SQL is different again: functions are stored as SQL user-defined functions in schemas, and called from SQL notebooks and from their tests.
+W: Scala notebooks cannot use the outside-notebook layout, so the recommended layout separates function code from test code in two notebooks, which keeps reuse possible.
+X: A=Scala files outside notebooks: that layout is exactly the one that is not supported for Scala notebooks, so it is not the recommendation.
+C=Same notebook: Scala notebooks can use functions from other notebooks, and mixing tests and code is the weaker layout that the recommendation avoids.
+D=SQL UDFs: that is the recommendation for SQL notebooks. ScalaTest exists and is the test framework used for Scala.
+T: Scala: functions in one notebook, tests in another; Python and R: files outside notebooks.
+V: Databricks Notebooks
+
+@ DBX-MLP D2 T2.6 applied use-case
+S: Analysts and ML engineers share a business rule that buckets customers by margin. It is called from many SQL notebooks and ought to be unit-tested. Which design does Databricks recommend for SQL notebooks?
+A: Define the rule as a temporary view in every notebook, and compare the view output with a CSV file of expected values kept in a volume
+B: Write the rule as comments in a notebook cell and ask each engineer to re-implement it when needed
+C: Store the rule as a SQL user-defined function in a schema, call it from notebooks, and test it with known inputs and expected outputs
+D: Re-implement the rule as a Python UDF in each notebook, because only Python code can be unit tested on Databricks
+K: C
+G: ## SQL has its own layout
+For SQL notebooks, Databricks recommends storing functions as SQL user-defined functions in your schemas (also called databases). They are governed objects, reusable by any notebook or query that can access the schema, and testable with SQL that calls the UDF and compares results with expected values.
+## Why not views or copies
+A temporary view lives only in one session, and copied logic drifts between notebooks.
+W: A SQL UDF in a schema is a single shared definition with a stable name. Unit-test queries call it with known inputs and compare the result, so all callers use the tested logic.
+X: A=Temporary views: they exist only in one session and are not a shared function definition, so there is no single tested rule behind them.
+B=Comments in a cell: documentation is not code, and each re-implementation can diverge from the rule, so nothing can be tested once.
+D=Python UDF copies: SQL UDFs can be tested with SQL, and copied Python logic is duplicated in each notebook, which is the opposite of one shared definition.
+T: For SQL notebooks, keep logic in SQL UDFs in a schema and test them with SQL.
+V: Unity Catalog, Databricks SQL
+
+@ DBX-MLP D2 T2.6 applied troubleshooting
+S: A unit test for the function `has_column(df, name)` is hard to write. The function returns `True` when the column exists, and otherwise returns the list of existing column names, which the callers then print. How should the function be redesigned for testability?
+A: Raise an exception with the list of columns when the column is missing, and leave the success return value unchanged
+B: Return a tuple that has the boolean in the first position and the list in the second, but only when the column is missing
+C: Return `None` for a missing column and the DataFrame for an existing column, so tests only check for `None`
+D: Return only a boolean, one predictable outcome of a single type, and move listing the columns to a separate function
+K: D
+G: ## One function, one predictable result
+Databricks guidance for testable functions: a function should return a single predictable outcome and be of a single data type. A check for existence returns a boolean, true or false. Returning false in one case and the thing itself in another forces every test and every caller to branch on the type.
+## Apply it
+Separate concerns: one function answers "does the column exist" and a second returns the column list. Each is trivial to assert on.
+W: A boolean-only function has a fixed return type and a fixed meaning, so a test is a single equality assertion. Listing columns becomes its own function with its own test.
+X: A=Exception on a miss: this makes the normal "missing" outcome an error path and turns an existence check into control flow, instead of a single predictable return.
+B=Tuple only on a miss: the return type still varies between calls (boolean in one case, tuple in the other), which is the core problem.
+C=`None` or DataFrame: this still mixes types and makes callers test for `None`. An existence check should answer true or false.
+T: Testable functions return one predictable outcome of one data type.
+V: Databricks Notebooks
+
+@ DBX-MLP D2 T2.6 applied troubleshooting
+S: An engineer moves `table_exists` from a notebook into `myfunctions.py` in a Git folder. The function works when called from the notebook, but pytest in CI fails with `NameError: name 'spark' is not defined`. What explains it, and what is the fix?
+A: Files that are not notebooks get no automatic Spark session; create one in the file with `SparkSession.builder.getOrCreate()` or pass it in
+B: pytest cannot use Spark on Databricks, so Spark-based functions have to stay in notebooks and be tested there
+C: The Git folder strips global variables from imported modules, so `spark` must be re-registered with `dbutils.library.restartPython()`
+D: The function must be wrapped in `@udf` before a module can use `spark`, because UDFs are the only way to share Spark code
+K: A
+G: ## What a notebook provides for free
+A Databricks notebook has a ready `spark` session, `dbutils` and other globals. A plain Python file does not: it is only a module. Databricks's own example puts `SparkSession.builder.getOrCreate()` into `myfunctions.py` for this reason: "Because this file is not a Databricks notebook, you must create a Spark session."
+## Design choice
+Creating the session in the file is simple; passing the session or DataFrame as an argument makes functions easier to test with small `createDataFrame` inputs.
+W: The module has no `spark` variable because only notebooks inject it. Creating or receiving a session fixes the error and keeps the function usable both in notebooks and in CI.
+X: B=Spark in pytest: tests of Spark code can run on Databricks compute, and the documented approach keeps functions in files while using Spark.
+C=Stripped globals: importing never removes globals, and `restartPython` restarts the interpreter. The `spark` name was never defined in the module.
+D=`@udf`: a UDF runs Python per row inside Spark. It is not needed to obtain a session and has nothing to do with the NameError.
+T: Code outside notebooks must create or receive its own Spark session.
+V: Databricks Git folders, Apache Spark
+
+@ DBX-MLP D2 T2.7 applied use-case
+S: In the production environment, data scientists have no write or compute access. They still need to analyze the live model's predictions, diagnose a drop in quality, and compare a new model with the one in production. Which access design follows the Databricks guidance?
+A: Give them write access to the production catalog so they can fix inference tables and rerun jobs
+B: Give them no production access at all, and send exported CSV files by email whenever they ask for data
+C: Give them read-only access to production catalog assets (models, inference and metric tables), while ML engineers keep writes and compute
+D: Give each data scientist an own copy of the production job, run under their personal identity, so that results are logged to dev
+K: C
+G: ## Roles in a staged environment
+In the recommended workflow ML engineers own the production environment, where pipelines train, validate and deploy models, publish predictions and monitor them. Data scientists typically do not have write or compute access there.
+## Why read-only still matters
+Data scientists know the ML-specific issues, so they need visibility into test results, logs, model artifacts, pipeline status and monitoring tables. Granting read-only access to the production catalog supports this, and they can load production models in the development workspace to compare them with new models.
+W: Read-only access to production assets gives data scientists the visibility to diagnose and compare, while writes and compute stay with the ML engineers who own production.
+X: A=Write access: it lets people alter production data and rerun jobs outside the reviewed pipelines, which is the risk that environment separation exists to prevent.
+B=Exported CSV files: slow, manual, outside governance, and the data scientists could not load production models to compare them with new candidates.
+D=Personal copies of production jobs: running production pipelines under personal identity bypasses review and mixes dev and prod assets. Read access is enough for analysis.
+T: Data scientists get read-only access to the production catalog; production writes and compute belong to ML engineers.
+V: Unity Catalog, MLflow
+
+@ DBX-MLP D2 T2.7 applied use-case
+S: Security policy forbids any access from the development workspace to the production catalog. Data scientists cannot work with realistic data, and models trained on small synthetic samples behave differently in production. What does Databricks suggest in this case?
+A: Grant temporary metastore admin rights to the data scientists so that they can read production tables only while experimenting
+B: Write a snapshot of production data to the dev catalog and let data scientists develop and evaluate code on that snapshot
+C: Develop only on random synthetic data and skip any evaluation, because production runs the real evaluation anyway
+D: Share the storage credential of the production catalog with the dev notebooks so that they can read the files directly
+K: B
+G: ## Ideal and fallback
+Ideally data scientists in the development workspace have read-only access to production data, inference tables and metric tables. If that is not possible, the guidance is that a snapshot of production data can be written to the dev catalog, so that project code can be developed and evaluated on realistic data.
+## Why the snapshot works
+The snapshot is produced by a controlled process that respects the policy, and development stays inside the dev catalog.
+W: A snapshot in the dev catalog gives realistic data for development and evaluation and keeps the dev workspace out of the production catalog, as the policy requires.
+X: A=Temporary admin rights: this gives broad privileges that violate the policy and defeats the isolation of the production catalog.
+C=Synthetic data without evaluation: it cannot reveal behavior on real distributions, so quality problems appear only after release.
+D=Shared storage credential: it bypasses Unity Catalog governance and audit, and gives direct file access to production data, which is also forbidden.
+T: If dev cannot read prod, publish a snapshot of production data into the dev catalog.
+V: Unity Catalog
+
+@ DBX-MLP D2 T2.7 advanced tradeoff
+S: One training project runs in dev, staging and prod, with a catalog per environment. The training code must register the model to the catalog of the environment where it ran, without code edits at promotion time. What is the best design?
+```
+mlflow.set_registry_uri("databricks-uc")
+mlflow.register_model(uri, f"{CATALOG}.ml.churn")
+```
+A: Hard-code `prod` in `CATALOG` and let staging tests overwrite the production model, then restore the old version if the tests fail
+B: Keep one copy of the notebook per environment, each with its own hard-coded catalog name, and review all three copies in every change
+C: Read `CATALOG` from a stage tag set manually on the cluster by an engineer, and have the engineer change the tag before each run
+D: Pass the catalog as a job parameter filled from the bundle target variable, so the same code registers to the dev, staging or prod catalog
+K: D
+G: ## One code base, many environments
+Deploy-code promotion moves the same reviewed code through the stages, so the code must not know which environment it runs in. The environment is injected at deployment: Unity Catalog uses one catalog per environment, and the pipeline registers models to the catalog corresponding to the environment in which it ran.
+## How
+A bundle target (dev, staging, prod) sets a variable, such as the catalog name, and the job passes it as a parameter. The model is then registered at `<catalog>.ml.churn` in the right place with no code edit.
+W: A parameter that comes from the deployment target keeps one reviewed code base and makes each environment register into its own catalog, so promotion is only deploying the same code to another target.
+X: A=Hard-coded production: staging tests would write into production assets and risk replacing the live model, which is exactly what environment isolation avoids.
+B=Three copies: they drift apart, so the code tested in staging is not the code that runs in production, which breaks deploy-code promotion.
+C=Manual tag: a human step before every run is error-prone and not reproducible, and a forgotten change registers a model in the wrong catalog.
+T: Inject the environment (catalog) from the deployment target, not from code edits.
+V: Declarative Automation Bundles, Unity Catalog
+
+@ DBX-MLP D2 T2.7 applied use-case
+S: A scheduled production training job runs under a service principal and creates the registered model `prod.ml.churn` on its first run. The job fails with a permission error when it registers the model. The service principal can read the feature tables. Which grants does it need?
+A: `USE CATALOG` on `prod`, `USE SCHEMA` on `prod.ml`, and `CREATE MODEL` on `prod.ml`
+B: `SELECT` on `prod.ml`, because a model is stored as a table in the schema
+C: `EXECUTE` on `prod.ml`, because registering a version is executing a model
+D: `MANAGE` on the whole metastore, so the service principal can create any object
+K: A
+G: ## Models are schema-level securables
+In Unity Catalog, registered models live in a catalog and schema. To create a new registered model in a schema, a principal needs `USE CATALOG` on the catalog, `USE SCHEMA` on the schema and `CREATE MODEL` on the schema. Adding versions to an existing model needs ownership of it or `CREATE MODEL VERSION` on it. `EXECUTE` is the privilege for using a model, for example loading or serving it.
+## Least privilege
+A production job should have just these grants. Data scientists receive read access separately, and ML engineers own the pipeline.
+W: The three grants allow the service principal to reach the catalog and schema and create the registered model, and nothing more. Later versions are added by the model owner, which the creator becomes.
+X: B=`SELECT`: that is a privilege for tables and views. A model is a different securable object, so reading privileges do not allow creating one.
+C=`EXECUTE`: it allows using an existing model, for example loading it, but not creating a new registered model in the schema.
+D=Metastore-wide `MANAGE`: it is far more than needed and violates least privilege for a service identity running automated jobs.
+T: Creating a registered model needs USE CATALOG, USE SCHEMA and CREATE MODEL on the target schema.
+V: Unity Catalog, MLflow
+
+@ DBX-MLP D2 T2.7 applied use-case
+S: An organization starts many ML projects and wants each of them to begin with the same environment layout, tested CI/CD pipelines and bundle-defined jobs, with a choice of only ML code or only CI/CD. What should the platform team use?
+A: A shared notebook copied by hand into each new project, with the CI configuration written again from scratch for every project in turn
+B: The `mlops-stacks` bundle template (`databricks bundle init mlops-stacks`), which creates a project that follows production best practices
+C: A Model Serving endpoint per project, since its configuration contains the project's pipeline definitions
+D: The AutoML UI, because it generates the CI/CD files that production deployment needs
+K: B
+G: ## Standardizing at scale
+Many projects are only manageable when each starts from the same structure. Declarative Automation Bundles with the MLOps Stacks repository provide a template for an MLOps project that follows production best practices out of the box: ML code, jobs for training, feature writing and batch inference, and CI/CD.
+## Choosing components
+The first prompt of `databricks bundle init mlops-stacks` selects `CICD_and_Project` (default), `Project_Only` for data scientists, or `CICD_Only` for ML engineers who set up infrastructure. You can run the command again to add the other part.
+W: The MLOps Stacks template is the documented way to create a standard, best-practice MLOps project with selectable ML and CI/CD components, repeatable for every new project.
+X: A=Hand-copied notebook: it is manual, drifts between projects and gives no tested CI/CD, which does not scale.
+C=Serving endpoint: an endpoint serves a model for inference. It does not define training pipelines, environments or CI/CD for a project.
+D=AutoML: it creates baseline models and notebooks for experimentation, not a project layout with CI/CD and environment configuration.
+T: Use the MLOps Stacks bundle template to start every ML project with a standard layout and CI/CD.
+V: Declarative Automation Bundles, MLflow
+
+@ DBX-MLP D2 T2.7 advanced tradeoff
+S: Data scientists tested many algorithms and hyperparameter ranges in dev. The weekly automated retraining in production now takes long and gives unstable results from run to run. What does the Databricks guidance suggest?
+A: Run the full dev search space in production, because more candidates always find a better model than a short list
+B: Stop automated retraining and let data scientists retrain by hand in production every week
+C: Limit production tuning to the top options found in dev, passed to the pipeline as a configuration file
+D: Remove hyperparameter tuning and all evaluation from the production pipeline to make it faster
+K: C
+G: ## Development explores, production repeats
+In development, data scientists try many algorithms and hyperparameters. In production training code, it is common to consider only the top-performing options. This saves time and can reduce the variance introduced by tuning in automated retraining.
+## How the choice reaches production
+If data scientists have read-only access to the production catalog, they can find the optimal set of hyperparameters on that data. The production training pipeline is then run with the selected set, typically included as a configuration file.
+W: A narrow, reviewed set of top options keeps retraining quick and stable, and the configuration file lets data scientists adjust it without changing pipeline code.
+X: A=Full search in production: it multiplies compute cost and run time and adds tuning variance, which is what the team wants to remove.
+B=Manual retraining: it removes automation and review, and makes results depend on who ran the job.
+D=No tuning or evaluation: skipping evaluation removes the check that a new model is not worse than the current one, so quality can silently drop.
+T: Production retraining uses a small configured set of top options from dev, not the full search space.
+V: MLflow, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.7 applied comparison
+S: Which description matches how code moves between environments in the Databricks MLOps workflow?
+A: Changes merge from the dev branch to main after CI passes in staging, and a release branch then triggers the update of production jobs
+B: Data scientists push directly to the release branch, and staging runs only after production has already been updated
+C: Notebooks are exported from the dev workspace and imported by hand into staging and production workspaces
+D: Each environment tracks its own long-lived branch with different code, and fixes are applied by hand in each one
+K: A
+G: ## Git as the promotion path
+Databricks recommends using Git for version control: pipelines and code are stored in Git, and moving ML logic between stages is moving code from the development branch to the staging branch to the release branch. Databricks Git folders sync notebooks and source code with workspaces.
+## The flow
+In the staging stage, a pull request runs unit tests, then integration tests run, and the code is merged into main. Creating a release branch triggers CI/CD to update the production jobs.
+W: Code is reviewed and tested in staging before it reaches main, and the release branch is the controlled trigger for production, so all environments run the same reviewed code.
+X: B=Direct push to release: production would be updated before testing, which removes the staging gate.
+C=Manual export and import: a manual copy has no review, no version history and no automated test, and the environments drift.
+D=Separate long-lived branches: the code in each environment differs, so what was tested in staging is not what runs in production.
+T: Promote code through Git: dev branch, main after staging tests, release branch for production.
+V: Databricks Git folders
+
+@ DBX-MLP D2 T2.8 applied troubleshooting
+S: A team defines ML assets in a bundle, but `databricks bundle validate` does not recognize the resource types.
+```
+resources:
+  models:           {churn: {name: churn, catalog_name: prod, schema_name: ml}}
+  mlflow_experiments: {exp: {name: /Workspace/Shared/churn}}
+  serving_endpoints:  {ep: {name: churn-ep}}
+```
+Which keys does a bundle use for these three resource types?
+A: `uc_models`, `mlflow_runs` and `inference_endpoints`
+B: `model_registry`, `experiment_tracking` and `serving_endpoints`
+C: `models`, `experiments` and `endpoints`
+D: `registered_models`, `experiments` and `model_serving_endpoints`
+K: D
+G: ## Bundle resources for ML
+Declarative Automation Bundles (formerly Databricks Asset Bundles) define Databricks resources as YAML under `resources`. The ML-related ones use these keys: `registered_models` (Unity Catalog models), `experiments` (MLflow experiments) and `model_serving_endpoints` (Model Serving endpoints). Others such as `jobs` and `quality_monitors` live next to them.
+## Why names matter
+Resource type keys are fixed by the schema. A key that looks reasonable but is not in the schema is not deployed.
+W: These three keys are the documented resource types, so the bundle can create the model, the experiment and the endpoint together with the jobs that use them.
+X: A=Invented names: none of these is a bundle resource type, so nothing would be deployed.
+B=Descriptive names: these read well but are not keys in the bundle schema, so validation does not recognize them.
+C=Partly right: `experiments` is correct, but `models` and `endpoints` are not the keys for registered models and serving endpoints.
+T: Bundle ML keys: registered_models, experiments, model_serving_endpoints.
+V: Declarative Automation Bundles, Unity Catalog, Model Serving
+
+@ DBX-MLP D2 T2.8 applied troubleshooting
+S: A bundle defines an experiment with `name: churn_experiments` under `resources.experiments`. Deployment fails for this resource, while jobs in the same bundle deploy. What is the fix?
+A: Add a `catalog_name` and a `schema_name`, because Unity Catalog stores experiments
+B: Replace the underscore with a dash, since experiment names allow only dashes
+C: Use an absolute workspace path, such as `/Workspace/Users/${workspace.current_user.userName}/churn_experiments`
+D: Move the experiment definition under `jobs`, since an experiment belongs to the single job that logs runs to it
+K: C
+G: ## Experiment names are paths
+In a bundle, an MLflow experiment is declared with a `name`. The name must be an absolute path in the Databricks workspace, for example `/Workspace/Users/someone@example.com/my_experiment`. A bare name is not a location. Substitutions such as `${workspace.current_user.userName}` build the path for each deploying user.
+## Other fields
+`permissions` grant levels such as `CAN_READ` to groups, `tags` add metadata (the description uses the `mlflow.note.content` tag), and `artifact_location` can point to a Unity Catalog volume.
+W: The experiment name must be an absolute workspace path. A path built with a substitution works for each user or service principal that deploys the bundle.
+X: A=Catalog and schema: these belong to registered models and other Unity Catalog objects. Experiments live in workspace folders and are addressed by path.
+B=Dashes only: the problem is the missing path, not the characters used in the last segment.
+D=Under `jobs`: experiments are their own resource type, and jobs refer to them by reference.
+T: A bundle experiment name is an absolute workspace path.
+V: Declarative Automation Bundles, MLflow
+
+@ DBX-MLP D2 T2.8 applied use-case
+S: A bundle manages the registered model `prod.ml.churn`. A scoring group must load and call the model from its own jobs but must not change or delete it. How is that declared in the bundle?
+A: Add a `permissions` entry with `CAN_MANAGE` for the group, as for experiments
+B: Add `grants` on the registered model with the `EXECUTE` privilege for the group
+C: Add `grants` with `ALL PRIVILEGES` for the group, since only that lets a job load a model
+D: Add `grants` with `SELECT` for the group, because models are read like tables
+K: B
+G: ## Grants for Unity Catalog resources
+Registered models are Unity Catalog securables, so a bundle sets access with `grants` (a list of principals and privileges), in the style of the documented example which grants `EXECUTE` to `account users`. `permissions` with levels such as `CAN_READ` and `CAN_MANAGE` apply to workspace objects like experiments and endpoints.
+## Least privilege
+`EXECUTE` allows using the model, such as loading it for inference. It does not allow editing or deleting it. Privileges stay in the reviewed YAML, so a model's access is part of its deployment.
+W: `grants` with `EXECUTE` on the registered model lets the scoring group load and call the model, without ownership or modification rights.
+X: A=`CAN_MANAGE` through `permissions`: that is a workspace-object permission level, and it would give management rights rather than just use.
+C=`ALL PRIVILEGES`: excessive. The group could then modify or drop the model, which the requirement forbids.
+D=`SELECT`: this privilege is for tables and views and does not apply to models.
+T: Give consumers EXECUTE on a bundle-managed registered model through grants.
+V: Declarative Automation Bundles, Unity Catalog
+
+@ DBX-MLP D2 T2.8 advanced use-case
+S: A bundle must roll out a new model version to 10 percent of requests of a production endpoint, while the current version stays at 90 percent. Which bundle configuration expresses this?
+```
+model_serving_endpoints:
+  churn_ep:
+    name: churn-ep
+    config: ...
+```
+A: Under `config`, list two `served_entities` with distinct names, and a `traffic_config` with routes of 90 and 10
+B: Define two endpoints named `churn-ep-current` and `churn-ep-new`, and let the client choose one at random
+C: Put a `traffic_percentage` field on the registered model so Unity Catalog splits requests between its versions
+D: Set `route_optimized: true`, which splits requests between the two newest versions
+K: A
+G: ## Traffic split in the endpoint config
+A serving endpoint can serve several entities. Each served entity has a `name`, an `entity_name` (the Unity Catalog model), an `entity_version`, workload size and scaling. `traffic_config.routes` assigns each `served_model_name` a `traffic_percentage`; for a rollout the values are 90 and 10.
+## In a bundle
+The same JSON shape is written as YAML under `config` of the `model_serving_endpoints` resource.
+- Changing the percentages and redeploying changes the rollout.
+- The endpoint keeps one URL; clients are unaware of the split.
+W: Two served entities with distinct names and a traffic config route 90 and 10 percent of requests inside one endpoint, and the split is part of the reviewed bundle.
+X: B=Two endpoints with client-side random choice: the application must implement and maintain the split, and every client needs two URLs.
+C=Field on the registered model: Unity Catalog models have versions and aliases but no traffic percentages. The split is a serving setting.
+D=`route_optimized`: it enables route optimization for low-latency access to the endpoint. It does not split traffic.
+T: Split traffic inside one endpoint with served entities and traffic_config routes in the bundle.
+V: Model Serving, Declarative Automation Bundles
+
+@ DBX-MLP D2 T2.8 advanced use-case
+S: A bundle deploys the serving endpoint `churn-ep`. A web application that runs as the service principal `app-sp` must send inference requests to it, but must not change the endpoint configuration or traffic split. How is this declared in the bundle?
+A: Add a `permissions` entry on the endpoint with `CAN_MANAGE` for `app-sp`, because querying an endpoint requires management rights
+B: Add a `permissions` entry on the endpoint with `CAN_QUERY` for `app-sp`, and keep `CAN_MANAGE` with the ML engineering group
+C: Add `grants` with `SELECT` on the endpoint for `app-sp`, because a serving endpoint is read like a Unity Catalog table
+D: Add `app-sp` to `run_as` of the bundle, since the identity that runs the bundle may always query its endpoints
+K: B
+G: ## Endpoint permissions in a bundle
+A `model_serving_endpoints` resource has a `permissions` list. The documented levels for a serving endpoint are `CAN_QUERY`, `CAN_VIEW` and `CAN_MANAGE`. `CAN_QUERY` lets a principal send requests; changing the configuration, such as the served entities or `traffic_config`, needs `CAN_MANAGE`.
+## Least privilege
+`grants` belongs to Unity Catalog securables such as registered models, schemas and volumes. An endpoint is a workspace object, so its access sits in `permissions`. The access stays in reviewed YAML next to the endpoint it protects.
+W: CAN_QUERY on the endpoint lets the application call it and nothing else, while CAN_MANAGE stays with the group that owns the endpoint configuration and the rollout.
+X: A=CAN_MANAGE: it allows editing the endpoint, including the traffic split, which the requirement forbids. Querying needs only the query level.
+C=SELECT grant: that privilege is for tables and views, and endpoint access is not set with Unity Catalog grants but with permissions on the endpoint.
+D=run_as: it sets the identity under which bundle jobs and pipelines run. It is not an access list for endpoints and grants no query rights.
+T: Give an application CAN_QUERY on a bundle-managed endpoint through permissions, not CAN_MANAGE.
+V: Declarative Automation Bundles, Model Serving
+
+@ DBX-MLP D2 T2.8 applied tradeoff
+S: The production registered model in a bundle must not be removed when a developer deletes it from the YAML or runs `bundle destroy`, because model versions would be lost. Which setting protects it?
+A: Set `mode: development` on the production target, which keeps all resources when the bundle is destroyed
+B: Set `lifecycle.prevent_destroy: true` on the registered model resource
+C: Move the model's definition into the `variables` section so that destroy skips it
+D: Add a `tags` entry `protected: true`, which blocks deletion in Unity Catalog
+K: B
+G: ## Lifecycle settings
+Every bundle resource can carry a `lifecycle` mapping that controls what happens when the resource is deployed or destroyed. `prevent_destroy` is a boolean that prevents the resource from being destroyed. For a registered model that holds the version history, this is a guard against accidental deletion by a YAML edit.
+## Why not other options
+Deployment modes change defaults such as name prefixes and paused schedules. Variables hold values and tags are only metadata.
+W: `prevent_destroy` on the registered model stops the bundle from destroying it, so removing it from the YAML or destroying the bundle does not delete the version history.
+X: A=Development mode: it prefixes names and pauses schedules for safe iteration, and does not protect resources. On a production target it would also be wrong.
+C=Variables: they carry values to substitute and do not define or protect resources.
+D=Tag: tags are descriptive metadata. Unity Catalog does not treat a tag named "protected" as a delete block.
+T: Use lifecycle.prevent_destroy to protect a production registered model.
+V: Declarative Automation Bundles, Unity Catalog
+
+@ DBX-MLP D2 T2.8 applied use-case
+S: A bundle declares an experiment `churn_exp` and a training job. The job must log runs to that experiment, but the experiment ID is known only after deployment. How should the job get the experiment?
+A: Hard-code the ID of the experiment in the job after the first deployment, and deploy twice
+B: Let the job create a new experiment with a random name on every run and ignore the one the bundle declared
+C: Reference it in the job with `${resources.experiments.churn_exp.id}`, which the bundle resolves at deployment
+D: Look the experiment up by its display name in a notebook cell and skip all bundle configuration
+K: C
+G: ## Referencing resources
+Bundle configuration supports substitutions that refer to other resources, for example `${resources.experiments.my_experiment.id}`, which the Databricks documentation uses to give an app access to a bundle-created experiment. The reference ties the job to the deployed experiment of the same target, so each target (dev, staging, prod) logs to its own experiment.
+## Benefits
+There is no manual two-step deployment, and the name or ID cannot drift between environments.
+W: A resource reference lets the bundle fill in the experiment ID when it deploys, so the job logs to the experiment that the same bundle created for each target.
+X: A=Hard-coded ID: it requires a manual second deployment and is wrong for every other target, because each target creates its own experiment.
+B=Random experiment per run: results spread over many experiments, and the bundle-managed experiment with its permissions is never used.
+D=Lookup by display name: this is fragile when names are prefixed per target, and ignores the configuration the bundle already offers.
+T: Use resource references like ${resources.experiments.<key>.id} so jobs use the bundle's own experiment.
+V: Declarative Automation Bundles, MLflow

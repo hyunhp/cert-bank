@@ -1,0 +1,605 @@
+# DBX-ASD batch 08: D5 T5.4 streaming deduplication (5), D6 T6.1 Spark Connect features (6), T6.2 deployment modes (5), D7 T7.1 pandas API on Spark advantages (6), T7.2 pandas UDF types (5); single answer, detailed explanations
+# src: https://spark.apache.org/docs/latest/streaming/apis-on-dataframes-and-datasets.html
+# src: https://spark.apache.org/docs/latest/spark-connect-overview.html
+# src: https://spark.apache.org/docs/latest/cluster-overview.html
+# src: https://spark.apache.org/docs/latest/submitting-applications.html
+# src: https://spark.apache.org/docs/latest/api/python/tutorial/pandas_on_spark/best_practices.html
+# src: https://spark.apache.org/docs/latest/api/python/tutorial/sql/arrow_pandas.html
+# src: https://docs.databricks.com/aws/en/pandas/pandas-on-spark
+
+@ DBX-ASD D5 T5.4 applied use-case
+S: A streaming job removes repeated events with the code below. No watermark is defined anywhere in the query, and the job runs for months. What happens to the deduplication state?
+```
+events = spark.readStream.table("raw_events")
+deduped = events.dropDuplicates(["guid"])
+```
+A: Spark keeps state for the current micro-batch only, so a repeat in a later micro-batch is written again
+B: Spark stores every `guid` it has seen as state with no time-based cleanup, so the state keeps growing for as long as the query runs
+C: Spark drops state older than the longest trigger interval that was configured, which makes the state size level off
+D: Spark spills the seen `guid` values to the checkpoint and removes them once the sink has acknowledged the write
+K: B
+G: ## Streaming deduplication needs memory of the past
+A batch `dropDuplicates` sees all rows at once. A stream does not: to decide that a new row is a repeat, Spark must remember the rows (or at least the key columns) it has already emitted. That memory is the streaming state, kept by the executors and checkpointed.
+## Without a watermark
+- Spark may deduplicate on a unique identifier column, with or without event time.
+- With no watermark, Spark has no rule that says an old key can never come back, so it keeps every key it has seen as state.
+- Deduplication is exact across the whole history, but the state grows without bound and eventually causes memory pressure.
+## With a watermark
+A watermark tells Spark how late data can be, so state for keys older than the watermark can be dropped. The next questions in this area cover how to combine it with the key columns.
+W: Unbounded state: without a watermark nothing tells Spark when a key is safe to forget, so every `guid` stays in state indefinitely.
+X: A=Per-batch state: deduplication across micro-batches is the whole point of the state. If state lived for one batch only, repeats in a later batch would pass through, which is not how `dropDuplicates` behaves.
+C=Trigger interval cleanup: state cleanup is driven by the watermark, not by the trigger interval. The trigger only controls how often micro-batches start.
+D=Sink acknowledgement: the sink acknowledging a write does not release deduplication state. The checkpoint stores state for recovery; it does not decide which keys can be forgotten.
+T: Streaming dropDuplicates without a watermark remembers every key forever, so state grows without bound.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.4 applied use-case
+S: A team wants exact deduplication of a stream of events that carry `guid` and `event_time`. Duplicates always have the same `event_time` as the original and arrive at most 10 minutes late. They want the state to stop growing. Which query fits?
+A: `events.dropDuplicates(["guid"]).withWatermark("event_time", "10 minutes")`, because a later watermark trims the state
+B: `events.withWatermark("event_time", "10 minutes").dropDuplicates(["guid"])`, because a watermark alone is enough to bound the state of any key
+C: `events.dropDuplicatesWithinWatermark(["event_time"])`, because the event time is the column that the watermark bounds
+D: `events.withWatermark("event_time", "10 minutes").dropDuplicates(["guid", "event_time"])`, because the event time in the key lets old state be dropped
+K: D
+G: ## Bounding the state of dropDuplicates
+Spark documents streaming deduplication with a watermark as: define the watermark on the event-time column, then call `dropDuplicates` with the unique identifier and the event-time column.
+```
+streamingDf \
+  .withWatermark("eventTime", "10 seconds") \
+  .dropDuplicates(["guid", "eventTime"])
+```
+## Why the event time must be in the key
+- Spark can only drop a state entry when it can tell that the entry's event time is older than the watermark.
+- If the key is only `guid`, no event-time value is part of the state row, so the watermark cannot clean it and the state still grows.
+- Order matters as well: the watermark must be defined before the deduplication on the same DataFrame.
+## When the event time differs between duplicates
+Then it cannot be part of the key, and `dropDuplicatesWithinWatermark` is the tool (Spark 3.5 and later).
+W: Watermark plus event time in the key: the watermark gives Spark the cutoff, and the event-time column in the key lets it match state entries to that cutoff and remove them.
+X: A=Watermark afterwards: a watermark applied after the deduplication cannot influence state that the earlier operator already holds, and `guid` alone has no event time to expire.
+B=Key with only guid: a watermark exists, but the state rows have no event-time value to compare with it, so the documented pattern requires the event-time column in the key.
+C=Key on event_time only: that treats different events with the same timestamp as duplicates and loses data. It also swaps the identifier for the wrong column.
+T: Streaming dropDuplicates with a watermark must include the event-time column in the key columns so old state can expire.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.4 advanced troubleshooting
+S: A query runs `df.withWatermark("event_time", "10 minutes").dropDuplicatesWithinWatermark(["guid"])`. The largest `event_time` seen so far is 12:00. A row with a `guid` that was never seen arrives with `event_time` 10:30, and it is missing from the output. What explains this?
+A: Spark keeps the `guid` of the earlier row from the same hour in state, so the new row is treated as a repeat of it
+B: The row is older than the current watermark (11:50), and Spark drops data that is too late, even when its `guid` is new
+C: Spark holds the row back until the watermark moves below 10:30, and then emits it in a later micro-batch
+D: Spark moves the watermark back to 10:20 so that the row is accepted, and it is emitted with the next batch
+K: B
+G: ## Late data and the watermark
+The watermark is the largest event time seen so far minus the delay threshold: 12:00 minus 10 minutes is 11:50. It only moves forward.
+- The API documentation of `dropDuplicatesWithinWatermark` (added in Spark 3.5) notes that data too late, older than the watermark, is dropped.
+- The decision is made on the event time of the row, not on whether its `guid` is already in state.
+- The same watermark logic also bounds the state: keys older than the watermark are released.
+## Consequence for design
+The delay threshold decides two things at once: how long copies are recognized and how late a first copy may be before it is lost. A source with delayed or replayed data needs a threshold above that lateness, at the price of more state.
+W: Too-late data: 10:30 is older than the 11:50 watermark, so the row is discarded before it can be emitted, although its `guid` is new.
+X: A=Hour-level match: deduplication compares the `guid` values given in the key list, not the hour of the event time, so no earlier row makes this one a repeat.
+C=Held back: Spark does not buffer too-late rows until the watermark falls. The watermark never moves backwards, so the row would never be released.
+D=Watermark moves back: a watermark is monotonic and only advances; a late row cannot lower it.
+T: Rows older than the watermark are dropped by dropDuplicatesWithinWatermark even when their key is new.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.4 applied troubleshooting
+S: A developer runs the query below on a rate-source stream. The query is rejected before it processes any data. Which change fixes it?
+```
+df = spark.readStream.format("rate").load()
+out = df.dropDuplicatesWithinWatermark(["value"])
+(out.writeStream.format("console")
+    .option("checkpointLocation", cp).start())
+```
+A: Switch the output mode to complete, because within-watermark deduplication only supports complete mode on the console sink
+B: Replace the key list with `["timestamp"]`, because the method accepts only the event-time column as a key
+C: Add `withWatermark("timestamp", "10 minutes")` before the deduplication, because the method requires a watermark delay threshold
+D: Call `repartition(1)` before the deduplication, because the state for that method must sit in a single partition
+K: C
+G: ## What dropDuplicatesWithinWatermark needs
+The method deduplicates on the given columns for as long as the watermark says the first copy is still inside the delay. Without a watermark there is no such period, so Spark cannot run it.
+- Spark's guide says the feature requires a watermark with a delay threshold to be set on the streaming DataFrame.
+- The watermark column does not need to be in the key list.
+- Output mode and partitioning are independent of this requirement. Deduplication emits only new rows, so it works with append mode.
+## Fix
+Define the watermark on the event-time column first, then call the method:
+```
+df.withWatermark("timestamp", "10 minutes") \
+  .dropDuplicatesWithinWatermark(["value"])
+```
+W: Missing watermark: the query has no `withWatermark`, and the method requires a watermark delay threshold, so adding one on `timestamp` makes the query valid.
+X: A=Complete mode: deduplication produces only new rows, so append mode is the natural one. Changing to complete mode does not supply the missing watermark.
+B=Key restricted to event time: the method takes any identifier columns, such as `value` here. Using only the event-time column would not deduplicate by id.
+D=repartition(1): the state is partitioned by the key and spread across shuffle partitions by design. Forcing one partition would not add a watermark and would hurt parallelism.
+T: dropDuplicatesWithinWatermark fails without an earlier withWatermark; the watermark column need not be in the key.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.4 advanced tradeoff
+S: A job uses `withWatermark("event_time", "1 hour").dropDuplicatesWithinWatermark(["guid"])`. Some duplicates are produced by a batch replay and carry the same `guid` up to 3 hours after the first copy. Some of them still appear in the output. What explains this, and what is the fix?
+A: Spark forgets a `guid` after the watermark passes it, so late copies pass; raise the delay above the largest gap
+B: Spark deduplicates only inside a single micro-batch for this method, so every copy in a later batch passes; switch to `dropDuplicates`
+C: Spark keeps the first copy only until the executor restarts, so replays are not caught; a larger executor memory setting fixes this
+D: Spark matches the event time as well as the `guid`, so replayed copies with other timestamps differ; add the event time to the key
+K: A
+G: ## Deduplication is bounded by the watermark
+Both streaming deduplication styles trade exactness for bounded state. A key is kept in state only while it is inside the watermark window; after that the state is released.
+- A copy that arrives within the delay of the first copy is removed.
+- A copy that arrives after the state is gone looks like a new event and is emitted.
+## Choosing the delay
+Spark's guide advises setting the watermark delay threshold longer than the maximum timestamp difference among duplicated events. If copies can be 3 hours apart, a 1-hour delay is too short.
+The cost of a longer delay is more state held for longer, and with event-time windows downstream it also delays results. If exactness across unbounded time is required, the only option is deduplication without a watermark, accepting unbounded state.
+W: Delay shorter than the gap: the 1-hour watermark releases a `guid` after about an hour, so copies 3 hours later are treated as new; a delay above 3 hours keeps them caught.
+X: B=Per-batch scope: deduplication works across micro-batches, within the watermark period. The failure is time based, not batch based.
+C=Executor restart: state is checkpointed and restored on restart, so a restart does not forget keys. Memory size is not the reason copies pass.
+D=Event time in the key: this method ignores event time when matching on `guid`, so different timestamps are not the cause.
+T: Copies later than the watermark delay are not deduplicated; set the delay above the largest gap between copies.
+V: Structured Streaming
+
+@ DBX-ASD D6 T6.1 applied definition
+S: A PySpark script in a web service uses Spark Connect. What does the client send to the Spark server, and how do results come back?
+A: Serialized Python bytecode of the whole script over Py4J, with results returned as pickled rows
+B: Optimized physical plans compiled on the client, with results returned as files in a shared directory that the server writes
+C: Unresolved logical plans encoded as protocol buffers over gRPC, with results streamed back as Arrow-encoded batches
+D: SQL strings only over JDBC, with results returned as JSON documents that the client parses
+K: C
+G: ## Client-server split
+Spark Connect (introduced in Spark 3.4) decouples the application from the Spark driver. The client is a thin library that builds DataFrame operations but does not run in the driver process.
+## What travels over the wire
+- The client turns DataFrame operations into unresolved logical plans, encoded with protocol buffers.
+- The plans are sent over the gRPC framework to the Spark Connect endpoint on the server.
+- The server resolves them into Spark logical plans and runs the normal optimizer and execution, so all Spark optimizations still apply.
+- Results are streamed back as Apache Arrow-encoded row batches.
+W: Unresolved plans over gRPC: that is the protocol described for Spark Connect, with Arrow batches for results.
+X: A=Bytecode over Py4J: the PySpark Connect client does not use Py4J and does not ship the script. It sends plans, not code.
+B=Physical plans through files: the client does not plan physically at all. The server does analysis, optimization and physical planning, and results are not exchanged through shared files.
+D=SQL over JDBC: Spark Connect is not JDBC. It carries DataFrame operations as plans, and SQL is just one kind of relation inside the same protocol.
+T: Spark Connect sends unresolved logical plans as protobuf over gRPC and receives Arrow batches.
+V: Spark Connect
+
+@ DBX-ASD D6 T6.1 applied troubleshooting
+S: A team moves a PySpark job from a classic driver to a Spark Connect session. Exactly one of the lines below fails, and the others run. Which line fails?
+A: `rdd = spark.sparkContext.parallelize(range(10))`, because the protocol describes plans and does not support RDD execution APIs
+B: `df = spark.range(10).filter("id > 3")`, because filter conditions cannot be encoded as unresolved logical plans for the server
+C: `df.groupBy("id").count().show()`, because aggregations are executed only inside a classic driver process of the cluster
+D: `spark.sql("SELECT 1 AS x").collect()`, because SQL text cannot cross the gRPC connection between client and server
+K: A
+G: ## What Spark Connect does not carry
+The Spark Connect protocol describes work declaratively as logical plans. That covers the DataFrame and SQL APIs, but not everything in classic Spark.
+- RDDs are not supported, because they are low-level objects tied to the driver JVM and cannot be described as a logical plan.
+- The client has no access to `SparkContext` or to the static Spark configuration.
+- Private JVM fields such as `df._jdf` are not reachable.
+## Migration rule
+Code that uses the DataFrame, Spark SQL and Column APIs moves without change. Code that calls `sparkContext`, RDDs or Py4J has to be rewritten with DataFrame operations.
+W: RDD API: `spark.sparkContext.parallelize` needs a SparkContext and RDDs, and the Spark Connect protocol supports neither, because it carries logical plans only.
+X: B=Filter: filter conditions are core DataFrame operations and are translated into plan nodes like every other transformation, so the line runs.
+C=Aggregation: a `groupBy().count()` is sent as a plan and executed on the server with the usual optimizer; only the result is streamed to the client.
+D=SQL: `spark.sql` is supported. The client wraps the text into a relation of the plan, and the collected rows come back as Arrow batches.
+T: Spark Connect clients use DataFrame and SQL APIs but cannot use RDDs or the SparkContext.
+V: Spark Connect
+
+@ DBX-ASD D6 T6.1 advanced use-case
+S: One Spark server hosts many notebooks. One analyst's notebook keeps loading a huge pandas DataFrame and runs out of memory, and in the current setup that takes down the driver for every user. What does moving the notebooks to Spark Connect clients change?
+A: The server stores each analyst's pandas data in its own isolated pool, so the shared driver never has to receive it
+B: The server caps each client at a fixed number of cores, so memory pressure from one user cannot reach other users
+C: The client library compresses pandas data before it is shared, so the memory footprint on the driver shrinks a lot
+D: Client code runs in its own process, so an application that uses too much memory only affects its own environment
+K: D
+G: ## Operational benefits
+In classic client mode, user code runs inside the driver JVM and its Python process. Anything heavy a user does runs in the same place as scheduling for everyone else on that driver.
+Spark Connect separates the two. Spark documents these benefits:
+- Stability: applications that use too much memory only affect their own environment because they run in their own processes. Users can define their own dependencies on the client without conflicts with the Spark driver.
+- Upgradability: the driver can be upgraded independently of applications.
+- Debuggability and observability: applications can be debugged from an IDE and monitored with their own metrics and logging libraries.
+## Limit
+The server still executes the DataFrame work for the client, so very heavy plans still consume server resources. The isolation is of client-side code and dependencies.
+W: Process isolation: the client is a separate process from the driver, so a client that exhausts its memory fails alone and the shared server keeps serving other users.
+X: A=Server-side pandas pool: the pandas object lives in the client process. Spark Connect does not host user Python objects in a server-side pool.
+B=Core cap: Spark Connect does not impose per-client core limits. The protection comes from running client code in a different process.
+C=Compression: the client does not compress user objects to save driver memory; the object was never in the driver in the first place.
+T: Spark Connect isolates client code in its own process, so one application's memory problem does not take down the shared driver.
+V: Spark Connect
+
+@ DBX-ASD D6 T6.1 applied use-case
+S: A platform team runs one Spark server for many applications. A security fix and a performance improvement are released for the server side of Spark. What does Spark Connect allow the team to do?
+A: Rebuild and redeploy every application together with the server, because the plan format changes with each release
+B: Upgrade the driver on its own, because applications stay compatible while the server RPC definitions are backward compatible
+C: Upgrade the applications first, because newer clients can send plans that an older server will rewrite for itself
+D: Move every client session to a new server and resend the data, because old servers cannot talk to existing sessions
+K: B
+G: ## Decoupled lifecycles
+In classic Spark an application embeds the Spark libraries and runs the driver itself, so upgrading Spark means rebuilding or redeploying the application. With Spark Connect the application depends only on a thin client library and speaks a defined RPC protocol to the server.
+- The Spark driver (server) can be upgraded without touching applications, so they benefit from performance improvements and security fixes.
+- This holds as long as the server-side RPC definitions are designed to be backward compatible. Applications are then forward-compatible.
+## Practical reading
+Upgrade the server first and the clients on their own schedule; clients keep working against a newer server within the compatibility promise.
+W: Independent upgrade: the protocol is the contract between client and server, so the server can move ahead while client applications stay as they are.
+X: A=Joint redeploy: that is the classic embedded model, and avoiding it is exactly what Spark Connect was designed for.
+C=Clients first: the documented benefit is that the driver is upgraded independently. An older server does not rewrite plans that it does not understand.
+D=Moving sessions and data: client sessions hold plans, not datasets. A server upgrade needs no data movement from the client.
+T: Spark Connect lets the server be upgraded independently of applications while the RPC stays backward compatible.
+V: Spark Connect
+
+@ DBX-ASD D6 T6.1 applied troubleshooting
+S: After switching a notebook to Spark Connect, the helper below fails with an AttributeError. Why does it fail?
+```
+def jvm_plan(df):
+    return df._jdf.queryExecution().toString()
+```
+A: The method `queryExecution` was renamed in a recent Spark version, and the old name was removed from the JVM class
+B: The call needs `spark.sparkContext` first, which a Spark Connect session creates lazily on the first action
+C: The DataFrame must be cached first, because an uncached plan has no JVM representation on the server
+D: The client does not use Py4J and holds no JVM DataFrame, so private fields such as `_jdf` are not accessible
+K: D
+G: ## No JVM in the client
+In classic PySpark the client talks to the driver JVM through Py4J, and a Python DataFrame wraps a JVM object in the private field `_jdf`. Code that reaches into those fields can inspect and manipulate the execution environment directly.
+With Spark Connect:
+- The client does not run in the same process as the Spark driver and cannot interact with the driver JVM.
+- The client does not use Py4J, so private fields holding the JVM implementation of `DataFrame`, `Column` or `SparkSession` are not available.
+## Alternative
+Use public APIs that work through the protocol, for example `df.explain()` to see the plans.
+W: No Py4J and no JVM object: the Connect client has no JVM handle at all, so the attribute `_jdf` does not exist on the Python DataFrame.
+X: A=Renamed method: the failure is raised on the attribute `_jdf`, before any JVM method name is looked up, so the name of the method is irrelevant.
+B=Lazy SparkContext: a Spark Connect client has no SparkContext, lazily created or not, and therefore no gateway to a JVM.
+C=Caching: caching has nothing to do with JVM access, and every DataFrame already has a plan on the server.
+T: Spark Connect clients cannot reach JVM internals; use public DataFrame APIs such as explain().
+V: Spark Connect
+
+@ DBX-ASD D6 T6.1 applied use-case
+S: An application connected through Spark Connect needs to change the static setting `spark.executor.memory` for all users of the server. What is the situation?
+A: The client calls `spark.conf.set` and every connected session receives the new executor memory right away
+B: The client reads the SparkContext through the gateway and updates the setting in the running application
+C: The client has no access to the static configuration or the SparkContext, so the server admin must set it
+D: The client submits a special plan that restarts all executors of the server with the new memory setting
+K: C
+G: ## Session-based clients
+Spark Connect gives each consumer a session. Session-scoped SQL configurations can be changed from the client, but properties that manipulate the environment for all connected clients cannot.
+- The client has no access to the static Spark configuration, such as executor memory and cores.
+- There is no `SparkContext` on the client.
+## Consequence
+Static settings are chosen by whoever starts or administers the Spark server, not by an application. An application can still set session-scoped configurations such as `spark.sql.shuffle.partitions`.
+W: Server-side configuration: executor sizing is a static setting of the server and is not exposed to connected clients, so the admin has to change it where the server starts.
+X: A=conf.set for everyone: a runtime setting applies to that session only, and a static setting cannot be changed on a running server by `spark.conf.set`.
+B=SparkContext via gateway: the Connect client has no SparkContext and no gateway, which is the whole point of the session-based design.
+D=Restart plan: plans describe data operations such as filters and joins; they cannot manage executors or cluster resources.
+T: Spark Connect clients cannot change static configuration; that belongs to whoever runs the server.
+V: Spark Connect
+
+@ DBX-ASD D6 T6.2 applied definition
+S: A developer launches `spark-submit --master yarn app.py` on an edge node and passes no `--deploy-mode` option. Where does the driver run?
+A: Inside the `spark-submit` process on the edge node, because the default deploy mode is client
+B: On a worker node of the cluster, because the default deploy mode is cluster for YARN
+C: In a gateway service that the cluster manager starts for every submitted application
+D: On the node of the first executor, because the cluster manager picks the host of the driver
+K: A
+G: ## Deploy mode
+The deploy mode says where the driver program runs.
+- `client` (default): the driver is launched directly within the `spark-submit` process, which acts as a client to the cluster. The input and output of the application are attached to the console.
+- `cluster`: the driver is deployed on one of the worker nodes of the cluster.
+## Cluster manager versus deploy mode
+`--master` selects the cluster manager (standalone, YARN, Kubernetes) or `local`. The deploy mode is a separate choice. Executors run on the cluster either way.
+W: Default client mode: Spark's Submitting Applications page gives client as the default value of `--deploy-mode`, so the driver stays in the submitting process.
+X: B=Default cluster: cluster mode must be requested explicitly with `--deploy-mode cluster`; it is not the default for any cluster manager in the documentation.
+C=Gateway service: Spark has no per-application gateway. The driver is a part of the application and is started by the deploy mode.
+D=Driver at first executor: executors are requested by an already running driver, so the driver cannot be placed according to where an executor starts.
+T: The default deploy mode is client, so the driver runs inside spark-submit.
+V: Apache Spark
+
+@ DBX-ASD D6 T6.2 advanced tradeoff
+S: A data scientist submits a batch application that runs for hours, from a laptop on a home network far away from the cluster. The laptop is often closed during the day. Which deploy mode is the better choice?
+A: Client mode, because the driver stays on the laptop and the console keeps the output attached to the session
+B: Cluster mode, because the driver runs next to the executors and does not depend on the laptop staying online
+C: Client mode, because a driver on the laptop needs less network bandwidth towards the worker nodes
+D: Cluster mode, because it removes the need for a cluster manager in the submission setup
+K: B
+G: ## Choosing the deploy mode
+Spark's guidance:
+- Client mode suits a gateway machine physically co-located with the workers. It also suits REPL use, where input and output are attached to the console.
+- Cluster mode is the common choice when the application is submitted from a machine far from the workers, such as a laptop, to minimize network latency between the driver and the executors.
+## Why driver location matters
+The driver schedules every task and must be network addressable from the worker nodes for its whole lifetime. A driver on a laptop across a wide-area link pays latency on every scheduling round, and if the laptop sleeps the application is lost.
+W: Cluster mode: the driver is placed on a worker node close to the executors, so latency stays low and the application outlives the laptop session.
+X: A=Client mode on the laptop: the driver would sit across a slow link and would disappear when the laptop is closed, which kills the application.
+C=Less bandwidth: a remote driver does not reduce traffic; the long distance between driver and executors is the expensive path.
+D=No cluster manager: cluster mode still needs a cluster manager, which starts the driver on a worker node of the cluster.
+T: When submitting from far away, use cluster mode so that the driver sits next to the executors.
+V: Apache Spark
+
+@ DBX-ASD D6 T6.2 applied use-case
+S: A team wants to explore data interactively in the `pyspark` shell and read each result in the terminal as soon as the statement runs. Which deploy mode matches that need?
+A: Cluster mode, because the driver in the cluster keeps the history of the shell for later sessions
+B: Cluster mode, because the console output of a worker-side driver is forwarded to the terminal automatically
+C: Client mode, because the driver runs in the launching process and its input and output are attached to the console
+D: Either mode behaves the same, because the shell always starts local executors regardless of the setting
+K: C
+G: ## REPL and deploy mode
+An interactive shell reads statements from a terminal and prints results. The driver must be the process that holds that terminal.
+- In client mode the driver is launched within the `spark-submit` process, with input and output attached to the console. Spark's documentation calls this mode especially suitable for applications that involve the REPL, such as the Spark shell.
+- In cluster mode the driver starts on a worker node, and the submitting machine has no console connection to it.
+## Rule of thumb
+Interactive work: client. Unattended or remote submission: cluster.
+W: Client mode: the driver is the shell process itself, so it can read your statements and print results to your terminal.
+X: A=Shell history in the cluster: a driver on a worker has no terminal link to you, and keeping history is not a function of the deploy mode.
+B=Output forwarding: console output of a cluster-mode driver is not forwarded to the submitter's terminal; it goes to the logs of that node.
+D=Same behavior: the deploy mode decides where the driver runs, and the executors are chosen by the master URL, so the two modes are not equivalent.
+T: Interactive shells need client mode, because the driver must own the terminal.
+V: Apache Spark
+
+@ DBX-ASD D6 T6.2 applied definition
+S: Which list names only cluster managers that Spark can use to acquire executors for an application?
+A: Apache Airflow, Hadoop YARN and Kubernetes
+B: Spark standalone, Slurm Workload Manager and Apache Airflow
+C: Apache Kafka, Spark standalone and Hadoop YARN
+D: Spark standalone, Hadoop YARN and Kubernetes
+K: D
+G: ## Cluster managers
+A Spark application's `SparkContext` connects to a cluster manager, an external service for acquiring resources on the cluster. The manager allocates resources across applications, and Spark then starts executors on the allocated nodes.
+Spark's Cluster Mode Overview lists these managers:
+- Standalone: Spark's own simple cluster manager.
+- Hadoop YARN: the resource manager in Hadoop 3.
+- Kubernetes: container orchestration.
+## Not cluster managers
+Airflow orchestrates workflows and Kafka is a messaging system; neither allocates executors. Spark is agnostic to the manager: it only needs to acquire executor processes that can communicate with each other.
+W: Standalone, YARN and Kubernetes: these three are the cluster managers listed in the Cluster Mode Overview page of the Spark documentation.
+X: A=Airflow: it schedules workflows that may launch Spark jobs, but it does not allocate executors for a SparkContext.
+B=Slurm and Airflow: neither is among the cluster managers named in the Spark documentation, and Airflow is a workflow tool.
+C=Kafka: it is a streaming platform that Spark reads from, not a service that hands out executors.
+T: Spark runs on the standalone, YARN or Kubernetes cluster managers.
+V: Apache Spark
+
+@ DBX-ASD D6 T6.2 applied troubleshooting
+S: A team submits a Python application to a Spark standalone cluster with `--deploy-mode cluster` and the submission is rejected. What is the documented reason and a valid way out?
+A: Python needs the `--class` argument in cluster mode, so the team must add the entry module name
+B: Standalone has no cluster mode for Python applications, so use client mode or another cluster manager
+C: Cluster mode needs an assembly jar, so the Python files must be packaged into a jar first
+D: Cluster mode requires `--supervise`, which Spark accepts only when the master is Kubernetes
+K: B
+G: ## Deploy mode support
+Not every combination of cluster manager, deploy mode and language is available. Spark's Submitting Applications page states that, currently, the standalone mode does not support cluster mode for Python applications.
+## Ways out
+- Submit in client mode, so the driver runs in the `spark-submit` process.
+- Use a cluster manager that supports cluster mode for Python, such as YARN or Kubernetes.
+## Related options
+`--py-files` adds `.py`, `.zip` or `.egg` files to the search path of a Python application. `--supervise` is an option of standalone cluster mode that restarts a driver that fails with a non-zero exit code.
+W: Standalone limitation: Spark documents that standalone mode cannot start Python applications in cluster mode, so the team picks client mode or a different cluster manager.
+X: A=--class: that argument names the main class of a JVM application. A Python submission passes the `.py` file instead and needs no class.
+C=Assembly jar: jars bundle JVM code. Python applications pass a `.py` file and use `--py-files` for extra Python modules.
+D=--supervise: it is an optional standalone cluster-mode flag for restarting the driver, not a requirement and not tied to Kubernetes.
+T: Standalone mode does not run Python applications in cluster mode.
+V: Apache Spark
+
+@ DBX-ASD D7 T7.1 applied definition
+S: An analyst has a pandas script that starts with `import pandas as pd` and runs out of memory on a laptop with a 40 GB file. What is the main advantage of switching to pandas API on Spark?
+A: It translates the script into SQL and runs it inside the metastore, so no Spark cluster is needed at all
+B: It stores the whole dataset in a single partition so that every pandas function behaves exactly as before
+C: It rewrites the pandas code into compiled code on the laptop, which lowers memory use of each operation
+D: It offers a familiar pandas API whose operations run distributed on Spark, so data is not limited to one machine
+K: D
+G: ## What pandas API on Spark is
+`pyspark.pandas` (imported as `ps`) provides pandas-equivalent APIs that work on Apache Spark. It fills the gap that plain pandas does not scale out to big data.
+- Data stays distributed across the executors instead of living in one process.
+- The same syntax means pandas users reuse their knowledge, and PySpark users get easier ways to do some tasks.
+## Typical change
+```
+import pyspark.pandas as ps
+psdf = ps.read_parquet(path)
+psdf["x"].mean()
+```
+W: Pandas syntax, Spark execution: operations run distributed on the cluster, so the dataset is no longer bound by the memory of a single laptop.
+X: A=SQL in a metastore: pandas API on Spark is not a SQL translation layer, and it still executes on Spark.
+B=Single partition: one partition would defeat the purpose and recreate the memory limit; data is spread over many partitions.
+C=Compiled laptop code: the work is executed by Spark executors, not compiled and run locally.
+T: Pandas API on Spark gives pandas syntax with Spark's distributed execution.
+V: Pandas API on Spark
+
+@ DBX-ASD D7 T7.1 applied use-case
+S: A team adopts pandas API on Spark and wants to keep using the Spark web UI, the history server and the same deployment modes as for their other jobs. What does the documentation say?
+A: All Spark features such as history server, web UI and deployment modes can be used as they are
+B: A separate pandas UI is required, because pandas API operations are not visible as Spark jobs
+C: Only client deploy mode is possible, because pandas objects cannot be shipped to a cluster driver
+D: The web UI works only when Arrow is disabled, since Arrow batches hide the stages from it
+K: A
+G: ## Built on Spark
+Pandas API on Spark runs on the same engine as the DataFrame API. Spark's best-practices page says it uses Spark under the hood, so many features and performance optimizations are available, and an existing Spark session or context is used out of the box.
+- Operations become Spark jobs, stages and tasks, so they appear in the web UI and history server.
+- Deployment modes (client, cluster) and cluster managers apply as for any Spark application.
+- Spark tuning guidance applies as well.
+W: Same Spark features: the best-practices page states that history server, web UI and deployment modes can be used as they are with pandas API on Spark.
+X: B=Separate UI: pandas API operations run through Spark, so they show up as ordinary jobs and stages in the Spark UI.
+C=Client only: no such restriction is documented; the same deployment modes as for any Spark application are available.
+D=Arrow disabled: Arrow settings affect data transfer to Python, not whether jobs and stages are shown in the UI.
+T: Pandas API on Spark runs on Spark, so the UI, history server and deployment modes work normally.
+V: Pandas API on Spark
+
+@ DBX-ASD D7 T7.1 applied use-case
+S: Pandas API on Spark executes lazily. A developer suspects that a chain of operations will trigger an expensive shuffle. How can the plan be checked before running the computation?
+A: Call `psdf.to_pandas()` on a sample and time it, because the timing output shows the plan of the full query
+B: Run the job first and open the history server, because plans exist only for jobs that have already finished
+C: Call `psdf.spark.explain()` to print the Spark plan and look for Exchange nodes that mark shuffles
+D: Call `psdf.info()`, which lists the stages that the next action is going to use for the computation
+K: C
+G: ## Lazy execution and plans
+Pandas API on Spark is based on lazy execution: operations build a plan, and an action runs it. Because of that, expensive operations can be predicted before the computation by using the Spark explain API through the `spark` accessor.
+```
+psdf = ps.DataFrame({"id": range(10)})
+psdf.sort_values("id").spark.explain()
+```
+## What to look for
+An `Exchange` node marks a shuffle, for example `rangepartitioning` for a sort, or `SinglePartition` for operations that need all data in one partition.
+W: spark.explain: the accessor prints the Spark plan without running the computation, so Exchange nodes can be spotted ahead of time.
+X: A=Sample timing: a sample actually runs a computation and says nothing about the plan of the full chain.
+B=History server: plans can be printed before an action; waiting for a finished job means paying for the expensive shuffle first.
+D=info: it reports column and type metadata of the object; it does not list stages or plans.
+T: Use psdf.spark.explain() to find shuffles before triggering the computation.
+V: Pandas API on Spark
+
+@ DBX-ASD D7 T7.1 applied comparison
+S: A team has a Spark DataFrame `sdf` and wants pandas-style APIs on it while the data stays distributed. Which call does that, and how does it differ from `toPandas()`?
+A: `sdf.toPandas()` returns a distributed object, while `sdf.pandas_api()` collects every row to the driver node and converts it there
+B: Both return the same distributed object type, and they differ only in how the index column is named
+C: `sdf.pandas_api()` returns a distributed pandas-on-Spark DataFrame, while `toPandas()` collects every row to the driver
+D: `sdf.pandas_api()` writes the data to a local file on the driver and reads it back as plain pandas
+K: C
+G: ## Moving between APIs
+- `DataFrame.pandas_api()` converts a Spark DataFrame to a pandas-on-Spark DataFrame. The data remains distributed across the cluster.
+- `DataFrame.toPandas()` collects all rows to the driver as a regular pandas DataFrame, which can fail with out-of-memory errors for large data.
+- `psdf.to_spark()` converts back to a Spark DataFrame.
+## Index note
+A Spark DataFrame has no index, so a default index is attached on conversion. Naming an index column explicitly is more efficient than relying on the default.
+W: pandas_api: the result is a pandas-on-Spark DataFrame that stays distributed, in contrast to the driver-side collect of `toPandas()`.
+X: A=Reversed roles: the description swaps the two calls; `toPandas()` is the one that gathers all data in the driver.
+B=Same object: they return different types, a pandas-on-Spark DataFrame in one case and a regular pandas DataFrame in the other.
+D=Local file: neither call writes a file; the conversion is a change of API wrapper over the same distributed plan.
+T: pandas_api keeps data distributed; toPandas collects it on the driver.
+V: Pandas API on Spark
+
+@ DBX-ASD D7 T7.1 advanced troubleshooting
+S: A job converts a large Spark DataFrame to pandas API on Spark and is slow because of the default index. What do Spark's best practices advise?
+A: Set the default index type to `distributed` or `distributed-sequence`, and name the index column where possible
+B: Keep the default `sequence` index and add more executors, because the index computation runs fully in parallel
+C: Disable the index completely, because pandas API on Spark works the same way without any index at all
+D: Call `toPandas()` first and rebuild the index on the driver, where the numbering is cheap and ordered
+K: A
+G: ## The default index
+Pandas API on Spark attaches a default index when the index is unknown, for example when a Spark DataFrame is converted directly. This is a common source of slow performance.
+- `sequence`: globally sequential, but computed on a single partition, which is discouraged for large data.
+- `distributed-sequence`: globally sequential and computed in a distributed way; it does not guarantee that the same row-to-index mapping is kept across operations such as `apply()`.
+- `distributed`: the cheapest, with no ordering guarantee.
+## Advice
+Configure `compute.default_index_type` as `distributed` or `distributed-sequence` for large data, and specify the index column on conversion.
+W: Distributed index and explicit index column: both avoid the single-partition numbering step, which is the usual source of the slowdown.
+X: B=Keep sequence: more executors do not help, because the `sequence` type needs a computation on a single partition.
+C=No index: pandas API on Spark always has an index; one is attached when the index is unknown.
+D=toPandas: it collects everything on the driver, which defeats the purpose and can run out of memory.
+T: Avoid the sequence default index for big data; choose a distributed type or name the index column.
+V: Pandas API on Spark
+
+@ DBX-ASD D7 T7.1 applied comparison
+S: A developer calls `psdf.rank()` on a large pandas-on-Spark DataFrame and the plan shows `Exchange SinglePartition`. What do the best practices recommend?
+A: Convert to pandas first, because ranking is not supported by the distributed engine
+B: Add more executors, because the exchange spreads the whole ranking work across all of the executors
+C: Cache the DataFrame, because cached data skips the exchange in the next action
+D: Use `GroupBy.rank` where possible, because the data can then be computed per group in parallel
+K: D
+G: ## Avoid computation on a single partition
+Some pandas operations need a global view. `DataFrame.rank()` without grouping orders all rows, so Spark moves all data into one partition (`Exchange SinglePartition`). That is slow and risks out-of-memory errors.
+## Best practice
+Spark's page says to use `GroupBy.rank` instead where possible, as it is less expensive because data can be distributed and computed for each group.
+```
+psdf.groupby("store").rank()
+```
+W: GroupBy.rank: the work is split by group, so partitions are processed in parallel and no single partition receives all rows.
+X: A=Convert to pandas: that would collect everything on the driver, and ranking is supported by pandas API on Spark.
+B=More executors: a single partition is processed by one task, so extra executors stay idle for that step.
+C=Cache: caching stores results but does not change the plan that moves all rows into one partition.
+T: Prefer grouped operations over global ones to avoid single-partition exchanges.
+V: Pandas API on Spark
+
+@ DBX-ASD D7 T7.2 applied definition
+S: A developer writes a Series to Series pandas UDF whose function filters out the negative values and returns the shorter Series. What happens when the query runs?
+A: Spark drops the matching rows from the DataFrame and continues with the remaining rows
+B: The query fails, because the output of this function type must have the same length as the input
+C: Spark pads the shorter Series with nulls to the batch length and then continues the query
+D: Spark runs the function again on smaller batches until the output fits the input length
+K: B
+G: ## Series to Series pandas UDF
+With type hints `pandas.Series, ... -> pandas.Series`, the UDF takes one or more Series (batches of columns) and returns a Series.
+- Spark splits columns into batches, calls the function on each batch and concatenates the results.
+- The output of the function must always be the same length as the input.
+## Aggregations and filters
+Filtering and aggregating change the length. Use a Series to Scalar UDF for aggregation, or filter the DataFrame with normal expressions.
+W: Same-length requirement: the function type maps each input value to one output value, so returning fewer values than were passed in makes the query fail.
+X: A=Dropping rows: a column UDF cannot remove rows from the DataFrame; filtering is done by `filter` on the DataFrame.
+C=Padding: Spark does not repair a length mismatch by adding nulls; it reports an error.
+D=Retry on smaller batches: batch size does not change the rule that output length equals input length, so no retry happens.
+T: Series to Series pandas UDFs must return as many values as they receive.
+V: pandas UDF
+
+@ DBX-ASD D7 T7.2 applied use-case
+S: A developer wants to write the filter logic in pandas for a whole DataFrame, with no grouping, and the function may return fewer rows than it receives. Which API fits?
+A: A Series to Series `pandas_udf` used in `withColumn`, because it receives batches and returns a Series
+B: A Series to Scalar `pandas_udf` used in `select`, because it reduces each batch to the rows that remain
+C: `DataFrame.mapInPandas`, whose function takes an iterator of pandas DataFrames and yields DataFrames of any length
+D: A Python UDF made with `udf()` that returns `None` for the rows to remove, because null results are dropped by Spark
+K: C
+G: ## Pandas Function API: map
+`DataFrame.mapInPandas(func, schema)` maps an iterator of `pandas.DataFrame` to another iterator of `pandas.DataFrame`, and the result is a Spark DataFrame.
+```
+def keep_id_1(it):
+    for pdf in it:
+        yield pdf[pdf.id == 1]
+df.mapInPandas(keep_id_1, schema=df.schema)
+```
+- Spark's guide says it can return output of arbitrary length, in contrast to some pandas UDFs.
+- The output schema is required, and the function works on batches of rows, not on groups.
+## Comparison
+Series to Series and iterator UDFs must keep the output length equal to the input length. Series to Scalar is an aggregation.
+W: mapInPandas: it takes whole pandas DataFrames per batch and may yield any number of rows, so a pandas filter can run without grouping.
+X: A=Series to Series: the output must be as long as the input, so a filter that removes rows is an error.
+B=Series to Scalar: it returns one value per group or window, and it is an aggregation, not a row filter.
+D=Python UDF returning None: the UDF yields a null value in a column; the row stays in the DataFrame.
+T: Use mapInPandas when a pandas function must return a different number of rows than it receives.
+V: pandas UDF
+
+@ DBX-ASD D7 T7.2 applied definition
+S: Which pandas UDF type defines an aggregation from one or more Series to a scalar and can be used in `groupBy().agg()` and in window functions?
+A: Series to Series, which returns one output value for each input value
+B: Iterator of Series to Iterator of Series, which yields batches of results
+C: Grouped map through `applyInPandas`, which maps a group DataFrame to a DataFrame
+D: Series to Scalar, which reduces a Series to a single value like an aggregate
+K: D
+G: ## Series to Scalar
+The hint is `pandas.Series, ... -> Any`. It behaves like a Spark aggregate function.
+```
+def mean_fn(v: pd.Series) -> float:
+    return v.mean()
+mean_udf = pandas_udf(mean_fn, "double")
+```
+- It can be used as `df.groupby("id").agg(mean_udf(df["v"]))`.
+- It can be used over a window; only unbounded windows are supported.
+- All data for a group or window is loaded into memory, and partial aggregation is not supported.
+W: Series to Scalar: the function reduces a Series to one scalar, which is what an aggregate does, and Spark allows it in agg and window.
+X: A=Series to Series: it returns as many values as it receives, so it is a column transformation, not an aggregation.
+B=Iterator form: it streams batches in and out with the same total length, which makes it a row-wise transformation.
+C=Grouped map: it is a Pandas Function API on DataFrames, applied with `applyInPandas`, and not a column UDF used in agg.
+T: Series to Scalar pandas UDFs are aggregations usable with groupBy().agg() and windows.
+V: pandas UDF
+
+@ DBX-ASD D7 T7.2 advanced troubleshooting
+S: A job uses `groupBy("customer").applyInPandas(fn, schema)`. One customer has far more rows than all others, and that task fails with an out-of-memory error. Why?
+A: Spark splits each group into batches of `maxRecordsPerBatch` rows, and those batches then fail together
+B: All rows of a group are loaded into memory before the function runs, and the batch size limit does not apply
+C: The Arrow transfer can carry only one group for each executor, so the extra rows spill to the driver
+D: Grouped map functions run on the driver, which has to hold every group of the DataFrame at once
+K: B
+G: ## Grouped map
+`groupBy().applyInPandas(func, schema)` maps each group to a pandas DataFrame, applies the function and combines the results.
+- The function takes a `pandas.DataFrame` and returns one.
+- The output schema is required.
+- All data for a group is loaded into memory before the function is applied. The `maxRecordsPerBatch` setting is not applied to groups, so users must ensure that each group fits in memory.
+## Skew
+A skewed key leads to one huge group. Remedies are to pre-aggregate with built-in functions, split the key, or reduce the data before the pandas step.
+W: Whole group in memory: the large customer's rows are materialized as one pandas DataFrame in a single task, and the batch-size setting does not split a group.
+X: A=Batch splitting: `maxRecordsPerBatch` is explicitly not applied to groups, so the group is not cut into batches.
+C=One group per executor: an executor can process many groups over time; there is no such Arrow limit, and nothing spills to the driver.
+D=Driver execution: the function runs in Python workers on the executors, so the driver does not hold the groups.
+T: applyInPandas loads each group completely into memory, so a skewed key can cause out-of-memory errors.
+V: pandas UDF
+
+@ DBX-ASD D7 T7.2 applied comparison
+S: Why is a pandas UDF usually faster than a regular row-at-a-time Python UDF for numeric work?
+A: Data moves in Arrow batches and the function works on vectorized pandas objects instead of single rows
+B: Pandas UDFs run inside the JVM, so no data has to cross a process boundary between Java and Python
+C: Catalyst compiles the pandas function into native code, which removes the Python interpreter from the path
+D: Pandas UDFs skip serialization, because the data of a DataFrame is already stored as Python objects
+K: A
+G: ## Vectorized UDFs
+A pandas UDF is executed by Spark using Arrow to transfer data and pandas to work with the data, which allows vectorized operations.
+- Columns are split into batches, the function is called for each batch, and the results are concatenated.
+- A regular Python UDF handles one row at a time with per-row serialization.
+- Pandas UDFs are defined with `pandas_udf()`, and Python type hints are the preferred way instead of `PandasUDFType`.
+## Remaining cost
+Python still runs outside the JVM, so built-in functions remain faster than any UDF whenever they can express the logic.
+W: Arrow batches and vectorization: moving whole batches and computing with vectorized pandas operations avoids per-row overhead.
+X: B=In the JVM: the function still runs in Python worker processes, and Arrow is the bridge across that boundary.
+C=Native compilation: Catalyst treats a Python UDF as an opaque function and does not compile it.
+D=No serialization: data in a DataFrame lives in JVM memory, so it must be serialized, here in the efficient Arrow format.
+T: Pandas UDFs batch data through Arrow and compute vectorized, which cuts per-row overhead.
+V: pandas UDF
