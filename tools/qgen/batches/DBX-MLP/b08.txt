@@ -8,45 +8,44 @@
 # src: https://docs.databricks.com/aws/en/machine-learning/manage-model-lifecycle/index
 
 @ DBX-MLP D2 T2.9 advanced use-case
-S: A data profile refreshes nightly on an inference table, and its drift metrics table is written by each refresh. The team wants a retraining job to start only after fresh drift metrics exist, not at a fixed hour that may come before the refresh finishes. The first task of the job will read the drift rows. Which trigger fits?
-A: A cron schedule at 06:00 each day, which the team moves later whenever the profile refresh starts to take longer than before
-B: A table update trigger on the drift metrics table, so that a job run starts when the profile refresh commits new rows to it
-C: A continuous job that runs the drift query in a loop all day and starts the training notebook when the output changes
-D: A file arrival trigger on the volume that holds the dashboard export, because the dashboard is regenerated after each refresh
-K: B
-G: ## Triggers for retraining jobs
-A retraining pipeline is a Lakeflow job. A job can be started by a schedule, by a file arrival trigger, by a continuous run, or by a table update trigger. The best trigger is the one that matches the event that makes retraining meaningful.
-- A table update trigger watches Unity Catalog tables (Delta and Iceberg managed tables, external Delta tables, materialized views, streaming tables) for updates, merges and deletes, and starts a run when they change. It needs no always-on cluster.
-- The principal in the job's Run as field must have `SELECT` on every monitored table, plus `USE CATALOG` and `USE SCHEMA`, or the trigger fails to evaluate and the job does not run.
-## Where the drift signal lives
-Data profiling (documented earlier as Lakehouse Monitoring) writes a profile metrics table and a drift metrics table as Delta tables. Writing the drift rows is the event that tells the pipeline new evidence exists, so that table is the natural source for the trigger.
-W: Table update trigger: the run starts when the refresh commits new drift rows, so the job never reads stale metrics and needs no guess about how long the refresh takes.
-X: A=Cron schedule: a fixed hour races against the refresh; when the refresh runs long the job reads yesterday's drift rows, and each delay forces a manual change of the schedule.
-C=Continuous job: it keeps a cluster running all day to poll a table that changes once a night, and "output changed" is not a reliable signal that new drift rows were written.
-D=File arrival trigger: it fires on new files in a storage location, and the dashboard export is not the data the job needs; the dashboard is a view of the metric tables, not their source.
-T: Start retraining from the event that produces the evidence (new drift rows) with a table update trigger instead of guessing a time.
+S: A data profile on an inference table refreshes every night and writes its drift metrics table each time, whether or not anything drifted. A table update trigger on that table starts the retraining job, and now a model is trained and registered every night, mostly on unchanged data. What is the best fix?
+A: Point the trigger at the profile metrics table instead, because that table receives new rows only in windows where some feature has drifted
+B: Replace the trigger by a weekly cron schedule, because a table update trigger always starts a run and offers no check of the table contents
+C: Raise the minimum time between triggers to seven days, so that the trigger itself inspects the table and skips the run when no drift is found
+D: Keep the trigger; a first task counts features above the baseline drift limit as a task value, and an If/else task trains only when the count is at least 1
+K: D
+G: ## A table update trigger fires on commits, not on content
+A table update trigger starts a run when a monitored Unity Catalog table is updated, merged into or deleted from. It does not look at what changed. The drift metrics table is written by every profile refresh, so a trigger on it means "a refresh finished", which is the right moment to look at drift but not a reason to retrain.
+- The trigger needs `SELECT` on the table for the Run as principal, plus `USE CATALOG` and `USE SCHEMA`, or the job does not run.
+- Minimum time between triggers only delays runs after a previous run; it never inspects data.
+## Trigger plus gate
+Use the trigger for timing and a condition for the decision: a first task queries the drift rows (`drift_type = 'BASELINE'`), counts columns above the agreed limit and sets a task value with `dbutils.jobs.taskValues.set`. An `If/else condition` task compares `{{tasks.check_drift.values.n_drifted}}` with `>= 1` and only the true branch trains.
+W: The trigger makes the check run right after fresh drift rows exist, and the If/else gate lets training start only when drift is above the limit, so unchanged nights cost one cheap task.
+X: B=Weekly cron: it keeps the same fixed-time race and retrains or checks on a calendar rather than on evidence; the premise is also wrong, because a gate task and If/else task add the content check.
+C=Longer minimum time: this setting only delays the next run after a previous one completed and never reads the table, so a run still starts and trains.
+A=Profile metrics table: both metric tables are rewritten on every refresh, so this trigger fires just as often and still says nothing about drift.
+T: Use a table update trigger for timing and an If/else gate on a drift count for the decision to retrain.
 V: Lakeflow Jobs, Data profiling, Unity Catalog
 
 @ DBX-MLP D2 T2.9 advanced troubleshooting
-S: A job has a `check_drift` notebook task that sets a task value with `dbutils.jobs.taskValues.set("n_drifted", 2.0)`. A downstream `If/else condition` task uses the expression `{{tasks.check_drift.values.n_drifted}} == 2`, and the retraining branch never runs, although two features have drifted. What is the cause and the fix?
-A: Task values cannot hold numbers, so the notebook must write the count as a string such as "two" and compare it with the `contains` operator
-B: The If/else task reads only job parameters, so the count must be passed as a job parameter that the schedule sets before the run
-C: The retraining task needs its Run if condition changed to "All done", because the If/else task stays pending until all tasks have run
-D: The equality operator compares strings, so "2.0" is not equal to "2"; use a numeric operator, for example `>= 2`, or write the value as an integer
-K: D
-G: ## If/else tasks and task values
-An `If/else condition` task evaluates a boolean expression with two operands. Operands can be job parameters, task parameters or task values, for example `{{tasks.check_drift.values.n_drifted}}`. A Python notebook sets a task value with `dbutils.jobs.taskValues.set(key, value)`.
-## Comparison rules
-- `==` and `!=` compare their operands as strings, so `12.0 == 12` is false.
-- `>`, `>=`, `<`, `<=` compare numbers, so `12.0 >= 12` is true.
-- Only numeric, string and boolean values are allowed; other types make the expression fail.
-Write retraining gates with numeric operators (`>=`, `>`) against thresholds, which is also the more robust rule: "at least 2 features drifted" instead of "exactly 2".
-W: The notebook stores 2.0, and `==` compares text, so "2.0" and "2" differ; a numeric operator such as `>= 2` evaluates as a number and the branch runs.
-X: A=String count with contains: task values can be numeric; turning a count into words makes numeric thresholds impossible and the condition becomes fragile.
-B=Job parameters only: operands can reference task values written upstream, which is the documented way to branch on a result computed inside the job.
-C=Run if "All done": that setting controls how a task reacts to the outcome of its dependencies; it does not change how the expression is evaluated, and the If/else task completes normally.
-T: Branch on computed values with numeric operators; `==` is a string comparison.
-V: Lakeflow Jobs
+S: In a retraining job, a `train` notebook task registers a new model version and a downstream `validate` task must evaluate exactly that version. Today `validate` loads the highest version number of the model from the registry. Twice, two overlapping job runs made `validate` test a version that the other run had trained. How should the version reach the validation task?
+A: Let `train` write the version number to a file on its driver's local disk and let `validate` read that file
+B: Let `train` set a task value `model_version` with `dbutils.jobs.taskValues.set` and give `validate` the reference `{{tasks.train.values.model_version}}`
+C: Add a fixed sleep at the start of `validate`, so that the other run has finished registering its own version before the highest one is read
+D: Define a job parameter for the version number and let the scheduler fill it in before the run starts
+K: B
+G: ## Passing results between tasks
+Task values pass a JSON-serializable value (up to 48 KiB) from one task of a job run to later tasks of the same run. A Python notebook sets one with `dbutils.jobs.taskValues.set(key, value)`, and downstream tasks reference it with the dynamic value `{{tasks.<task_key>.values.<key>}}`, also in non-Python tasks.
+## Why "highest version" is fragile
+- The registry is shared by all runs. With two overlapping runs, "latest" is whichever finished registering last, not the version this run trained.
+- The version number does not exist before training, so nothing can be set at schedule time.
+- Tasks of one job can run on different compute, so a local file on the driver of one task is not visible to the next.
+W: Task values are scoped to the run, so each `validate` receives the version its own `train` registered, whatever other runs do.
+X: A=Local file: tasks can run on different clusters, and driver disk is not shared or durable; it also has no run isolation if the path is reused.
+C=Fixed sleep: it hides the race rather than removing it, and the highest version can still belong to the other run.
+D=Job parameter filled before the run: the version is created by `train` during the run, so no value exists at start time.
+T: Hand the trained version to later tasks with a task value, not by asking the registry for the latest.
+V: Lakeflow Jobs, MLflow, Unity Catalog
 
 @ DBX-MLP D2 T2.9 advanced tradeoff
 S: A drift alert fires and starts the retraining job. The investigation shows that an upstream pipeline change set a feature to null for 40% of rows (`percent_null_delta` jumped), and the real customer behavior did not change. Retraining on the new data would bake the defect into the model. How should the automated pipeline be designed?
@@ -86,43 +85,42 @@ D=Nightly schedule: a schedule can be used, but it retrains regardless of need, 
 T: Drift starts a challenger; labelled evaluation against the champion decides the promotion.
 V: Data profiling, Unity Catalog, Lakeflow Jobs
 
-@ DBX-MLP D2 T2.9 advanced troubleshooting
-S: After a retraining run, the new model is serving, but the profile still reports high baseline drift for the same features. The drift alert fires again after every refresh, and the retraining job starts again every time. The baseline table is the training snapshot of the original model. What should be changed?
-A: Raise the alert threshold until the alert stops firing, because the new model is already in production and no further action is needed
-B: Set the baseline table of the profile to the training data of the newly promoted model as a part of the retraining job
-C: Switch the profile to consecutive drift only, by deleting the baseline table, so that the old snapshot is no longer compared with
-D: Increase the profile granularity to monthly windows so that the drift is averaged away and the alert cannot reach the threshold
+@ DBX-MLP D2 T2.9 advanced tradeoff
+S: A price-sensitivity model is retrained six weeks after a regulatory change that altered customer behavior abruptly and permanently on 1 September. The training table holds three years of history. Which training window gives the retrained model the best chance to match current behavior?
+A: All three years with equal weight, because more rows always lower the variance and the regulatory change affects only one date in the whole history
+B: The post-change days plus older data that is down-weighted or marked with a regime flag, with a time-ordered holdout taken after the change
+C: A random sample over the three years, because random sampling removes the effect of the date on which the change happened
+D: Only the six weeks since the change, with the older rows deleted for good, so that the model sees no stale behavior at all
 K: B
-G: ## The baseline must follow the model
-For an inference profile the recommended baseline is the data used to train or validate the model being monitored, with the same feature columns and the same model id column. Baseline drift compares each window with that table.
-After a retrain the training distribution changed. If the baseline still describes the old model, every window keeps looking drifted, and a trigger on that alert becomes a retraining loop. The retraining job should therefore update the baseline table (and the profile configuration that points to it) as part of promotion, so drift is measured against what the serving model actually saw.
-## Why not hide the signal
-Raising thresholds, changing granularity or removing the baseline treats the symptom and also blinds the monitor to the next real shift.
-W: Updating the baseline to the new training data makes baseline drift mean "different from what the serving model learned", which ends the loop and keeps the alert meaningful.
-X: A=Raise the threshold: the signal is a false alarm only because the reference is stale; a higher threshold also hides real drift in the future.
-C=Delete the baseline: consecutive drift only detects abrupt changes between windows and would miss a slow drift away from the training distribution.
-D=Monthly windows: averaging over a longer window delays detection and still compares to the old model's data, so a persistent shift continues to show.
-T: Move the profile baseline to the new model's training data whenever retraining promotes a model.
-V: Data profiling, Lakeflow Jobs
+G: ## Choosing the training window after an abrupt change
+After an abrupt, permanent shift (concept drift), old rows describe a relationship that no longer holds. Training windows trade bias against variance.
+- A long window has low variance but teaches the old behavior.
+- A very short window matches the new behavior but may be too small and noisy, especially for seasonal products.
+A common compromise keeps older data with lower sample weights or a regime indicator feature, so that the model can still use stable patterns, and evaluates on a time-ordered holdout from the new regime. The champion is scored on the same holdout.
+W: Weighting or flagging the old regime keeps useful volume, and a post-change holdout measures what matters: performance on current behavior.
+X: A=Equal weight over all years: the old regime dominates the rows, so the model averages two behaviors and fits neither well.
+C=Random sample: sampling does not change the share of old-regime rows, and a random split would leak post-change days into training and evaluation alike.
+D=Six weeks only and delete the rest: the window may be too small for stable estimates or to cover seasonality, and deleting history removes data that is still partly valid.
+T: After an abrupt change, emphasize the new regime without throwing away all history, and test on the new period.
+V: MLflow
 
-@ DBX-MLP D2 T2.9 applied use-case
-S: Retraining needs three feature tables that three different pipelines update between 01:00 and 03:00, in any order, with several commits each. A table update trigger exists on the training job. The team wants one run after all three have been refreshed, not one run per commit. Which configuration fits?
-A: Monitor the tables with the trigger set to start when any table is updated, and let the training task skip itself when inputs are incomplete
-B: Create three separate jobs, each triggered by one table, and ask the last job to cancel the runs of the two jobs that started earlier
-C: Use a cron schedule at 03:00 and add a retry policy, because table update triggers cannot monitor more than one table
-D: Monitor all three tables, trigger when all of them are updated, and set a wait after the last change so that a batch of commits is complete
-K: D
-G: ## Controlling when a table update trigger fires
-A table update trigger can monitor several tables. With more than one, "Trigger when" decides whether a run starts when any table or all tables are updated. Two advanced options shape the timing:
-- Minimum time between triggers: the minimum wait after a previous run completes.
-- Wait after last change: the trigger waits this many seconds after the latest update, and another update inside the period resets the timer. It exists for tables updated in batches whose whole batch must be done.
-A trigger can monitor up to 25 tables; more than 10 requires file events on the external location. The job can read `{{job.trigger.table_update.updated_tables}}` to know which tables changed.
-W: Watching all three tables with an "all updated" condition and a wait after the last change gives one run after every table has been refreshed and the commit burst has ended.
-X: A=Any table: the first commit starts a run on partial inputs, and later commits start more runs, which is the behavior to avoid; skipping inside the task does not remove the extra runs.
-B=Three jobs with cancellation: this builds fragile orchestration by hand for something the trigger already supports.
-C=Cron with retries: table update triggers do monitor multiple tables, and a fixed time repeats the race that the pipeline updates finish at different times.
-T: Combine "all tables updated" with a wait after the last change to run retraining once per complete data refresh.
-V: Lakeflow Jobs, Unity Catalog
+@ DBX-MLP D2 T2.9 advanced troubleshooting
+S: A lending model is retrained monthly on all applications with a known repayment outcome. Only approved applicants have outcomes, because rejected applicants never received a loan. Each retrain makes the model more confident about the kind of applicant it already approves, and drift alerts on the application data stay quiet. What is the underlying problem and the mitigation?
+A: The labels exist only for cases the model approved, which biases the data; approve a small random share for exploration or use reject inference
+B: The model suffers from concept drift in every single month, so the retraining schedule should move from monthly to weekly or to even shorter intervals
+C: The PSI limit is too wide to see the problem, so it should be lowered until an alert fires after each retrain
+D: Approved applicants are too few for training, so the approved rows should be oversampled until the classes balance
+K: A
+G: ## Feedback loops and selection bias
+When a model decides who gets an outcome, the labelled data is a filtered sample of the population: the labels come from the cases the model (or the earlier policy) accepted. Retraining on them teaches the model about its own accepted region and says nothing about rejected cases.
+- Input drift tests do not show it, because the application stream itself is unchanged.
+- Mitigations: exploration (for example a small random share of otherwise rejected cases is approved so that outcomes exist), reject inference methods, and an evaluation set built from randomly selected cases.
+W: Exploration produces outcomes for cases the model would reject, which restores unbiased labels for retraining and evaluation.
+X: B=Weekly retraining: more frequent training on the same filtered labels amplifies the bias, and the issue is sample selection, not a changed relationship.
+C=Tighter PSI limit: inputs have not drifted, so a threshold on input drift cannot reveal a bias in which rows carry labels.
+D=Oversample approved rows: this changes class counts but not which cases are missing, so the rejected region stays unobserved.
+T: When labels exist only for what the model accepted, add exploration or reject inference before trusting retraining.
+V: Lakeflow Jobs, MLflow
 
 @ DBX-MLP D2 T2.9 advanced use-case
 S: A scheduled retraining job trains a model and registers it in Unity Catalog as `prod.ml.churn`. Batch scoring and a serving endpoint load `models:/prod.ml.churn@Champion`. The team wants retraining to be fully automatic, but a new version must not reach production unless it beats the current model. Which last stage of the job fits?
@@ -247,7 +245,7 @@ T: Choose on validation, report on a test set touched once.
 V: MLflow
 
 @ DBX-MLP D2 T2.10 advanced use-case
-S: The automated promotion gate must accept a challenger only if the primary metric improves, p95 scoring latency stays under the limit documented for the application, and the input and output signature stays compatible with callers of the champion. Which design is best?
+S: The automated promotion gate must accept a challenger only if the primary metric improves, p95 scoring latency stays under the application limit, and the input and output signature stays compatible with callers of the champion. Which design is best?
 A: Log the metrics and the signature check as outputs of an evaluation task, and let an If/else gate move the Champion alias only when all conditions pass
 B: Promote on the primary metric alone and ask the application team to report latency and signature problems after the release
 C: Move the Champion alias first and run the checks afterwards, so that a failing check triggers a rollback by moving the alias back
@@ -289,7 +287,7 @@ S: A drift metrics table row for the column `plan_type` (a categorical feature w
 A: It is a bug, because the KS test is computed for every column type and a null value means that the refresh failed
 B: It is expected: the KS test is computed only for numeric columns, and categorical columns get chi-square, total variation and related distances
 C: It means that `plan_type` has no drift, because null in a test column is how the table encodes the absence of any change
-D: It means the column was converted to numbers by the profile, and the null shows that the KS test had too few distinct values to run
+D: It means the column was converted to numbers by the profile, and the null shows that the KS test had too few distinct values to run on it
 K: B
 G: ## Drift tests by column type
 The drift metrics table fills different columns for numeric and categorical data and leaves the others null.
@@ -425,46 +423,45 @@ C=Custom metric with yesterday's value: this reimplements by hand what a baselin
 T: Slow drift needs baseline drift against a fixed reference; consecutive drift catches sudden changes.
 V: Data profiling
 
-@ DBX-MLP D2 T2.12 applied use-case
-S: An analyst needs a SQL alert that fires when the Wasserstein distance of any numeric feature against the training baseline exceeds a limit. Which statement describes the query source correctly?
-A: Query the drift metrics table, keep rows with `drift_type = 'BASELINE'`, and test the `wasserstein_distance` column per `column_name`
-B: Query the profile metrics table, because it has the distribution statistics, and calculate the distance in the query from the quantile columns
-C: Query the inference table of the endpoint, because it holds one row per request and the distance needs raw rows
-D: Query the dashboard's cached results, since the metric tables contain only the latest window and no history
-K: A
-G: ## Which table answers which question
-- Profile metrics table: per-window statistics of each column (counts, nulls, mean, quantiles, model quality metrics). Use it to alert on a statistic leaving a range, for example `percent_null` above a limit.
-- Drift metrics table: per-window comparison with the previous window or with the baseline: deltas, `ks_test`, `chi_squared_test`, `tv_distance`, `js_distance`, `wasserstein_distance`, `population_stability_index`. Use it to alert on distribution change.
-A profile alert is an ordinary Databricks SQL alert over a query on one of these tables; it can notify by email, webhook, Slack or PagerDuty. Filter by `drift_type`, `column_name`, `slice_key` and the window to avoid mixing comparison types.
-W: The drift table already contains the precomputed distance per column and window, and filtering on the baseline type ensures the number compares with the training data and not the previous window.
-X: B=Profile metrics table: it holds the statistics, not the distances, and recomputing a distance from quantiles in SQL duplicates what the profile already stores.
-C=Inference table: it holds raw payloads, so the query would have to recompute distributions for every window itself and would bypass the profile's baseline handling.
-D=Dashboard cache: the dashboard is a view built on the metric tables, and the tables themselves keep one row per window and column as history.
-T: Distribution alerts query the drift metrics table, filtered by drift type and column.
-V: Data profiling, Databricks SQL
-
-@ DBX-MLP D2 T2.12 advanced use-case
-S: The team will attach an inference profile to the scoring table of a churn model. It chooses a baseline table to measure drift. Which baseline satisfies the documented guidance?
-A: Last week's production scoring data, because it is the most recent known good state and requires no extra table to maintain
-B: A random 1% sample of all customers from the CRM, because the baseline should be independent of the model
-C: The data used to train or validate the model, with the same feature columns and the same model id column as the profiled table
-D: The labelled holdout results only, with a prediction column but without any feature columns, because drift is about outputs
+@ DBX-MLP D2 T2.12 advanced comparison
+S: An upstream outage made one daily window of a numeric feature look very different, and values returned to normal the next day. The team has alerts on both comparison types of the drift metrics table. The consecutive-drift alert fired on two days in a row, the baseline-drift alert on only one. How does this fit the two drift types?
+A: Baseline drift is computed with a delay of one day, so it shows the outage a day late and never notices the return to normal
+B: The profile writes every consecutive drift row twice, so the second alert is only a duplicate that the team can suppress by filtering on the window start time
+C: Consecutive drift compares a window with the previous one, so it fires into the anomaly and again on the return; baseline drift fires only in the window that differs
+D: Consecutive drift compares each window with the first window ever profiled, so the return to normal differs from it as well
 K: C
-G: ## Baseline for an inference profile
-The documentation recommends for an inference profile the data that was used to train or validate the model being profiled. Alerts then say that the data drifted relative to what the model learned. The table should:
-- match the schema of the profiled table (the timestamp column is the exception);
-- contain the same feature columns as the primary table;
-- carry the same `model_id_col` as the primary table so rows are aggregated consistently.
-If columns are missing in either table, the profile uses best-effort heuristics to compute the metrics. A baseline made of last week's data would drift along with production and could not show slow decay; a baseline without features cannot measure feature drift at all.
-W: Training or validation data with the same features and model id column defines "what the model learned", so baseline drift directly measures the distance from the model's experience.
-X: A=Last week's production data: that is a moving reference which absorbs gradual drift, and consecutive drift already covers neighbor comparison.
-B=CRM sample: it is a different population from the scoring table and unrelated to the training distribution, so differences would not mean model risk.
-D=Holdout without features: drift of inputs cannot be computed without feature columns, and the baseline would lack the columns the primary table has.
-T: For an inference profile, use training or validation data with matching feature and model id columns as the baseline.
+G: ## What each drift type compares with
+- Consecutive drift (`drift_type = 'CONSECUTIVE'`): a window against the previous time window. Any single-window anomaly produces two changes, one into the anomaly and one out of it.
+- Baseline drift (`drift_type = 'BASELINE'`): a window against the baseline table, which is fixed. Only windows that differ from the reference alert.
+So consecutive drift suits detecting abrupt changes and baseline drift suits "different from what the model learned". A permanent shift looks different: consecutive drift fires once at the change, baseline drift keeps firing in every later window until the baseline is replaced.
+W: The comparison reference of consecutive drift moves with the data, so a spike and its recovery are two step changes, while the fixed baseline sees only one different window.
+X: B=Duplicate rows: each window and column has one row per drift type and comparison window; the second alert is a genuine change.
+A=Delayed baseline drift: the baseline comparison is calculated for each window in the same refresh, with no day of delay.
+D=Compared with the first window: consecutive drift uses the immediately preceding window, which is why it follows the data.
+T: Consecutive drift flags a spike and its recovery; baseline drift flags only the windows that differ from the fixed reference.
 V: Data profiling
 
+@ DBX-MLP D2 T2.12 advanced troubleshooting
+S: Labels have arrived for last month's fraud scores. The fraud rate in the labelled data fell to a third of the usual value, feature drift against the baseline is small, ROC AUC is unchanged, but precision at the fixed alert threshold dropped sharply. Which interpretation and response fit best?
+A: The ranking is intact but the share of positives moved, so refit the threshold or the calibration on recent labelled data before considering a full retrain
+B: The features must be corrupted, so retraining is pointless until the upstream pipeline is repaired, even though feature drift is small and the AUC is unchanged
+C: An unchanged AUC proves that precision cannot have changed, so the precision metric of the profile is wrong and should be recomputed
+D: Any precision change means the ranking has degraded as well, so the model must be retrained from scratch at once on the last month
+K: A
+G: ## Prior shift: the base rate moves, the ranking holds
+Precision depends on the share of positives (the prior) as well as on the ranking. If positives become three times rarer while the model separates them equally well, ROC AUC stays the same, but at a fixed threshold more flagged cases are false positives, so precision falls.
+- Input drift tests see nothing, because P(X) is mostly unchanged.
+- Label drift (a shift of the label column) and the labelled quality metrics of an inference profile show it once labels arrive.
+- Often a cheaper fix is enough: move the threshold to meet the required precision, or recalibrate the scores on recent labelled data. Full retraining is the next step if ranking quality (AUC, PR AUC) has fallen too.
+W: The unchanged AUC says the ranking still works; the lower base rate lowers precision at the old threshold, so re-fitting the threshold or calibration addresses the cause.
+X: B=Corrupted features: small feature drift and unchanged AUC do not support a data defect, and the change is explained by the label base rate.
+C=Precision must be wrong: AUC measures ranking over all thresholds, while precision at one threshold also depends on the prevalence, so both can be right.
+D=Ranking degraded: the unchanged AUC contradicts it, and a full retrain would be an expensive answer to a base-rate change.
+T: When AUC holds but precision falls with a lower base rate, re-fit the threshold or calibration before a full retrain.
+V: Data profiling, MLflow
+
 @ DBX-MLP D2 T2.12 advanced comparison
-S: A credit model's input features show no drift against the baseline, yet default rates in a new segment behave differently from what the model learned, and its accuracy has fallen. Which statement about the monitoring explains this and names the feature needed?
+S: A credit model's input features show no drift against the baseline, yet default rates in a new segment behave differently from what the model learned, and its accuracy has fallen. Which statement about the monitoring explains this and names the setting that is needed?
 A: Drift tests are flawed, because they compare only means; switching to a median-based test would have caught the accuracy loss
 B: The change is concept drift, which input tests cannot see; the inference profile needs the label column for accuracy metrics
 C: The baseline table must have been wrong; with the training data as baseline, the accuracy drop would have shown up as feature drift
