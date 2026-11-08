@@ -76,3 +76,23 @@ Writing rules (in addition to the DBX-DEA ones above):
 - Preview/Beta check on every docs page banner. Likely candidates: Genie Agents features (benchmarks, channel apps, Trusted Assets variants), dashboard embedding, external lineage, Lakebase,
   metric views, governed tags, Lakeflow Connect connectors, Genie Code slash commands. No prices, DBU rates, limits or runtime versions.
 - Overlap: DBX-DEA owns Auto Loader, COPY INTO, Jobs, Delta basics and Unity Catalog grants at engineer depth. Read its published questions first (grep data/DBX-DEA.json) and ask the analyst-side decision.
+
+## DBX-MLA Databricks Certified Machine Learning Associate (added 2026-11-08)
+Sources: https://www.databricks.com/learn/certification/machine-learning-associate and the guide
+https://www.databricks.com/sites/default/files/2026-10/Databricks-Certified-Machine-Learning-Associate-Exam-Guide-August-2026.pdf
+(file name says August 2026 but the guide text is dated March 1, 2025 for publication and update, read 2026-11-08: its wording is older than the docs; docs win).
+
+| Item | Value |
+|---|---|
+| Questions | 48 scored multiple-choice and multiple-selection (+ up to 10 unscored), 90 min, USD 200, valid 2 years, English/Japanese/pt-BR/Korean |
+| Pass mark | Not published. `passMarkUnpublished: true`; the mock aims at 80% |
+| Sections | D1 Databricks Machine Learning 38%, D2 Data Processing 19%, D3 Model Development 31%, D4 Model Deployment 12% |
+| Tasks | 48 (`data/exam-tasks.json`): 1.1-1.18, 2.1-2.9, 3.1-3.15, 4.1-4.6 (one per outline bullet) |
+| Format | The guide says multiple-selection exists: unlike DBX-DEA/DEP/DAA, about 15% of the bank is "(Select TWO)" |
+
+Writing rules (in addition to the DBX-DEA ones above):
+- ML-practitioner view: choose the right Databricks ML feature, metric, tuning method or deployment mode for a scenario; short Python (scikit-learn, Spark ML, MLflow) snippets <=8 lines allowed. Not API-name recall.
+- Names change: check the docs for the current name before keying. Likely traps: workspace Feature Store (legacy) vs feature tables in Unity Catalog (current feature engineering); workspace model registry (legacy) vs Unity Catalog models with aliases (stages are legacy); "Delta Live Tables" is now Lakeflow Spark Declarative Pipelines; online tables / online feature stores have changed (check the banner); Mosaic AI Model Serving; Hyperopt status on recent ML runtimes (docs list Optuna, Ray Tune, Hyperopt: verify before keying); MLflow 3 vs MLflow 2 API differences.
+- Nothing preview, beta or deprecated in keys (check each docs page banner). Where the guide asks about a legacy item (workspace registry, Hyperopt), key the documented current comparison and say in G: what is legacy. No prices, DBU rates, limits or runtime versions.
+- Spark ML and scikit-learn facts (estimators/transformers, pipelines, CrossValidator, metrics) come from spark.apache.org and scikit-learn docs where reachable; math facts (bias-variance, metrics, number of models in grid x folds) are generally accepted definitions.
+- Overlap: DBX-DEA has Unity Catalog, Jobs and Delta basics; DBX-DAA has SQL analysis. Test the ML decision, not platform trivia. AWS MLA-C02 shares ML concepts, not products.
