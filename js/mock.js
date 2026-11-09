@@ -18,6 +18,15 @@ let onExit = null;
 let specs = null;        // data/exam-specs.json
 let domainMap = null;    // data/exam-domains.json
 let state = null;        // running or finished exam
+// Time per question: seconds spent with a question on screen (state.times[id]); a pause over 10 minutes counts as 10.
+let shown = null;        // { id, at } for the question on screen
+function markQ(id) {
+  if (state && !state.submitted && shown) {
+    state.times = state.times || {};
+    state.times[shown.id] = (state.times[shown.id] || 0) + Math.min(600, Math.round((Date.now() - shown.at) / 1000));
+  }
+  shown = id ? { id, at: Date.now() } : null;
+}
 let view = "setup";
 let setupExam = null;
 let tick = null;
@@ -295,6 +304,7 @@ function injectStyles() {
 .mk .tab.on{border-color:var(--accent);color:var(--accent-ink);background:var(--accent-bg)}
 .mk .rv{margin-bottom:12px}
 .mk .rvhead{display:flex;align-items:center;gap:8px;font-size:.8rem;color:var(--muted);margin-bottom:8px}
+.mk .rvtime{font-size:.72rem;color:var(--muted);font-variant-numeric:tabular-nums}
 .mk .rvdom{font-family:"IBM Plex Mono","IBM Plex Sans KR",monospace;font-size:.72rem;padding:1px 6px;border-radius:5px;background:var(--surface-2);color:var(--muted)}
 .mk .rvexp summary{cursor:pointer;font-size:.85rem;font-weight:600;color:var(--accent-ink);margin:8px 0}
 .mk .yours{font-size:.75rem;font-weight:600;color:var(--muted);white-space:nowrap}
@@ -366,6 +376,7 @@ async function validActive(active) {
   });
   active.answers = active.answers || {};
   active.flags = active.flags || [];
+  active.times = active.times || {};
   active.cur = Math.min(Math.max(0, active.cur | 0), ids.length - 1);
   save(KEY_ACTIVE, active);
   return active;
@@ -398,7 +409,7 @@ async function startExam(mode, timed) {
   const dur = timeFor(spec, ids.length);
   const seenBefore = new Set(seenAll[setupExam] || []);
   state = {
-    v: 1, exam: setupExam, domain: setupDomain, mode, ids, order, answers: {}, flags: [], cur: 0, fresh: ids.filter(id => !seenBefore.has(id)).length,
+    v: 1, exam: setupExam, domain: setupDomain, mode, ids, order, answers: {}, flags: [], times: {}, cur: 0, fresh: ids.filter(id => !seenBefore.has(id)).length,
     startedAt: Date.now(), duration: dur, timed: !!timed, deadline: timed ? Date.now() + dur * 1000 : null,
     submitted: false,
   };
@@ -425,6 +436,7 @@ function stopTicking() { if (tick) { clearInterval(tick); tick = null; } }
 async function submit(auto) {
   if (!state || state.submitted) return;
   stopTicking();
+  markQ(null);
   const docs = await docsFor(state.exam);
   const byId = new Map(docs.map(q => [q.id, q]));
   const spec = specs[state.exam];
@@ -447,12 +459,14 @@ async function submit(auto) {
   state.submitted = true;
   state.auto = !!auto;
   state.results = results;
-  state.summary = { correct, total: state.ids.length, dom, used };
+  const spent = state.ids.map(id => (state.times || {})[id] || 0);
+  const avgSec = spent.some(t => t > 0) ? Math.round(spent.reduce((a, b) => a + b, 0) / state.ids.length) : null;
+  state.summary = { correct, total: state.ids.length, dom, used, avgSec };
   // history + seen
   state.notSaved = isEmptyAttempt(state.answers, state.ids);
   if (!state.notSaved) {
     const hist = loadHistory();
-    hist.push({ exam: state.exam, domain: state.domain || null, mode: state.mode, at: Date.now(), correct, total: state.ids.length, dom, used, timed: state.timed, auto: state.auto, fresh: state.fresh, answered: state.ids.filter(id => (state.answers[id] || []).length).length });
+    hist.push({ exam: state.exam, domain: state.domain || null, mode: state.mode, at: Date.now(), correct, total: state.ids.length, dom, used, timed: state.timed, auto: state.auto, fresh: state.fresh, avgSec, answered: state.ids.filter(id => (state.answers[id] || []).length).length });
     save(KEY_HISTORY, hist.slice(-HISTORY_MAX));
     const seen = loadSeen();
     seen[state.exam] = Array.from(new Set((seen[state.exam] || []).concat(state.ids)));
@@ -572,6 +586,7 @@ async function renderExam() {
     if (!state.ids.length) { drop(KEY_ACTIVE); state = null; view = "setup"; return render(); }
     state.cur = Math.min(state.cur, state.ids.length - 1); persist(); return renderExam();
   }
+  markQ(id);
   const n = state.ids.length;
   const answered = Object.keys(state.answers).filter(k => (state.answers[k] || []).length).length;
   const multi = (q.correctKeys || []).length > 1;
@@ -618,6 +633,7 @@ async function renderExam() {
 }
 
 function renderGrid(confirming) {
+  markQ(null);
   const n = state.ids.length;
   const unanswered = state.ids.filter(id => !(state.answers[id] || []).length).length;
   const left = state.timed ? (state.deadline - Date.now()) / 1000 : null;
@@ -657,7 +673,7 @@ function renderResults() {
     <p class="sub">${esc(examName(state.exam))}${state.auto ? " · submitted automatically when time ran out" : ""}</p>
     <div class="panel">
       <div class="scorerow"><div class="score v-${v.key}">${pct}%</div><div class="verdict v-${v.key}">${v.label}</div></div>
-      <div class="statchips"><span>${correct} of ${total} correct</span><span>${wrong} incorrect</span><span>time ${fmtTime(used)}${state.timed ? " of " + fmtTime(state.duration) : ""}</span></div>
+      <div class="statchips"><span>${correct} of ${total} correct</span><span>${wrong} incorrect</span><span>time ${fmtTime(used)}${state.timed ? " of " + fmtTime(state.duration) : ""}</span>${state.summary.avgSec != null ? `<span>${state.summary.avgSec} s per question</span>` : ""}</div>
       <p class="meta">${esc(v.note)}</p>
       <p class="meta passnote">${esc(passMarkNote(spec))}</p>
       ${state.notSaved ? `<p class="meta notsaved">Not saved: fewer than ${Math.round(EMPTY_ATTEMPT * 100)}% of the questions were answered, so this attempt is left out of your history, seen questions and readiness.</p>` : ""}
@@ -714,7 +730,7 @@ async function renderReview() {
       const letters = state.order[id].map((k, j) => want.has(k) ? LETTERS[j] : null).filter(Boolean).join(", ");
       const bm = qb.isBookmarked(id);
       return `<div class="qcard rv" data-qid="${esc(id)}">
-        <div class="rvhead"><span>#${i + 1}</span><span class="mono">${esc(id)}</span><span class="${ok ? "ok" : "no"}">${ok ? "✓ Correct" : got.size ? "✗ Incorrect" : "✗ Unanswered"}</span><span class="rvdom">${esc(domainOf(q, state.exam, domainMap))}</span>${state.flags.includes(id) ? "<span>⚑ flagged</span>" : ""}
+        <div class="rvhead"><span>#${i + 1}</span><span class="mono">${esc(id)}</span><span class="${ok ? "ok" : "no"}">${ok ? "✓ Correct" : got.size ? "✗ Incorrect" : "✗ Unanswered"}</span>${(state.times || {})[id] ? `<span class="rvtime">${state.times[id]} s</span>` : ""}<span class="rvdom">${esc(domainOf(q, state.exam, domainMap))}</span>${state.flags.includes(id) ? "<span>⚑ flagged</span>" : ""}
           <button class="bookmark-btn${bm ? " active" : ""}" data-bm="${esc(id)}" type="button" aria-label="Bookmark this question">${bm ? "★" : "☆"}</button></div>
         <div class="stem">${esc(q.stem)}</div>
         <div class="choices">${state.order[id].map((k, j) => {
