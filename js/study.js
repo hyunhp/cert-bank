@@ -49,6 +49,13 @@ const nf = n => Number(n).toLocaleString("en-US");
 const isRetired = code => { const d = specs && specs[code] && specs[code].lastDay; return !!d && d < new Date().toISOString().slice(0, 10); };
 const vendorOfEntry = e => isRetired(e[0]) ? "archive" : e[3];
 const vendorOf = code => { const e = STUDY_EXAMS.find(([c]) => c === code); return e && vendorOfEntry(e); };
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function endBadge(code) {   // last day of an exam that is being retired (from exam-specs.json), as in the question bank
+  const d = specs && specs[code] && specs[code].lastDay;
+  if (!d) return "";
+  const [y, m, day] = d.split("-").map(Number), gone = isRetired(code);
+  return `<span class="end" title="${gone ? "Retired" : "Last day to take this exam"}: ${d}">${gone ? "Retired" : `Ends<span class="d"> ${MONTHS[m - 1]} ${day}${y !== new Date().getFullYear() ? " " + y : ""}</span>`}</span>`;
+}
 const isNewVersion = name => / \(new\)$/.test(name);
 const shortName = name => name.replace(/ – (Associate|Professional|Expert|Specialty)( \(new\))?$/, "");
 const LEVELS = [["foundational", "Foundational"], ["associate", "Associate"], ["professional", "Professional"], ["expert", "Expert"], ["specialty", "Specialty"]];
@@ -74,7 +81,7 @@ const StudyStore = {
     try { localStorage.setItem(this.KEY, JSON.stringify(state)); } catch (e) { /* private mode: keep in memory only */ }
   },
   _norm(p = {}) {
-    return { done: Array.isArray(p.done) ? p.done : [], lastDay: p.lastDay || null, updatedAt: p.updatedAt || null };
+    return { done: Array.isArray(p.done) ? p.done : [], quiz: p.quiz && typeof p.quiz === "object" && !Array.isArray(p.quiz) ? p.quiz : {}, lastDay: p.lastDay || null, updatedAt: p.updatedAt || null };
   },
   get(exam) { return this._norm(this._read().exams[exam]); },
   _update(exam, fn) {
@@ -86,6 +93,8 @@ const StudyStore = {
     this._write(state);
     return p;
   },
+  // Latest quiz result of a day: { right, total, at }, stored once every question has an answer.
+  setQuiz(exam, day, right, total) { return this._update(exam, p => { p.quiz[day] = { right, total, at: new Date().toISOString() }; }); },
   setLastDay(exam, day) { return this._update(exam, p => { p.lastDay = day; }); },
   lastExam() { return this._read().lastExam || null; },
   setLastExam(exam) { const state = this._read(); state.lastExam = exam; this._write(state); },
@@ -199,7 +208,7 @@ function renderExamRow() {
   if (vsel && vrow.scrollWidth > vrow.clientWidth) vrow.scrollLeft = vsel.offsetLeft - (vrow.clientWidth - vsel.offsetWidth) / 2;
   fade(); vrow.onscroll = fade;
   const chipHtml = ([code, name]) =>
-    `<button class="chip${code === current.exam ? " active" : ""}" data-exam="${code}" title="${esc(name)}"><span class="cd">${code}${isNewVersion(name) ? `<span class="new">NEW</span>` : ""}</span><span class="nm">${esc(shortName(name))}</span></button>`;
+    `<button class="chip${code === current.exam ? " active" : ""}" data-exam="${code}" title="${esc(name)}"><span class="cd">${code}${isNewVersion(name) ? `<span class="new">NEW</span>` : ""}${endBadge(code)}</span><span class="nm">${esc(shortName(name))}</span></button>`;
   $("#examRow").classList.toggle("multi", levels.length > 1);
   $("#examRow").innerHTML = levels.map(([l, label]) => {
     const list = exams.filter(e => e[2] === l);
@@ -210,7 +219,7 @@ function renderExamRow() {
   }).join("");
   const cur = STUDY_EXAMS.find(([c]) => c === current.exam);
   $("#examSum").innerHTML = cur
-    ? `<span class="code">${cur[0]}</span> ${esc(shortName(cur[1]))}${isNewVersion(cur[1]) ? ` <span class="new">NEW</span>` : ""} <span class="lv">· ${(LEVELS.find(([l]) => l === cur[2]) || [, ""])[1]}</span>`
+    ? `<span class="code">${cur[0]}</span> ${esc(shortName(cur[1]))}${isNewVersion(cur[1]) ? ` <span class="new">NEW</span>` : ""}${endBadge(cur[0]) ? " " + endBadge(cur[0]) : ""} <span class="lv">· ${(LEVELS.find(([l]) => l === cur[2]) || [, ""])[1]}</span>`
     : "Choose an exam";
   $("#examPicker").classList.toggle("folded", !examOpen);
   $("#examToggle").setAttribute("aria-expanded", String(examOpen));
@@ -224,7 +233,7 @@ function dayListHTML(guide, progress) {
     groups[groups.length - 1].days.push(d);
   }
   return groups.map(g => `<div class="daygroup"><h3>${g.key === "final" ? "Final review" : `${g.key} · ${esc(domainName(guide.exam, g.key))}`}</h3>` +
-    g.days.map(d => `<button class="daylink${d.day === current.day ? " current" : ""}" data-day="${d.day}"><span class="n">Day ${d.day}</span><span>${esc(d.title)}</span>${progress.done.includes(d.day) ? '<span class="ck" aria-label="studied">✓</span>' : ""}</button>`).join("") +
+    g.days.map(d => `<button class="daylink${d.day === current.day ? " current" : ""}" data-day="${d.day}"><span class="n">Day ${d.day}</span><span>${esc(d.title)}</span>${progress.quiz[d.day] ? `<span class="qz${progress.quiz[d.day].right === progress.quiz[d.day].total ? " full" : ""}" title="Latest quiz result">${progress.quiz[d.day].right}/${progress.quiz[d.day].total}</span>` : ""}${progress.done.includes(d.day) ? '<span class="ck" aria-label="studied">✓</span>' : ""}</button>`).join("") +
     `</div>`).join("");
 }
 
@@ -303,6 +312,18 @@ function answer(qEl, picked) {
   qEl.querySelector(".explain-slot").innerHTML =
     `<div class="explain${ok ? "" : " wrong"}"><b>${ok ? "Correct" : "Not quite — answer: " + "ABCDE"[q.answer]}</b>${text(q.explain)}</div><button class="retry">Try again</button>`;
   updateQuizSummary();
+  saveQuizResult();
+}
+
+// Remember the result of a day's quiz (latest full run) so the day list can show it.
+function saveQuizResult() {
+  const qs = [...document.querySelectorAll(".quiz-q")];
+  const done = qs.filter(q => q.querySelector(".choice:disabled"));
+  if (!qs.length || done.length < qs.length) return;
+  const right = done.filter(q => q.querySelector(".explain:not(.wrong)")).length;
+  StudyStore.setQuiz(current.exam, current.day, right, qs.length);
+  const nav = $("#dayNav");
+  if (nav) nav.querySelector(".daypanel").innerHTML = dayListHTML(guides[current.exam], StudyStore.get(current.exam));
 }
 
 async function show(exam, day) {

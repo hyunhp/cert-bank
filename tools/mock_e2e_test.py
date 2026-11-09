@@ -34,6 +34,9 @@ with sync_playwright() as p:
     rec = pg.evaluate("JSON.parse(localStorage.getItem('aws_qbank_mock_recent_v1')||'{}')")
     ok("this draw is remembered for the next one", rec.get("SAA-C03") == [st["ids"]], str(rec)[:120])
     ok("one Review & finish button in the top bar", pg.locator(".mkbar [data-act=\"grid\"]").count() == 1 and pg.locator(".mkbar .btn").count() == 1)
+    first_id = st["ids"][0]
+    pg.wait_for_timeout(1300); pg.click('[data-act="next"]'); pg.wait_for_selector(".qnum"); pg.click('[data-act="prev"]'); pg.wait_for_selector(".qnum")
+    ok("time on the first question is recorded", (state(pg).get("times") or {}).get(first_id, 0) >= 1, str(state(pg).get("times")))
     ok("answers hidden during exam", pg.locator("#mockRoot .choice.correct").count() == 0 and pg.locator("#mockRoot .explain").count() == 0)
     # The flag button sits in the bottom Prev/Flag/Next bar (sticky), not in the question header, so a long question never needs a scroll back up.
     ok("flag button is in the bottom bar", pg.locator("#mockRoot .nav [data-act=\"flag\"]").count() == 1 and pg.locator("#mockRoot .qnum [data-act=\"flag\"]").count() == 0)
