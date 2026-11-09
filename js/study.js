@@ -42,10 +42,13 @@ const STUDY_EXAMS = [
   ["VLT-VA003", "Vault Associate (003)", "associate", "hashicorp"],
   ["TF-IEP002", "Terraform Infrastructure Engineer Professional (002)", "professional", "hashicorp"],
 ].map(([code, name, level, vendor]) => [code, name, level, vendor || "aws"]);
-const VENDORS = [["aws", "AWS"], ["palantir", "Palantir"], ["azure", "Azure"], ["gcp", "Google Cloud", "GCP"], ["databricks", "Databricks"], ["hashicorp", "HashiCorp"]];   // [id, name, short name on phones]
+const VENDORS = [["aws", "AWS"], ["palantir", "Palantir"], ["azure", "Azure"], ["gcp", "Google Cloud", "GCP"], ["databricks", "Databricks"], ["hashicorp", "HashiCorp"], ["archive", "Archive"]];   // [id, name, short name on phones]
 const levelOfExam = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[2];
 const nf = n => Number(n).toLocaleString("en-US");
-const vendorOf = code => (STUDY_EXAMS.find(([c]) => c === code) || [])[3];
+// Exams past "lastDay" in exam-specs.json sit in the Archive tab (as in the question bank); nothing is removed.
+const isRetired = code => { const d = specs && specs[code] && specs[code].lastDay; return !!d && d < new Date().toISOString().slice(0, 10); };
+const vendorOfEntry = e => isRetired(e[0]) ? "archive" : e[3];
+const vendorOf = code => { const e = STUDY_EXAMS.find(([c]) => c === code); return e && vendorOfEntry(e); };
 const isNewVersion = name => / \(new\)$/.test(name);
 const shortName = name => name.replace(/ – (Associate|Professional|Expert|Specialty)( \(new\))?$/, "");
 const LEVELS = [["foundational", "Foundational"], ["associate", "Associate"], ["professional", "Professional"], ["expert", "Expert"], ["specialty", "Specialty"]];
@@ -180,13 +183,13 @@ function domainName(exam, code) {
 
 function renderExamRow() {
   const all = available();
-  const vendor = current.vendor || vendorOf(current.exam) || (all[0] || [])[3];
-  const exams = all.filter(e => e[3] === vendor);
+  const vendor = current.vendor || vendorOf(current.exam) || vendorOfEntry(all[0] || []);
+  const exams = all.filter(e => vendorOfEntry(e) === vendor);
   const levels = LEVELS.filter(([l]) => exams.some(e => e[2] === l));
-  const vendors = VENDORS.filter(([v]) => all.some(e => e[3] === v));
+  const vendors = VENDORS.filter(([v]) => all.some(e => vendorOfEntry(e) === v));
   $("#vendorRow").hidden = vendors.length < 2;
   $("#vendorRow").innerHTML = vendors.map(([v, label, short]) =>
-    `<button class="vtab" role="tab" aria-selected="${v === vendor}" data-vendor="${v}"${short ? ` title="${label}"` : ""}>${short ? `<span class="vname">${label}</span><span class="vshort">${short}</span>` : label}<span class="cnt">${nf(all.filter(e => e[3] === v).length)}</span></button>`).join("");
+    `<button class="vtab" role="tab" aria-selected="${v === vendor}" data-vendor="${v}"${short ? ` title="${label}"` : ""}>${short ? `<span class="vname">${label}</span><span class="vshort">${short}</span>` : label}<span class="cnt">${nf(all.filter(e => vendorOfEntry(e) === v).length)}</span></button>`).join("");
   const vrow = $("#vendorRow");
   const fade = () => {
     vrow.classList.toggle("fade-l", vrow.scrollLeft > 4);

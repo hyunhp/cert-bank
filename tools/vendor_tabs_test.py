@@ -33,8 +33,11 @@ with sync_playwright() as p:
     ex = pg.evaluate("EXAMS.map(([c, n, v]) => [c, v, EXAM_LEVEL[c] || null])")
     spec_exams = {c: s for c, s in specs.items() if isinstance(s, dict) and "vendor" in s}
     check("EXAMS lists every exam in exam-specs.json", sorted(c for c, _, _ in ex) == sorted(spec_exams), sorted(set(spec_exams) ^ {c for c, _, _ in ex}))
-    check("EXAMS vendor and EXAM_LEVEL match exam-specs.json", all(spec_exams.get(c, {}).get("vendor") == v and spec_exams.get(c, {}).get("level") == l for c, v, l in ex),
-          [(c, v, l) for c, v, l in ex if spec_exams.get(c, {}).get("vendor") != v or spec_exams.get(c, {}).get("level") != l])
+    import datetime
+    today = datetime.date.today().isoformat()
+    def want_vendor(c): return "archive" if spec_exams[c].get("lastDay", "9999") < today else spec_exams[c].get("vendor")
+    check("EXAMS vendor and EXAM_LEVEL match exam-specs.json (retired exams sit in archive)", all(want_vendor(c) == v and spec_exams.get(c, {}).get("level") == l for c, v, l in ex),
+          [(c, v, l) for c, v, l in ex if want_vendor(c) != v or spec_exams.get(c, {}).get("level") != l])
     last = pg.evaluate("LAST_DAY")
     check("LAST_DAY matches lastDay in exam-specs.json", last == {c: v["lastDay"] for c, v in spec_exams.items() if "lastDay" in v}, last)
     check("tab counts use thousands separators", tabs[0][2] == f"{total('aws'):,}" and "," in tabs[0][2], tabs[0])
@@ -124,5 +127,31 @@ with sync_playwright() as p:
     check("320px: page has no horizontal overflow", ov)
     off = sm.eval_on_selector_all("#chipRow .chip", "cs => cs.filter(c => Math.abs(c.querySelector('.cnt').getBoundingClientRect().top - c.querySelector('.code').getBoundingClientRect().top) > 4).map(c => c.dataset.code)")
     check("320px: counts on the code line", not off, off)
+
+    # Archive: after a lastDay the exam leaves its vendor tab and appears in the Archive tab (nothing is removed).
+    ar = b.new_context(viewport={"width": 1100, "height": 800}).new_page()
+    ar.route("**/fonts.googleapis.com/**", lambda r: r.abort())
+    ar.add_init_script("""(() => { const R = Date, off = new R('2026-11-20T12:00:00Z').getTime() - R.now();
+      window.Date = class extends R { constructor(...a) { a.length ? super(...a) : super(R.now() + off); } static now() { return R.now() + off; } }; })()""")
+    ar.goto(BASE + "#exam=SAA-C03"); ar.wait_for_selector(".qcard")
+    vt = ar.eval_on_selector_all(".vtab", "els => els.map(e => e.dataset.vendor)")
+    check("archive tab appears once an exam is retired", vt[-1] == "archive", vt)
+    aws = ar.eval_on_selector_all("#chipRow .chip[data-code]", "els => els.map(e => e.dataset.code)")
+    check("retired SAP-C02 leaves the AWS tab", "SAP-C02" not in aws and "SAP-C03" in aws, aws)
+    ar.goto(BASE + "#exam=SAP-C02"); ar.reload(); ar.wait_for_selector(".qcard")
+    check("#exam= link to a retired exam opens the Archive tab", ar.eval_on_selector(".vtab[aria-selected='true']", "e => e.dataset.vendor") == "archive"
+          and ar.eval_on_selector("#chipRow .chip.active", "e => e.dataset.code") == "SAP-C02")
+    arch = ar.eval_on_selector_all("#chipRow .chip[data-code]", "els => els.map(e => e.dataset.code)")
+    check("archive lists only retired exams, with Retired badge", arch == ["SAP-C02"] and "Retired" in ar.text_content("#chipRow"), arch)
+    check("retired exam keeps its questions", ar.locator(".qcard").count() == idx["exams"]["SAP-C02"]["count"])
+    ar.goto(BASE + "#mock=SAP-C02"); ar.reload(); ar.wait_for_selector("#mockRoot .mk")
+    check("mock setup lists retired exams under Archive", ar.locator("#mockRoot optgroup option[value='SAP-C02']").count() == 1)
+    st = b.new_context(viewport={"width": 1100, "height": 800}).new_page()
+    st.route("**/fonts.googleapis.com/**", lambda r: r.abort())
+    st.add_init_script("""(() => { const R = Date, off = new R('2026-11-20T12:00:00Z').getTime() - R.now();
+      window.Date = class extends R { constructor(...a) { a.length ? super(...a) : super(R.now() + off); } static now() { return R.now() + off; } }; })()""")
+    st.goto(BASE + "study.html#exam=SAP-C02&day=1"); st.wait_for_selector(".vtab")
+    check("study page: retired exam sits in the Archive tab", st.eval_on_selector(".vtab[aria-selected='true']", "e => e.dataset.vendor") == "archive"
+          and st.eval_on_selector_all("#examRow .chip", "els => els.map(e => e.dataset.exam)") == ["SAP-C02"])
     b.close()
 sys.exit(C.exit())

@@ -512,7 +512,9 @@ async function renderSetup(extra) {
     .map(d => `<option value="${d.code}"${d.code === setupDomain ? " selected" : ""}>${d.code} · ${esc(d.name)} (${perDomain[d.code]})</option>`).join("");
   const domName = setupDomain ? (spec.domains.find(d => d.code === setupDomain) || {}).name : "";
   const hist = loadHistory().filter(h => h.exam === setupExam).slice(-10).reverse();
-  const opts = (qb.EXAMS || []).filter(([c]) => specs[c]).map(([c, n]) => `<option value="${c}"${c === setupExam ? " selected" : ""}>${c} · ${esc(n)}</option>`).join("");
+  const optHtml = ([c, n]) => `<option value="${c}"${c === setupExam ? " selected" : ""}>${c} · ${esc(n)}</option>`;
+  const liveExams = (qb.EXAMS || []).filter(([c]) => specs[c]), oldExams = liveExams.filter(e => e[2] === "archive");
+  const opts = liveExams.filter(e => e[2] !== "archive").map(optHtml).join("") + (oldExams.length ? `<optgroup label="Archive (retired exams)">${oldExams.map(optHtml).join("")}</optgroup>` : "");
   const mode = (extra && extra.mode) || root.dataset.mode || "full";
   root.dataset.mode = mode;
   root.innerHTML = `<div class="mk">
