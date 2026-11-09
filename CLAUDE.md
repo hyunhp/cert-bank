@@ -15,7 +15,8 @@ backup) and the mock exam "one section only" option read `data/exam-specs.json`,
 `exam-tasks.json` (English task names; keep it in step with `tools/qgen/tasks.json`).
 Vendors: `exam-specs.json` gives each exam a `vendor`; `index.html` has `EXAMS` (code, name, vendor) and `VENDORS`
 (the tabs). Exam codes are globally unique (Palantir codes start with `PLTR-`), so links, bookmarks and stats carry no
-vendor. Keep the `aws_qbank_*` localStorage keys: renaming them would wipe every user's bookmarks and history.
+vendor. Retired exams: once `lastDay` in `exam-specs.json` has passed, index.html (`isRetired`) and js/study.js move the exam to the `Archive` tab by itself (keep `LAST_DAY` in step); nothing is deleted.
+Keep the `aws_qbank_*` localStorage keys: renaming them would wipe every user's bookmarks and history.
 Palantir exams publish a percent pass mark (`passingPct`) and no domain weights (`weightsAssumed`, equal weights).
 **Before any `PLTR-*` work read `tools/qgen/PALANTIR.md`** (official facts and writing rules).
 **Before any `AZ-*` or `AI-*` (Microsoft Azure) work read `tools/qgen/AZURE.md`** (for AI-901/AI-103 also
