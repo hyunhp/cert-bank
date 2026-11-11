@@ -22,6 +22,15 @@ Not confirmed, so never state them in questions or on the site as fact: whether 
 back to earlier questions, whether open-book includes AI tools, and details of Foundry Aware.
 All three guides were re-read on 2026-10-15: DE and AIE unchanged (95 q, 70%, no weights).
 
+### Foundry Aware (checked 2026-11-11)
+learn.palantir.com and certification.palantir.com answer 403 to this environment (site side). Fallback source:
+Palantir staff posts on community.palantir.com (host allowed 2026-11-11; Discourse JSON: `/t/<id>.json`).
+- Staff (topics 7022, 7059, 7061, 4171/7): Foundry Aware is free, "the recommended foundation for every new builder",
+  based on the Foundry & AIP Aware course (building in Foundry & AIP, scoping use cases, positioning Foundry & AIP in
+  an enterprise IT landscape). In the 2026 framework: Foundry Aware < old Professional < new Associate < Specialist.
+- NOT confirmed by staff (a user asked, no answer): unproctored, 120 min, unlimited retakes. No question count,
+  domains or pass mark published. So no `PLTR-*` Aware exam is registered: there is no guide to map domains to.
+
 ## Codes and task ids
 - `PLTR-DE` (Data Engineer – Associate), `PLTR-AIE` (AI Engineer – Associate), `PLTR-APD` (Application Developer – Associate).
 - Domains D1-D8 follow the guides' order and names exactly.
