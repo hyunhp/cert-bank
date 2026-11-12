@@ -15,6 +15,7 @@ const STUDY_EXAMS = [
   ["SAP-C03", "Solutions Architect – Professional (new)", "professional"], ["DOP-C02", "DevOps Engineer – Professional", "professional"],
   ["AIP-C01", "Generative AI Developer – Professional", "professional"],
   ["ANS-C01", "Advanced Networking – Specialty", "specialty"], ["SCS-C03", "Security – Specialty", "specialty"],
+  ["PLTR-AWARE", "Foundry Aware", "foundational", "palantir"],
   ["PLTR-DE", "Data Engineer – Associate", "associate", "palantir"], ["PLTR-AIE", "AI Engineer – Associate", "associate", "palantir"],
   ["PLTR-APD", "Application Developer – Associate", "associate", "palantir"],
   ["AZ-900", "Azure Fundamentals", "foundational", "azure"],

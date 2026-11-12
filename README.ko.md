@@ -47,7 +47,8 @@ Amazon Web Services, Palantir Technologies, Microsoft, Google과 관련 없는 �
 | | | AIP-C01 Generative AI Developer | 405 | 35 |
 | | Specialty | ANS-C01 Advanced Networking | 395 | 28 |
 | | | SCS-C03 Security | 395 | 28 |
-| Palantir | Associate | PLTR-DE Data Engineer | 475 | 17 |
+| Palantir | Foundational | PLTR-AWARE Foundry Aware | 225 | 12 |
+| | Associate | PLTR-DE Data Engineer | 475 | 17 |
 | | | PLTR-AIE AI Engineer | 475 | 17 |
 | | | PLTR-APD Application Developer | 425 | 17 |
 | Azure | Foundational | AZ-900 Azure Fundamentals | 225 | 14 |
