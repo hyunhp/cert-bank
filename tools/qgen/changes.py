@@ -96,6 +96,8 @@ def main(argv):
     (ROOT / "data" / "changes" / f"{pr}.json").write_text(json.dumps(entries, indent=1, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
     imp = sum(e["important"] for e in entries)
     print(f"data/changes/{pr}.json: {len(entries)} entries, {imp} important")
+    import subprocess   # exam pages list recent changes: regenerate them
+    subprocess.run([sys.executable, str(ROOT / "tools" / "site" / "build.py")], check=True)
     return 0
 
 

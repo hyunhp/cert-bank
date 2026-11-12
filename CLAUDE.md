@@ -32,6 +32,11 @@ start: what is in progress, on which branch, what comes next). Update that secti
 Study guide: `study.html` + `js/study.js` read `data/study/<EXAM>.json` (day-by-day plans, edited directly,
 not through qgen) and mark terms from `data/glossary.json` with tap/hover popovers (EN + KO). See
 `tools/study/README.md` for the glossary rules and the planned (unbuilt) backend design.
+Static site pages (crawlable, no JS): `exams/` (list + one hub per exam), `about.html`, `privacy.html`, `sitemap.xml`,
+`assets/site.css`, all written by `python3 tools/site/build.py` from the data, `content/domain-briefs.json` (hand-written
+per exam|domain) and EXAMS in index.html. Never hand-edit the output; qgen `stamp` (ingest/share) and `changes.py`
+rerun it, and `tools/site_test.py` fails when a page is stale. Indexable = sitemap pages only; tool screens (study.html)
+carry `noindex`. Hosting stays GitHub Pages, no ads (owner 2026-11-13).
 Donations: `support.html` holds the payment links (`METHODS`; empty url = "coming soon"); the only other copy is the
 Ko-fi badge in the Support section of `README.md` / `README.ko.md` (update all three if the Ko-fi page changes).
 KakaoPay links only open in the phone app (404 in desktop browsers): the card shows `assets/kakaopay-qr.svg` and is a
@@ -96,4 +101,4 @@ answer), stem length. `python3 tools/qgen/length_bias.py <batch>` lists the ques
 - Docs for writers/reviewers: `python3 tools/learn_fetch.py [--grep "<terms>"] <url>` (shared text cache in
   ~/.cache/cert-bank-docs; batches list their pages as `# src: <url>` lines so reviewers reuse them)
 - Tests (all must pass before commit):
-  `node tools/mock_unit_test.mjs && python3 tools/study_test.py && python3 tools/mock_e2e_test.py && python3 tools/mock_link_test.py && python3 tools/bookmark_backup_test.py && python3 tools/loading_perf_test.py && python3 tools/domain_filter_test.py && python3 tools/vendor_tabs_test.py && python3 tools/explain_format_test.py && python3 tools/data_scope_test.py && python3 tools/changes_test.py && python3 tools/resume_test.py && python3 tools/support_test.py && python3 tools/diagrams/scroll_ui_test.py && python3 tools/diagrams/check.py && python3 tools/diagrams/site_test.py`
+  `node tools/mock_unit_test.mjs && python3 tools/study_test.py && python3 tools/mock_e2e_test.py && python3 tools/mock_link_test.py && python3 tools/bookmark_backup_test.py && python3 tools/loading_perf_test.py && python3 tools/domain_filter_test.py && python3 tools/vendor_tabs_test.py && python3 tools/explain_format_test.py && python3 tools/data_scope_test.py && python3 tools/changes_test.py && python3 tools/resume_test.py && python3 tools/support_test.py && python3 tools/site_test.py && python3 tools/diagrams/scroll_ui_test.py && python3 tools/diagrams/check.py && python3 tools/diagrams/site_test.py`
