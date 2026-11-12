@@ -37,6 +37,11 @@ Static site pages (crawlable, no JS): `exams/` (list + one hub per exam), `about
 per exam|domain) and EXAMS in index.html. Never hand-edit the output; qgen `stamp` (ingest/share) and `changes.py`
 rerun it, and `tools/site_test.py` fails when a page is stale. Indexable = sitemap pages only; tool screens (study.html)
 carry `noindex`. Hosting stays GitHub Pages, no ads (owner 2026-11-13).
+Guides: sources in `content/guides/{en,ko}/<slug>.html` (copied from blogger-publisher `guides/` @ f3881bc; cert-bank owns
+and edits its copies), published in `content/guides/PUBLISHED.txt` order (~3 per PR, each fact-checked; next slugs from
+publisher `guides/ORDER.txt`). `tools/site/guides.py` drops comment lines, maps old blog label links, and replaces the
+blog's practice section with bank links; pages `guides/<slug>/` + `ko/guides/<slug>/` (hreflang pair). Edit wording that
+says "this blog" in the copies.
 Donations: `support.html` holds the payment links (`METHODS`; empty url = "coming soon"); the only other copy is the
 Ko-fi badge in the Support section of `README.md` / `README.ko.md` (update all three if the Ko-fi page changes).
 KakaoPay links only open in the phone app (404 in desktop browsers): the card shows `assets/kakaopay-qr.svg` and is a

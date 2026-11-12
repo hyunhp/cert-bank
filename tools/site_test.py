@@ -69,6 +69,15 @@ C.check("hub has weights, briefs, study order and tool links",
         all(s in hub for s in ("30%", "What to watch for", "A study order that works", "#mock=SAA-C03", "study.html#exam=SAA-C03")))
 ret = (ROOT / "exams" / "sap-c02" / "index.html").read_text(encoding="utf-8")
 C.check("retiring exam names its last day and its replacement", "2026-11-16" in ret and 'href="../sap-c03/"' in ret)
+guide_urls = [u for u in urls if "/guides/guide-" in u]
+C.check("published guides are in the sitemap in both languages", len(guide_urls) >= 2 and len(guide_urls) % 2 == 0, len(guide_urls))
+leftover = [str(f) for f in list((ROOT / "guides").rglob("*.html")) + list((ROOT / "ko").rglob("*.html")) if "blogspot.com" in f.read_text(encoding="utf-8")]
+C.check("guides keep no link to the old blog", not leftover, leftover)
+g_en = (ROOT / "guides" / "guide-saa-c03-study-plan" / "index.html").read_text(encoding="utf-8")
+g_ko = (ROOT / "ko" / "guides" / "guide-saa-c03-study-plan" / "index.html").read_text(encoding="utf-8")
+C.check("guide pairs carry hreflang en/ko and lang", all('hreflang="ko"' in x and 'hreflang="en"' in x for x in (g_en, g_ko)) and '<html lang="ko">' in g_ko)
+C.check("guide practice section points into the bank", '#exam=SAA-C03&amp;d=D1' in g_en and '#mock=SAA-C03' in g_ko)
+C.check("hub lists its guides", 'href="../../guides/guide-saa-c03-study-plan/"' in hub)
 C.check("index.html footer links the exam pages", 'href="exams/"' in (ROOT / "index.html").read_text(encoding="utf-8"))
 
 srv, BASE = serve(str(ROOT))
@@ -77,7 +86,8 @@ with sync_playwright() as pw:
     for scheme in ("light", "dark"):
         c = b.new_context(java_script_enabled=False, viewport={"width": 375, "height": 800}, color_scheme=scheme)
         q = c.new_page()
-        for path in ("exams/", "exams/saa-c03/", "exams/pltr-aware/", "about.html", "contact.html", "privacy.html"):
+        for path in ("exams/", "exams/saa-c03/", "exams/pltr-aware/", "about.html", "contact.html", "privacy.html",
+                     "guides/", "guides/guide-saa-c03-study-plan/", "ko/guides/guide-clf-c02-study-plan/"):
             q.goto(BASE + path)
             w = q.evaluate("document.documentElement.scrollWidth")
             C.check(f"[{scheme}] {path}: readable without JS, no horizontal scroll on a phone", w <= 375 and q.inner_text("h1"), w)
