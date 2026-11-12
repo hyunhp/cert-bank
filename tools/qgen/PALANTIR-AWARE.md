@@ -24,8 +24,19 @@ environment). Exam facts still unknown: question count, time, domains, weights, 
 - S5 Security, governance and deployment: security and governance layer; branching (safe change management for
   human and AI builders); Apollo (software delivery layer).
 
+## Course: Deep Dive: Creating Your First Data Connection (45-60 min, copied 2026-11-12)
+- Needs Foundry access and permission to create data sources and data egress policies; Palantir-provided sources.
+- Setup: permissions, enabling an egress policy, a learning project and a course folder.
+- Basic concepts; connecting an external system with Foundry.
+- S3 source: open Data Connection, pick source type, create source, connection details, direct-connection egress
+  policy, output folder, configure a data sync, view imported data.
+- Relational database (Postgres): same steps plus configuring certificates.
+- REST API: source, egress policy, code import configuration, a Code Repositories resource, external transform
+  library, import the REST API source, code to access the data, commit and build the dataset.
+- Wrap-up: considerations and best practices.
+
 ## Still needed (from the owner's browser)
-- The names of all 7 courses in the Aware program and their lesson lists.
+- Only the names of all 7 courses in the Aware program (lesson details come from palantir.com/docs).
 - The Foundry Aware exam page: question count, time, pass mark, proctoring, any topic list.
 Facts in questions are checked on palantir.com/docs (reachable); course-only concepts (e.g. "AI labor",
 "decision-centric systems") have no docs page, so the explanation must say they are course vocabulary.
