@@ -1,8 +1,9 @@
 # Foundry Aware: source notes (PLTR, not registered yet)
 
 Source: course pages on learn.palantir.com, copied by the owner on 2026-11-12 (the site answers 403 to this
-environment). Exam facts still unknown: question count, time, domains, weights, pass mark. Do not register a
-`PLTR-*` Aware exam or write questions until the remaining items below are known.
+environment). Exam facts (lesson "Conclusions and Certification Exam", copied 2026-11-12): 60 multiple-choice questions,
+120 minutes, open note and open website, retakes allowed, free (certification.palantir.com, "Foundation" level).
+Not published: pass mark, domains, weights. Registered as `PLTR-AWARE` on 2026-11-12 (225 questions, b01-b09).
 
 ## Foundry & AIP Aware program ("course of courses")
 - About 8 hours; 7 courses (2 theoretical, 5 hands-on: basics up to a working real-world solution per module).
@@ -46,7 +47,7 @@ D3 = section 3.
   library, import the REST API source, code to access the data, commit and build the dataset.
 - Wrap-up: considerations and best practices.
 
-## Still needed (from the owner's browser)
-- The Foundry Aware exam page: question count, time, pass mark, proctoring, any topic list.
+## Sources
+
 Facts in questions are checked on palantir.com/docs (reachable); course-only concepts (e.g. "AI labor",
 "decision-centric systems") have no docs page, so the explanation must say they are course vocabulary.
