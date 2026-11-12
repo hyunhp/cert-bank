@@ -13,6 +13,17 @@ environment). Exam facts still unknown: question count, time, domains, weights, 
 - A later section highlights two developer building blocks: Data Connection (ingest from external systems) and
   Workshop (applications with quick release cycles).
 
+## Program structure (copied 2026-11-12; 15 lessons, 7 courses)
+1. Getting Acquainted with Foundry & AIP: Introduction to Foundry & AIP for Enterprise Organizations (theory);
+   Speedrun: Your first End-to-End Workflow.
+2. Building Blocks for Developers: Deep Dive: Creating your first Data Connection; Deep Dive: Building your first
+   Application.
+3. Applying Foundry & AIP in the Real World: Scoping Use Cases for Foundry & AIP (theory); Speedrun: Mining your
+   first Business Process; Speedrun: Your first Agentic AIP Workflow.
+4. Wrapping Up: Conclusions and Certification Exam (lesson that leads to the exam).
+Planned domains if registered (own split, equal weights, `weightsAssumed`): D1 = section 1, D2 = section 2,
+D3 = section 3.
+
 ## Course: Introduction to Foundry & AIP for Enterprise Organizations (22 lessons)
 - Overview; Why Foundry & AIP: Enterprise Autonomy Vision; Linear to Decision-Centric Systems; AI Labor;
   High-Level Architecture of the Platform.
@@ -36,7 +47,6 @@ environment). Exam facts still unknown: question count, time, domains, weights, 
 - Wrap-up: considerations and best practices.
 
 ## Still needed (from the owner's browser)
-- Only the names of all 7 courses in the Aware program (lesson details come from palantir.com/docs).
 - The Foundry Aware exam page: question count, time, pass mark, proctoring, any topic list.
 Facts in questions are checked on palantir.com/docs (reachable); course-only concepts (e.g. "AI labor",
 "decision-centric systems") have no docs page, so the explanation must say they are course vocabulary.
