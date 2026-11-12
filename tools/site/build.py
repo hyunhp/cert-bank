@@ -16,6 +16,8 @@ Output is deterministic (no build date), so `python3 tools/site/build.py --check
 Run `python3 tools/site/build.py` after any data change; tools/site_test.py checks it.
 """
 import html, json, os, re, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from guides import Guides, KINDS, TXT  # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 BASE = "https://hyunhp.github.io/cert-bank/"
@@ -55,38 +57,62 @@ def slug(code):
 
 
 # ---------------------------------------------------------------- page frame
-def page(title, desc, path, body, depth, crumbs=()):
+UI = {
+    "en": {"exams": "Exams", "bank": "Question bank", "study": "Study plans", "guides": "Guides", "about": "About",
+           "contact": "Contact", "privacy": "Privacy", "support": "Support", "source": "Source on GitHub",
+           "free": '<b>Every question here is free and will stay free.</b> No ads, no sign-up. If the site helped you, '
+                   '<a href="{up}support.html">a coffee keeps new questions coming</a> (optional).',
+           "fine": "Unofficial study material. Not affiliated with or endorsed by AWS, Palantir, Microsoft, Google, "
+                   "Databricks or HashiCorp. Exam names belong to their owners."},
+    "ko": {"exams": "시험", "bank": "문제은행", "study": "학습 계획", "guides": "가이드", "about": "소개",
+           "contact": "문의", "privacy": "개인정보", "support": "후원", "source": "GitHub 소스",
+           "free": '<b>모든 문제는 앞으로도 무료입니다.</b> 광고도 가입도 없습니다. 도움이 되셨다면 '
+                   '<a href="{up}support.html">커피 한 잔으로 응원</a>해 주세요(선택).',
+           "fine": "비공식 학습 자료입니다. AWS, Palantir, Microsoft, Google, Databricks, HashiCorp와 제휴하거나 "
+                   "보증받지 않았습니다. 시험 이름은 각 소유자의 것입니다."},
+}
+
+
+def page(title, desc, path, body, depth, crumbs=(), lang="en", alternates=None, og_type="website", image=None):
+    """alternates: {lang: path} of the same page in each language (hreflang)."""
     up = "../" * depth
     canon = BASE + path
-    nav = ' <span aria-hidden="true">›</span> '.join(f'<a href="{up}{h}">{esc(t)}</a>' for t, h in crumbs)
+    t = UI[lang]
+    nav = ' <span aria-hidden="true">›</span> '.join(f'<a href="{up}{h}">{esc(x)}</a>' for x, h in crumbs)
+    alt = ""
+    if alternates:
+        alt = "".join(f'<link rel="alternate" hreflang="{l}" href="{BASE}{p}">\n' for l, p in alternates.items())
+        alt += f'<link rel="alternate" hreflang="x-default" href="{BASE}{alternates.get("en", path)}">\n'
+    img = f'<meta property="og:image" content="{esc(image)}">\n' if image else ""
+    guides = f'<a href="{up}{"ko/" if lang == "ko" else ""}guides/">{t["guides"]}</a>'
     return f"""<!doctype html>
-<html lang="en">
+<html lang="{lang}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(title)}</title>
 <meta name="description" content="{esc(desc)}">
 <link rel="canonical" href="{canon}">
-<meta property="og:title" content="{esc(title)}">
+{alt}<meta property="og:title" content="{esc(title)}">
 <meta property="og:description" content="{esc(desc)}">
 <meta property="og:url" content="{canon}">
-<meta property="og:type" content="website">
-<link rel="apple-touch-icon" href="{up}assets/icon-180.png">
+<meta property="og:type" content="{og_type}">
+{img}<link rel="apple-touch-icon" href="{up}assets/icon-180.png">
 <meta name="theme-color" content="#1E5AA8">
 <link rel="stylesheet" href="{up}assets/site.css">
 </head>
 <body>
 <header class="site"><div class="in">
   <a class="brand" href="{up}exams/">{SITE}</a>
-  <nav><a href="{up}exams/">Exams</a><a href="{up}./">Question bank</a><a href="{up}study.html">Study plans</a><a href="{up}about.html">About</a></nav>
+  <nav><a href="{up}exams/">{t["exams"]}</a>{guides}<a href="{up}./">{t["bank"]}</a><a href="{up}study.html">{t["study"]}</a><a href="{up}about.html">{t["about"]}</a></nav>
 </div></header>
 <main class="in">
 {f'<p class="crumbs">{nav}</p>' if crumbs else ''}{body}
 </main>
 <footer class="site"><div class="in">
-  <p class="support"><b>Every question here is free and will stay free.</b> No ads, no sign-up. If the site helped you, <a href="{up}support.html">a coffee keeps new questions coming</a> (optional).</p>
-  <p><a href="{up}about.html">About</a> · <a href="{up}contact.html">Contact</a> · <a href="{up}privacy.html">Privacy</a> · <a href="{up}support.html">Support</a> · <a href="https://github.com/hyunhp/cert-bank">Source on GitHub</a></p>
-  <p class="fine">Unofficial study material. Not affiliated with or endorsed by AWS, Palantir, Microsoft, Google, Databricks or HashiCorp. Exam names belong to their owners.</p>
+  <p class="support">{t["free"].format(up=up)}</p>
+  <p><a href="{up}about.html">{t["about"]}</a> · <a href="{up}contact.html">{t["contact"]}</a> · <a href="{up}privacy.html">{t["privacy"]}</a> · <a href="{up}support.html">{t["support"]}</a> · <a href="https://github.com/hyunhp/cert-bank">{t["source"]}</a></p>
+  <p class="fine">{t["fine"]}</p>
 </div></footer>
 </body>
 </html>
@@ -154,7 +180,7 @@ def kinds_text(kinds):
 
 
 # ---------------------------------------------------------------- hubs
-def hub(code, name, vendor_name, spec, tasks, briefs, changes, successor, predecessor):
+def hub(code, name, vendor_name, spec, tasks, briefs, changes, successor, predecessor, guides=()):
     total, by_dom, multi = bank_facts(code)
     level = dict(LEVELS).get(spec.get("level"), "")
     title = f"{code} {vendor_name} {name}: domains, weights and study order | {SITE}"
@@ -180,6 +206,11 @@ def hub(code, name, vendor_name, spec, tasks, briefs, changes, successor, predec
              f'<a class="btn" href="{up}#mock={code}">Take a timed mock exam</a>'
              + (f'<a class="btn" href="{up}study.html#exam={code}">Day-by-day study plan</a>' if study_plan(code) else "")
              + "</p>")
+    if guides:
+        b.append("<h2>Guides for this exam</h2><ul class=\"guides\">" + "".join(
+            f'<li><a href="{up}guides/{g["slug"]}/">{esc(g["lang"]["en"]["title"])}</a>'
+            + (f' · <a href="{up}ko/guides/{g["slug"]}/" hreflang="ko" lang="ko">한국어</a>' if "ko" in g["lang"] else "")
+            + "</li>" for g in guides) + "</ul>")
 
     # format
     if spec.get("passingScore"):
@@ -368,6 +399,45 @@ def write(path, text, out, check):
                 f.write(text)
 
 
+def write_guides(gd, changed, check):
+    urls = []
+    for lang in ("en", "ko"):
+        pre = "ko/" if lang == "ko" else ""
+        mine = [g for g in gd.items if lang in g["lang"]]
+        if not mine:
+            continue
+        t = TXT[lang]
+        b = [f"<h1>{t['list_h1']}</h1>", f"<p class=\"lead\">{t['list_lead']}</p>"]
+        for prefix, label in KINDS[lang]:
+            group = [g for g in mine if g["slug"].startswith(prefix)]
+            if group:
+                b.append(f"<h2>{label}</h2><ul class=\"exams\">" + "".join(
+                    f'<li><a href="{g["slug"]}/">{esc(g["lang"][lang]["title"])}</a>'
+                    f'<span class="meta">{", ".join(g["exams"])}</span></li>' for g in group) + "</ul>")
+        alts = {"en": "guides/", "ko": "ko/guides/"}
+        depth = 2 if lang == "ko" else 1
+        write(pre + "guides/index.html", page(f"{t['list_h1']} | {SITE}", t["list_lead"][:155], pre + "guides/", "\n".join(b),
+                                             depth, lang=lang, alternates=alts), changed, check)
+        urls.append(pre + "guides/")
+        for g in mine:
+            path = gd.path(g["slug"], lang)
+            depth = path.count("/")
+            up = "../" * depth
+            other = "ko" if lang == "en" else "en"
+            g_l = g["lang"][lang]
+            body = gd.render_body(g, lang, up)
+            sw = (f'<p class="langswitch"><a href="{up}{gd.path(g["slug"], other)}" hreflang="{other}" lang="{other}">'
+                  f'{t["read_other"]}</a></p>') if other in g["lang"] else ""
+            art = f'{sw}<article class="paper"><h1>{esc(g_l["title"])}</h1>\n{body}\n</article>'
+            alts = {l: gd.path(g["slug"], l) for l in g["lang"]}
+            img = f"https://hyunhp.github.io/bdb-images/images/{g['slug']}.png"
+            crumbs = [(UI[lang]["guides"], pre + "guides/")]
+            write(path + "index.html", page(f"{g_l['title']} | {SITE}", gd.description(body, lang), path, art, depth, crumbs,
+                                            lang=lang, alternates=alts, og_type="article", image=img), changed, check)
+            urls.append(path)
+    return urls
+
+
 def main():
     check = "--check" in sys.argv
     exams, vendors = index_js()
@@ -383,13 +453,16 @@ def main():
     succ = {c: o for c, n, _ in exams for o, m, _ in exams if o != c and base(m) == n and m.endswith(" (new)")}
     pred = {v: k for k, v in succ.items()}
 
+    gd = Guides(ROOT, specs, lambda c: bank_facts(c)[0], lambda c: (study_plan(c) or [[0, 0, 0]])[-1][2],
+                lambda p: open(os.path.join(ROOT, p), encoding="utf-8").read())
     changed, urls = [], ["", "exams/", "about.html", "contact.html", "privacy.html"]
+    urls += write_guides(gd, changed, check)
     write("exams/index.html", page(f"Certification exams: domains, weights and study plans | {SITE}",
                                    f"Free original practice questions, mock exams and study plans for {len(exams)} cloud, data and AI certification exams.",
                                    "exams/", exam_list(exams, vendors, specs), 1), changed, check)
     for code, name, vid in exams:
         title, desc, body = hub(code, name, vendor_name[vid], specs[code], tasks.get(code, {}), briefs, changes,
-                                succ.get(code), pred.get(code))
+                                succ.get(code), pred.get(code), gd.for_exam(code))
         path = f"exams/{slug(code)}/"
         write(path + "index.html", page(title, desc, path, body, 2, [("Exams", "exams/")]), changed, check)
         urls.append(path)
