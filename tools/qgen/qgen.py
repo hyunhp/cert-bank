@@ -209,6 +209,13 @@ def stamp_exam_fields():
             q["examDomain"] = domain_of(q, code, dmap)
             q["examTask"] = exam_task(q, code, tmap)
         write_json(path, qs)
+    rebuild_site()
+
+
+def rebuild_site():
+    """Static exam pages (exams/<code>/) show counts from the data files: regenerate them (tools/site/build.py)."""
+    import subprocess
+    subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve().parents[1] / "site" / "build.py")], check=True)
 
 
 def target(code):
