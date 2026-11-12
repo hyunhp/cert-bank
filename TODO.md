@@ -293,7 +293,7 @@ Ideas the owner asked to keep for later. Each needs its vendor's guide and docs 
 network settings (only docs.aws.amazon.com, learn.microsoft.com and cloud.google.com/learn pages are reachable now).
 - Palantir Foundry Aware (re-checked 2026-11-11): learn/certification.palantir.com still 403; staff posts on
   community.palantir.com (now allowed) confirm only: free, based on the Foundry & AIP Aware course. No guide, domains,
-  question count or pass mark, so not started (facts in `tools/qgen/PALANTIR.md`). Start when a guide is reachable.
+  question count or pass mark, so not started (facts in `tools/qgen/PALANTIR.md`). Start when a guide is reachable. Owner copied the program text and the Introduction course outline (2026-11-12, `tools/qgen/PALANTIR-AWARE.md`); still needed: the 7 course names and the exam page facts.
 - Google Cloud: other Professional exams (Cloud Architect, ACE, GAIL, CDL done, see the Google Cloud section).
 - Out of scope (hands-on, not multiple choice): Kubernetes CKA/CKAD, Palantir Specialist.
 
