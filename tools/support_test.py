@@ -7,7 +7,7 @@
 - The header link, the bottom card and the mock exam results point to support.html.
     python3 tools/support_test.py
 """
-import pathlib, sys
+import datetime, os, pathlib, re, sys
 from playwright.sync_api import sync_playwright
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from testkit import serve, Checker
@@ -82,11 +82,14 @@ with sync_playwright() as p:
         pg.goto(BASE + url); pg.wait_for_selector(".toplinks .pill:not([hidden])")
         hs = pg.eval_on_selector_all(".toplinks .pill:not([hidden]), .langseg", "els => els.map(e => Math.round(e.getBoundingClientRect().height))")
         check(f"{url or 'index'}: header pills same height", len(hs) >= 2 and len(set(hs)) == 1, hs)
-    # Blog link in the footnote: hidden before 2026-11-21 (label pages are empty until then), external and marked afterwards.
+    # Blog link in the footnote: hidden before BLOG_FROM (or always while BLOG_FROM is ""), external and marked afterwards.
+    blog_from = re.search(r'const BLOG_FROM = "([^"]*)";', open(os.path.join(ROOT, "index.html")).read()).group(1)
     def clock(day):
         return ("(() => { const D = Date, t = new D('%sT12:00:00Z').getTime(); "
                 "Date = class extends D { constructor(...a) { if (a.length) super(...a); else super(t); } static now() { return t; } }; })()" % day)
-    for day, shown in (("2026-11-20", False), ("2026-11-21", True), ("2027-01-01", True)):
+    days = (("2026-11-20", False), ("2027-01-01", False)) if not blog_from else \
+        ((str(datetime.date.fromisoformat(blog_from) - datetime.timedelta(days=1)), False), (blog_from, True), ("2099-01-01", True))
+    for day, shown in days:
         c = b.new_context(); c.add_init_script(clock(day)); q = c.new_page()
         q.route("**/fonts.googleapis.com/**", lambda r: r.abort())
         q.goto(BASE); q.wait_for_selector(".footnote")
