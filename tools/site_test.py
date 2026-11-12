@@ -77,6 +77,26 @@ g_en = (ROOT / "guides" / "guide-saa-c03-study-plan" / "index.html").read_text(e
 g_ko = (ROOT / "ko" / "guides" / "guide-saa-c03-study-plan" / "index.html").read_text(encoding="utf-8")
 C.check("guide pairs carry hreflang en/ko and lang", all('hreflang="ko"' in x and 'hreflang="en"' in x for x in (g_en, g_ko)) and '<html lang="ko">' in g_ko)
 C.check("guide practice section points into the bank", '#exam=SAA-C03&amp;d=D1' in g_en and '#mock=SAA-C03' in g_ko)
+sys.path.insert(0, str(ROOT / "tools" / "site"))
+import json  # noqa: E402
+from guides import Guides  # noqa: E402
+specs = {k: v for k, v in json.loads((ROOT / "data" / "exam-specs.json").read_text(encoding="utf-8")).items() if isinstance(v, dict)}
+src = ROOT / "content" / "guides"
+en = sorted(f.stem for f in (src / "en").glob("*.html")); ko = sorted(f.stem for f in (src / "ko").glob("*.html"))
+order = [l.strip() for l in (src / "ORDER.txt").read_text(encoding="utf-8").splitlines() if l.strip() and not l.startswith("#")]
+C.check("every guide source has both languages and is in ORDER.txt", en == ko and set(order) == set(en), set(en) ^ set(ko) ^ set(order))
+allg = Guides(str(ROOT), specs, lambda c: 1, lambda c: 1,
+              lambda p: "\n".join(en) if p.endswith("PUBLISHED.txt") else (ROOT / p).read_text(encoding="utf-8"))
+errs = []
+for it in allg.items:
+    for lang in it["lang"]:
+        try:
+            allg.render_body(it, lang, "../../")
+        except Exception as e:
+            errs.append(f"{it['slug']} {lang}: {e}")
+    if not it["exams"]:
+        errs.append(f"{it['slug']}: no exam in Tags")
+C.check("every guide source (published or not) renders: exam tags, no blog link left", not errs, errs[:5])
 C.check("hub lists its guides", 'href="../../guides/guide-saa-c03-study-plan/"' in hub)
 C.check("index.html footer links the exam pages", 'href="exams/"' in (ROOT / "index.html").read_text(encoding="utf-8"))
 

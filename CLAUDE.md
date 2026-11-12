@@ -37,9 +37,10 @@ Static site pages (crawlable, no JS): `exams/` (list + one hub per exam), `about
 per exam|domain) and EXAMS in index.html. Never hand-edit the output; qgen `stamp` (ingest/share) and `changes.py`
 rerun it, and `tools/site_test.py` fails when a page is stale. Indexable = sitemap pages only; tool screens (study.html)
 carry `noindex`. Hosting stays GitHub Pages, no ads (owner 2026-11-13).
-Guides: sources in `content/guides/{en,ko}/<slug>.html` (copied from blogger-publisher `guides/` @ f3881bc; cert-bank owns
-and edits its copies), published in `content/guides/PUBLISHED.txt` order (~3 per PR, each fact-checked; next slugs from
-publisher `guides/ORDER.txt`). `tools/site/guides.py` drops comment lines, maps old blog label links, and replaces the
+Guides: `content/guides/{en,ko}/<slug>.html` is the ONLY source of all 54 guides (owner 2026-11-13; blogger-publisher's
+copy is frozen; EN from f3881bc, KO from 5406067), published in `content/guides/PUBLISHED.txt` order (~3 per PR, each
+fact-checked; next slugs from `content/guides/ORDER.txt`; rules `content/guides/STYLE.md`; diagrams
+`content/guides/diagrams/*.json` + `tools/site/make_diagrams.py`, EN only). `tools/site/guides.py` drops comment lines, maps old blog label links, and replaces the
 blog's practice section with bank links; pages `guides/<slug>/` + `ko/guides/<slug>/` (hreflang pair). Edit wording that
 says "this blog" in the copies.
 Donations: `support.html` holds the payment links (`METHODS`; empty url = "coming soon"); the only other copy is the
