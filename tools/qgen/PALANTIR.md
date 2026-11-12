@@ -30,6 +30,7 @@ Palantir staff posts on community.palantir.com (host allowed 2026-11-11; Discour
   an enterprise IT landscape). In the 2026 framework: Foundry Aware < old Professional < new Associate < Specialist.
 - NOT confirmed by staff (a user asked, no answer): unproctored, 120 min, unlimited retakes. No question count,
   domains or pass mark published. So no `PLTR-*` Aware exam is registered: there is no guide to map domains to.
+- Course outline copied by the owner (2026-11-12): `tools/qgen/PALANTIR-AWARE.md`.
 
 ## Codes and task ids
 - `PLTR-DE` (Data Engineer – Associate), `PLTR-AIE` (AI Engineer – Associate), `PLTR-APD` (Application Developer – Associate).
