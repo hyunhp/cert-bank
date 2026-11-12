@@ -29,11 +29,11 @@ class Links(html.parser.HTMLParser):
 
 sm = (ROOT / "sitemap.xml").read_text(encoding="utf-8")
 urls = re.findall(r"<loc>([^<]+)</loc>", sm)
-C.check("sitemap has the exam list, every hub, about and privacy", len(urls) >= 47 and len(urls) == len(set(urls)), len(urls))
+C.check("sitemap has home, exam list, every hub, about, contact and privacy", len(urls) >= 49 and len(urls) == len(set(urls)), len(urls))
 pages = []
 for u in urls:
     rel = u[len(BASE_URL):] if u.startswith(BASE_URL) else None
-    f = ROOT / (rel + "index.html" if rel.endswith("/") else rel) if rel is not None else None
+    f = ROOT / (rel + "index.html" if rel == "" or rel.endswith("/") else rel) if rel is not None else None
     if not f or not f.exists():
         C.check(f"sitemap url has a file: {u}", False); continue
     pages.append((rel, f))
@@ -43,7 +43,7 @@ bad_links, no_canon, scripted, noindexed, desc = [], [], [], [], []
 for rel, f in pages:
     p = Links(); p.feed(f.read_text(encoding="utf-8"))
     if p.canon != BASE_URL + rel: no_canon.append(rel)
-    if p.scripts: scripted.append(rel)
+    if p.scripts and rel: scripted.append(rel)   # the home page is the question bank (JS), its intro is static
     if "noindex" in p.meta.get("robots", ""): noindexed.append(rel)
     if not (50 <= len(p.meta.get("description", "")) <= 300) or p.h1 != 1: desc.append(rel)
     for h in p.links:
@@ -54,12 +54,15 @@ for rel, f in pages:
         if target.is_dir() or str(target).endswith("/"): target = target / "index.html"
         if not target.exists(): bad_links.append((rel, h))
 C.check("each page's canonical is its own sitemap url", not no_canon, no_canon[:5])
-C.check("pages need no JavaScript (no <script>)", not scripted, scripted[:5])
+C.check("generated pages need no JavaScript (no <script>)", not scripted, scripted[:5])
 C.check("indexable pages carry no noindex", not noindexed, noindexed)
 C.check("each page has one h1 and a description of 50-300 chars", not desc, desc[:5])
 C.check("every local link and stylesheet resolves", not bad_links, bad_links[:8])
 C.check("study screens are noindex", 'name="robots" content="noindex"' in (ROOT / "study.html").read_text(encoding="utf-8"))
-C.check("tool pages are not in the sitemap", not any(u.endswith(("study.html", "support.html")) or u == BASE_URL for u in urls))
+C.check("tool pages are not in the sitemap", not any(u.endswith(("study.html", "support.html")) for u in urls))
+C.check("home page is in the sitemap", BASE_URL in urls)
+con = (ROOT / "contact.html").read_text(encoding="utf-8")
+C.check("contact page gives the e-mail address", 'href="mailto:koreanxpodcast@gmail.com"' in con)
 
 hub = (ROOT / "exams" / "saa-c03" / "index.html").read_text(encoding="utf-8")
 C.check("hub has weights, briefs, study order and tool links",
@@ -74,10 +77,13 @@ with sync_playwright() as pw:
     for scheme in ("light", "dark"):
         c = b.new_context(java_script_enabled=False, viewport={"width": 375, "height": 800}, color_scheme=scheme)
         q = c.new_page()
-        for path in ("exams/", "exams/saa-c03/", "exams/pltr-aware/", "about.html", "privacy.html"):
+        for path in ("exams/", "exams/saa-c03/", "exams/pltr-aware/", "about.html", "contact.html", "privacy.html"):
             q.goto(BASE + path)
             w = q.evaluate("document.documentElement.scrollWidth")
             C.check(f"[{scheme}] {path}: readable without JS, no horizontal scroll on a phone", w <= 375 and q.inner_text("h1"), w)
+        q.goto(BASE)
+        C.check(f"[{scheme}] home: static intro links the exam pages without JS", q.locator('header.top p.intro a[href="exams/#aws"]').is_visible())
+        q.goto(BASE + "privacy.html")
         bg = q.evaluate("getComputedStyle(document.body).backgroundColor")
         C.check(f"[{scheme}] page background follows the color scheme", (bg == "rgb(16, 21, 28)") == (scheme == "dark"), bg)
         c.close()

@@ -85,7 +85,7 @@ def page(title, desc, path, body, depth, crumbs=()):
 </main>
 <footer class="site"><div class="in">
   <p class="support"><b>Every question here is free and will stay free.</b> No ads, no sign-up. If the site helped you, <a href="{up}support.html">a coffee keeps new questions coming</a> (optional).</p>
-  <p><a href="{up}about.html">About</a> · <a href="{up}privacy.html">Privacy</a> · <a href="{up}support.html">Support</a> · <a href="https://github.com/hyunhp/cert-bank">Source on GitHub</a></p>
+  <p><a href="{up}about.html">About</a> · <a href="{up}contact.html">Contact</a> · <a href="{up}privacy.html">Privacy</a> · <a href="{up}support.html">Support</a> · <a href="https://github.com/hyunhp/cert-bank">Source on GitHub</a></p>
   <p class="fine">Unofficial study material. Not affiliated with or endorsed by AWS, Palantir, Microsoft, Google, Databricks or HashiCorp. Exam names belong to their owners.</p>
 </div></footer>
 </body>
@@ -260,7 +260,7 @@ def exam_list(exams, vendors, specs):
         mine = [e for e in exams if e[2] == vid]
         if not mine:
             continue
-        b.append(f"<h2>{esc(vname)}</h2><ul class=\"exams\">")
+        b.append(f"<h2 id=\"{vid}\">{esc(vname)}</h2><ul class=\"exams\">")
         for code, name, _ in mine:
             s = specs[code]
             lv = dict(LEVELS).get(s.get("level"), "")
@@ -302,8 +302,7 @@ answer is too often the longest option (a give-away in many question banks).</li
 <li>When a service or an exam changes, questions are corrected in place and the change is logged; each exam page lists
 its recent changes.</li>
 </ol>
-<p>Mistakes still happen. If you find a wrong answer, please open a
-<a href="https://github.com/hyunhp/cert-bank/issues">GitHub issue</a> with the question id.</p>
+<p>Mistakes still happen. If you find a wrong answer, please <a href="contact.html">tell us</a> with the question id.</p>
 
 <h2>Independence</h2>
 <p>cert-bank is not affiliated with, endorsed by or sponsored by AWS, Palantir, Microsoft, Google, Databricks or HashiCorp.
@@ -338,7 +337,23 @@ from Google's servers.</li>
 their privacy policies. cert-bank never sees card details.</p>
 
 <h2>Changes</h2>
-<p>If this policy changes, this page changes with it. Last updated November 13, 2026.</p>
+<p>If this policy changes, this page changes with it. Questions about it: <a href="mailto:koreanxpodcast@gmail.com">koreanxpodcast@gmail.com</a>.
+Last updated November 13, 2026.</p>
+"""
+
+
+CONTACT = """<h1>Contact</h1>
+<p class="lead">Questions, corrections and suggestions are welcome by e-mail:
+<a href="mailto:koreanxpodcast@gmail.com">koreanxpodcast@gmail.com</a>.</p>
+
+<h2>Reporting a wrong answer</h2>
+<p>Please include the exam code and the question id (for example <code>SAA-C03 Q000123</code>, shown on every question
+card), what you think is wrong, and a link to the vendor documentation if you have one. Corrections are made in place,
+and the exam's page lists them under its recent changes.</p>
+<p>If you prefer, you can also open a <a href="https://github.com/hyunhp/cert-bank/issues">GitHub issue</a>.</p>
+
+<h2>Languages</h2>
+<p>English or Korean (한국어) are both fine.</p>
 """
 
 
@@ -368,7 +383,7 @@ def main():
     succ = {c: o for c, n, _ in exams for o, m, _ in exams if o != c and base(m) == n and m.endswith(" (new)")}
     pred = {v: k for k, v in succ.items()}
 
-    changed, urls = [], ["exams/", "about.html", "privacy.html"]
+    changed, urls = [], ["", "exams/", "about.html", "contact.html", "privacy.html"]
     write("exams/index.html", page(f"Certification exams: domains, weights and study plans | {SITE}",
                                    f"Free original practice questions, mock exams and study plans for {len(exams)} cloud, data and AI certification exams.",
                                    "exams/", exam_list(exams, vendors, specs), 1), changed, check)
@@ -382,6 +397,8 @@ def main():
                              "practice questions are written and reviewed, and who runs it.", "about.html", ABOUT, 0), changed, check)
     write("privacy.html", page(f"Privacy | {SITE}", "cert-bank has no accounts, ads, analytics or cookies; study progress "
                                "stays in your browser.", "privacy.html", PRIVACY, 0), changed, check)
+    write("contact.html", page(f"Contact | {SITE}", "How to reach cert-bank: questions, corrections to practice "
+                               "questions and suggestions, by e-mail.", "contact.html", CONTACT, 0), changed, check)
     sm = ('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
           + "".join(f"  <url><loc>{BASE}{u}</loc></url>\n" for u in urls) + "</urlset>\n")
     write("sitemap.xml", sm, changed, check)
