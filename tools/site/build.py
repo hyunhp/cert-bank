@@ -52,6 +52,12 @@ def index_js():
     return exams, vendors
 
 
+def split_hero(body):
+    """A static page's h1 and its lead paragraph go into the hero band: returns (rest, hero) in page() order."""
+    m = re.match(r'\s*(<h1>.*?</h1>\s*(?:<p class="lead">.*?</p>)?)', body, re.S)
+    return body[m.end():], m.group(1)
+
+
 def slug(code):
     return code.lower()
 
@@ -73,8 +79,10 @@ UI = {
 }
 
 
-def page(title, desc, path, body, depth, crumbs=(), lang="en", alternates=None, og_type="website", image=None):
-    """alternates: {lang: path} of the same page in each language (hreflang)."""
+def page(title, desc, path, body, depth, crumbs=(), lang="en", alternates=None, og_type="website", image=None,
+         hero="", wide=False):
+    """alternates: {lang: path} of the same page in each language (hreflang).
+    hero: HTML for the gradient band under the header (holds the page's h1); wide: list pages use the full width."""
     up = "../" * depth
     canon = BASE + path
     t = UI[lang]
@@ -84,7 +92,11 @@ def page(title, desc, path, body, depth, crumbs=(), lang="en", alternates=None, 
         alt = "".join(f'<link rel="alternate" hreflang="{l}" href="{BASE}{p}">\n' for l, p in alternates.items())
         alt += f'<link rel="alternate" hreflang="x-default" href="{BASE}{alternates.get("en", path)}">\n'
     img = f'<meta property="og:image" content="{esc(image)}">\n' if image else ""
-    guides = f'<a href="{up}{"ko/" if lang == "ko" else ""}guides/">{t["guides"]}</a>'
+    sect = path.split("/")[1] if path.startswith("ko/") else path.split("/")[0]
+    cur = lambda k: ' class="on" aria-current="page"' if sect == k else ""
+    guides = f'<a href="{up}{"ko/" if lang == "ko" else ""}guides/"{cur("guides")}>{t["guides"]}</a>'
+    crumb = f'<p class="crumbs">{nav}</p>' if crumbs else ""
+    top = f'<section class="hero{" slim" if crumbs else ""}"><div class="in">{crumb}{hero}</div></section>\n' if hero else ""
     return f"""<!doctype html>
 <html lang="{lang}">
 <head>
@@ -98,20 +110,21 @@ def page(title, desc, path, body, depth, crumbs=(), lang="en", alternates=None, 
 <meta property="og:url" content="{canon}">
 <meta property="og:type" content="{og_type}">
 {img}<link rel="apple-touch-icon" href="{up}assets/icon-180.png">
-<meta name="theme-color" content="#1E5AA8">
+<meta name="theme-color" content="#3a3f78">
 <link rel="stylesheet" href="{up}assets/site.css">
 </head>
 <body>
 <header class="site"><div class="in">
-  <a class="brand" href="{up}exams/">{SITE}</a>
-  <nav><a href="{up}exams/">{t["exams"]}</a>{guides}<a href="{up}./">{t["bank"]}</a><a href="{up}study.html">{t["study"]}</a><a href="{up}about.html">{t["about"]}</a></nav>
+  <a class="brand" href="{up}exams/"><span class="mark" aria-hidden="true">CB</span>{SITE}</a>
+  <nav><a href="{up}exams/"{cur("exams")}>{t["exams"]}</a>{guides}<a href="{up}./">{t["bank"]}</a><a href="{up}study.html">{t["study"]}</a><a href="{up}about.html"{cur("about.html")}>{t["about"]}</a></nav>
 </div></header>
-<main class="in">
-{f'<p class="crumbs">{nav}</p>' if crumbs else ''}{body}
+{top}<main class="in{" wide" if wide else ""}">
+{"" if hero else crumb}{body}
 </main>
 <footer class="site"><div class="in">
+  <p class="brand"><span class="mark" aria-hidden="true">CB</span>{SITE}</p>
   <p class="support">{t["free"].format(up=up)}</p>
-  <p><a href="{up}about.html">{t["about"]}</a> · <a href="{up}contact.html">{t["contact"]}</a> · <a href="{up}privacy.html">{t["privacy"]}</a> · <a href="{up}support.html">{t["support"]}</a> · <a href="https://github.com/hyunhp/cert-bank">{t["source"]}</a></p>
+  <p class="links"><a href="{up}about.html">{t["about"]}</a><a href="{up}contact.html">{t["contact"]}</a><a href="{up}privacy.html">{t["privacy"]}</a><a href="{up}support.html">{t["support"]}</a><a href="https://github.com/hyunhp/cert-bank">{t["source"]}</a></p>
   <p class="fine">{t["fine"]}</p>
 </div></footer>
 </body>
@@ -187,7 +200,11 @@ def hub(code, name, vendor_name, spec, tasks, briefs, changes, successor, predec
     desc = (f"{code} ({vendor_name} {name}) at a glance: {spec['questions']} questions in {spec['minutes']} minutes, "
             f"{len(spec['domains'])} domains, what each domain asks, a study order, and {total:,} free original practice questions.")
     up = "../../"
-    b = [f'<h1><span class="code">{code}</span> {esc(vendor_name)} {esc(name)}</h1>']
+    eyebrow = f'<p class="eyebrow">{esc(vendor_name)}{" · " + level if level else ""}</p>'
+    hero = [eyebrow, f'<h1><span class="code">{code}</span> {esc(vendor_name)} {esc(name)}</h1>',
+            f'<p class="lead">{spec["questions"]} questions · {spec["minutes"]} minutes · {len(spec["domains"])} domains · '
+            f'{total:,} free practice questions here</p>']
+    b = []
     last = spec.get("lastDay")
     if spec.get("update"):   # the bank's own dated note on a version change says the most
         other = successor or predecessor
@@ -201,11 +218,11 @@ def hub(code, name, vendor_name, spec, tasks, briefs, changes, successor, predec
         b.append(f'<p class="notice">{code} is the new version of <a href="../{slug(predecessor)}/">{predecessor}</a>.</p>')
 
     # buttons into the tools
-    b.append('<p class="actions">'
-             f'<a class="btn primary" href="{up}#exam={code}">Practice {total:,} questions</a>'
-             f'<a class="btn" href="{up}#mock={code}">Take a timed mock exam</a>'
-             + (f'<a class="btn" href="{up}study.html#exam={code}">Day-by-day study plan</a>' if study_plan(code) else "")
-             + "</p>")
+    hero.append('<p class="actions">'
+                f'<a class="btn light" href="{up}#exam={code}">Practice {total:,} questions</a>'
+                f'<a class="btn ghost" href="{up}#mock={code}">Take a timed mock exam</a>'
+                + (f'<a class="btn ghost" href="{up}study.html#exam={code}">Day-by-day study plan</a>' if study_plan(code) else "")
+                + "</p>")
     if guides:
         b.append("<h2>Guides for this exam</h2><ul class=\"guides\">" + "".join(
             f'<li><a href="{up}guides/{g["slug"]}/">{esc(g["lang"]["en"]["title"])}</a>'
@@ -280,26 +297,34 @@ def hub(code, name, vendor_name, spec, tasks, briefs, changes, successor, predec
     b.append("<h2>About these questions</h2><p>Every question is original, written from the public exam guide and checked "
              "against the vendor's own documentation. None comes from a real exam. Each one has an explanation of why the "
              f'answer is right and why the other options are wrong. <a href="{up}about.html#how">How the questions are written</a>.</p>')
-    return title, desc, "\n".join(b)
+    return title, desc, "\n".join(b), "\n".join(hero)
 
 
 def exam_list(exams, vendors, specs):
-    b = ["<h1>Certification exams</h1>",
-         f"<p class=\"lead\">Free, original practice questions, mock exams and day-by-day study plans for {len(exams)} "
-         "cloud, data and AI certification exams. Pick an exam for its domains, weights, a study order and what the bank holds.</p>"]
-    for vid, vname in vendors:
+    """(body, hero): the hero holds the h1, the counts and a jump link per vendor; the body one card grid per vendor."""
+    total = sum(bank_facts(c)[0] for c, _, _ in exams)
+    live = [v for v in vendors if any(e[2] == v[0] for e in exams)]
+    hero = ['<p class="eyebrow">Original practice questions, not exam dumps</p>',
+            "<h1>Certification exams</h1>",
+            f"<p class=\"lead\">Free, original practice questions, mock exams and day-by-day study plans for {len(exams)} "
+            "cloud, data and AI certification exams. Pick an exam for its domains, weights, a study order and what the bank holds.</p>",
+            '<ul class="stats">' + f"<li><b>{len(exams)}</b>exams</li><li><b>{total:,}</b>practice questions</li>"
+            f"<li><b>{len(live)}</b>vendors</li></ul>",
+            '<p class="jump">' + "".join(f'<a href="#{vid}">{esc(vn)}</a>' for vid, vn in live) + "</p>"]
+    b = []
+    for vid, vname in live:
         mine = [e for e in exams if e[2] == vid]
-        if not mine:
-            continue
-        b.append(f"<h2 id=\"{vid}\">{esc(vname)}</h2><ul class=\"exams\">")
+        b.append(f'<h2 class="group" id="{vid}">{esc(vname)} <span>{len(mine)}</span></h2><ul class="cards">')
         for code, name, _ in mine:
             s = specs[code]
             lv = dict(LEVELS).get(s.get("level"), "")
-            end = f' · last day {nice_date(s["lastDay"])}' if s.get("lastDay") else ""
-            b.append(f'<li><a href="{slug(code)}/"><span class="code">{code}</span> {esc(name)}</a>'
-                     f'<span class="meta">{lv} · {s["questions"]} questions, {s["minutes"]} min{end}</span></li>')
+            end = f'<span class="chip end">Last day {nice_date(s["lastDay"])}</span>' if s.get("lastDay") else ""
+            b.append(f'<li><a href="{slug(code)}/"><span class="chips"><span class="chip">{esc(vname)}</span>'
+                     f'<span class="chip lv">{lv}</span>{end}</span>'
+                     f'<span class="code">{code}</span><span class="name">{esc(name)}</span>'
+                     f'<span class="meta">{s["questions"]} questions · {s["minutes"]} min<span class="go">Open →</span></span></a></li>')
         b.append("</ul>")
-    return "\n".join(b)
+    return "\n".join(b), "\n".join(hero)
 
 
 # ---------------------------------------------------------------- site pages
@@ -407,17 +432,20 @@ def write_guides(gd, changed, check):
         if not mine:
             continue
         t = TXT[lang]
-        b = [f"<h1>{t['list_h1']}</h1>", f"<p class=\"lead\">{t['list_lead']}</p>"]
+        hero = f"<h1>{t['list_h1']}</h1><p class=\"lead\">{t['list_lead']}</p>"
+        b = []
         for prefix, label in KINDS[lang]:
             group = [g for g in mine if g["slug"].startswith(prefix)]
             if group:
-                b.append(f"<h2>{label}</h2><ul class=\"exams\">" + "".join(
-                    f'<li><a href="{g["slug"]}/">{esc(g["lang"][lang]["title"])}</a>'
-                    f'<span class="meta">{", ".join(g["exams"])}</span></li>' for g in group) + "</ul>")
+                b.append(f'<h2 class="group">{label} <span>{len(group)}</span></h2><ul class="cards guides">' + "".join(
+                    f'<li><a href="{g["slug"]}/"><span class="chips">'
+                    + "".join(f'<span class="chip">{c}</span>' for c in g["exams"])
+                    + f'</span><span class="name">{esc(g["lang"][lang]["title"])}</span>'
+                    f'<span class="meta">{t["read"]}<span class="go">→</span></span></a></li>' for g in group) + "</ul>")
         alts = {"en": "guides/", "ko": "ko/guides/"}
         depth = 2 if lang == "ko" else 1
         write(pre + "guides/index.html", page(f"{t['list_h1']} | {SITE}", t["list_lead"][:155], pre + "guides/", "\n".join(b),
-                                             depth, lang=lang, alternates=alts), changed, check)
+                                             depth, lang=lang, alternates=alts, hero=hero, wide=True), changed, check)
         urls.append(pre + "guides/")
         for g in mine:
             path = gd.path(g["slug"], lang)
@@ -457,21 +485,22 @@ def main():
                 lambda p: open(os.path.join(ROOT, p), encoding="utf-8").read())
     changed, urls = [], ["", "exams/", "about.html", "contact.html", "privacy.html"]
     urls += write_guides(gd, changed, check)
+    ex_body, ex_hero = exam_list(exams, vendors, specs)
     write("exams/index.html", page(f"Certification exams: domains, weights and study plans | {SITE}",
                                    f"Free original practice questions, mock exams and study plans for {len(exams)} cloud, data and AI certification exams.",
-                                   "exams/", exam_list(exams, vendors, specs), 1), changed, check)
+                                   "exams/", ex_body, 1, hero=ex_hero, wide=True), changed, check)
     for code, name, vid in exams:
-        title, desc, body = hub(code, name, vendor_name[vid], specs[code], tasks.get(code, {}), briefs, changes,
+        title, desc, body, hero = hub(code, name, vendor_name[vid], specs[code], tasks.get(code, {}), briefs, changes,
                                 succ.get(code), pred.get(code), gd.for_exam(code))
         path = f"exams/{slug(code)}/"
-        write(path + "index.html", page(title, desc, path, body, 2, [("Exams", "exams/")]), changed, check)
+        write(path + "index.html", page(title, desc, path, body, 2, [("Exams", "exams/")], hero=hero), changed, check)
         urls.append(path)
     write("about.html", page(f"About {SITE}: how the practice questions are written", "What cert-bank is, how its original "
-                             "practice questions are written and reviewed, and who runs it.", "about.html", ABOUT, 0), changed, check)
+                             "practice questions are written and reviewed, and who runs it.", "about.html", split_hero(ABOUT)[0], 0, hero=split_hero(ABOUT)[1]), changed, check)
     write("privacy.html", page(f"Privacy | {SITE}", "cert-bank has no accounts, ads, analytics or cookies; study progress "
-                               "stays in your browser.", "privacy.html", PRIVACY, 0), changed, check)
+                               "stays in your browser.", "privacy.html", split_hero(PRIVACY)[0], 0, hero=split_hero(PRIVACY)[1]), changed, check)
     write("contact.html", page(f"Contact | {SITE}", "How to reach cert-bank: questions, corrections to practice "
-                               "questions and suggestions, by e-mail.", "contact.html", CONTACT, 0), changed, check)
+                               "questions and suggestions, by e-mail.", "contact.html", split_hero(CONTACT)[0], 0, hero=split_hero(CONTACT)[1]), changed, check)
     sm = ('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
           + "".join(f"  <url><loc>{BASE}{u}</loc></url>\n" for u in urls) + "</urlset>\n")
     write("sitemap.xml", sm, changed, check)
