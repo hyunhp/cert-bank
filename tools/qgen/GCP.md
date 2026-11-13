@@ -70,6 +70,7 @@ Writing rules (in addition to the shared ones below):
   Database Migration Service, BigQuery Data Transfer Service, Transfer Appliance, Cloud DLP / Sensitive Data Protection,
   BigQuery ML). Check each name on docs.cloud.google.com before keying: products get renamed (the ACE and PCA banks hit several).
 - Preview, beta and deprecated features stay out of keys; say so in G if a distractor depends on one.
+- Renames seen on docs (2026-11-13, guide fact-check): Conversational Insights -> "Customer Experience Insights"; Customer Engagement Suite -> "Gemini Enterprise for Customer Experience"; Conversational Agents page title "CX Agent Studio"; Vertex AI Search -> "Agent Search"; Vertex AI -> "Gemini Enterprise Agent Platform" ("an evolution of Vertex AI"). Exam guides keep the old names.
 - Renames seen on docs (2026-11-06): Dataplex Universal Catalog is now "Knowledge Catalog" (2026-04-10; API, CLI, IAM names unchanged);
   Analytics Hub is "BigQuery sharing"; Dataproc is "Managed Service for Apache Spark"; Cloud Composer is "Managed Service for Apache
   Airflow"; Vertex AI is "Agent Platform". Keys and options use the exam guide's names; the new name appears only in G.
