@@ -150,7 +150,7 @@ have 45 minutes to complete this assessment").
   current names (Microsoft Defender XDR, not Microsoft 365 Defender; Microsoft Purview, not Microsoft 365 compliance).
 - DP-900 is a data fundamentals exam: describe data concepts, relational and non-relational services, analytics
   (Microsoft Fabric, Azure Databricks) and Power BI. Facts from learn.microsoft.com (azure/, fabric/, power-bi/,
-  training/modules for DP-900). Azure Database for MariaDB is retired; Azure Synapse Analytics is still documented but
+  training/modules for DP-900). Azure Database for MariaDB is on the retirement path (Learn: migrate to Azure Database for MySQL); Azure Synapse Analytics is still documented but
   Microsoft points new analytics to Fabric — check status before keying Synapse.
 - AZ-900 is a fundamentals exam: stems test choosing and describing services, not CLI flags or portal clicks.
 - AZ-104 is an administrator exam: stems are hands-on scenarios (configure, troubleshoot, interpret). Concrete settings,
