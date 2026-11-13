@@ -130,7 +130,7 @@ https://www.databricks.com/sites/default/files/2026-10/databricks-certified-gen-
 | Pass mark | Not published. `passMarkUnpublished: true`; the mock aims at 80% |
 | Sections | D1 Design Applications 14%, D2 Data Preparation 14%, D3 Application Development 30%, D4 Assembling and Deploying Applications 22%, D5 Governance 8%, D6 Evaluation and Monitoring 12% |
 | Tasks | 56 (`data/exam-tasks.json`): 1.1-1.6, 2.1-2.8, 3.1-3.13, 4.1-4.15, 5.1-5.4, 6.1-6.10 (one per outline bullet) |
-| Format | The guide says multiple-selection exists: about 15% of the bank is "(Select TWO)" (about 34 of 225); the rest single answer |
+| Format | The guide says multiple-selection exists: about 15% of the bank is "(Select TWO)" (33 of 225); the rest single answer |
 
 Writing rules (in addition to the DBX-DEA and DBX-MLA ones above):
 - GenAI-engineer view: pick the chunking, retrieval, prompt, guardrail, chain or deployment option for a scenario and say why the others fail. Short LangChain/MLflow/SQL (`ai_query`) snippets <=8 lines. Not UI paths.
@@ -152,7 +152,7 @@ https://www.databricks.com/sites/default/files/2026-10/Databricks-Certified-Cont
 | Pass mark | Not published. `passMarkUnpublished: true`; the mock aims at 80% |
 | Sections | D1 Foundations of Context Engineering 16%, D2 System Prompt and Instruction Design 9%, D3 Knowledge Retrieval and Genie Configuration 20%, D4 Memory Architecture with Lakebase and MLflow 18%, D5 Tool Design, MCP, and Agent Context 13%, D6 Context Compression and Compaction 11%, D7 Multi-Agent and Long-Horizon Task Design 13% |
 | Tasks | 45 (`data/exam-tasks.json`): 1.1-1.7, 2.1-2.4, 3.1-3.9, 4.1-4.8, 5.1-5.6, 6.1-6.5, 7.1-7.6 (one per outline bullet) |
-| Format | The guide says multiple-selection exists: about 15% of the bank is "(Select TWO)" (about 34 of 225); the rest single answer |
+| Format | The guide says multiple-selection exists: about 16% of the bank is "(Select TWO)" (37 of 225); the rest single answer |
 
 Writing rules (in addition to the DBX-DEA and DBX-MLA ones above):
 - Every question is a short scenario: an agent, a symptom (trace, eval log, MLflow result, config) and the decision (technique, configuration, metadata fix, strategy). Stems of 3-6 lines, four long plausible options with a real trade-off (see the guide's samples: the wrong options are sensible fixes that cost recall, tokens or maintenance). No code beyond a 3-line config or trace excerpt.
