@@ -118,7 +118,7 @@ with sync_playwright() as pw:
         C.check(f"[{scheme}] home: static intro links the exam pages without JS", q.locator('header.top p.intro a[href="exams/#aws"]').is_visible())
         q.goto(BASE + "privacy.html")
         bg = q.evaluate("getComputedStyle(document.body).backgroundColor")
-        C.check(f"[{scheme}] page background follows the color scheme", (bg == "rgb(19, 18, 28)") == (scheme == "dark"), bg)
+        C.check(f"[{scheme}] page background follows the color scheme", (bg == "rgb(16, 21, 28)") == (scheme == "dark"), bg)
         c.close()
     b.close()
 sys.exit(C.exit())

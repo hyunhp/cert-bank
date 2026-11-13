@@ -14,14 +14,14 @@ TXT = {
     "en": {"read_other": "이 글을 한국어로 읽기", "practise_p": "Practise in the question bank: every question explains each "
            "option, right and wrong. Start with the domain you just studied, then take a timed mock exam.",
            "page": "{code} exam page", "all": "All {n:,} {code} questions", "mock": "Timed mock exam",
-           "plan": "{days}-day study plan", "by_dom": "By domain", "list_h1": "Guides", "read": "Read the guide",
+           "plan": "{days}-day study plan", "by_dom": "By domain", "list_h1": "Guides",
            "list_lead": "Hand-written guides to certification exams: what each exam really asks, a study order, and the "
                         "traps that cost the most points. Every guide links to the practice questions for its exam.",
            "guides_h2": "Guides for this exam"},
     "ko": {"read_other": "Read this guide in English", "practise_p": "문제은행에서 연습하십시오. 모든 문제에 정답과 오답 보기마다 "
            "해설이 있습니다. 방금 공부한 도메인부터 시작하고, 그다음 시간 제한이 있는 모의고사를 보십시오.",
            "page": "{code} 시험 안내", "all": "{code} 문제 전체 {n:,}개", "mock": "시간 제한 모의고사",
-           "plan": "{days}일 학습 계획", "by_dom": "도메인별", "list_h1": "가이드", "read": "가이드 읽기",
+           "plan": "{days}일 학습 계획", "by_dom": "도메인별", "list_h1": "가이드",
            "list_lead": "자격증 시험을 위해 직접 쓴 가이드입니다. 시험이 실제로 묻는 것, 학습 순서, 점수를 가장 많이 잃는 함정을 "
                         "정리했고, 가이드마다 해당 시험의 연습 문제로 이어집니다.",
            "guides_h2": "Guides for this exam"},
