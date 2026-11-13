@@ -28,7 +28,6 @@ TXT = {
 }
 VENDOR_LABEL = {"AWS": "aws", "Palantir": "palantir", "Azure": "azure", "Microsoft Azure": "azure",
                 "Google Cloud": "gcp", "Databricks": "databricks", "HashiCorp": "hashicorp"}
-NOTE_STYLE = 'style="font-size:14px;color:#4b5563"'
 
 
 def norm(name):
@@ -80,9 +79,10 @@ class Guides:
             return f"{up}exams/#{VENDOR_LABEL[label]}"
         return f"{up}guides/"
 
-    def practice(self, lang, exams, up):
+    def practice(self, lang, exams, up, intro=True):
         t = TXT[lang]
-        out = [f"<p>{t['practise_p']}</p>", "<ul>"]
+        out = [f"<p>{t['practise_p']}</p>"] if intro else []
+        out.append("<ul>")
         for code in exams:
             n = self.bank_count(code)
             days = self.study_days(code)
@@ -95,22 +95,23 @@ class Guides:
             doms = " · ".join(f'<a href="{up}#exam={code}&amp;d={d["code"]}">{html.escape(d["name"])}</a>'
                               for d in self.specs[code]["domains"])
             out.append(f"<li>{t['by_dom']}{' (' + code + ')' if len(exams) > 1 else ''}: {doms}</li>")
-        out.append("</ul>")
-        return "\n".join(out)
+        return out
 
     def render_body(self, g, lang, up):
+        """The blog's practice list (the last <ul> of blog label links) becomes question bank links. Items that say more
+        than a label (e.g. "Patterns 2, 4 and 5: Design Secure Architectures") are kept, pointing into the bank.
+        If the list stood alone under its heading, a short intro paragraph goes before it."""
         body = g["lang"][lang]["body"]
         exams = g["exams"]
-        # the blog's practice section: last h2 whose section links blog labels -> question bank links
-        parts = re.split(r"(<h2>.*?</h2>)", body)
-        idx = [i for i in range(1, len(parts), 2) if i + 1 < len(parts) and "search/label/" in parts[i + 1]]
-        if idx:
-            i = idx[-1]
-            sect = parts[i + 1]
-            m = re.search(rf"<p {NOTE_STYLE}>", sect)
-            keep = sect[m.start():] if m else re.search(r"</div>\s*$", sect).group(0)
-            parts[i + 1] = "\n" + self.practice(lang, exams, up) + "\n" + keep
-            body = "".join(parts)
+        lists = [m for m in re.finditer(r"<ul>(?:(?!</ul>).)*search/label/(?:(?!</ul>).)*</ul>", body, re.S)]
+        if lists:
+            m = lists[-1]
+            keep = [li for li in re.findall(r"<li>.*?</li>", m.group(0), re.S)
+                    if re.search(r"<a [^>]*>[^<]*:\s", li)]
+            before = body[:m.start()]
+            alone = bool(re.search(r"</h2>\s*$", before))
+            new = self.practice(lang, exams, up, intro=alone) + keep + ["</ul>"]
+            body = before + "\n".join(new) + body[m.end():]
         body = re.sub(r'href="https://bigdatabreakthroughs\.blogspot\.com/search/label/([^"]+)"',
                       lambda m: f'href="{self.label_href(m.group(1), exams, up)}"', body)
         assert "blogspot.com" not in body, f"{g['slug']} ({lang}): a blog link is left"

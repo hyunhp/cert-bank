@@ -73,6 +73,9 @@ guide_urls = [u for u in urls if "/guides/guide-" in u]
 C.check("published guides are in the sitemap in both languages", len(guide_urls) >= 2 and len(guide_urls) % 2 == 0, len(guide_urls))
 leftover = [str(f) for f in list((ROOT / "guides").rglob("*.html")) + list((ROOT / "ko").rglob("*.html")) if "blogspot.com" in f.read_text(encoding="utf-8")]
 C.check("guides keep no link to the old blog", not leftover, leftover)
+blogword = [str(f.relative_to(ROOT)) for f in list((ROOT / "guides").rglob("*.html")) + list((ROOT / "ko").rglob("*.html"))
+            if re.search(r"this blog|이 블로그", f.read_text(encoding="utf-8"))]
+C.check('published guides never say "this blog" (edit the source copy)', not blogword, blogword)
 g_en = (ROOT / "guides" / "guide-saa-c03-study-plan" / "index.html").read_text(encoding="utf-8")
 g_ko = (ROOT / "ko" / "guides" / "guide-saa-c03-study-plan" / "index.html").read_text(encoding="utf-8")
 C.check("guide pairs carry hreflang en/ko and lang", all('hreflang="ko"' in x and 'hreflang="en"' in x for x in (g_en, g_ko)) and '<html lang="ko">' in g_ko)
