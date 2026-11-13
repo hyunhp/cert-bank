@@ -37,7 +37,7 @@ Source: https://developer.hashicorp.com/certifications/terraform-infrastructure-
 
 | Item | Value |
 |---|---|
-| Format | Multiple choice, online proctored, English, 90 minutes, credential valid 2 years; exam launches at IBM TechXchange 2026 (price "coming soon") |
+| Format | Multiple choice, online proctored, English, 90 minutes, credential valid 2 years; registration open, USD 200 plus taxes, free retake not included (exam page re-read 2026-11-13); not a lab exam (the lab-based one is Terraform Authoring & Operations Advanced) |
 | Version tested | Terraform 1.15 (page). Key only features the docs on developer.hashicorp.com show as released; anything the docs mark newer/preview stays out of keys |
 | Questions / pass mark / weights | Not published: mock uses `questions: 60` (assumed), `passMarkUnpublished`, `weightsAssumed` (equal) |
 | Objectives | 7 sections, 43 objectives (1a-1h, 2a-2e, 3a-3i, 4a-4d, 5a-5e, 6a-6d, 7a-7e) = tasks T1.1-T7.5 in `data/exam-tasks.json` (a=1, b=2 ...) |
