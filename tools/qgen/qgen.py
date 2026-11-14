@@ -48,6 +48,11 @@ Explanation-only blocks replace the explanation of a published question and leav
     @ Q001592 explain
     G: ...   W: ...   X: ...   T: ...
 
+Services-only blocks replace the service tags of a published question (e.g. after a product rename) and leave
+everything else untouched; they go in the same kind of separate file as explain-only blocks:
+    @ Q004656 services
+    V: AIP Chatbot Studio, AIP Logic
+
 Ingest is idempotent: each block is identified by a hash of its stem, so re-ingesting an edited batch
 updates the same question id instead of adding a duplicate. Choices are re-ordered so correct-answer
 positions stay balanced per exam, and the batch is rejected on schema errors, near-duplicates, or
@@ -253,6 +258,7 @@ def plan(code, quiet=False):
 # ---------------------------------------------------------------- parse
 HEAD = re.compile(r"^@\s*(\S+)\s+(D\d)\s+(T\d\.\d+)\s+(\S+)\s+(\S+)\s*(.*)$")
 EXPL_HEAD = re.compile(r"^@\s*(Q\d{6})\s+explain\s*$")
+SVC_HEAD = re.compile(r"^@\s*(Q\d{6})\s+services\s*$")
 MULTILINE = {"G", "W", "X"}                       # continuation lines keep their line break
 RICH = "## "                                      # detailed explanations start with a heading
 MIN_RICH = {"G": 250, "W": 80, "X": 60}          # minimum characters (per X entry) for detailed blocks
@@ -347,6 +353,24 @@ def build_explain(block, errors):
             "take": f["T"], "keys": q["correctKeys"], "choices": {c["key"]: c["text"] for c in q["choices"]}}
 
 
+def build_services(block, errors):
+    """@ Q004656 services: replace the service tags of a published question."""
+    qid = SVC_HEAD.match(block["_head"]).group(1)
+    where = f"line {block['_line']} ({qid})"
+    v = block["fields"].get("V", "")
+    services = [x.strip() for x in v.split(",") if x.strip()]
+    if not services:
+        errors.append(f"{where}: missing V:")
+    extra = sorted(set(block["fields"]) - {"V"})
+    if extra:
+        errors.append(f"{where}: a services block takes only V: (found {', '.join(extra)}:)")
+    if not published().get(qid):
+        errors.append(f"{where}: no published question {qid}")
+    if any(e.startswith(where) for e in errors):
+        return None
+    return {"explain_only": True, "services_only": True, "id": qid, "where": where, "services": services}
+
+
 _published = None
 def published():
     global _published
@@ -419,6 +443,8 @@ def stem_hash(stem):
 def build(block, errors):
     if EXPL_HEAD.match(block["_head"]):
         return build_explain(block, errors)
+    if SVC_HEAD.match(block["_head"]):
+        return build_services(block, errors)
     h = HEAD.match(block["_head"])
     where = f"line {block['_line']}"
     if not h:
@@ -651,7 +677,9 @@ def length_bias_findings(items):
 
 def batch_summary(path, explains, items, errors, warns):
     if explains:
-        return f"{path}: {len(explains)} explanation rewrites, {len(errors)} errors, {len(warns)} warnings"
+        n_svc = sum(1 for x in explains if x.get("services_only"))
+        return (f"{path}: {len(explains) - n_svc} explanation rewrites, {n_svc} service-tag updates, "
+                f"{len(errors)} errors, {len(warns)} warnings")
     multi = sum(1 for i in items if len(i["keys"]) > 1)
     rich = sum(1 for i in items if i["bg"])
     return f"{path}: {len(items)} questions ({rich} detailed), {multi} multi-answer, {len(errors)} errors, {len(warns)} warnings"
@@ -715,8 +743,15 @@ def save_all_exams(files):
 def ingest_explanations(explains):
     """Replace only the explanation of published questions (every exam file that holds them)."""
     files = load_all_exams()
-    done = set()
+    done, tagged = set(), set()
     for x in explains:
+        if x.get("services_only"):
+            for e in EXAMS:
+                for q in files[e]:
+                    if q["id"] == x["id"]:
+                        q["services"] = x["services"]
+                        tagged.add(x["id"])
+            continue
         letters = list(x["choices"])
         text = rich_explanation({"bg": x["bg"], "why": x["why"], "wrong": x["wrong"], "take": x["take"],
                                  "why_by": x["why_by"], "keys": x["keys"]}, letters)
@@ -727,7 +762,7 @@ def ingest_explanations(explains):
                     done.add(x["id"])
     for e in EXAMS:
         save_exam(e, files[e])
-    print(f"ingested: {len(done)} explanations rewritten")
+    print(f"ingested: {len(done)} explanations rewritten, {len(tagged)} service tags replaced")
     refresh_site_index()
 
 
