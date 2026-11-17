@@ -1,0 +1,476 @@
+# DBX-MLA batch 11: expert tier (level expert), D1 8, D2 4, D3 6, D4 2 (guide read 2026-11-08, docs read 2026-11-17)
+# src: https://mlflow.org/docs/latest/api_reference/python_api/mlflow.html
+# src: https://docs.databricks.com/aws/en/mlflow/experiments
+# src: https://docs.databricks.com/aws/en/mlflow/tracking
+# src: https://docs.databricks.com/aws/en/machine-learning/manage-model-lifecycle/
+# src: https://docs.databricks.com/aws/en/machine-learning/manage-model-lifecycle/upgrade-workflows
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/train-models-with-feature-store
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/time-series
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/online-feature-store
+# src: https://docs.databricks.com/aws/en/machine-learning/automl/
+# src: https://docs.databricks.com/aws/en/machine-learning/databricks-runtime-ml
+# src: https://docs.databricks.com/aws/en/machine-learning/automl-hyperparam-tuning/hyperopt-concepts
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.summary.html
+# src: https://spark.apache.org/docs/latest/ml-features.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/api/pyspark.ml.feature.StringIndexer.html
+# src: https://spark.apache.org/docs/latest/ml-statistics.html
+# src: https://spark.apache.org/docs/latest/ml-tuning.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/api/pyspark.ml.tuning.CrossValidator.html
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/create-manage-serving-endpoints
+# src: https://docs.databricks.com/aws/en/ldp/updates
+# src: https://docs.databricks.com/aws/en/ldp/streaming-tables
+
+@ DBX-MLA D1 T1.11 expert troubleshooting
+S: Data scientists log tuning runs from the notebook `/Users/ana/tune` without calling `mlflow.set_experiment`, so the runs land in that notebook's experiment, whose ID is `90211`. A scheduled job runs a different notebook, `/Jobs/promote`, which executes `best = mlflow.search_runs(filter_string="attributes.status = 'FINISHED'", order_by=["metrics.val_rmse ASC"], max_results=1)` followed by `best.iloc[0].run_id`. The job fails with `IndexError: single positional indexer is out-of-bounds`, although the experiment page lists 48 finished runs with `val_rmse`. Two stale runs were deleted from that experiment last week, and other teams' experiments in the workspace also log `val_rmse`. The job must not move or copy Ana's runs, and the call must return exactly one run from Ana's experiment. Which change fixes the job?
+A: Pass experiment_ids=["90211"] to search_runs, because without it the call searches only the active experiment of the promote notebook
+B: Pass run_view_type=ViewType.ALL to search_runs, because the deleted runs in the experiment make the default active-only view return no rows
+C: Pass experiment_names=["90211"] to search_runs, because without it the call searches only the active experiment of the promote notebook
+D: Pass search_all_experiments=True and leave experiment_ids unset, so the call widens its scope beyond the promote notebook's own experiment
+K: A
+G: ## Which experiment a search looks at
+`mlflow.search_runs()` accepts `experiment_ids` **or** `experiment_names`. When both are empty, it searches the **active experiment**. In a Databricks notebook with no experiment set, the active experiment is that notebook's own **notebook experiment**, which shares the notebook's name (its path) and ID.
+So a job notebook that never sets an experiment searches its own, empty experiment, gets an empty DataFrame, and `.iloc[0]` raises `IndexError`.
+## Other parameters in the options
+- `run_view_type` defaults to active runs only; deleted runs are simply excluded and never hide active ones.
+- `experiment_names` takes names; a notebook experiment's name is the notebook path, not its numeric ID.
+- `search_all_experiments=True` is honored only when `experiment_ids` is empty.
+## Example
+`mlflow.search_runs(experiment_ids=["90211"], filter_string="attributes.status = 'FINISHED'", order_by=["metrics.val_rmse ASC"], max_results=1)`
+W: experiment_ids: naming Ana's experiment by its ID makes the job search the 48 finished runs instead of its own empty notebook experiment.
+X: B=ViewType.ALL: deleted runs are excluded by default but cannot hide active runs; the search still targets the wrong experiment, and ALL could even return a deleted run.
+C=experiment_names with the ID: a notebook experiment is named by its notebook path, so the numeric ID used as a name matches no experiment.
+D=search_all_experiments: with experiment_ids empty the call ranks finished runs from every experiment, so the lowest val_rmse can come from another team's experiment instead of Ana's.
+T: search_runs without experiment_ids searches the active experiment, which in a job notebook is that notebook's own experiment.
+
+@ DBX-MLA D1 T1.14 expert troubleshooting
+S: A team trains a pricing model for six hours and logs it as a custom `mlflow.pyfunc.PythonModel` wrapper with `mlflow.pyfunc.log_model(name="model", python_model=wrapper)`. Autologging is disabled by company policy on this workspace. The run finishes, and the fitted wrapper object is still in memory in the notebook. Registration then fails:
+```
+mlflow.register_model(f"runs:/{run_id}/model", "prod.ml.pricing")
+MlflowException: Model passed for registration did not contain any signature metadata.
+All models in the Unity Catalog must be logged with a model signature ...
+```
+Retraining is not acceptable, the version must live in Unity Catalog, and the input is a pandas DataFrame with 12 numeric columns. What should the team do?
+A: Log the same fitted wrapper again in a new run with an input_example of one training row, then register that newly logged model in Unity Catalog
+B: Set MLFLOW_USE_DATABRICKS_SDK_MODEL_ARTIFACTS_REPO_FOR_UC to True in the notebook, then retry the registration of the model from the original run
+C: Register the original model in the Workspace Model Registry first, then copy that version into prod.ml.pricing in Unity Catalog with copy_model_version
+D: Turn on autologging for this one notebook session, then retry the registration of the original run's model so that a signature is generated for it
+K: A
+G: ## Signatures are mandatory in Unity Catalog
+New model versions in Unity Catalog **must have a model signature** (input and output schema). A model logged without one cannot be registered there. Two documented ways to get one:
+- Databricks **autologging** logs signatures for many frameworks (not an option under this policy).
+- Pass an **`input_example`** to `log_model` (MLflow 2.5+); the signature is inferred from the example and the model's prediction. An explicit `signature=` works too.
+## No retraining needed
+Logging is a separate step from training. The fitted wrapper still in memory can be logged again in a new run with `input_example=X_train.iloc[[0]]`, and that logged model can then be registered to `prod.ml.pricing`.
+## What the environment variable is for
+`MLFLOW_USE_DATABRICKS_SDK_MODEL_ARTIFACTS_REPO_FOR_UC=True` helps with **authorization** problems when uploading model artifacts (and is required on AWS GovCloud). It does not add a signature.
+W: Re-log with input_example: the in-memory model is logged again with an inferred signature, so Unity Catalog accepts the new version without any retraining.
+X: B=Artifact repository variable: it addresses authorization errors during registration, not a missing signature, so the same error returns.
+C=Workspace registry first: the version still has no signature, and copying it into Unity Catalog creates a new Unity Catalog version that must meet the same signature rule.
+D=Autologging now: autologging records signatures while a supported framework trains or logs; it does not add a signature to a model already logged, and policy forbids it anyway.
+T: Unity Catalog needs a signature; log the existing model again with an input_example (or signature) and register that.
+
+@ DBX-MLA D1 T1.18 expert troubleshooting
+S: The registered model `prod.ml.churn` is owned by the group `ml-admins`, whose human members must keep full control of it. A deployment job runs as the service principal `deployer`, which holds USE CATALOG on `prod`, USE SCHEMA on `prod.ml`, and both CREATE MODEL VERSION and EXECUTE on `prod.ml.churn`. The job registers version 12, validates it, and then calls `client.set_registered_model_alias("prod.ml.churn", "Champion", 12)`, which fails with `PERMISSION_DENIED`. The team wants the job to promote validated versions without any manual step, and nothing else about the model's ownership may change. Which change lets the job set the alias?
+A: Add the deployer service principal to the ml-admins group, because only an owner of a registered model can set or move its aliases
+B: Grant APPLY TAG on prod.ml.churn to the deployer service principal, because aliases are stored as tags on the version they point to
+C: Grant CREATE MODEL on the prod.ml schema to the deployer service principal, because setting an alias creates a new object in the schema
+D: Transfer ownership of prod.ml.churn to the deployer service principal, because only an owner of a registered model can set or move its aliases
+K: A
+G: ## Who may set an alias
+For models in Unity Catalog, setting, updating or deleting an alias requires being the **owner of the registered model**, plus USE CATALOG and USE SCHEMA. No separate privilege grants it. Other model privileges:
+- `CREATE MODEL VERSION`: add versions to a model you do not own.
+- `EXECUTE`: load or deploy the model.
+- `APPLY TAG`: set or delete tags.
+- `CREATE MODEL` (on the schema): create new registered models.
+## Ownership by a group
+An owner can be a group. The docs recommend granting ownership of a model to a group so that several principals can manage it together; every member then acts as an owner. Adding the service principal to the owning group gives it owner rights without changing who owns the model.
+W: Join the owning group: membership in ml-admins makes the service principal an owner for alias operations while ownership stays with ml-admins and its human members.
+X: B=APPLY TAG: tag privileges cover tags only; aliases are a separate, owner-only operation.
+C=CREATE MODEL: it allows creating new registered models in the schema and does not touch aliases on an existing one.
+D=Transfer ownership to the service principal: the alias would work, but the ml-admins humans would lose ownership, which the stem forbids.
+T: Aliases are owner-only; give automation owner rights by putting it in the owning group.
+
+@ DBX-MLA D1 T1.8 expert troubleshooting
+S: The shared time series feature table `ml.ads.user_features` has primary key `(user_id, ts TIMESERIES)` and is used by six teams. A training job used `FeatureLookup(table_name="ml.ads.user_features", feature_names=["clicks_7d"], lookup_key="user_id", timestamp_lookup_key="impression_ts")`. After a refactor, the label DataFrame now follows a new events schema with columns `uid`, `event_time` and `clicked`, and `create_training_set` fails with:
+`Unable to join feature table 'ml.ads.user_features' because timestamp lookup key 'impression_ts' not found in DataFrame.`
+The events schema cannot change back, and each label must still receive the latest `clicks_7d` at or before its `event_time`. Which change fixes the training set?
+A: Set lookup_key="uid" and timestamp_lookup_key="event_time" in the FeatureLookup, so the keys refer to the label DataFrame's new column names
+B: Set lookup_key=["uid", "event_time"] in the FeatureLookup and remove timestamp_lookup_key, so both columns join on the table's two key columns
+C: Set lookup_key="uid" and timestamp_lookup_key="ts" in the FeatureLookup, so the timestamp key refers to the feature table's own key column
+D: Rename user_id and ts in ml.ads.user_features to uid and event_time, so that the original FeatureLookup arguments match the new events schema
+K: A
+G: ## What the lookup arguments name
+In a `FeatureLookup`, `lookup_key` and `timestamp_lookup_key` name columns of **the DataFrame passed to `create_training_set`**, not columns of the feature table. The lookup keys are matched to the table's primary keys (excluding the timestamp key) by order and type, and the timestamp lookup column is matched to the `TIMESERIES` key.
+## Point-in-time joins
+On a time series feature table, **every** `FeatureLookup` must be a point-in-time lookup with a `timestamp_lookup_key`. Feature Store then takes, for each row, the latest feature value whose timestamp is at or before the row's timestamp (an AS OF join), which prevents leakage.
+## Error
+`timestamp lookup key '...' not found in DataFrame` means the training DataFrame lacks the column the lookup names. Timestamp columns should not be used as a `lookup_key`.
+W: Point the keys at the new DataFrame columns: uid matches user_id and event_time drives the AS OF join against ts, so point-in-time semantics are kept.
+X: B=Timestamp as a lookup key: lookups on a time series table must use timestamp_lookup_key, and an exact-match join on time would miss most rows.
+C=ts as timestamp lookup key: the argument names a DataFrame column, and the label DataFrame has no ts column, so the same error appears.
+D=Rename the shared table's keys: changing primary key names breaks the other five teams' pipelines, and the docs warn against altering a feature table's keys.
+T: lookup_key and timestamp_lookup_key name columns of the training DataFrame; time series lookups always need timestamp_lookup_key.
+
+@ DBX-MLA D1 T1.10 expert troubleshooting
+S: A fraud team computes per-card velocity features with a streaming job that calls `fe.write_table(..., mode="merge")` on `ml.risk.card_velocity` every few seconds. The primary key `card_id` is already declared NOT NULL. A Model Serving endpoint with automatic feature lookup needs these features within seconds of each write, and lookup latency itself is already acceptable. The table is also read by nightly batch jobs and must not be dropped or re-created. An engineer runs `fe.publish_table(online_store=store, source_table_name="ml.risk.card_velocity", online_table_name="ml.risk.card_velocity_online", publish_mode="CONTINUOUS")`, and the call fails with an error saying the source table needs change data feed. Which fix meets every requirement?
+A: Enable change data feed with ALTER TABLE ... SET TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true'), then publish again in CONTINUOUS mode
+B: Keep the table as it is and publish in SNAPSHOT mode instead, because snapshot publishing copies the whole table without needing change data feed
+C: Enable change data feed with ALTER TABLE ... SET TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true'), then publish again in TRIGGERED mode
+D: Drop the table and re-create it with change data feed enabled from the start, then backfill it and publish it again in CONTINUOUS mode
+K: A
+G: ## Requirements for publishing to an online store
+Every feature table published with `publish_table` needs a primary key constraint with non-nullable key columns. **Change data feed** is additionally required for the incremental modes.
+## Publish modes
+- `TRIGGERED` (default): incremental sync when you call `publish_table` again or on a schedule. Needs change data feed.
+- `CONTINUOUS`: a streaming pipeline updates the online store immediately as new data is written to the offline table. Needs change data feed.
+- `SNAPSHOT`: a one-time full copy; efficient when most rows change between syncs. Does not use change data feed, but nothing is updated afterwards unless you publish again.
+## Example
+`ALTER TABLE ml.risk.card_velocity SET TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')` changes a property in place; the table keeps its data and readers.
+W: CDF + CONTINUOUS: change data feed is turned on in place, and continuous publishing pushes each streaming merge to the online store within seconds.
+X: B=SNAPSHOT: it avoids the change data feed requirement but copies the table once; features would be stale until the next full publish, far from seconds.
+C=CDF + TRIGGERED: the prerequisite is fixed, but triggered sync updates only when publish runs again or on a schedule, not within seconds of each write.
+D=Re-create the table: it meets the technical need but drops a table the batch jobs read, which the stem forbids, and change data feed can be enabled in place.
+T: Seconds-fresh online features = change data feed on the offline table + publish_mode CONTINUOUS.
+
+@ DBX-MLA D1 T1.16 expert use-case
+S: A bank cannot afford to retrain its 30-hour model in production, so it promotes models: a validated version in `staging.ml.fraud` is copied into `prod.ml.fraud` with `client.copy_model_version("models:/staging.ml.fraud/7", "prod.ml.fraud")`. The copy runs as the service principal `promoter`. `prod.ml.fraud` already exists and is owned by the group `prod-owners`, whose separate approval job sets the `Champion` alias afterwards. Least privilege applies: `promoter` must not own either model or be able to create new registered models. Security reviews every grant, so only the minimum set is allowed. Its first run fails with `PERMISSION_DENIED`. Which THREE grants must `promoter` hold? (Select THREE)
+A: USE CATALOG on the staging and prod catalogs, and USE SCHEMA on the staging.ml and prod.ml schemas that contain the two models
+B: The EXECUTE privilege on staging.ml.fraud, so that the service principal can read the source model version it is going to copy
+C: The CREATE MODEL VERSION privilege on prod.ml.fraud, so that the service principal can add the copied version to it
+D: The SELECT privilege on staging.ml.fraud, so that the service principal can read the source model version it is going to copy
+E: The CREATE MODEL privilege on the prod.ml schema, so that the service principal can add the copied version to the existing model
+F: The EXECUTE privilege on prod.ml.fraud, so that the service principal can add the copied version to the existing destination model
+K: A,B,C
+G: ## Promoting a model version across catalogs
+In the deploy models pattern with Unity Catalog, each environment is a catalog and promotion copies a version with `MlflowClient.copy_model_version(src_uri, dst_name)`.
+The docs list what the caller needs:
+- `USE CATALOG` on the `staging` and `prod` catalogs, and `USE SCHEMA` on both schemas.
+- `EXECUTE` on the **source** model (`staging.ml.fraud`), the model privilege that allows reading and loading it.
+- **Ownership of the destination model or `CREATE MODEL VERSION` on it** (`prod.ml.fraud`).
+## Privileges that look similar
+- `SELECT` applies to tables and views, not to registered models.
+- `CREATE MODEL` on a schema creates **new** registered models; the destination already exists.
+- `EXECUTE` on the destination allows loading it, not adding versions.
+After the copy, the owner group sets the alias, because aliases need ownership.
+W: A=USE CATALOG and USE SCHEMA: every model operation needs them on both enclosing catalogs and schemas.
+B=EXECUTE on the source: it is the documented privilege for reading the staging version being copied.
+C=CREATE MODEL VERSION on the destination: it lets a non-owner add the copied version to prod.ml.fraud, as least privilege requires.
+X: D=SELECT on the source: SELECT is a table privilege; registered models are read with EXECUTE.
+E=CREATE MODEL on prod.ml: it creates new registered models, which policy forbids, and does not grant versions on an existing model.
+F=EXECUTE on the destination: it allows loading prod.ml.fraud but not creating a version in it.
+T: copy_model_version needs USE CATALOG/SCHEMA on both sides, EXECUTE on the source, and ownership or CREATE MODEL VERSION on the destination.
+
+@ DBX-MLA D1 T1.3 expert troubleshooting
+S: Four analysts share one classic compute resource with Standard access mode, running a Databricks Runtime ML release that still includes AutoML, and nobody has changed its preinstalled libraries. They call `databricks.automl.classify(dataset="main.crm.churn_training", target_col="churned")`, and the experiment fails before any trial starts. The same call succeeds on a colleague's personal compute that uses Dedicated access mode with the same runtime. The training table is in Unity Catalog and must stay there, the four analysts must keep sharing one compute resource, and each must work only with the team's data permissions. Which configuration lets the team run AutoML?
+A: A compute resource in Dedicated access mode assigned to the analysts' group, running the same Databricks Runtime ML release that includes AutoML
+B: A compute resource in No isolation shared access mode, running the same Databricks Runtime ML release that includes AutoML for all four users
+C: A compute resource in Standard access mode, running a newer Databricks Runtime ML release in which AutoML is no longer a built-in library
+D: A compute resource in Dedicated access mode assigned to one analyst's user account, running the same release, with the others given attach rights
+K: A
+G: ## AutoML compute requirements
+AutoML lists the supported compute access modes:
+- **Dedicated** (formerly single user): AutoML supported, Unity Catalog supported.
+- **Standard** (formerly shared): AutoML **unsupported**, Unity Catalog supported.
+- **No isolation shared**: AutoML supported, Unity Catalog **unsupported**.
+AutoML also depends on the libraries preinstalled in Databricks Runtime ML: changing their versions breaks runs. In Databricks Runtime 18.0 ML and above, AutoML is not included as a built-in library.
+## Sharing Dedicated compute
+Dedicated compute can be assigned to a **group**; each member's permissions are then down-scoped to the group's permissions. That gives one shared resource, Unity Catalog access and AutoML support at the same time.
+W: Dedicated for the group: AutoML and Unity Catalog are both supported, the four analysts share one resource, and each works with the group's permissions.
+X: B=No isolation shared: AutoML runs there, but this mode has no Unity Catalog access, so the training table cannot be read.
+C=Standard with a newer release: Standard mode does not support AutoML, and the newer release does not include AutoML as a built-in library either.
+D=Dedicated to one analyst: only the assigned user can run workloads, and that user's personal grants, not the team's, would apply.
+T: AutoML + Unity Catalog + sharing = Dedicated access mode assigned to a group.
+
+@ DBX-MLA D1 T1.12 expert troubleshooting
+S: A training loop runs for 40 epochs inside `with mlflow.start_run():` and calls `mlflow.log_metric("val_loss", v)` at the end of each epoch. After the run, the metric chart with Step on the x-axis shows all 40 points stacked at step 0, so reviewers cannot compare learning curves across runs by epoch, which is the main review requirement. The code also builds a matplotlib confusion-matrix figure `fig`, calls `fig.savefig("cm.png")` on the driver's local disk after `mlflow.end_run()`, and nothing appears under Artifacts. The team must keep one run per training job and must not write files to storage by hand. Which TWO changes fix both problems? (Select TWO)
+A: Pass step=epoch in every log_metric call, so that each validation loss is stored at the step of the epoch that produced it
+B: Call mlflow.log_figure(fig, "plots/cm.png") inside the with block, so the figure becomes an artifact of the same run
+C: Pass timestamp=epoch in every log_metric call, so that the chart orders the validation losses by the epoch that produced them
+D: Call mlflow.log_artifact("cm.png") after mlflow.end_run(), so the saved image file is uploaded as an artifact of the training run
+E: Log each epoch under its own key such as val_loss_{epoch}, so every epoch's validation loss gets its own metric in the run
+K: A,B
+G: ## Steps of a metric
+`mlflow.log_metric(key, value, step=None, timestamp=None)` stores one value of a metric history. **`step` defaults to zero** when it is not given, so 40 calls without a step put 40 values at step 0. Passing `step=epoch` gives a proper curve per run, and the experiment's chart view can overlay those curves across runs. `timestamp` is the wall-clock time in milliseconds, not an epoch counter.
+## Logging a figure
+`mlflow.log_figure(figure, artifact_file)` saves a matplotlib or plotly figure directly as a run artifact (for example `plots/cm.png`), without writing a file yourself.
+## Active runs
+Logging calls go to the **active run**. After `end_run()`, there is no active run; `log_*` calls then start a new run, so an artifact logged there lands in a different run.
+W: A=step=epoch: each value gets its epoch as the step, so curves are plotted per epoch and can be compared across runs.
+B=log_figure inside the run: the figure becomes an artifact of the same training run with no manual file handling.
+X: C=timestamp=epoch: timestamp is a time in milliseconds; the step-based chart still shows every point at step 0.
+D=log_artifact after end_run: with no active run the call starts a new run, which breaks the one-run-per-job rule, and it uploads a hand-written local file.
+E=One key per epoch: 40 separate metrics with one value each cannot be drawn or compared as a learning curve.
+T: Per-epoch curves need step=epoch; figures go in with mlflow.log_figure while the run is active.
+
+@ DBX-MLA D2 T2.2 expert use-case
+S: On the training split of a delivery dataset, `df.approxQuantile("delivery_minutes", [0.25, 0.75], 0.001)` returns Q1 = 40 and Q3 = 100, and `df.summary()` reports a mean of 78 and a standard deviation of 35. Operations confirms that real rural deliveries can take up to 190 minutes and must stay in training, while anything longer is a logging error. Two suspicious records show 185 and 200 minutes. The rule must be computed on the training split only and then applied unchanged to later data, and the chosen bounds will be documented for auditors. Which rule and bounds satisfy operations?
+A: The 1.5 x IQR rule with bounds of -50 and 190 minutes, which keeps the 185-minute record and removes the 200-minute record
+B: The 1.0 x IQR rule with bounds of -20 and 160 minutes, which removes both the 185-minute record and the 200-minute record
+C: The 3-standard-deviation rule with bounds of -27 and 183 minutes, which removes both the 185-minute record and the 200-minute record
+D: The 2-standard-deviation rule with bounds of 8 and 148 minutes, which removes both the 185-minute record and the 200-minute record
+K: A
+G: ## Working the numbers
+- **IQR** = Q3 - Q1 = 100 - 40 = 60.
+- **1.5 x IQR rule**: lower = 40 - 90 = **-50**, upper = 100 + 90 = **190**.
+- **1.0 x IQR**: lower = 40 - 60 = -20, upper = 100 + 60 = 160.
+- **3-sigma rule**: 78 +/- 3 x 35 = 78 +/- 105 -> **-27 to 183**.
+- **2-sigma rule**: 78 +/- 70 -> 8 to 148.
+## Why the rules differ here
+The data is right-skewed (mean 78 is above the midpoint of Q1 and Q3), so the standard deviation is inflated by the tail while the quartiles are not. The IQR rule is based on quartiles, which are robust to the tail; the standard deviation rules depend on mean and variance, which the long tail moves.
+## Applying the rule
+Bounds are learned once on the training split and stored, then applied unchanged to later data.
+W: 1.5 x IQR: the upper bound is exactly 190, so the real 185-minute rural delivery stays and the 200-minute logging error is removed.
+X: B=1.0 x IQR: the tighter multiplier puts the upper bound at 160 and removes the genuine 185-minute delivery.
+C=3 standard deviations: the upper bound is 183, so the genuine 185-minute delivery is removed.
+D=2 standard deviations: the upper bound is 148, which removes many genuine long deliveries, including 185.
+T: Work the bounds: 1.5 x IQR = Q1 - 1.5 x IQR to Q3 + 1.5 x IQR; on skewed data quartile rules behave differently from sigma rules.
+
+@ DBX-MLA D2 T2.1 expert troubleshooting
+S: Before training, a data scientist runs `df.select("age", "income", "segment").summary().show()` on a Spark DataFrame of exactly 10,000,000 customers, read directly from a Delta table without any filter, and gets this excerpt:
+```
+summary   age        income     segment
+count     9412000    10000000   10000000
+mean      41.2       58900.0    null
+min       18         0.0        Bronze
+50%       40         51000.0    null
+max       96         2.4E7      Silver
+```
+The team plans to impute only in columns where values are actually missing, report median income to finance as an approximation, and drop the `segment` value Gold if no customer has it. Which conclusion does this output support?
+A: The age column has 588,000 missing values, because the count row reports only the non-null values of each column
+B: No customer belongs to the Gold segment, because Silver is the maximum and Gold would otherwise appear in the max row
+C: The median income is exactly 51,000, because the 50% row of summary computes the exact middle value of the income column
+D: The segment column contains only null values, because its mean and its 50% rows show null instead of a computed value
+K: A
+G: ## What DataFrame.summary() computes
+`summary()` with no arguments returns `count`, `mean`, `stddev`, `min`, **approximate** quartiles (`25%`, `50%`, `75%`) and `max` for numeric and string columns.
+- **count** counts **non-null** values: 10,000,000 - 9,412,000 = 588,000 nulls in `age`.
+- **mean**, **stddev** and percentiles are numeric statistics: for a string column they are `null`.
+- **min**/**max** of a string column are **lexicographic** (alphabetical): "Bronze" < "Gold" < "Platinum" < "Silver", so Gold can exist although it is neither min nor max.
+- Percentiles are approximate, so `51000.0` is close to, not guaranteed to be, the exact median.
+W: Non-null count: the count row excludes nulls, so 588,000 ages are missing and imputation is needed there only.
+X: B=Gold missing: string min and max are alphabetical; Gold sorts between Bronze and Silver, so this output says nothing about it.
+C=Exact median: summary percentiles are approximate, which fits an approximation for finance but is not exact.
+D=Segment all null: mean and percentiles are numeric statistics and are null for any string column; the count shows 10,000,000 non-null values.
+T: summary(): count = non-null values, string min/max are alphabetical, percentiles are approximate.
+
+@ DBX-MLA D2 T2.6 expert use-case
+S: A credit model pipeline in Spark ML must fill missing values in three columns: `income` (right-skewed, 3% null), `num_dependents` (integer count from 0 to 6, 2% null, where a filled value must be a real count) and `employment_type` (string, 5% null). Every fill must be learned from the training split and saved in the `PipelineModel`, so scoring jobs that only load the model behave identically. Applicants with missing `employment_type` behave differently from all others, so the model should be able to treat them as their own group. Which THREE stages belong in the pipeline? (Select THREE)
+A: An Imputer with strategy median on income, so that the long right tail does not pull the learned fill value upward
+B: An Imputer with strategy mode on num_dependents, so the learned fill value is always one of the observed dependent counts
+C: A StringIndexer with handleInvalid keep on employment_type, so null values are indexed into their own extra category
+D: An Imputer with strategy mode on employment_type, so null values are replaced with the most frequent employment type
+E: An Imputer with strategy mean on income, so the learned fill value keeps the average income of the training split unchanged
+F: A StringIndexer with handleInvalid skip on employment_type, so rows with null values are left out when the model is fitted
+K: A,B,C
+G: ## Matching the fill to the column
+- **Skewed numeric** (`income`): the median is a typical value; the mean is pulled toward the tail.
+- **Discrete count** (`num_dependents`): the mode is always an observed value, so the fill stays a real count.
+- **String category** (`employment_type`): `Imputer` works on **numeric** columns only. `StringIndexer` treats NULL as invalid data; with `handleInvalid="keep"` invalid values (unseen labels or NULL) go to an extra index `numLabels`, so "missing" becomes its own category the model can learn from.
+## Keeping it in the pipeline
+`Imputer` and `StringIndexer` are Estimators: inside a `Pipeline`, `fit()` learns medians, modes and label mappings from the training split, and the saved `PipelineModel` reapplies them at scoring.
+W: A=Median Imputer on income: robust to the right skew and learned from training data inside the pipeline.
+B=Mode Imputer on num_dependents: the fill is always an existing count, as required.
+C=StringIndexer keep: missing employment types become their own category, so the model can treat that group separately.
+X: D=Mode Imputer on a string column: Imputer only accepts numeric input columns, and filling with the mode would also erase the distinct missing group.
+E=Mean Imputer on income: the mean is pulled up by the tail, so the fill is not a typical income.
+F=StringIndexer skip: it drops rows with nulls, so the distinctive missing group is lost in training and those rows would vanish at scoring.
+T: Median for skewed numbers, mode for counts, StringIndexer(handleInvalid="keep") to make missing categories their own group.
+
+@ DBX-MLA D2 T2.4 expert troubleshooting
+S: A churn team checks which features relate to the binary label `churned` before any modeling starts. It assembles four columns into one vector, `[plan_idx, region_idx, device_idx, tenure_months]`, where the first three are `StringIndexer` outputs and `tenure_months` is a continuous number of months with 118 distinct values, and runs `ChiSquareTest.test(df, "features", "churned")`; the label holds only 0 and 1. The result shows pValues `[0.0001, 0.42, 0.003, 0.0]` and degreesOfFreedom `[3, 5, 2, 117]`. The team uses a 0.01 significance level and wants only conclusions the test actually supports. Which reading is correct?
+A: Plan and device are associated with churn; tenure's result is not meaningful, since the test treats each tenure value as a category
+B: Plan, device and tenure are all associated with churn, because each of their p-values is below the 0.01 significance level the team chose
+C: Plan and device are associated with churn; the tenure result shows 117 degrees of freedom, which means the column holds too many nulls to test
+D: Region is the feature most strongly associated with churn, because the highest p-value in the result marks the strongest dependence on the label
+K: A
+G: ## Pearson's chi-square test of independence
+`ChiSquareTest` builds a contingency table of (feature value, label value) counts for **each feature** and tests whether the feature and the label are independent. Spark's docs state that **all label and feature values must be categorical**.
+- **p-value**: probability of seeing an association at least this strong if feature and label were independent. Small (below the chosen level, here 0.01) = evidence of association.
+- **Degrees of freedom** = (number of feature values - 1) x (number of label values - 1). With a binary label: 4 plans -> 3, 6 regions -> 5, 3 devices -> 2.
+## A continuous column in a chi-square test
+`tenure_months` has 118 distinct values, so it was treated as 118 categories (117 degrees of freedom). Sparse cells make the result unreliable, and categories of months ignore their order. For a continuous feature, bin it first or use a test meant for continuous variables.
+W: Plan and device, not tenure: their p-values are below 0.01 and they are categorical; tenure's 117 degrees of freedom show it was treated as 118 categories, which the test does not support.
+X: B=All three: the tenure p-value comes from treating a continuous column as categories, so it is not a supported conclusion.
+C=Too many nulls: degrees of freedom come from the number of distinct values, not from nulls.
+D=Highest p-value is strongest: it is the opposite; region's 0.42 shows no evidence of association.
+T: Chi-square needs categorical features: low p = association; degrees of freedom = (values - 1) x (labels - 1).
+
+@ DBX-MLA D3 T3.5 expert troubleshooting
+S: A team on a legacy cluster that still includes Hyperopt tunes a random forest before migrating to Optuna next quarter, and must keep TPE until then. The search space `space` lets the maximum depth range from 2 to 20. The code is:
+```
+def objective(p):
+    m = RandomForestClassifier(max_depth=int(p["d"])).fit(X_tr, y_tr)
+    acc = accuracy_score(y_val, m.predict(X_val))
+    return {"loss": acc, "status": STATUS_OK}
+best = fmin(objective, space, algo=tpe.suggest, max_evals=60, trials=SparkTrials(parallelism=8))
+```
+In MLflow, the trial chosen by `fmin` has validation accuracy 0.61, while other trials reached 0.84, and later trials cluster around poor settings. Which change makes the search select the best model?
+A: Return {"loss": -acc, "status": STATUS_OK} from the objective, because fmin minimizes the loss it receives from each trial
+B: Replace algo=tpe.suggest with algo=rand.suggest, because TPE converges on the region of poor settings that it found in the first trials
+C: Set SparkTrials(parallelism=1), because eight concurrent trials stop TPE from learning which settings gave the lowest loss so far
+D: Raise max_evals from 60 to 240, because 60 trials are too few for TPE to move away from the poor settings explored early on
+K: A
+G: ## fmin minimizes
+Hyperopt's `fmin(fn, space, algo, max_evals, trials)` searches for the parameters that give the **lowest** value of the loss returned by `fn` (a scalar or a dict with `loss` and `status`). Returning accuracy as the loss tells TPE that low accuracy is good, so it chooses the worst model and steers later trials toward poor settings.
+## The fix
+Return a quantity that is smaller when the model is better: `-acc` (or `1 - acc`).
+## Status on Databricks
+Open-source Hyperopt is no longer maintained and is not included in Databricks Runtime ML after 16.4 LTS ML. Databricks recommends Optuna or Ray Tune; the "minimize the objective" convention is the same in Optuna's default direction.
+W: Negative accuracy as loss: fmin minimizes, so negating accuracy makes the most accurate trial the best one and lets TPE steer toward good settings.
+X: B=Random search: it removes the steering but still picks the trial with the lowest accuracy, and TPE must be kept.
+C=Parallelism 1: lower parallelism helps adaptivity but the objective is still inverted, so the worst trial wins.
+D=More evaluations: more trials only make the inverted search better at finding low accuracy.
+T: fmin minimizes the loss: return -accuracy (or 1 - accuracy), never accuracy.
+
+@ DBX-MLA D3 T3.10 expert use-case
+S: A data scientist tunes a Spark ML `LogisticRegression` with `ParamGridBuilder` holding 3 values of `regParam` and 4 values of `elasticNetParam`, and a `CrossValidator(numFolds=5, parallelism=4)`. Benchmarks on this cluster show that every single fit takes about 6 minutes, and that up to 4 fits run side by side without slowing each other down. The cross-validator processes the folds one after another and evaluates parameter maps in parallel within each fold, then refits the best map on the whole input. The nightly window is 100 minutes. About how long does `cv.fit(train)` take?
+A: About 96 minutes: 5 folds x 3 rounds of 4 parallel fits x 6 minutes, plus one 6-minute final refit on the whole input
+B: About 90 minutes: 5 folds x 3 rounds of 4 parallel fits x 6 minutes, because the best map's fold model is reused as the final model
+C: About 366 minutes: 60 fold fits plus one final refit, each taking 6 minutes, because the parallelism setting applies only to evaluation
+D: About 24 minutes: 3 rounds of 4 parallel fits x 6 minutes plus one 6-minute final refit, because the 5 folds are also fitted in parallel
+K: A
+G: ## Counting fits
+Grid = 3 x 4 = **12** parameter maps. CrossValidator fits each map in each fold: 12 x 5 = **60** fits, plus **1** final refit of the best map on all the data passed to `fit()`.
+## Parallelism
+Spark's `parallelism` parameter evaluates up to that many parameter settings at the same time (a value of 1 is serial). With 12 maps and parallelism 4, each fold needs 12 / 4 = **3 rounds**.
+## Time
+- Folds: 5 x 3 rounds x 6 min = **90 min**.
+- Final refit: **6 min**.
+- Total about **96 min**, inside the 100-minute window.
+Serial evaluation would take 61 x 6 = 366 minutes.
+W: 96 minutes: 15 rounds of parallel fits (90 minutes) plus the separate final refit (6 minutes).
+X: B=90 minutes: the final model is refitted with the best map on all input data; fold models were trained on subsets and are not reused.
+C=366 minutes: parallelism makes the fits of different parameter maps run concurrently; the serial estimate ignores it.
+D=24 minutes: the folds run one after another, so the five rounds of fold work add up instead of overlapping.
+T: CrossValidator time ~ folds x ceil(grid / parallelism) x fit time + one final refit.
+
+@ DBX-MLA D3 T3.12 expert comparison
+S: Two delivery-time models are evaluated on the same validation set. Model P: RMSE 12.0 minutes, MAE 4.0 minutes. Model Q: RMSE 9.5 minutes, MAE 6.5 minutes. The courier contract charges a penalty proportional to every minute of prediction error, with no extra cost for large misses, and finance will decide on total penalty. Separately, operations wants to know which model has the more uneven errors before trusting its worst cases. The validation labels contain no data errors, and both models use the same features and training data. Which TWO statements are correct? (Select TWO)
+A: Model P's RMSE is three times its MAE, which indicates a few very large errors, whereas Model Q's errors are more uniform in size
+B: Under the courier contract Model P is the better choice, because the total penalty follows MAE, which is lower for P
+C: Model P has the higher R-squared on this validation set, because its mean absolute error is lower than the mean absolute error of Q
+D: If large misses were disproportionately costly, Model P would be preferable, because it has fewer large errors than Model Q
+E: Model Q has the more extreme errors, because MAE reacts more strongly to outliers than RMSE does when both use the same data
+K: A,B
+G: ## RMSE versus MAE
+- **MAE** = mean of |error|. Every minute counts the same; it matches a cost that is **linear** in the error.
+- **RMSE** = square root of the mean of squared errors. Squaring weights large errors more, so RMSE reacts strongly to outliers and matches a cost that grows faster than linearly.
+- Always RMSE >= MAE. The ratio RMSE / MAE grows when a few errors are much larger than the rest; equal-sized errors give a ratio of 1.
+## R-squared
+R-squared = 1 - MSE / variance of the labels. On the same validation set, the model with the **lower RMSE** has the **higher** R-squared, whatever its MAE.
+## Reading the numbers
+P: 12.0 / 4.0 = 3.0 (a few very large errors). Q: 9.5 / 6.5 = about 1.5 (more uniform errors). Linear penalty: P is cheaper (MAE 4.0 vs 6.5). Squared-type cost: Q is better (RMSE 9.5 vs 12.0).
+W: A=Ratio of 3: a high RMSE-to-MAE ratio means P's error is concentrated in a few big misses, while Q's ratio of about 1.5 shows more even errors.
+B=Linear penalty: total penalty is proportional to total absolute error, so the lower MAE of P means a lower penalty.
+X: C=R-squared from MAE: R-squared follows MSE, so Q, with the lower RMSE, has the higher R-squared.
+D=Large misses costly: that case favors the lower RMSE, Model Q; P has the big misses.
+E=MAE more sensitive: it is the reverse; RMSE squares errors and reacts more to outliers.
+T: Linear cost -> MAE; costly big misses -> RMSE; RMSE/MAE well above 1 signals a few large errors.
+
+@ DBX-MLA D3 T3.11 expert troubleshooting
+S: A fraud classifier is evaluated on 10,000 validation transactions, of which 200 are fraud. At the default 0.5 threshold, the confusion matrix is: true positives 80, false negatives 120, false positives 40, true negatives 9,760. A manager reads the 98.4% accuracy as proof that the model is ready. The fraud team, which can investigate every flagged case, cares about both how many flagged cases are real fraud and how much fraud is caught, and wants statements it can defend with this matrix alone. Which THREE statements are correct? (Select THREE)
+A: Precision for the fraud class is about 0.67, because 80 of the 120 transactions flagged as fraud are actually fraud
+B: Recall for the fraud class is 0.40, because the model catches 80 of the 200 fraudulent transactions
+C: F1 for the fraud class is 0.50, because it is the harmonic mean of a precision of about 0.67 and a recall of 0.40
+D: Accuracy of 98.4% shows strong fraud detection, because it is far above the 50% that a random guess would reach here
+E: Recall for the fraud class is about 0.67, because 80 of the 120 transactions flagged as fraud are actually fraud
+F: Raising the threshold to 0.7 will raise recall, because only the most confident transactions are then flagged as fraud
+K: A,B,C
+G: ## From the confusion matrix
+- **Precision** = TP / (TP + FP) = 80 / 120 = **0.667**: share of flagged cases that are fraud.
+- **Recall** = TP / (TP + FN) = 80 / 200 = **0.40**: share of fraud that is caught.
+- **F1** = 2 x P x R / (P + R) = 2 x 0.667 x 0.40 / 1.067 = **0.50**.
+- **Accuracy** = (80 + 9,760) / 10,000 = 98.4%.
+## Why accuracy misleads here
+Fraud is 2% of the data. A model that flags nothing reaches 98% accuracy, so 98.4% is barely above that baseline, while 60% of fraud is missed.
+## Thresholds
+Raising the threshold flags fewer cases: precision usually rises and recall falls (or stays). Lowering it does the reverse.
+W: A=Precision 0.67: 80 true positives out of 120 flagged.
+B=Recall 0.40: 80 caught out of 200 actual fraud cases.
+C=F1 0.50: the harmonic mean of 0.667 and 0.40 is 0.50.
+X: D=Accuracy vs random: the relevant baseline is the 98% of always predicting "not fraud", not 50%; the model barely beats it.
+E=Recall 0.67: that ratio divides by flagged cases, which is precision, not recall.
+F=Higher threshold raises recall: flagging fewer cases cannot catch more fraud; recall falls or stays the same.
+T: Precision = TP/(TP+FP), recall = TP/(TP+FN); with 2% positives, accuracy hides poor recall.
+
+@ DBX-MLA D3 T3.15 expert troubleshooting
+S: A Spark ML `GBTClassifier` with `maxDepth=10`, `maxIter=200` and `stepSize=0.3` reaches training AUC 0.995 and validation AUC 0.78. Learning curves show validation AUC still rising steadily as more training rows are added, with the gap to training AUC shrinking. However, no new labeled data will be available for six months, the feature set is frozen by the risk committee, and the model must remain a gradient-boosted tree ensemble. Training already uses every labeled row available. The team needs the best validation AUC it can get now. Which change addresses the diagnosed problem within these constraints?
+A: Reduce model complexity, for example maxDepth 4 with a lower stepSize and subsamplingRate below 1, and select the settings by validation AUC
+B: Increase model complexity, for example maxDepth 14 with maxIter 400, and select the settings by validation AUC on the same validation split
+C: Reduce model complexity, for example maxDepth 4 with a lower stepSize, and select the settings by training AUC so the fit stays close to the data
+D: Keep the current settings and add more labeled rows from the next six months of production traffic, since the learning curve is still rising
+K: A
+G: ## Diagnosing from the evidence
+- Training AUC near 1.0, validation AUC far lower: a **large gap**.
+- Validation improves as data grows and the gap narrows: classic **high variance (overfitting)**.
+## Remedies for high variance
+More data would help, but none is available. The other levers reduce the model's freedom to memorize:
+- **Shallower trees** (`maxDepth`), **fewer or smaller boosting steps** (`stepSize`, `maxIter`).
+- **Row subsampling** (`subsamplingRate < 1`) for stochastic gradient boosting.
+- **Minimum leaf size** (`minInstancesPerNode`).
+Choose the settings by **validation** performance (or cross-validation), never by training performance, which always favors the most complex model.
+W: Simpler, regularized boosting chosen on validation AUC: it reduces variance with the data and features available and picks the setting that generalizes best.
+X: B=More complexity: deeper trees and more iterations widen the gap of an already overfitting model.
+C=Select by training AUC: the regularization is right, but training AUC rewards the most complex model, so selection undoes it.
+D=More rows: the curve says it would help, but no labels exist for six months, which the stem rules out.
+T: Big train-validation gap that shrinks with more data = high variance: regularize and select on validation data when more data is unavailable.
+
+@ DBX-MLA D3 T3.13 expert comparison
+S: A card issuer's investigation team can review exactly 500 flagged transactions per day out of about 100,000, and the goal is to confirm as many fraud cases per day as possible. The team does not use probabilities beyond ranking. Two candidate models are evaluated on the same last-month data: Model A has ROC AUC 0.91 and precision 0.42 among each day's 500 highest-scored transactions; Model B has ROC AUC 0.88 and precision 0.61 among each day's 500 highest-scored transactions. Both have similar latency and cost. Which model should be deployed, and why?
+A: Model B, because with a fixed capacity of 500 reviews per day it confirms about 305 fraud cases daily versus about 210
+B: Model A, because its higher ROC AUC means it ranks fraud above non-fraud more often, which matters more than results at a single cutoff
+C: Model B, because its ROC AUC of 0.88 is high enough to pass review, and precision is the tie-breaker once both AUC values are close
+D: Model A, because its higher ROC AUC guarantees more fraud among the top 500, and the precision values reflect only sampling noise
+K: A
+G: ## Metrics at a fixed capacity
+ROC AUC summarizes ranking quality over **all** thresholds, including regions the business never uses (for example the top 50,000). When the team acts on a fixed number of cases, the relevant metric is **precision at k** (here k = 500): the share of real fraud among the k highest-scored items.
+## Working the numbers
+- Model A: 0.42 x 500 = **210** confirmed cases per day.
+- Model B: 0.61 x 500 = **305** confirmed cases per day.
+A model can have a higher AUC overall and still be worse at the very top of the ranking, which is the only part that matters here.
+W: Model B: at the fixed cutoff of 500 reviews it finds about 95 more fraud cases per day, which is the stated goal.
+X: B=AUC over all thresholds: AUC includes ranking quality far below the 500 cases the team can review, so it does not measure the goal.
+C=AUC as a pass mark: this picks the right model for the wrong reason; the decision rests on precision at 500, not on AUC being "high enough".
+D=AUC guarantees the top: AUC does not guarantee better precision at a specific cutoff, and the evaluation covers a full month of days.
+T: Fixed review capacity = compare precision at k, not ROC AUC.
+
+@ DBX-MLA D4 T4.2 expert use-case
+S: A payments team runs a custom model on a Model Serving endpoint that a data scientist created with her personal account; she leaves the company next week. At peak the endpoint receives 300 queries per second, and each prediction takes about 40 milliseconds of model run time. Scale to zero is enabled, and every morning at 09:00 the first burst of requests sees long delays. The endpoint must keep accepting configuration updates after she leaves, morning bursts must not wait for capacity, and finance asks not to provision far more than the documented sizing rule suggests. Which TWO changes meet these requirements? (Select TWO)
+A: Re-create the endpoint under a service principal with USE CATALOG, USE SCHEMA and EXECUTE on the model, as the creator is fixed
+B: Disable scale to zero and choose a compute scale-out that handles about 12 concurrent requests, based on 300 queries x 0.04 seconds
+C: Give a service principal CAN MANAGE permission on the existing endpoint, so that it becomes the endpoint's recorded creator going forward
+D: Keep scale to zero and send a warm-up request at 08:55 each day, so that the endpoint has capacity ready before the morning burst begins
+E: Disable scale to zero and choose a compute scale-out that handles about 300 concurrent requests, one for each query arriving per second
+K: A,B
+G: ## The recorded creator
+When an endpoint is created, Databricks records the calling identity as its **creator** and uses it to access Unity Catalog resources for the endpoint. It **cannot be changed** after creation. Configuration updates re-check that the creator is still a workspace member and fail with `PERMISSION_DENIED` otherwise. If the creator is removed, the endpoint must be deleted and re-created under a principal (typically a service principal) that holds `USE CATALOG`, `USE SCHEMA` and `EXECUTE` on the model.
+## Scale to zero and sizing
+- Scale to zero is **not recommended for production**: capacity is not guaranteed and scaling back up adds a cold start.
+- Scale-out should cover about **QPS x model run time** concurrent requests: 300 x 0.04 s = **12**.
+W: A=Re-create under a service principal: the creator is fixed at creation, so only a new endpoint created by a service principal with the model grants survives her departure.
+B=No scale to zero, about 12 concurrent: capacity stays ready for the 09:00 burst, and 300 x 0.04 = 12 follows the sizing rule.
+X: C=CAN MANAGE for a service principal: endpoint permissions control who may manage it; they do not change the recorded creator, so updates still fail after she leaves.
+D=Warm-up request: scale to zero gives no capacity guarantee in production, and a warm-up timed for one burst does not cover other ones.
+E=300 concurrent requests: it confuses queries per second with concurrency and provisions about 25 times the documented estimate.
+T: Production endpoints: create with a service principal, size concurrency as QPS x run time, avoid scale to zero.
+
+@ DBX-MLA D4 T4.4 expert tradeoff
+S: A Lakeflow pipeline reads transactions from a Kafka topic with 7-day retention and scores them into the streaming table `scored_txn`, which holds two years of history and keeps every input feature column next to the score. The team changes the model in the table's query from version 1 to version 2. New transactions must be scored with version 2 starting with the next update, and the two-year history must be kept. Auditors also need version 2 scores for all historical rows in a separate report, and nobody may later wipe `scored_txn` by accident with a full refresh. Which plan meets every requirement?
+A: Run a normal update with the new query, set pipelines.reset.allowed to false on scored_txn, and rescore history in a batch job
+B: Run a full refresh of scored_txn with the new query, set pipelines.reset.allowed to false on scored_txn, and use its rows for the report
+C: Reset the streaming flow checkpoints of scored_txn with the new query, set pipelines.reset.allowed to false, and use its rows for the report
+D: Raise the Kafka retention to two years, run a full refresh of scored_txn with the new query, and then use its rows for the auditors' report
+K: A
+G: ## Streaming tables and query changes
+A streaming table processes **each input row once**. After a change to its query, a normal update applies the new logic to **new** rows only; existing rows keep their old values.
+## Refresh options
+- **Full refresh**: clears the streaming table and its checkpoints and reprocesses all records **still available in the source**. With Kafka's 7-day retention, rows older than 7 days are dropped from the target.
+- **Reset streaming flow checkpoints**: keeps the table's data but reprocesses all available source records, so recent rows are processed again without touching older ones.
+- Table property **`pipelines.reset.allowed = false`** prevents full refreshes of the table.
+## Rescoring history safely
+Read the existing rows of `scored_txn` (which still contain the input features) in a separate batch job and score them with version 2 into a report table.
+W: Normal update + reset protection + batch rescoring: new rows use version 2 at once, history stays intact and protected from full refresh, and auditors get version 2 scores from a separate job.
+X: B=Full refresh: it clears the table and can only reprocess the last 7 days from Kafka, so most of the two-year history is lost.
+C=Reset checkpoints: data is kept, but only the last 7 days are reprocessed, adding a second copy of recent rows while older rows keep version 1 scores.
+D=Raise Kafka retention then full refresh: records that already expired from Kafka cannot come back, so the full refresh still drops them.
+T: Never full-refresh a streaming table whose source has short retention; protect it with pipelines.reset.allowed=false and rescore history in batch.
