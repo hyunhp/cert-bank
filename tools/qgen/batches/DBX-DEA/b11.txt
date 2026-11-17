@@ -1,0 +1,429 @@
+# DBX-DEA batch 11 (expert tier, level expert): 20 evidence-based questions (D1 1, D2 4, D3 4, D4 3, D5 2, D6 3, D7 3); single answer; docs read 2026-11-17
+# src: https://docs.databricks.com/aws/en/delta/history
+# src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/schema
+# src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/options
+# src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/faq
+# src: https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/sql-server-faq
+# src: https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/sql-server-source-setup
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/try_parse_json
+# src: https://docs.databricks.com/aws/en/delta/merge
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/row_number
+# src: https://docs.databricks.com/aws/en/optimizations/aqe
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/grouping
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-groupby
+# src: https://docs.databricks.com/aws/en/jobs/run-if
+# src: https://docs.databricks.com/aws/en/jobs/dynamic-value-references
+# src: https://docs.databricks.com/aws/en/jobs/for-each
+# src: https://docs.databricks.com/aws/en/jobs/advanced
+# src: https://docs.databricks.com/aws/en/dev-tools/bundles/deployment-modes
+# src: https://docs.databricks.com/aws/en/admin/system-tables/jobs-cost
+# src: https://docs.databricks.com/aws/en/optimizations/spark-ui-guide/one-spark-task
+# src: https://docs.databricks.com/aws/en/delta/clustering
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/filters-and-masks/
+# src: https://docs.databricks.com/aws/en/catalogs/binding
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-undrop-table
+
+@ DBX-DEA D1 T1.1 expert troubleshooting
+S: On Monday a faulty job overwrote rows in the managed Delta table `silver.orders`, and an engineer ran `RESTORE TABLE silver.orders TO VERSION AS OF 812`, which reported success. A separate Structured Streaming job reads `silver.orders` as a stream with `skipChangeCommits` disabled and appends every new file's rows to `gold.order_events`, which feeds billing. After the restore, `gold.order_events` contains about 3 million duplicate rows, all from files that had been part of versions up to 812. The source table history shows only the bad write and the RESTORE since Friday, and billing must not see duplicates again during future restores. Which explanation and change fit the evidence?
+A: The restore commit re-adds old files with `dataChange` set to true, so the stream reads them as new data; dedupe gold by key, for example with an insert-only MERGE
+B: The restore commit re-adds old files with `dataChange` set to false, so the stream skipped them and gold lost rows; replay the stream from version 812
+C: The restore rewrote every file of the table into new files, so the stream read the whole table again; run VACUUM after each restore to remove the copies
+D: The restore reset the table's streaming checkpoint to version 812, so the stream read every later version again; keep checkpoints outside the table location
+K: A
+G: ## What RESTORE writes
+`RESTORE` returns a Delta table to an earlier version by committing a **new version** that removes the files added since then and adds back the files of the old version. The history docs warn that restore is a data-changing operation: its log entries have `dataChange` set to `true`.
+## Effect on streaming readers
+A Structured Streaming query that reads the table processes new commits as new data. The re-added files arrive in a commit with `dataChange = true`, so the stream treats them as **newly added data and processes them again**, which can create duplicates downstream. The checkpoint of the reader is unaffected; it lives with the stream, not in the table.
+## Protecting the downstream table
+Because a restore can replay rows, the downstream write must be idempotent: for example an insert-only MERGE on the event key (deduplicating the micro-batch first) instead of a blind append.
+W: dataChange true on restore: the stream sees the re-added files as new data and appends them again; an idempotent write by key in gold absorbs future restores.
+X: B=dataChange false: restore commits are documented with dataChange true, and the evidence is duplicates, not missing rows.
+C=Full rewrite plus VACUUM: restore re-adds existing files rather than rewriting the table, and VACUUM removes unreferenced files, not duplicate rows already in gold.
+D=Checkpoint reset: a stream's checkpoint belongs to the stream, not the source table, and RESTORE does not touch it.
+T: RESTORE commits re-added files as data changes, so streaming readers reprocess them; make downstream writes idempotent.
+V: Delta Lake, Structured Streaming
+
+@ DBX-DEA D2 T2.3 expert troubleshooting
+S: An Auto Loader stream ingests CSV files from 40 branch systems into `bronze.sales` with an inferred schema, `cloudFiles.schemaLocation`, and the default rescued data column. The schema chose the header `customerId` from the sampled files. A data quality check shows that 6% of rows have `customerId` NULL, and for exactly those rows `_rescued_data` holds JSON such as `{"CustomerID":"C-1182","_file_path":"..."}`. Every affected file comes from three older branches whose exports use different header casing. The stream must keep its checkpoint, the bronze schema must not gain a second customer column, and no value may be lost. Which change fits?
+A: Set `cloudFiles.schemaEvolutionMode` to `addNewColumns`, so that `CustomerID` is added as a second column on the next restart of the stream
+B: Set `readerCaseSensitive` to false, so that headers that differ only by case are read into `customerId` instead of being rescued
+C: Set `readerCaseSensitive` to true, so that headers that differ only by case are kept apart and stored in the rescued data column
+D: Add `customerId STRING` to `cloudFiles.schemaHints`, so that Auto Loader prefers the declared casing for every file it reads later
+K: B
+G: ## Case handling in Auto Loader
+During schema inference Auto Loader treats `abc`, `Abc` and `ABC` as one column and picks one casing from the sample. After that, the docs describe this behavior: **when the rescued data column is enabled, fields named in a case other than the schema's are loaded into `_rescued_data`** instead of the column. That explains NULL in `customerId` plus `CustomerID` in the rescued JSON.
+## The option that changes it
+`readerCaseSensitive` controls case sensitivity when `rescuedDataColumn` is enabled:
+- `true`: data columns whose names differ by case are rescued (the observed behavior);
+- `false`: data is read case-insensitively, so `CustomerID` fills `customerId`.
+The schema, checkpoint and column list stay the same. Rows already loaded can be repaired from `_rescued_data` with a one-off update.
+W: readerCaseSensitive false: the three branches' `CustomerID` headers map to the existing `customerId` column, so nothing is rescued, no column is added, and the stream keeps its checkpoint.
+X: A=addNewColumns: case variants are not treated as new columns; even if they were, a second customer column is exactly what the team forbids.
+C=readerCaseSensitive true: that is the setting that rescues case variants, which produces the NULLs.
+D=Schema hint for customerId: a hint fixes type or casing during inference, but the schema already uses that casing; it does not change how case variants are read.
+T: Case-mismatched columns land in `_rescued_data`; set `readerCaseSensitive` to false to read them into the schema's column.
+V: Auto Loader
+
+@ DBX-DEA D2 T2.1 expert troubleshooting
+S: A vendor sends a daily `positions.csv` into the same volume path, and when it finds an error it overwrites the file under the same name, sometimes twice a day. The Auto Loader stream uses directory listing with default options and appends to `bronze.positions`. Auditors found that corrected values never reached bronze, although the files in the volume are correct. The vendor refuses to change its naming. The bronze table must hold the latest version of each row by `position_id`, the stream must keep its checkpoint, and storage on the vendor side cannot be changed. Which configuration fits the evidence?
+A: Keep `cloudFiles.allowOverwrites` false and start the stream with a new checkpoint each night, so that every file in the path is treated as new again
+B: Set `cloudFiles.allowOverwrites` to true and keep appending each micro-batch, so that the corrected versions of a file are added to the bronze table
+C: Set `cloudFiles.allowOverwrites` to true and MERGE each micro-batch into bronze by `position_id`, so that a reprocessed file updates rows instead of duplicating them
+D: Set `cloudFiles.includeExistingFiles` to true on the running stream, so that overwritten files already present in the path are listed and loaded again
+K: C
+G: ## How Auto Loader decides that a file is new
+Auto Loader normally ingests each file **once, based on its path**. With the default `cloudFiles.allowOverwrites = false`, a file that is later appended to or overwritten is not processed again, and which version was read is not guaranteed. That explains why corrections never arrived.
+## allowOverwrites
+With `cloudFiles.allowOverwrites = true`, Auto Loader also uses the file's last-modified timestamp, so an overwritten file is processed again, and the **latest** version is guaranteed to be processed (intermediate versions are not). The FAQ adds two warnings:
+- the entire file is reprocessed, so **you must handle duplicate records yourself**;
+- in file notification mode the same file can be ingested twice even without an update.
+Databricks generally recommends immutable files; when the producer cannot change, an upsert by key keeps the target correct.
+W: allowOverwrites plus MERGE by key: overwritten files are picked up again, and the upsert turns the reprocessed rows into updates, so bronze holds the latest version per position.
+X: A=New checkpoint nightly: every file in the path would be reprocessed each night, creating duplicates and discarding the stream's progress.
+B=allowOverwrites with append: corrections arrive, but each reprocessed file appends all its rows again, so bronze holds several versions of each position.
+D=includeExistingFiles on a running stream: the option is evaluated only on the first start of a stream and does not cause already processed files to be reloaded.
+T: For files overwritten in place, enable `cloudFiles.allowOverwrites` and make the write an upsert by key.
+V: Auto Loader
+
+@ DBX-DEA D2 T2.4 expert troubleshooting
+S: A managed SQL Server connector ingests 30 tables with Lakeflow Connect. Reconciliation for the table `dbo.scan_events` shows 1,204,331 rows in the source and 1,198,907 in the destination; all other tables match. The DBA confirms the table has no primary key, no unique key and no unique index, and that the barcode scanners sometimes send the same event twice, producing fully identical rows. CDC is enabled on that table, and the pipeline reports no errors. The source application cannot be changed this year, and analysts need every scan, including repeats, for throughput reports. Which explanation fits the evidence?
+A: CDC dropped the repeated inserts because CDC requires a primary key, so switching the table to change tracking would capture every repeated scan
+B: The connector treats all non-LOB columns as a bundled key when no key exists, so identical rows become one row; add a distinguishing column at the source
+C: The connector deduplicates every table by the first column when no key exists, so repeats with the same scan ID collapse; reorder the source columns
+D: The gateway skipped rows that arrived during its restarts, so a full refresh of the table would restore the missing repeated scans to the destination
+K: B
+G: ## Keys in the SQL Server connector
+The managed connector needs a key to apply changes to the destination. The FAQ explains what happens when a table has none:
+- if the table has a unique key or unique index, the connector uses it as the primary key;
+- otherwise it treats **all columns except large objects as a bundled primary key**;
+- **duplicate rows in the source are ingested as a single row** in the destination.
+## Change tracking versus CDC
+Change tracking requires a primary key; CDC does not. So CDC is the right source-side feature for a keyless table, and it is not the cause here.
+## What to do
+The missing count equals the number of fully identical repeats. Only a value that makes the rows different, such as a scan sequence number or a unique ID column, lets the destination keep them apart; it can be added to the table even if the application itself does not change.
+W: Bundled key collapses duplicates: without any key, identical rows share the same bundled key and are stored once; a distinguishing column restores them.
+X: A=Switch to change tracking: change tracking requires a primary key, which this table lacks, and CDC is not what drops the rows.
+C=First column as key: the connector bundles all non-LOB columns, not the first one, and column order does not change that.
+D=Gateway restarts and full refresh: a full refresh would collapse the same identical rows again, because the key logic is unchanged.
+T: For keyless source tables, the connector uses all non-LOB columns as the key, so fully identical rows land as one row.
+V: Lakeflow Connect
+
+@ DBX-DEA D2 T2.7 expert troubleshooting
+S: A bronze table stores webhook payloads as STRING in `body`. A silver job runs `INSERT INTO silver.events SELECT id, parse_json(body) AS payload FROM bronze.events WHERE ingest_date = current_date()`, and tonight it failed with a malformed JSON error; the bronze history shows 14 rows from a partner whose payloads are cut off. Requirements: the nightly job must not fail on bad payloads, silver must keep valid rows as VARIANT, every bad row must be kept for the partner with its raw text, and the job runs on a SQL warehouse without Python. Which rewrite fits?
+A: Use `try_parse_json(body)` in the INSERT, and write rows where it returns NULL for a non-NULL body, with the raw text, to a quarantine table
+B: Use `parse_json(body)` inside a TRY block of a SQL script, and skip the whole night's insert whenever a single payload fails to parse
+C: Use `try_parse_json(body)` in the INSERT and filter out rows where it returns NULL, so that only valid payloads ever reach the silver table
+D: Use `from_json(body, 'MAP<STRING,STRING>')` in the INSERT, so that malformed payloads become NULL maps and stay in silver next to the valid rows
+K: A
+G: ## parse_json versus try_parse_json
+- `parse_json(jsonStr)` returns a VARIANT and **raises an error** if the string is not valid JSON, so one bad row fails the statement.
+- `try_parse_json(jsonStr)` returns the VARIANT when possible and **NULL** when parsing fails. The docs point to `parse_json` when an error is wanted instead.
+## Quarantine pattern
+A NULL from `try_parse_json` on a non-NULL `body` marks a bad payload. Routing those rows (with `body`) to a quarantine table and the rest to silver meets all three needs: no failure, valid VARIANT data, and nothing lost. Both inserts are plain SQL on a warehouse.
+## Why not a map
+`from_json` into `MAP<STRING,STRING>` flattens nested values into strings, so valid payloads lose their structure, and the VARIANT requirement is broken.
+W: try_parse_json plus quarantine: bad payloads no longer fail the job, valid ones land as VARIANT, and the 14 broken rows are kept with their raw text for the partner.
+X: B=Skip the whole night on any failure: valid rows are delayed by a single bad payload, which the requirement rules out.
+C=try_parse_json and drop NULLs: the job succeeds, but the bad rows disappear instead of being kept for the partner.
+D=from_json to a map: valid payloads lose their nested structure and are not stored as VARIANT, and bad rows are mixed into silver.
+T: Use `try_parse_json` to avoid failures and route NULL results with their raw text to a quarantine table.
+V: Databricks SQL, VARIANT
+
+@ DBX-DEA D3 T3.1 expert troubleshooting
+S: A nightly job upserts customer changes into `silver.customers` with `MERGE INTO silver.customers t USING staging.customer_changes s ON t.customer_id = s.customer_id WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *`. Tonight it failed with: "Cannot perform Merge as multiple source rows matched and attempted to modify the same target row". `staging.customer_changes` is rebuilt every night from a CRM export, and the export now contains several change rows per customer when a customer was edited more than once in a day; each row has `changed_at`. Silver must hold the latest state per customer, the MERGE must stay one statement, and the CRM export cannot be changed. Which fix fits?
+A: Add `WHEN MATCHED AND s.changed_at > t.changed_at` to the MERGE, so that only the newer source rows update a target row
+B: Rewrite the source of the MERGE as a subquery that keeps one row per `customer_id` with the latest `changed_at`, using `row_number()` and `QUALIFY`
+C: Run the MERGE once for each distinct `changed_at` value of the night, in ascending order, so that each run sees at most one row per customer
+D: Replace the MERGE with `INSERT OVERWRITE silver.customers SELECT DISTINCT * FROM staging.customer_changes`, so that duplicate rows are removed
+K: B
+G: ## The MERGE rule behind the error
+Only **one source row may match a given target row**. If several source rows match and the merge tries to update the same target row, the operation is ambiguous (which row should win?) and MERGE fails. The docs recommend preprocessing the source to remove the possibility of multiple matches.
+In recent runtimes, MERGE evaluates both the ON clause and the WHEN MATCHED conditions to detect duplicate matches. A condition such as `s.changed_at > t.changed_at` can still let **two** newer source rows qualify for the same target row, so it does not remove the ambiguity.
+## Preprocess the source
+`SELECT * FROM staging.customer_changes QUALIFY row_number() OVER (PARTITION BY customer_id ORDER BY changed_at DESC) = 1` keeps the latest change per customer. Used as the MERGE source, it gives exactly one candidate per target row, in one statement.
+W: Latest row per key as the source: each customer has one source row, so the ambiguity is gone and silver gets the latest state in a single MERGE.
+X: A=Newer-than condition: two edits on the same day can both be newer than the target, so the same target row is still matched by several source rows.
+C=One MERGE per timestamp: it works only if timestamps align across customers, multiplies the runs, and is no longer one statement.
+D=INSERT OVERWRITE with DISTINCT: it replaces silver with only tonight's changes, and DISTINCT does not collapse rows that differ in `changed_at`.
+T: When MERGE reports multiple source rows for one target row, deduplicate the source to one row per key before merging.
+V: Delta Lake MERGE
+
+@ DBX-DEA D3 T3.1 expert troubleshooting
+S: A silver job keeps the latest status per shipment with `SELECT * FROM bronze.shipment_events QUALIFY row_number() OVER (PARTITION BY shipment_id ORDER BY event_ts DESC) = 1`. Operations reports that for about 0.3% of shipments the reported status flips between `DELIVERED` and `OUT_FOR_DELIVERY` from one run to the next. Delta history shows no new commit on `bronze.shipment_events` between the two runs, and the affected shipments all have two events with the same `event_ts` at second precision. The carrier also sends a monotonically increasing `seq_no` per shipment. The result must be repeatable, and bronze must not be rewritten. Which change fits?
+A: Replace `row_number()` with `rank()`, so that both tied events get rank 1 and the query returns the same pair of rows every run
+B: Add `seq_no DESC` after `event_ts DESC` in the window ORDER BY, so that ties on the timestamp are broken by the carrier's sequence
+C: Add `ORDER BY shipment_id` to the outer query, so that Spark processes the rows in a fixed order and row_number assigns the same numbers
+D: Cache `bronze.shipment_events` before the query, so that both runs read the same data files and the window function picks the same row
+K: B
+G: ## Ties and row_number
+`row_number()` assigns a unique sequential number in the order of the window. The docs say: unlike `rank` and `dense_rank`, row_number **breaks ties**, and **if the order is not unique, the result is non-deterministic**. Two events of one shipment with the same `event_ts` can be numbered either way, so the "latest" row changes between runs even though the data did not.
+## Make the order unique
+Add a column that orders rows within the tie. A monotonically increasing `seq_no` per shipment is ideal: `ORDER BY event_ts DESC, seq_no DESC`. Now exactly one row is first, every time.
+## Why the other ideas fail
+- `rank()` gives tied rows the same rank, so `= 1` returns **two** rows per shipment, which breaks the one-row-per-shipment rule.
+- Sorting the outer result or caching does not change the order within each window partition.
+W: Tie-breaker in the window: the order becomes unique, so the same event is numbered 1 every run and the status stops flipping.
+X: A=rank(): tied events both get 1, so silver would hold two rows per affected shipment.
+C=Outer ORDER BY: it sorts the final output; the numbering inside each partition is still undefined for ties.
+D=Cache the source: the data is already unchanged; the non-determinism comes from the tie, not from different files.
+T: `row_number()` over a non-unique order is non-deterministic; add a tie-breaker column.
+V: Databricks SQL
+
+@ DBX-DEA D3 T3.5 expert troubleshooting
+S: A report must list all 4,000 promotions, including those without sales: `SELECT p.promo_id, s.amount FROM promotions p LEFT OUTER JOIN sales s ON p.promo_id = s.promo_id`, then a GROUP BY. `promotions` is 3 MB and `sales` is 4 TB. The engineer added `/*+ BROADCAST(p) */`, yet the plan still shows a sort merge join that shuffles both sides, and AQE does not switch to a broadcast join either. Statistics are current, AQE is on, and the threshold is far above 3 MB. The result must still include promotions without sales, and the team wants the 4 TB shuffle gone. Which explanation and change fit?
+A: The hint is ignored because statistics are stale; run ANALYZE TABLE on `promotions` and keep the left outer join with the broadcast hint on `p`
+B: The preserved side of a left outer join cannot be broadcast; aggregate `sales` by `promo_id` first, then left-join `promotions` to that small result
+C: The broadcast threshold applies to the larger side; raise it above 4 TB so that the join can broadcast `sales` to every executor
+D: The preserved side of a left outer join cannot be broadcast; switch to an inner join with the hint on `p`, which keeps promotions without sales
+K: B
+G: ## Which side can be broadcast
+In a broadcast hash join, the broadcast side is the build side. For outer joins, the **preserved** side cannot be the build side, because the join must emit its unmatched rows. The AQE docs list this explicitly: some join types cannot broadcast one side; for example, **AQE can't broadcast the left side of a LEFT OUTER JOIN**. Hints are respected only where the join type allows them.
+## Make the right side small
+Here the preserved side is the tiny `promotions` table, and the right side is 4 TB, so neither side qualifies for a broadcast as written. Aggregating `sales` by `promo_id` first shrinks the right side to at most a few thousand rows. The left outer join can then broadcast that small right side, and promotions without sales still appear (with NULL amounts).
+W: Aggregate sales first: the right side becomes tiny and broadcastable, the left outer join still keeps promotions without sales, and the large shuffle for the join disappears.
+X: A=Stale statistics: the statistics are current, and no statistic lets the preserved side of a left outer join be broadcast.
+C=Raise the threshold: broadcasting 4 TB to every executor is not feasible, and the threshold is about the side that is broadcast, not the larger side.
+D=Inner join: an inner join drops promotions without sales, which the report must include.
+T: The preserved side of an outer join cannot be broadcast; shrink the other side (for example by aggregating it) so that it can be.
+V: Apache Spark, AQE
+
+@ DBX-DEA D3 T3.4 expert troubleshooting
+S: A gold table holds revenue with subtotals from `SELECT region, country, sum(revenue) FROM silver.sales GROUP BY ROLLUP(region, country)`. Finance says the grand total is counted twice on the dashboard: rows with `region` NULL are shown under the label "All regions", and the dashboard sums them with the real grand total. Profiling shows that 2% of silver rows really have `region` NULL because of a legacy import, and those rows must be reported as "Unknown region", not dropped. The dashboard cannot change its labeling logic, and silver must stay unchanged. Which change to the gold query fits?
+A: Replace ROLLUP with `GROUPING SETS ((region, country), ())`, so that the query produces only detail rows and the grand total without region subtotals
+B: Add `WHERE region IS NOT NULL` to the query, so that the only NULL in `region` left in the result is the one produced by the rollup
+C: Add `grouping(region)` to the output and label rows where it is 1 as "All regions" and NULL regions where it is 0 as "Unknown region"
+D: Replace ROLLUP with `CUBE(region, country)`, so that every combination gets its own subtotal row and NULL regions are separated
+K: C
+G: ## Two kinds of NULL in ROLLUP output
+`GROUP BY ROLLUP(region, country)` returns detail rows, a subtotal per region (country NULL) and a grand total (both NULL). A NULL in the output can therefore mean **"all values" (a subtotal)** or **"the data really is NULL"**. Here both meanings occur in `region`, so the dashboard mislabels the real NULL-region group as a total.
+## grouping() tells them apart
+`grouping(col)` returns **1** when the row is a subtotal over `col`, and **0** when it is not. So:
+`CASE WHEN grouping(region) = 1 THEN 'All regions' WHEN region IS NULL THEN 'Unknown region' ELSE region END`
+labels each row correctly without changing silver or dropping data. (`grouping_id` gives a bit vector for several columns.)
+## Alternatives
+`GROUPING SETS` and `CUBE` change which subtotals exist, but they still produce NULL for "all values", so the ambiguity remains.
+W: grouping(region): it separates rollup subtotals (1) from real NULL regions (0), so the legacy rows are labeled Unknown region and the total is no longer counted twice.
+X: A=GROUPING SETS: the grand-total row still has NULL in `region`, so the real NULL region and the total remain indistinguishable.
+B=Filter NULL regions: it removes 2% of the revenue, which the requirement forbids.
+D=CUBE: it adds more subtotal rows with NULL, making the ambiguity worse rather than resolving it.
+T: Use `grouping()` to tell rollup subtotals from genuine NULL values.
+V: Databricks SQL
+
+@ DBX-DEA D4 T4.1 expert troubleshooting
+S: A job has the task `load` (notebook), an If/else condition task `check_load` that depends on `load` and tests `{{tasks.load.result_state}} == "success"`, a true branch `publish`, and a false branch `page_oncall`. Last night `load` failed after retries; the run graph shows `check_load` as Upstream failed and neither `publish` nor `page_oncall` ran, so nobody was paged. The on-call team wants paging driven by this graph, not by job notifications, and `publish` must never run after a failed load. Which change fixes the behavior?
+A: Set the Run if condition of `check_load` to All done, so that the condition task runs after `load` finishes, whatever its result
+B: Set the Run if condition of `page_oncall` to All done, so that the false branch runs after `check_load` finishes, whatever its result
+C: Set the Run if condition of `check_load` to At least one failed, so that the condition task runs only after `load` has failed
+D: Set the Run if condition of `check_load` to None failed, so that the condition task runs after `load` unless another dependency failed
+K: A
+G: ## Run if decides whether a task starts at all
+Every task has a Run if condition over its dependencies:
+- **All succeeded** (default): run only if all dependencies succeeded; otherwise the task is marked **Upstream failed**.
+- **None failed**, **At least one succeeded**: similar, marked Upstream failed when unmet.
+- **At least one failed**: run if a dependency failed; otherwise the task is **Excluded**.
+- **All done**: run after all dependencies have run, **regardless of their status**.
+## The trap
+With the default, `check_load` never evaluates when `load` fails, so its branches never start. The condition already handles both outcomes through `{{tasks.load.result_state}}` (values such as `success` or `failed`); it just needs to run. With All done, a failed load sends the run to `page_oncall`, a successful one to `publish`.
+W: check_load on All done: the condition task always evaluates after `load`, so a failure takes the false branch and pages on-call, while publish still needs success.
+X: B=page_oncall on All done: the change is on the wrong task; `check_load` still is not evaluated after a failed load, so the branch decision by result state never happens.
+C=At least one failed: on a successful load `check_load` is excluded, so `publish` never runs on good nights.
+D=None failed: `load` did fail, so the condition is unmet and `check_load` is again Upstream failed.
+T: A condition task that must react to an upstream failure needs Run if = All done.
+V: Lakeflow Jobs
+
+@ DBX-DEA D4 T4.2 expert troubleshooting
+S: A job has a For each task `per_region` over `["emea","apac","amer"]` with Concurrency 3. Its nested notebook calls `dbutils.jobs.taskValues.set(key="row_count", value=n)`. A downstream notebook task `audit` has the parameter `counts` = `{{tasks.per_region.values.row_count}}` and compares the value with a threshold using `int(dbutils.widgets.get("counts"))`. Since the For each task was introduced, `audit` fails with `ValueError: invalid literal for int()`, and the logged value looks like `[120344,98211,143002]`. The audit must check every region separately, and the per-region notebook must stay unchanged. Which explanation and fix fit?
+A: Task values from a For each task are not visible downstream; set the value in a separate task after `per_region` and reference that task
+B: The reference resolves to the value of the last finished iteration only; set Concurrency to 1 so that the last value is always `amer`
+C: The reference resolves to a JSON array with one value per iteration in iteration order; parse it as JSON in `audit` and check each element
+D: The reference resolves to the sum of all iterations formatted as text; cast it with `float()` in `audit` instead of `int()` to read the total
+K: C
+G: ## Task values and For each
+A task sets a value with `dbutils.jobs.taskValues.set(key, value)`; downstream tasks read it with `{{tasks.<task_name>.values.<key>}}`.
+When `<task_name>` is a **For each** task, the dynamic value reference docs state that it **resolves to a JSON array of the value that each iteration set, ordered by iteration index**. Concurrency changes when iterations run, not the order of the array.
+## Reading it
+The parameter arrives as a string like `[120344,98211,143002]`. Parsing it with `json.loads` gives a list, and the audit can check each region (index 0 = `emea`, and so on, matching the input order). `int()` fails because the string is an array, not a number.
+W: JSON array by iteration index: the reference returns every iteration's value in input order, so parsing it as JSON lets the audit check each region.
+X: A=Not visible downstream: the values are visible, as the logged array shows; they just arrive as an array.
+B=Last iteration only: the docs describe an array of all iterations; changing concurrency would only slow the job down.
+D=Sum as text: the values are not aggregated; the logged value is a list, not a number.
+T: A task value referenced through a For each task is a JSON array of the iterations' values in input order.
+V: Lakeflow Jobs
+
+@ DBX-DEA D4 T4.3 expert troubleshooting
+S: A job with a Quartz schedule at 23:50 UTC has max concurrent runs of 1 and queueing enabled. Its notebook loads the partition for `run_date` = `{{job.start_time.iso_date}}`. Last Tuesday the previous run overran, the 23:50 run was queued, it started at 00:20 UTC on Wednesday, and it loaded Wednesday's empty partition instead of Tuesday's. The run history shows no failure. The team must keep queueing, must not change the 23:50 schedule, and wants the date to match the scheduled slot even when a run starts late. Which change fits?
+A: Disable queueing for the job, so that a run that cannot start at 23:50 is skipped instead of loading the partition of the wrong day
+B: Set max concurrent runs to 2, so that the 23:50 run starts on time next to the overrunning run and its start time stays on the right day
+C: Use `{{job.start_time.iso_date}}` shifted back by one day, so that every run loads the partition of the day before it started
+D: Use `{{job.trigger.time.iso_date}}`, so that the date comes from the time the schedule triggered the run rather than the time it started
+K: D
+G: ## Start time versus trigger time
+Dynamic value references offer two clocks, both in UTC:
+- `{{job.start_time.<argument>}}`: when the run **started**.
+- `{{job.trigger.time.<argument>}}`: when the run was **triggered**, rounded down to the minute for cron schedules.
+For a queued run they differ: the schedule fires at 23:50, the run waits in the queue (up to 48 hours) and starts later. A date based on the start time can therefore jump to the next day.
+## Applying it
+Using the trigger time ties the date to the schedule slot (Tuesday 23:50), whether the run starts at 23:50 or 00:20.
+W: Trigger time: the date comes from the 23:50 trigger, so a queued run that starts after midnight still loads Tuesday's partition.
+X: A=Disable queueing: the team must keep queueing, and skipped runs would leave days unloaded.
+B=Two concurrent runs: the two runs could overlap on the same data, and it changes the concurrency model instead of fixing the date logic.
+C=Start date minus one: on normal nights the run starts at 23:50, so subtracting a day would load Monday's partition on Tuesday.
+T: For date-driven runs that can be queued, take the date from `{{job.trigger.time...}}`, not from the start time.
+V: Lakeflow Jobs
+
+@ DBX-DEA D5 T5.3 expert troubleshooting
+S: A team copied its `dev` target settings into a new `prod` target with `mode: production`, a `run_as` service principal and `git: {branch: main}`. The pipeline resource is declared at the top level of the bundle with `development: true`, which dev relied on for fast iteration. In CI on `main`, `databricks bundle deploy -t prod` now fails during validation and names the pipeline. Jobs must keep running as the service principal, dev must keep its fast pipeline iteration, and the deployment must stay in production mode. Which change fits?
+A: Remove `git: {branch: main}` from the prod target, because production mode validation fails whenever a Git branch is pinned in the target
+B: Set `development: false` for the pipeline under the prod target, because production mode requires deployed pipelines not to be in development mode
+C: Remove `run_as` from the prod target, because production mode validation fails when a service principal runs the deployed jobs
+D: Set `development: false` for the pipeline at the top level, because production mode reads only the top-level value of every pipeline setting
+K: B
+G: ## Production mode validations
+Deploying a target with `mode: production` checks, among other things:
+- that all deployed Lakeflow pipelines are marked **`development: false`**;
+- that the current Git branch equals the branch set in the target, if one is set;
+- without a service principal: that paths are not user-specific and that `run_as` and `permissions` are specified.
+Databricks recommends a service principal as `run_as` for production.
+## Keeping dev fast
+A target can override resource settings. Setting `development: false` for the pipeline **under the prod target** satisfies production validation, while the top-level `development: true` still applies to dev (which, in development mode, marks pipelines as development anyway).
+W: development false under prod: the pipeline passes the production check for the prod target only, and dev keeps its development setting.
+X: A=Remove the branch pin: pinning a branch is optional and valid; CI already deploys from `main`, so the branch check passes.
+C=Remove run_as: a service principal is the recommended identity for production, and the error names the pipeline, not the identity.
+D=Change the top level: it would satisfy production, but it also changes dev, which the team wants to keep fast.
+T: Production mode requires `development: false` on pipelines; override it in the production target to keep dev unchanged.
+V: Declarative Automation Bundles
+
+@ DBX-DEA D5 T5.4 expert troubleshooting
+S: To save cost during a release test, an engineer ran `databricks bundle deploy -t prod --cluster-id 0812-091544-abc123` so that the bundle's jobs would use an existing cluster instead of creating job clusters. The command failed with a validation error about overriding cluster definitions. The same flag works for the `dev` target. The `prod` target has `mode: production`, its jobs must keep their job cluster definitions in production, and the release test must still run the jobs from the deployed bundle. Which explanation and approach fit?
+A: The cluster ID belongs to another workspace; use a `lookup` variable for the cluster name so that the prod target resolves the right ID
+B: The flag must be set as `compute_id` inside the prod target; move the cluster ID into the bundle configuration and deploy again
+C: Production mode does not allow overriding cluster definitions; deploy prod unchanged and test against a non-production target that allows the override
+D: The flag works only together with `--force-lock`; add it to the command so that the prod deployment can replace the job clusters
+K: C
+G: ## Cluster overrides by deployment mode
+In **development** mode, a deployment can use `--cluster-id <id>` (or the `cluster_id`/`compute_id` mapping) to override **all** existing cluster definitions in the bundle with one existing cluster, which speeds up iteration.
+The deployment modes docs state that `mode: production` **does not allow overriding existing cluster definitions**, whether by the command-line option or by the `compute_id` mapping. Production deployments must run on the clusters they define.
+## A safe test
+Test cost savings with a development-mode (or other non-production) target that permits the override, and deploy prod as defined.
+W: Production blocks cluster overrides: the validation error is by design, so the cheap test belongs in a target that allows overrides, while prod keeps its job clusters.
+X: A=Lookup variable: the error is about overriding cluster definitions in production mode, not about resolving an ID in another workspace.
+B=compute_id mapping: the docs name the mapping too; production mode rejects it just like the flag.
+D=--force-lock: the lock controls concurrent deployments; it does not lift production-mode validation.
+T: Production mode forbids `--cluster-id`/`compute_id` overrides; use a development target for that.
+V: Declarative Automation Bundles
+
+@ DBX-DEA D6 T6.1 expert troubleshooting
+S: A FinOps analyst attributes cost per job with a query that joins `system.billing.usage` to `system.billing.list_prices` and groups by `usage_metadata.job_id` for the last 30 days. The nightly job `refresh_kpis` shows no cost at all, although the Jobs UI shows 30 successful runs of about an hour. Its two tasks are a SQL task on the shared serverless SQL warehouse `bi_wh` and a notebook task on the all-purpose cluster `analytics_shared`. Finance needs a cost estimate for this job, and the team can change compute but not the job's logic. Which explanation and change fit?
+A: System billing tables are delayed by 30 days; rerun the query next month, when the usage of the job's recent runs has been loaded
+B: The query must group by `usage_metadata.job_run_id` instead; job-level totals appear only after grouping by individual runs first
+C: Usage on SQL warehouses and all-purpose compute is not billed as jobs; move the notebook task to jobs compute or serverless to attribute it
+D: The job's run-as identity lacks SELECT on `system.billing.usage`; grant it so that the job's own usage rows become visible in the query
+K: C
+G: ## What job cost attribution covers
+The documented job cost queries over `system.billing.usage` attribute usage through `usage_metadata.job_id` and price it with `system.billing.list_prices`. The docs state that these queries **only calculate costs for jobs run on jobs compute and serverless compute**. Jobs that run on **SQL warehouses** and **all-purpose compute** are not billed as jobs, so their usage is excluded from job cost attribution; the usage belongs to the warehouse or cluster instead.
+## Applying it
+Both tasks of `refresh_kpis` use shared compute, so no usage row carries its job ID. Running the notebook task on jobs compute or serverless compute for jobs makes that part attributable; the SQL task's warehouse usage stays with the warehouse and needs a separate estimate (for example from the warehouse's usage).
+W: Shared compute is not job-billed: SQL warehouse and all-purpose usage carry no job attribution, so the job looks free; jobs or serverless compute makes the notebook task's cost attributable.
+X: A=30-day delay: the analyst sees other jobs' costs from the same days, so data delay does not explain a single job with zero cost.
+B=Group by run ID: grouping by runs cannot reveal usage rows that have no job attribution in the first place.
+D=Missing SELECT for the job: the analyst runs the query, not the job, and the other jobs' rows are visible.
+T: Job cost attribution covers jobs compute and serverless only; work on SQL warehouses or all-purpose clusters is not billed as the job.
+V: System tables, Lakeflow Jobs
+
+@ DBX-DEA D6 T6.3 expert troubleshooting
+S: A nightly job adds a running total per customer: `df.withColumn("cum_amt", F.sum("amount").over(Window.orderBy("customer_id", "ts")))` on 900 million rows, on a 32-worker cluster. In the Spark UI, the longest stage has exactly one task running for 2 hours with spill, while all other executors are idle; adding workers last week changed nothing. The business definition is a running total within each customer, ordered by time. The output must not change, and the deadline is 1 hour. Which change fits?
+A: Set `spark.sql.shuffle.partitions` to `auto`, so that the window stage is split into many tasks sized from the input data
+B: Repartition the DataFrame by `customer_id` before the window, so that the window stage reads many partitions in parallel
+C: Use `Window.partitionBy("customer_id").orderBy("ts")`, so that each customer's rows form their own window and tasks run in parallel
+D: Enable AQE skew join handling, so that the single oversized partition of the window stage is split into several smaller tasks
+K: C
+G: ## A stage with one task
+A long stage with **exactly one task** has no parallelism: one core works while the cluster idles, and **adding workers does not help**. The Spark UI guide lists common causes, among them **a window function without `PARTITION BY`**: the window then spans the whole dataset, so a single task processes every row.
+## Fixing it without changing the result
+`Window.orderBy("customer_id", "ts")` computes one running total across all customers in order, which only matches the business definition by accident of the ordering. The intended definition is per customer, so `Window.partitionBy("customer_id").orderBy("ts")` is both correct and parallel: rows are shuffled by customer, and each partition is processed independently.
+## Why other knobs fail
+Without a partition key in the window, every row must still end in one partition, whatever the shuffle settings, repartitioning or skew handling.
+W: Partition the window by customer: the running total keeps its per-customer meaning, and the work spreads over many tasks instead of one.
+X: A=Auto shuffle partitions: a window without PARTITION BY moves all rows into a single partition regardless of the shuffle partition count.
+B=Repartition first: the window still requires the whole dataset in one partition, so Spark gathers it again into one task.
+D=AQE skew handling: skew splitting applies to joins (and rebalancing); it does not split a window that has no partition key.
+T: One long task in a window stage usually means a missing `PARTITION BY`; add it when the logic allows.
+V: Apache Spark, Spark UI
+
+@ DBX-DEA D6 T6.4 expert troubleshooting
+S: The managed table `gold.visits` uses liquid clustering on `(visit_date)`. Analysts now filter on `country`, so an engineer changed the nightly append to `df.write.mode("append").clusterBy("country", "visit_date").saveAsTable("gold.visits")`. The job now fails at the write, and `DESCRIBE DETAIL` still shows `clusteringColumns` as `[visit_date]`. The append must keep running nightly without rewriting the 12 TB table during the write, existing data should be reclustered in a maintenance window, and predictive optimization is enabled. Which change fits?
+A: Write with `.mode("overwrite").clusterBy("country", "visit_date")` once, so that the keys change and the table is reclustered in the same nightly write
+B: Run `ALTER TABLE gold.visits CLUSTER BY (country, visit_date)` once, remove `clusterBy` from the append, then run `OPTIMIZE gold.visits FULL` in the window
+C: Run `ALTER TABLE gold.visits CLUSTER BY (country, visit_date)` once, keep `clusterBy` in the append, then run `OPTIMIZE gold.visits FULL` in the window
+D: Run `ALTER TABLE gold.visits CLUSTER BY (country, visit_date)` once, remove `clusterBy` from the append, then rely on the nightly appends to recluster old files
+K: B
+G: ## Setting clustering keys
+With the DataFrame API, clustering columns can be specified **only at table creation or in overwrite mode**; they **cannot be changed in append mode**. To change keys on an existing table that receives appends, the docs say to use SQL `ALTER TABLE ... CLUSTER BY` **separately from the write operations**.
+## Existing data
+After a key change, later `OPTIMIZE` runs and writes use the new keys, but existing data is **not rewritten**. Liquid clustering is incremental and does not rewrite files clustered with other keys; `OPTIMIZE <table> FULL` forces reclustering of existing records and is recommended when keys change. Predictive optimization runs incremental OPTIMIZE automatically, which does not replace the one-time FULL run.
+W: ALTER, plain append, OPTIMIZE FULL: the keys change in metadata, the nightly append works again, and the maintenance window reclusters the existing 12 TB.
+X: A=Overwrite with clusterBy: it rewrites the whole 12 TB table in the nightly write, which the team must avoid.
+C=Keep clusterBy in the append: the append still tries to set clustering columns in append mode, so the write keeps failing.
+D=Rely on appends: new writes use the new keys, but old files are not reclustered without `OPTIMIZE ... FULL`.
+T: Change liquid clustering keys with `ALTER TABLE ... CLUSTER BY`, not in an append, and use `OPTIMIZE FULL` to recluster old data.
+V: Delta Lake, Liquid Clustering
+
+@ DBX-DEA D7 T7.3 expert troubleshooting
+S: A nightly Python job upserts HR changes with `DeltaTable.forName(spark, "main.hr.employees").merge(changes, "t.id = s.id").whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()`. Last week security added a column mask on `salary` and a row filter on `department` to `main.hr.employees`, and since then the job fails although the job's service principal still has SELECT and MODIFY and is exempted by both policy functions. A second job that reads the table with SQL works. The policies must stay, the upsert logic must stay identical, and the job may still use Python. Which change fits?
+A: Replace the Delta Lake Python API call with the same MERGE written in SQL through `spark.sql(...)`, because Delta Lake APIs are not supported on such tables
+B: Replace `forName` with `DeltaTable.forPath` on the table's storage location, because path-based access bypasses the policies for exempted principals
+C: Grant the service principal ALL PRIVILEGES on `main.hr.employees`, because the Delta Lake APIs need privileges beyond SELECT and MODIFY with policies
+D: Run the job on a dedicated access mode cluster, because Delta Lake APIs work on tables with policies only when the compute is single user
+K: A
+G: ## Limitations of row filters and column masks
+The filters and masks docs list operations that do not work on tables with these policies, among them:
+- **Delta Lake APIs are not supported**;
+- **path-based access** to files of tables with policies is not supported;
+- clones and time travel are not supported; MERGE has extra limits when the policy functions are complex.
+The policies are enforced by the SQL engine, so table operations must go through the table name with SQL or DataFrame table reads and writes.
+## Applying it
+The Python `DeltaTable.merge` builder is a Delta Lake API, so it fails after the policies were added, even for a principal the functions exempt. The same logic as `spark.sql("MERGE INTO main.hr.employees t USING changes s ON t.id = s.id WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *")` (with `changes` registered as a temporary view) keeps the logic and runs through the supported path.
+W: SQL MERGE instead of the Delta API: SQL statements are supported on tables with policies, so the same upsert runs again with the policies in place.
+X: B=forPath: path-based access is also unsupported on tables with policies; it would bypass governance if it were allowed.
+C=ALL PRIVILEGES: the failure is an unsupported API, not a missing privilege, and the principal already has SELECT and MODIFY.
+D=Dedicated cluster: dedicated compute enforces the policies through serverless compute; it does not make the Delta Lake APIs supported.
+T: Tables with row filters or column masks reject Delta Lake APIs and path-based access; use SQL (or table-name DataFrame operations).
+V: Unity Catalog, Delta Lake
+
+@ DBX-DEA D7 T7.2 expert troubleshooting
+S: Workspace `ws-sales` was created with automatic Unity Catalog enablement and has its own workspace catalog `ws_sales`, owned by the workspace admins. A new workspace `ws-finance` is attached to the same metastore. A finance job there runs as a service principal that holds `USE CATALOG`, `USE SCHEMA` and `SELECT` on `ws_sales.crm`, granted by a sales workspace admin, yet it fails with an error that the catalog is not accessible from this workspace. Other catalogs of the metastore work from `ws-finance`. Finance must only read, and grants must stay least-privilege. Which change fits?
+A: Grant the principal BROWSE on `ws_sales`, so that the catalog becomes visible to it in `ws-finance` and the existing grants then apply
+B: Add the principal to the workspace admins group of `ws-sales`, because that group owns the catalog and its members can read it from any workspace
+C: Bind `ws_sales` also to `ws-finance` with read-only access, which the catalog owner or a user with MANAGE on it can do; the existing grants then apply
+D: Bind `ws_sales` also to `ws-finance` with read-write access, which only the metastore admin can do; the existing grants then apply
+K: C
+G: ## Workspace-catalog binding
+By default every catalog is reachable from every workspace attached to the metastore. **Workspace-catalog binding** restricts a catalog to listed workspaces; from any other workspace, access is denied **even for users with explicit privilege grants**. Binding is managed by the catalog owner or users with MANAGE on the catalog, and a binding can be **read-only**, blocking all writes from that workspace.
+## The detail in the stem
+The exception to the open default is the **default workspace catalog** created for new workspaces: it is bound only to its own workspace. So `ws_sales` is invisible from `ws-finance`, while other catalogs work. When extending access, permissions must be granted explicitly, because the workspace admins group is workspace-local and cannot be used across workspaces.
+W: Read-only binding to ws-finance: the catalog becomes reachable there, writes stay blocked, and the existing least-privilege grants take effect.
+X: A=BROWSE: it lets users discover metadata, but an unbound workspace is denied access regardless of grants.
+B=Workspace admins group: that group is workspace-local, cannot be used across workspaces, and would hand out far more than read access.
+D=Read-write binding by the metastore admin: finance needs only reads, and the owner or a MANAGE holder can already change bindings.
+T: Default workspace catalogs are bound to their own workspace; add a (read-only) binding to reach them elsewhere.
+V: Unity Catalog
+
+@ DBX-DEA D7 T7.1 expert troubleshooting
+S: Twelve days ago an engineer dropped the managed table `main.ops.sla_metrics` by mistake and, the same afternoon, a pipeline recreated an empty table with that name, which has since received new rows that must be kept. Today the team needs the dropped table's data back. `UNDROP TABLE main.ops.sla_metrics` fails because a table with that name exists. The schema's recovery period was raised to 30 days last year, `SHOW TABLES DROPPED IN main.ops` lists the dropped table with its ID, and no one may delete the new rows. Which sequence fits?
+A: Drop the new table, then run `UNDROP TABLE main.ops.sla_metrics`, so that the most recently dropped table with that name is recovered
+B: Run `UNDROP TABLE main.ops.sla_metrics` with time travel `VERSION AS OF 0`, so that the older table version is restored next to the new one
+C: Rename the new table with `ALTER TABLE ... RENAME TO`, then run `UNDROP TABLE WITH ID '<id>'` using the ID from `SHOW TABLES DROPPED`
+D: Run `UNDROP TABLE WITH ID '<id>'` directly, because recovering by ID ignores the name conflict and restores the table under a new name
+K: C
+G: ## How UNDROP finds a table
+`UNDROP TABLE name` recovers the **most recently dropped** relation of that name owned by the user, within the recovery period of a managed table (7 days by default; configurable at the catalog or schema level, here 30 days). When several dropped tables share a name, `SHOW TABLES DROPPED` lists their IDs, and `UNDROP TABLE WITH ID '<id>'` recovers a specific one.
+## The name conflict
+The docs say: if a relation with the same name exists, use `ALTER TABLE ... RENAME TO` to change the name of the existing relation first. Recovery restores the table under its original name, so the name must be free.
+## Applying it
+Twelve days is within the schema's 30-day period. Renaming the new table keeps its rows, and UNDROP by ID brings back the dropped table under `main.ops.sla_metrics`.
+W: Rename then UNDROP by ID: the new rows are kept under another name, and the dropped table returns under its original name within the 30-day recovery period.
+X: A=Drop the new table first: it deletes rows that must be kept, and UNDROP by name would then recover the table dropped most recently, which is the new one, not the old data.
+B=UNDROP with time travel: UNDROP takes a name or an ID, not a version clause, and the name conflict remains.
+D=UNDROP by ID with a conflict: recovery uses the original name, so the existing table must be renamed first.
+T: To recover a dropped table whose name is taken, rename the current table, then `UNDROP TABLE WITH ID`.
+V: Unity Catalog
