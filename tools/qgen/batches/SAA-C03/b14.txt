@@ -5,6 +5,8 @@
 # src: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-optimized.html
 # src: https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
 # src: https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucket-key.html
+# src: https://docs.aws.amazon.com/AmazonS3/latest/userguide/configuring-bucket-key-object.html
+# src: https://docs.aws.amazon.com/AmazonS3/latest/userguide/batch-ops-copy-object.html
 # src: https://docs.aws.amazon.com/kms/latest/developerguide/requests-per-second.html
 # src: https://docs.aws.amazon.com/AmazonS3/latest/userguide/optimizing-performance.html
 # src: https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/provisioned-capacity-mode.html
@@ -96,28 +98,31 @@ T: For multipart uploads, part size must be at least object size divided by 10,0
 V: Amazon S3
 
 @ SAA-C03 D3 T3.1 expert troubleshooting
-S: A media company in eu-central-1 stores objects in one S3 bucket whose default encryption is SSE-KMS with a customer managed key, which compliance requires. Ingest workers upload about 16,000 objects per second spread across 200 prefixes, and readers download about 6,000 objects per second, nearly all written within the last hour. Requests intermittently fail with throttling errors, and Service Quotas shows usage of the KMS Cryptographic operations (symmetric) request rate pinned at its 20,000-per-second quota. The key policy allows the workers' role to call kms:GenerateDataKey and kms:Decrypt only when kms:EncryptionContext:aws:s3:arn matches arn:aws:s3:::media-raw/*. Finance also wants KMS request charges to fall. Which TWO actions should the solutions architect take? (Select TWO)
+S: A media company in eu-central-1 keeps a one-year archive of about 400 million objects in one S3 bucket whose default encryption is SSE-KMS with a customer managed key, which compliance requires. Ingest workers upload about 3,000 objects per second across 200 prefixes, and a recommendation engine downloads about 21,000 objects per second, spread evenly across the whole year of objects. Requests intermittently fail with throttling errors, and Service Quotas shows the KMS Cryptographic operations (symmetric) request rate pinned at its 20,000-per-second quota. No IAM or key policy uses an encryption context condition. Finance also wants KMS request charges to fall. Which TWO actions should the solutions architect take? (Select TWO)
 A: Enable an S3 Bucket Key in the bucket's default encryption settings, so S3 uses a short-lived bucket-level key to generate data keys for new objects
-B: Change the key policy condition to match the bucket ARN arn:aws:s3:::media-raw, because objects encrypted under a Bucket Key use the bucket ARN as context
-C: Request a Service Quotas increase of the symmetric cryptographic request rate to 30,000 per second and keep requesting one data key per object
-D: Spread the uploads across 400 prefixes instead of 200, so that S3 partitions the request load further and stops returning the throttling errors
-E: Change the bucket's default encryption to SSE-S3, so that uploads and downloads no longer call AWS KMS at all and the quota stops applying
+B: Run an S3 Batch Operations Copy job that copies the existing objects in place with SSE-KMS under the same key and the S3 Bucket Key enabled
+C: Request a Service Quotas increase of the symmetric cryptographic request rate to 30,000 per second and keep one KMS request per object operation
+D: Create a second customer managed key and set it as the default for half of the prefixes, so that each key handles about half of the KMS request load
+E: Change the bucket's default encryption to SSE-S3, so that uploads and downloads no longer call AWS KMS at all and the request quota stops applying
 K: A,B
 G: ## How SSE-KMS uses KMS
-With SSE-KMS, S3 calls KMS on your behalf: `GenerateDataKey` for every upload and `Decrypt` for every download. These calls count toward the account's **Cryptographic operations (symmetric) request rate**, which is 20,000 per second (shared) in Regions such as eu-central-1.
+With SSE-KMS and no Bucket Key, S3 calls KMS on your behalf for every object operation: `GenerateDataKey` for each upload and `Decrypt` for each download. These calls count toward the account's **Cryptographic operations (symmetric) request rate**, a quota **shared by all symmetric keys** in the account and Region: 20,000 per second in Regions such as eu-central-1.
 ## Working the numbers
-16,000 uploads + 6,000 downloads = **22,000 KMS requests per second**, above the 20,000 quota. The S3 side is fine: 16,000 / 200 prefixes = 80 PUTs per prefix, far below 3,500.
+- Today: 3,000 uploads + 21,000 downloads = **24,000 KMS requests per second**, above the 20,000 quota.
+- The S3 side is fine: 3,000 / 200 prefixes = 15 PUTs per prefix, far below 3,500.
+- Bucket Key on the bucket only: new uploads stop calling KMS per object, but downloads are spread over a year of **existing** objects, which keep their own data keys. About 21,000 `Decrypt` calls per second remain, still above the quota.
 ## S3 Bucket Keys
-A Bucket Key is a short-lived bucket-level key that S3 gets from KMS and then uses to create data keys for new objects, cutting KMS request traffic (and cost) by up to 99%. Points to know:
-- Only objects written **after** enabling it use it; existing objects keep their own keys (here almost all reads are of new objects).
-- The encryption context becomes the **bucket ARN** instead of the object ARN, so policies that match `.../media-raw/*` stop matching and must be updated.
-W: A=Enable Bucket Key: S3 asks KMS for a bucket-level key only occasionally instead of once per object, which brings KMS traffic far below the quota and cuts request charges.
-B=Condition on the bucket ARN: with a Bucket Key the encryption context is `arn:aws:s3:::media-raw`, which does not match the old `media-raw/*` pattern, so without this change the role's KMS calls would be denied.
-X: C=Quota increase: it may stop the throttling, but every object still costs a KMS request, so the finance requirement to lower KMS charges is not met.
-D=400 prefixes: S3 is not the bottleneck at 80 PUTs per prefix; the throttling comes from the KMS request quota, which prefixes do not change.
-E=SSE-S3: it removes KMS calls, but compliance requires the customer managed key, so switching to S3 managed keys breaks a stated constraint.
-T: When SSE-KMS traffic hits the KMS request quota, enable S3 Bucket Keys and update any policy that keys on the object ARN encryption context.
-V: Amazon S3, AWS KMS, Service Quotas
+A Bucket Key is a short-lived bucket-level key that S3 gets from KMS and keeps for a limited time, so S3 makes far fewer KMS requests; AWS cites up to 99% lower KMS request costs. Points to know:
+- Enabling it on the bucket applies to **new objects only**; objects already in the bucket do not use it.
+- To give existing objects a Bucket Key, copy them (`CopyObject`); at scale, an S3 Batch Operations Copy job does this in place.
+- With a Bucket Key the encryption context becomes the bucket ARN; that matters only if a policy conditions on the object ARN (none does here).
+W: A=Enable Bucket Key: new uploads use the bucket-level key instead of one KMS request per object, which removes most of the 3,000 GenerateDataKey calls per second and their charges.
+B=Batch Operations copy in place: the downloads target objects from the whole year, and only copied objects pick up the Bucket Key; once rewritten, their reads stop needing one Decrypt per object, which takes KMS traffic far below the quota.
+X: C=Quota increase: it may stop the throttling, but every upload and download still costs a KMS request, so the finance goal of lower KMS charges is not met.
+D=Second key: the request rate quota is shared across all symmetric keys in the account and Region, so splitting objects between two keys leaves the 24,000 requests per second unchanged.
+E=SSE-S3: it removes the KMS calls, but compliance requires the customer managed key, so switching to S3 managed keys breaks a stated constraint.
+T: A Bucket Key covers only objects written after it is enabled; when reads span old objects, re-copy them so their KMS traffic drops too.
+V: Amazon S3, AWS KMS, S3 Batch Operations, Service Quotas
 
 @ SAA-C03 D3 T3.3 expert troubleshooting
 S: An order service writes to a DynamoDB table in provisioned mode with auto scaling turned off. The table has 2,400 WCUs, and at peak the service writes 600 new orders per second, each item about 2.5 KB. A global secondary index on customerId projects ALL attributes and was created with 600 WCUs. During peaks, PutItem calls fail with ProvisionedThroughputExceededException even though the table's consumed write capacity stays near 1,800 WCUs. A support dashboard queries the index and must keep returning every order attribute without a second read against the table. Which change should the solutions architect make?
@@ -141,7 +146,7 @@ T: A GSI with too little write capacity throttles writes to its base table; size
 V: Amazon DynamoDB
 
 @ SAA-C03 D3 T3.3 expert troubleshooting
-S: A retail catalog serves about 20,000 reads per second through a three-node DAX cluster in front of DynamoDB, and roughly half of those reads are category listings. All writes go through the DAX client, and the cluster uses the default parameter group. After a price update, the product page, which calls GetItem by productId, shows the new price immediately, but the category listing, which runs a Query on a categoryId index, keeps showing the old price for up to five minutes. The business now requires price changes to appear in listings within 30 seconds, and consumed DynamoDB read capacity must not rise by more than about 10%. Which change meets these requirements?
+S: A retail catalog serves about 20,000 reads per second through a three-node DAX cluster in front of DynamoDB, and roughly half of those reads are listings of the catalog's 300 categories. All writes go through the DAX client, and the cluster uses the default parameter group. After a price update, the product page, which calls GetItem by productId, shows the new price immediately, but the category listing, which runs a Query on a categoryId index, keeps showing the old price for up to five minutes. The business now requires price changes to appear in listings within 30 seconds, and consumed DynamoDB read capacity must not rise by more than about 10%. Which change meets these requirements?
 A: Attach a custom parameter group that sets query-ttl-millis to 30,000 and leaves record-ttl-millis at 300,000, because writes never refresh cached query results
 B: Attach a custom parameter group that sets record-ttl-millis to 30,000 and leaves query-ttl-millis at 300,000, because listings are assembled from cached items
 C: Set ConsistentRead to true on the listing's Query calls, so that DAX returns the latest committed values of every item in the category
@@ -155,7 +160,7 @@ Both TTLs default to **5 minutes**. They are set in a parameter group (`record-t
 The product page is fresh because the write refreshed the item cache. The listing is stale for up to five minutes because it is a Query served from the query cache.
 ## Strongly consistent reads
 DAX passes `ConsistentRead=true` requests to DynamoDB and does **not** cache the results.
-W: A=Query TTL 30 s: listings are Query results, so a 30-second query TTL bounds staleness at 30 seconds; each distinct listing is re-read from DynamoDB at most twice a minute, a small rise in consumed capacity.
+W: A=Query TTL 30 s: listings are Query results, so a 30-second query TTL bounds staleness at 30 seconds; each of the 300 listings is re-read from DynamoDB at most once per 30 seconds, about 10 Query calls per second instead of 1 per second, a negligible rise next to 20,000 reads per second.
 X: B=Item TTL 30 s: the item cache already shows the new price; the stale data sits in the query cache, whose five-minute TTL is unchanged.
 C=ConsistentRead true: DAX would pass every listing query to DynamoDB uncached, about 10,000 extra reads per second, far beyond the 10% limit.
 D=UpdateItem through DAX: writes already go through DAX; no write operation invalidates query cache entries, so listings would stay stale until the TTL expires.
@@ -236,7 +241,7 @@ T: With NLB cross-zone off, each zone's targets share that node's traffic; keep 
 V: Elastic Load Balancing, Network Load Balancer, Amazon EC2 Auto Scaling
 
 @ SAA-C03 D3 T3.5 expert troubleshooting
-S: Fleet telemetry arrives at about 40,000 records per second, each about 250 bytes, from producers that call PutRecords with 500 records per request. The provisioned Kinesis data stream has 12 shards, and partition keys are random device IDs, so load spreads evenly. CloudWatch shows about 0.85 MB per second of incoming data per shard, yet WriteProvisionedThroughputExceeded errors appear on every shard. The consumers are KCL 2.x applications that must keep receiving individual readings. The team wants the fewest shards that stop the throttling and no change to consumer code. What should the solutions architect do?
+S: Fleet telemetry arrives at about 40,000 records per second, each about 250 bytes, from producers that call PutRecords with 500 records per request. The provisioned Kinesis data stream has 12 shards, and partition keys are random device IDs, so load spreads evenly. CloudWatch shows about 0.83 MB per second of incoming data per shard, yet WriteProvisionedThroughputExceeded errors appear on every shard. The consumers are KCL 2.x applications that must keep receiving individual readings. The team wants the fewest shards that stop the throttling and no change to consumer code. What should the solutions architect do?
 A: Switch the producers to the KPL with aggregation turned on and keep 12 shards, because the KCL consumers de-aggregate the user records automatically
 B: Switch the producers to the KPL with collection only, so records travel in fewer, larger PutRecords calls that count less toward each shard's limits
 C: Reshard the stream to 40 shards, so each shard receives about 1,000 records per second, which matches the documented per-shard record limit
@@ -302,30 +307,30 @@ Since September 2024 lifecycle rules by default do **not** transition objects sm
 W: A=Standard-IA at day 30: occasional reads stay in milliseconds, and 90 days in the class covers its 30-day minimum.
 B=Deep Archive at day 120: the lowest-cost class fits audits that allow 48 hours, and 180 days until deletion meets its 180-day minimum exactly.
 C=Default minimum size: thumbnails are read on every claim page; leaving them in Standard avoids transition requests, the 128 KB minimum billable size and retrieval fees.
-X: D=Glacier IR at day 60: objects would leave Glacier Instant Retrieval after 60 of its 90 minimum days, so the transition at day 120 incurs a 30-day minimum-duration charge.
+X: D=Glacier IR at day 60: objects would leave Glacier Instant Retrieval after 60 of its 90 minimum days; S3 rejects that pair of transitions in a single rule, and split across two rules it incurs a 30-day minimum-duration charge.
 E=Deep Archive at day 150: deletion at day 300 comes after only 150 days in Deep Archive, so 30 days of the 180-day minimum are charged anyway.
 F=Size filter of 0 bytes: each 40 KB thumbnail would be billed as 128 KB, cost a transition request and incur Standard-IA retrieval fees on every page view.
 T: Plan lifecycle transitions backward from the deletion date so each class's minimum duration is met, and leave sub-128 KB objects where they are.
 V: Amazon S3, S3 Lifecycle
 
 @ SAA-C03 D4 T4.1 expert troubleshooting
-S: A company moved 90 TB of departmental file shares to Amazon FSx for NetApp ONTAP. The engineers created every volume with the AWS CLI and did not set a tiering policy. A month later the SSD tier is nearly full and a larger SSD tier is being requested, although about 75% of the files on the projects volume have not been opened in over 60 days. Capacity pool storage holds only snapshot blocks. A nightly antivirus scan reads every file sequentially. A separate dbdata volume holds a latency-sensitive database whose data must stay on SSD, and its snapshots may be tiered. Which change lowers storage cost while meeting these needs?
+S: A company moved 90 TB of departmental file shares to Amazon FSx for NetApp ONTAP. The engineers created every volume with the AWS CLI and did not set a tiering policy. A month later the SSD tier is nearly full and a larger SSD tier is being requested, although about 75% of the files on the projects volume have not been opened in over 60 days. Capacity pool storage holds only snapshot blocks. Next quarter, security will add a nightly antivirus scan that reads every file sequentially. A separate dbdata volume holds a latency-sensitive database whose data must stay on SSD, and its snapshots may be tiered. Which change lowers storage cost while meeting these needs?
 A: Set the projects volume's tiering policy to Auto with the default 31-day cooling period, and leave the dbdata volume on its current policy
 B: Set both the projects and the dbdata volumes' tiering policy to Auto with a 31-day cooling period, so cold blocks on either volume leave SSD
-C: Set the projects volume's tiering policy to All, because the nightly antivirus scan would make every block hot again under the Auto policy
+C: Set the projects volume's tiering policy to All, because the planned antivirus scan would bring every tiered block back to SSD under Auto
 D: Keep the current tiering policies and raise the SSD storage capacity, so that the file system has room for another year of project data growth
 K: A
 G: ## FSx for ONTAP tiering policies
 Each volume has its own policy that decides which blocks move from the SSD tier to the lower-cost **capacity pool**:
 - **Snapshot Only**: only snapshot blocks tier (cooling period 2 days by default). It is the **default when a volume is created with the AWS CLI, API or ONTAP CLI**.
-- **Auto**: all cold blocks, user data and snapshots, tier after the cooling period (default 31 days, 2 to 183). **Random** reads make blocks hot again; **sequential** reads, such as an antivirus scan, leave them cold.
+- **Auto**: all cold blocks, user data and snapshots, tier after the cooling period (default 31 days, 2 to 183). When **cold** (tiered) blocks are read **randomly** they become hot and return to SSD; read **sequentially**, as by an antivirus scan, they stay cold in the capacity pool.
 - **All**: all data is marked cold and served from the capacity pool; reads do not bring it back to SSD.
 - **None**: everything stays on SSD.
 ## Reading the evidence
 The volumes were created with the CLI, so they use **Snapshot Only**; that is why the capacity pool holds only snapshot blocks and the SSD tier fills with cold project files.
-W: A=Auto on projects only: files unopened for 60 days tier after 31 days, the sequential antivirus scan does not re-warm them, and dbdata keeps Snapshot Only, which tiers snapshots but leaves database blocks on SSD.
+W: A=Auto on projects only: files unopened for 60 days tier once the 31-day cooling period passes, the planned sequential antivirus scan leaves tiered blocks cold in the capacity pool, and dbdata keeps Snapshot Only, which tiers snapshots but leaves database blocks on SSD.
 X: B=Auto on both volumes: database blocks that cool for 31 days would move to the capacity pool, breaking the rule that the database's data stays on SSD.
-C=All on projects: sequential scans do not re-warm blocks under Auto, so the premise is wrong; under All, files opened this week would also be served from the capacity pool.
+C=All on projects: under Auto, cold blocks read sequentially stay in the capacity pool, so the premise is wrong; under All, files opened this week would also be served from the capacity pool.
 D=Bigger SSD tier: it pays SSD prices for data nobody has opened in two months, the opposite of lowering storage cost.
 T: FSx for ONTAP volumes created by CLI or API default to Snapshot Only; set Auto on volumes with cold user data.
 V: Amazon FSx for NetApp ONTAP
