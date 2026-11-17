@@ -21,6 +21,8 @@
 # src: https://docs.cloud.google.com/bigquery/docs/time-travel
 # src: https://docs.cloud.google.com/bigquery/docs/restore-deleted-tables
 # src: https://docs.cloud.google.com/sql/docs/mysql/import-export/import-export-sql
+# src: https://docs.cloud.google.com/sql/docs/mysql/troubleshooting
+# src: https://docs.cloud.google.com/load-balancing/docs/l7-internal/monitoring
 # src: https://docs.cloud.google.com/nat/docs/ports-and-addresses
 # src: https://docs.cloud.google.com/nat/docs/monitoring
 # src: https://docs.cloud.google.com/monitoring/agent/ops-agent/troubleshoot-run-ingest
@@ -187,7 +189,7 @@ An internal Application Load Balancer is a proxy: Envoy proxies terminate the cl
 - from Google's **health check ranges** (`35.191.0.0/16`, `130.211.0.0/22`),
 - from the **proxy-only subnet**.
 ## Reading the evidence
-Health checks come from the central ranges, which `allow-hc` permits, so backends look healthy. Real requests come from 10.129.0.0/23, which no rule allows, so `deny-all` drops them and the proxy reports it failed to connect. `allow-clients` never matches because client addresses are not the source of backend traffic.
+Health checks come from the central ranges, which `allow-hc` permits, so backends look healthy. Real requests come from 10.129.0.0/23, which no rule allows, so `deny-all` drops them and the proxy logs `failed_to_connect_to_backend`, which the logging reference maps to HTTP 503 for clients. `allow-clients` never matches because client addresses are not the source of backend traffic.
 W: Allow the proxy-only subnet: the proxies' connections from 10.129.0.0/23 reach port 8080, while health checks were already allowed, which explains healthy backends with failing requests.
 X: B=Egress rule for responses: firewall rules are stateful, so replies to allowed connections are allowed, and the proxies, not clients, are the peers.
 C=Forwarding rule IP as source: backend connections come from proxy-only subnet addresses, not from the frontend IP of the load balancer.
@@ -313,7 +315,7 @@ K: A
 G: ## Who writes a Cloud SQL export
 A Cloud SQL export is performed by the **instance's own service account**, not by the caller. The docs list two sets of permissions:
 - the caller needs Cloud SQL permissions to start the export (for example `cloudsql.instances.export`);
-- the **service account of the instance** needs `roles/storage.objectAdmin` (or a custom role with permissions such as `storage.objects.create`) **on the bucket**.
+- the **service account of the instance** needs `roles/storage.objectAdmin` (or a custom role with permissions such as `storage.objects.create`) **on the bucket**; the troubleshooting table for this exact 403 error names Storage Object Creator as enough to write the export.
 Find it with `gcloud sql instances describe INSTANCE` (field `serviceAccountEmailAddress`) and grant it with `gcloud storage buckets add-iam-policy-binding gs://BUCKET --member=serviceAccount:EMAIL --role=roles/storage.objectAdmin`.
 ## Reading the evidence
 The bucket was recreated, so the old grant to the instance's account disappeared with it. The caller's new role is irrelevant to the write.
@@ -368,3 +370,87 @@ C=Default service account: these VMs run as batch-sa, so a role on another accou
 D=Reinstall: the agent is installed and active; reinstalling keeps the same identity and the same missing role.
 T: If Ops Agent logs arrive but metrics fail with permission denied, give the VM's service account Monitoring Metric Writer.
 V: Cloud Monitoring, Ops Agent, IAM
+
+@ GCP-ACE D4 T4.1 expert troubleshooting
+S: Alex left the company in March, and his Cloud Identity account `alex@example.com` was deleted. In September he rejoined and an administrator created a new account with the same address. Alex now cannot query tables in project `analytics`, where he used to have access. Running `gcloud projects get-iam-policy analytics --flatten="bindings[].members" --filter="bindings.members~alex"` shows the member `deleted:user:alex@example.com?uid=123456789012345678901` in a binding for `roles/bigquery.dataViewer`. His manager says the binding will reattach once the directory sync finishes. Alex should get back exactly the access he had, and the audit trail must show who granted it. What should the engineer do?
+A: Add a Data Viewer binding for user:alex@example.com, as the deleted entry is another principal that never applies to the new account
+B: Wait for the directory sync to finish, after which IAM maps the deleted entry to the new account because the email address is the same
+C: Restore the old Cloud Identity account so that its unique ID matches the deleted entry again, then delete the new account Alex is using
+D: Grant Alex BigQuery Data Viewer on the organization instead, since project bindings that mention deleted users stay locked for a year
+K: A
+G: ## Deleted principals in allow policies
+When a user, group or service account is deleted, its bindings remain in allow policies with the prefix `deleted:` and, for some types, a `?uid=NUMERIC_ID` suffix, for example `deleted:user:alex@example.com?uid=123456789012345678901`.
+- A **new principal with the same name** does **not** inherit those bindings. IAM does this on purpose, so that someone who gets a reused address cannot pick up the old owner's access.
+- To give the new principal access, **add a binding for it**; the docs say a binding added for the new principal applies to it even when a deleted entry with the same name remains.
+## Example
+`gcloud projects add-iam-policy-binding analytics --member=user:alex@example.com --role=roles/bigquery.dataViewer`
+The Admin Activity audit log records who made the grant. The stale `deleted:` entry can be removed in the same change.
+W: New binding for the new account: the deleted entry is tied to the old account's unique ID and never applies to the new one, so an explicit grant restores the same role with an audit record.
+X: B=Wait for sync: IAM never remaps deleted entries to a new account with the same address, so waiting changes nothing.
+C=Restore the old account: an account deleted in March is far beyond any restore window, and it would throw away the account Alex now uses.
+D=Organization grant: it gives Alex the role on every project in the organization, more access than he had, and the lock it assumes does not exist.
+T: Bindings of deleted principals never transfer to a new principal with the same name; grant the new principal explicitly.
+V: IAM, Cloud Identity
+
+@ GCP-ACE D4 T4.1 expert troubleshooting
+S: The Prod folder has an IAM deny policy with one rule: denied principals `principalSet://goog/public:all`, denied permission `compute.googleapis.com/instances.delete`, exception principal `group:prod-breakglass@example.com`, and the denial condition `resource.matchTag('123456789012/env', 'prod')`. Project `shop-prod` in that folder carries the tag `env=prod`. Sam, an SRE, holds Compute Instance Admin (v1) on `shop-prod` and must delete a stuck VM during tonight's incident. Policy Troubleshooter shows his allow policy grants the permission but the deny policy denies it. Access must last only for the incident, must leave an audit trail, and must not loosen the rule for anyone else. What should the engineer do?
+A: Add Sam to the prod-breakglass group for the incident, ideally with a membership expiration, since exception principals are exempt from the rule
+B: Grant Sam the Owner role on shop-prod for tonight, because Owner permissions are evaluated before deny policies on the same project
+C: Remove the env=prod tag from shop-prod during the incident, so that the denial condition is false and Sam's existing role applies again
+D: Add a binding for Sam with a request.time condition ending tonight, because conditional allow bindings are evaluated before deny rules
+K: A
+G: ## How deny policies are evaluated
+IAM checks **deny policies before allow policies**. If a deny rule applies, the permission is refused no matter which roles the principal holds, Owner included. A deny rule applies when:
+- the principal is in `deniedPrincipals` (here everyone),
+- and not in `exceptionPrincipals` (directly or through a group),
+- and the `denialConditions` evaluate to true or cannot be evaluated (here: the resource has the tag `env=prod`).
+## Break-glass access
+The rule already has an exception group. Adding Sam to `prod-breakglass` exempts only him, and the group change is logged. A Cloud Identity group membership can be given an expiration time, so access ends by itself after the incident.
+W: Break-glass group: membership exempts Sam from this single rule, every other principal stays denied, the change is audited, and an expiring membership ends access on its own.
+X: B=Owner role: deny policies are checked before any allow grant, so Owner does not override the denial.
+C=Remove the tag: the condition would be false for everyone, lifting the protection for all principals and possibly other tag-based controls on the project.
+D=Conditional allow binding: allow bindings of any kind are only evaluated after deny policies, so the denial still wins.
+T: Deny policies beat every allow grant; temporary exceptions belong in the rule's exception principals, for example a break-glass group.
+V: IAM, Resource Manager tags
+
+@ GCP-ACE D4 T4.2 expert troubleshooting
+S: An on-premises scheduler impersonates the service account `etl-sa` and passes the resulting OAuth 2.0 access token to a third-party loader that cannot refresh tokens; each load runs for up to 8 hours. The engineer calls the IAM Service Account Credentials API's `generateAccessToken` method with `"lifetime": "28800s"`, and the request is rejected with an INVALID_ARGUMENT error that says the lifetime is above the allowed maximum. The caller already holds Service Account Token Creator on `etl-sa`. Using `gcloud auth print-access-token --impersonate-service-account=etl-sa` gives a token that expires after an hour. Security will not allow service account keys. Which TWO changes let the scheduler obtain an 8-hour token? (Select TWO)
+A: Add etl-sa to an organization policy for the constraint iam.allowServiceAccountCredentialLifetimeExtension, which raises its token limit to 12 hours
+B: Keep requesting the token with generateAccessToken and a lifetime of 28800s through the REST API or a client library, not through gcloud
+C: Grant the caller Service Account Token Creator on etl-sa at the organization level instead, because the lifetime limit follows where the role is granted
+D: Request a lifetime of 43200s or more, because tokens shorter than 12 hours are always cut back to the default lifetime of one hour
+E: Create a user-managed key for etl-sa only for the scheduler, because access tokens issued from service account keys are valid for 12 hours
+K: A,B
+G: ## Lifetime of short-lived access tokens
+`generateAccessToken` creates an OAuth 2.0 access token for a service account. By default the **maximum lifetime is 1 hour (3,600 seconds)**. To allow up to **12 hours (43,200 seconds)**, the docs say to add the service account to an organization policy that uses the list constraint `constraints/iam.allowServiceAccountCredentialLifetimeExtension`.
+## How to ask for a longer token
+The lifetime is a request field (`"lifetime": "28800s"`) of the REST API and the client libraries. The docs note that **the gcloud CLI does not support setting a lifetime** for the token, so `gcloud auth print-access-token` with impersonation always returns the default lifetime.
+## Permissions are a separate question
+Service Account Token Creator decides whether the caller may create tokens at all; it does not change the maximum lifetime.
+W: A=Lifetime extension constraint: listing etl-sa in this organization policy raises the maximum token lifetime for that account to 12 hours.
+B=REST or client library request: only these let the caller ask for 28,800 seconds; gcloud cannot set a token lifetime.
+X: C=Role at organization level: the role controls permission to create tokens, which the caller already has; the limit comes from the organization policy.
+D=Ask for 12 hours or more: without the constraint any lifetime above 3,600 seconds is rejected, and more than 12 hours is never allowed.
+E=Service account key: keys are forbidden here, and access tokens obtained with a key are also short-lived, not valid for 12 hours.
+T: Access tokens beyond 1 hour need the lifetime-extension organization policy and an API request that sets the lifetime.
+V: IAM, Organization Policy Service
+
+@ GCP-ACE D4 T4.2 expert troubleshooting
+S: A Cloud Build trigger in project `ci-prod` builds an image and runs `gcloud run deploy orders --image=IMAGE --service-account=orders-run@app-prod.iam.gserviceaccount.com --region=europe-west1 --project=app-prod`. The trigger runs as the user-specified service account `builder@ci-prod.iam.gserviceaccount.com`, which has Cloud Run Admin on `app-prod`. The step fails with `PERMISSION_DENIED: Permission 'iam.serviceaccounts.actAs' denied on service account orders-run@app-prod.iam.gserviceaccount.com (or it may not exist)`. The account exists, and an engineer already granted `builder` Service Account User on `builder` itself, which did not help. Security requires that `builder` cannot act as any other service account in `app-prod`. What should the engineer grant?
+A: Service Account User to builder on the orders-run service account only, so that builder may attach that one identity to the service
+B: Service Account User to builder on the app-prod project, so that builder may attach any service account of the project to the service
+C: Service Account User to the Cloud Build service agent on orders-run, because the service agent performs the deploy for every trigger
+D: Service Account Token Creator to builder on orders-run, so that builder can create tokens for orders-run during each deployment
+K: A
+G: ## Deploying with a service identity
+When a Cloud Run service is deployed with `--service-account`, the deployer must be allowed to **act as** that service account: Cloud Run's reference lists `iam.serviceAccounts.actAs` on the service identity, which comes with **Service Account User** (`roles/iam.serviceAccountUser`). Cloud Run Admin alone is not enough.
+## Which principal, which resource
+- The principal is whoever runs `gcloud run deploy`, here the trigger's user-specified service account `builder`.
+- The resource is the **service account being attached**, `orders-run`. Granting the role on that one service account (a service account is also a resource with its own allow policy) gives exactly the needed access; granting it on the project would cover every service account in it.
+`gcloud iam service-accounts add-iam-policy-binding orders-run@app-prod.iam.gserviceaccount.com --member=serviceAccount:builder@ci-prod.iam.gserviceaccount.com --role=roles/iam.serviceAccountUser`
+W: Service Account User on orders-run: builder gains actAs for exactly the identity it attaches, and no other service account in app-prod.
+X: B=Project-level grant: it works but lets builder act as every service account in app-prod, which security forbids.
+C=Cloud Build service agent: the trigger runs as builder, and the error names builder's missing permission, not the service agent's.
+D=Token Creator: it allows creating tokens for the account, but it does not include iam.serviceAccounts.actAs, which the deploy checks.
+T: To deploy with a service identity, the deployer needs Service Account User on that specific service account.
+V: Cloud Build, Cloud Run, IAM
