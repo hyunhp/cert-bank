@@ -1,0 +1,425 @@
+# DBX-MLP b13: expert tier (level expert), D1 9, D2 8, D3 3 (guide read 2026-11-08, docs read 2026-11-17)
+# Single answer only (DBX-MLP rule). Stems 90-140 words, 3-4 constraints (one only in the details), evidence-based troubleshooting,
+# options that differ in one detail.
+# src: https://docs.databricks.com/aws/en/structured-streaming/foreach
+# src: https://docs.databricks.com/aws/en/machine-learning/ray/scale-ray
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/time-series
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/lineage
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/monitor-output
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/create-monitor-api
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/index
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/production-optimization
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/model-serving-debug
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/create-manage-serving-endpoints
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/serve-multiple-models-to-serving-endpoint
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/inference-tables
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/score-custom-model-endpoints
+# src: https://docs.databricks.com/aws/en/dev-tools/bundles/deployment-modes
+# src: https://mlflow.org/docs/latest/ml/model/signatures
+# src: https://mlflow.org/docs/latest/api_reference/python_api/mlflow.html
+# src: https://mlflow.org/docs/latest/api_reference/python_api/mlflow.models.html
+# src: https://spark.apache.org/docs/latest/ml-classification-regression.html
+
+@ DBX-MLP D1 T1.6 expert troubleshooting
+S: A Structured Streaming job scores card transactions with a Spark ML PipelineModel inside `foreachBatch(score_and_write)`. The function first writes the scored micro-batch to the Delta table `ml.risk.scores`, then appends a one-row summary of the batch to the Delta table `ml.risk.score_audit`. Last night the cluster restarted in the middle of micro-batch 5121, after the first write had committed but before the second. After recovery, `scores` contains 18,400 duplicated rows, all from batch 5121, while `score_audit` has exactly one row for that batch. Both writes must stay inside the same function, the team follows the guidance not to catch and retry exceptions locally, and downstream readers must not deduplicate. Which change makes a replayed batch safe for both tables?
+A: Add .option("txnAppId", stable query id) and .option("txnVersion", batch_id) only to the audit write, which is the last write in the function
+B: Add .option("txnAppId", new UUID per batch) and .option("txnVersion", batch_id) to both Delta writes inside the function
+C: Add .option("txnAppId", stable query id) and .option("txnVersion", batch_id) to both Delta writes inside the function
+D: Add .option("txnAppId", stable query id) and .option("txnVersion", current epoch milliseconds) to both Delta writes inside the function
+K: C
+G: ## Why foreachBatch can duplicate
+Structured Streaming guarantees that a micro-batch is processed again after a failure, but `foreachBatch` gives you the batch as a plain DataFrame. Two writes inside it are two separate Delta commits; if the first commits and the job dies before the checkpoint records the batch as done, the replay writes it again.
+## Idempotent Delta writes
+Delta Lake supports idempotent writes with two options on each write:
+- `txnAppId`: a stable string that identifies the writing application (the same across restarts).
+- `txnVersion`: a monotonically increasing number; Databricks recommends binding it to `batchId`.
+Delta records the pair in the table's log and **skips** a write whose `(txnAppId, txnVersion)` it has already committed. Databricks docs: use both options on every Delta write in foreachBatch, and let errors propagate instead of retrying locally.
+## Evidence check
+Batch 5121 was written twice to `scores` (committed before the crash) and once to `audit` (not committed before the crash): exactly the replay pattern.
+W: Stable app id and batch_id on both writes: on replay Delta sees that version 5121 of this app was already committed to scores and skips it, while the audit write commits once.
+X: A=Only on the audit write: the scores write, the one that actually duplicated, stays unprotected.
+B=New UUID per batch: the replay generates a different app id, so Delta treats it as a new writer and commits the duplicate.
+D=Epoch milliseconds as version: the replayed batch gets a new, larger version, so Delta cannot recognize it as already written.
+T: In foreachBatch, give every Delta write txnAppId (stable) and txnVersion (batchId) to make replays idempotent.
+V: Structured Streaming, Delta Lake, Spark ML
+
+@ DBX-MLP D1 T1.3 expert troubleshooting
+S: A claims pipeline in Spark ML indexes `merchant_state` (57 distinct values) and `channel` (4 values) with StringIndexer, assembles them with 30 numeric columns and fits `RandomForestClassifier(numTrees=200, maxDepth=10)`. The fit fails with: `DecisionTree requires maxBins (= 32) to be at least as large as the number of values in each categorical feature, but categorical feature 0 has 57 values.` The risk team requires the state to stay one categorical feature, one-hot encoding was rejected because it fragments the state into many sparse columns, and the approved tree count and depth must not change. Training runs nightly on a fixed cluster, and the same pipeline also feeds a weekly retrain of a second model with the same features. Which change fixes the fit?
+A: Set maxBins=64 on the StringIndexer for merchant_state, so that the indexer emits no more than 64 distinct category index values
+B: Set maxBins=64 on the RandomForestClassifier, so that each categorical feature has at least as many bins as it has values
+C: Set maxBins=16 on the RandomForestClassifier, so that the 57 states are merged into fewer bins before the trees search splits
+D: Set maxBins=64 on the VectorAssembler, so that the column metadata limits each categorical feature to 64 recorded values
+K: B
+G: ## How Spark trees treat categorical features
+Spark ML tree models (decision tree, random forest, GBT) read **column metadata**: features produced by `StringIndexer` (or `VectorIndexer`) are marked as categorical with their number of values. Trees then split on groups of categories instead of thresholds.
+## maxBins
+`maxBins` (default 32) is the maximum number of bins used to discretize continuous features **and** the maximum number of categories a categorical feature may have. If any categorical feature has more values than `maxBins`, the fit fails with exactly this message. The fix is to set `maxBins` on the **tree estimator** to at least the largest category count (57 here; 64 leaves room).
+Larger `maxBins` means more split candidates and somewhat more computation and memory per tree, which is acceptable on the nightly cluster.
+W: maxBins=64 on the classifier: the estimator now allows 64 categories per categorical feature, so the 57 states fit while staying one categorical feature, with numTrees and maxDepth unchanged.
+X: A=maxBins on the StringIndexer: StringIndexer has no maxBins parameter; the limit belongs to the tree estimator.
+C=maxBins=16: the rule requires maxBins to be at least the number of categories, so a smaller value fails the same way.
+D=maxBins on the VectorAssembler: the assembler only combines columns and has no maxBins parameter.
+T: For Spark ML trees, maxBins on the estimator must be at least the largest categorical feature's number of values.
+V: Spark ML
+
+@ DBX-MLP D1 T1.15 expert troubleshooting
+S: A weekly Lakeflow job has a task `prep` that runs `with mlflow.start_run(run_name="weekly") as run:`, logs data statistics and passes `run.info.run_id` as the task value `pid`. Two tasks, `train_gbt` and `train_lr`, then run in parallel; each reads `pid` and calls `mlflow.start_run(parent_run_id=pid, run_name=...)`. Both fail with an MLflow error saying the parent run must be active. The audit team requires one parent run per weekly job that groups both model runs in the experiment UI. All three steps must stay separate notebook tasks, and the parent must be marked FINISHED only after both trainings have completed. Which change meets every requirement?
+A: In prep, keep the with block, and in the training tasks call start_run(run_id=pid, nested=True), so that the parent run is resumed as their parent
+B: In prep, keep the with block, and in the training tasks start a new run and set the tag mlflow.parentRunId to pid after the parent has finished
+C: In prep, create the parent with MlflowClient().create_run so it stays RUNNING, and call set_terminated on it at the end of the prep task itself
+D: In prep, create the parent with MlflowClient().create_run so it stays RUNNING, and call set_terminated on it in a final task after both trainings
+K: D
+G: ## Parent runs across processes
+`mlflow.start_run(parent_run_id=...)` creates a new run nested under the given run, and the MLflow API states that **the parent run must be in the ACTIVE state**. A `with mlflow.start_run()` block ends its run (status FINISHED) when the block exits, so by the time the training tasks start, the parent is no longer active.
+## Keeping the parent open
+`MlflowClient().create_run(experiment_id, run_name="weekly")` creates a run in RUNNING state without making it the active run of the process, so nothing ends it when the notebook finishes. Child tasks can then nest under it with `parent_run_id`. A final task that depends on both trainings calls `MlflowClient().set_terminated(pid)` (FINISHED by default).
+## Other parameters
+`start_run(run_id=pid)` **resumes** that run itself; it does not create a child.
+W: create_run plus a final set_terminated task: the parent stays active while both trainings nest under it, and it is finished only after they complete, as the audit requires.
+X: A=start_run(run_id=pid): this resumes the parent run itself instead of creating child runs, so the model runs are not grouped as children.
+B=Tag after the parent finished: the parent is already FINISHED before the trainings run, which violates the rule that it ends only after both complete.
+C=set_terminated in prep: the parent is finished before the training tasks start, so their parent_run_id calls fail exactly as before.
+T: Nesting with parent_run_id needs an active parent; create it with MlflowClient.create_run and terminate it in a final task.
+V: MLflow, Lakeflow Jobs
+
+@ DBX-MLP D1 T1.10 expert troubleshooting
+S: A team runs a hybrid workload on a Databricks cluster whose driver has one GPU and whose workers are CPU-only nodes with 16 cores each. It calls `setup_ray_cluster(min_worker_nodes=2, max_worker_nodes=4, num_cpus_per_node=16)` with Ray 2.10 or later. CPU preprocessing tasks run on the Ray workers, but every task decorated with `@ray.remote(num_gpus=1)` stays pending, and the Ray dashboard reports that no node can satisfy the resource request `{'GPU': 1}`. Budget rules forbid adding GPU workers, the head node must keep coordinating the cluster, and the GPU work must run on the driver's GPU. Which change lets the GPU tasks run?
+A: Pass num_gpus_worker_node=1 to setup_ray_cluster, so that each Ray worker node advertises one GPU for the decorated tasks to use
+B: Pass num_cpus_head_node=1 to setup_ray_cluster, so that the head node advertises resources for tasks and can run the decorated tasks
+C: Pass num_gpus_head_node=1 to setup_ray_cluster, so that the Ray head node on the driver advertises its GPU for the decorated tasks
+D: Call ray.init(num_gpus=1) after setup_ray_cluster, so that the connection to the running cluster registers one GPU for the decorated tasks
+K: C
+G: ## Ray on Spark node layout
+`setup_ray_cluster` starts the Ray **head node on the Spark driver** and Ray **worker nodes as Spark tasks** on the workers. By default Databricks gives the head node **0 CPUs, 0 GPUs** and small memory, because it usually only coordinates and the driver is shared.
+## Using the driver's GPU
+With Ray 2.8 and above, `num_cpus_head_node`, `num_gpus_head_node` and `object_store_memory_head_node` configure the head node's resources. Setting `num_gpus_head_node=1` makes the driver's GPU visible to Ray's scheduler, so tasks requesting `num_gpus=1` can be placed there. Databricks also documents heterogeneous setups such as a GPU driver with CPU workers.
+## Evidence
+"No node can satisfy {'GPU': 1}" means no Ray node advertises a GPU: the workers have none and the head advertises zero by default.
+W: num_gpus_head_node=1: the head on the driver now advertises its GPU, so the pending GPU tasks are scheduled there while the head still coordinates.
+X: A=num_gpus_worker_node=1: the worker nodes have no physical GPU, so advertising one would be wrong and could not run GPU work.
+B=num_cpus_head_node=1: it adds a CPU to the head but still advertises zero GPUs, so the GPU request stays unsatisfiable.
+D=ray.init(num_gpus=1): when connecting to an existing cluster, resources are defined by the nodes, not by the client's init call.
+T: Ray on Spark gives the head node no GPUs by default; set num_gpus_head_node to use the driver's GPU.
+V: Ray on Databricks
+
+@ DBX-MLP D1 T1.12 expert use-case
+S: A team fine-tunes a 5-billion-parameter PyTorch model in full fp32 with AdamW on 2 nodes of 4 GPUs each, 24 GB per GPU. Its sizing note counts 4 bytes per parameter for weights, 4 for gradients and 8 for the two Adam moments, so 16 bytes per parameter, plus about 3 GB of activations per GPU at the chosen batch size. DistributedDataParallel fails with CUDA out-of-memory at the first step. Larger GPU types are not allowed this quarter, the optimizer and precision must stay unchanged because the training recipe is validated, and the deadline requires all 8 GPUs to work on one run. Which configuration fits in memory?
+A: FSDP across all 8 GPUs with full sharding of parameters, gradients and optimizer states: about 80 / 8 = 10 GB plus 3 GB per GPU
+B: DDP across all 8 GPUs with gradient checkpointing: activations drop to about 1 GB, while each GPU still holds the 80 GB of model state
+C: Optimizer-state sharding only across all 8 GPUs: about 40 GB of weights and gradients plus 40 / 8 = 5 GB of moments per GPU
+D: FSDP with full sharding inside one node of 4 GPUs: about 80 / 4 = 20 GB plus 3 GB per GPU, while the second node stays idle
+K: A
+G: ## Count the model state
+Per parameter in fp32 with Adam: weights 4 B, gradients 4 B, two moments 8 B = 16 B. For 5 billion parameters that is 80 GB per full replica, before activations.
+## What each strategy keeps on one GPU
+- **DDP**: a full replica on every GPU (80 GB), whatever the batch size.
+- **Optimizer-state sharding (ZeRO stage 1)**: weights and gradients stay replicated (40 GB); only the moments are split.
+- **Full sharding (FSDP FULL_SHARD / ZeRO stage 3)**: weights, gradients and moments are all split: 80 / N per GPU, gathered layer by layer when needed.
+## Apply the constraints
+Precision and optimizer are fixed, so the bytes per parameter cannot be reduced. The run must use all 8 GPUs. Full sharding over 8 GPUs needs about 10 GB + 3 GB = 13 GB on 24 GB GPUs, leaving headroom for buffers.
+W: Full sharding across 8 GPUs: about 13 GB per GPU fits in 24 GB, uses every GPU on one run, and keeps the validated fp32 AdamW recipe.
+X: B=DDP with checkpointing: checkpointing only shrinks activations; each GPU still needs the full 80 GB of model state.
+C=Optimizer sharding only: about 45 GB per GPU (40 replicated plus 5 sharded) still exceeds 24 GB.
+D=Full sharding on one node: about 23 GB per GPU leaves almost no headroom, and the idle second node breaks the all-8-GPUs deadline requirement.
+T: Size distributed training from bytes per parameter; only full sharding divides all model state by the number of GPUs.
+V: PyTorch FSDP, DeepSpeed, TorchDistributor
+
+@ DBX-MLP D1 T1.19 expert troubleshooting
+S: A fraud model combines two shared feature tables owned by other teams: `ml.users.user_daily` and `ml.merch.merchant_daily`. Both tables publish a feature called `avg_7d` (the user's and the merchant's 7-day average amount), and the model needs both. The training code builds two FeatureLookup objects and calls `fe.create_training_set(df=labels, feature_lookups=[user_lookup, merch_lookup], label="is_fraud")`, which fails because both lookups produce an output column named `avg_7d`. The owning teams refuse to rename their columns, and the model will be logged with `fe.log_model` so that Model Serving looks up both features automatically from online stores. Which change fixes the training set and keeps automatic lookup consistent?
+A: Pass exclude_columns=["avg_7d"] to create_training_set, so that the duplicate output column is removed and the training set can be built
+B: Pass rename_outputs={"avg_7d": "merch_avg_7d"} to the merchant FeatureLookup, so that its output gets a distinct name in training and serving
+C: Rename the merchant column with withColumnRenamed after load_df, so that the training DataFrame contains two distinct average columns
+D: Pass feature_names=["avg_7d"] only to the user FeatureLookup and drop the merchant lookup, so that only one column named avg_7d remains
+K: B
+G: ## Output names of feature lookups
+Each `FeatureLookup` adds its features to the training set under their feature names. Two lookups that return the same name collide. `FeatureLookup` accepts `rename_outputs`, a dictionary from feature name to the output name used in the training set, for example `rename_outputs={"latitude": "restaurant_latitude"}` in the Databricks feature lineage example.
+## Why the rename must live in the lookup
+`fe.log_model` packages the lookups with the model. At batch scoring and serving time the same lookups run again, including `rename_outputs`, so the model receives `merch_avg_7d` everywhere. A rename done after `load_df` exists only in the training notebook; serving would return the original name.
+W: rename_outputs on the merchant lookup: both features reach the model under distinct names, and because the rename is stored with the logged model, serving applies it too.
+X: A=exclude_columns: it removes the column from the training set, so the model loses the feature it needs.
+C=withColumnRenamed after load_df: the collision happens while building the set, and a rename outside the lookup is not packaged with the model for serving.
+D=Drop the merchant lookup: it removes the merchant feature the model requires.
+T: Resolve feature name collisions with rename_outputs in the FeatureLookup so the rename is packaged with the model.
+V: Feature Store, Unity Catalog
+
+@ DBX-MLP D1 T1.11 expert tradeoff
+S: A forecasting model uses a single-node library that needs the whole training matrix in memory and makes one internal copy of it while fitting. The training set is 150 million rows by 40 numeric features. Data grows about 10% per year, and the library cannot be replaced this year. The platform team's rule is that a job may plan to use at most 70% of a node's memory. A validation run showed that the library accepts float32 input with no change in accuracy. Available single-node sizes have 64 GB, 128 GB or 256 GB of memory, priced in that order. Which choice is the LOWEST cost that satisfies the rule for the coming year?
+A: A 64 GB node with float32 input: about 24 GB of data, 48 GB with the copy, about 53 GB after a year of growth
+B: A 128 GB node with float64 input: about 48 GB of data, 96 GB with the copy, about 106 GB after a year of growth
+C: A cluster of eight 32 GB workers with float64 input: about 256 GB in total, which leaves more than enough room for the copy
+D: A 128 GB node with float32 input: about 24 GB of data, 48 GB with the copy, about 53 GB after a year of growth
+K: D
+G: ## Work the memory
+- Values: 150,000,000 x 40 = 6 billion.
+- float64: 8 bytes, so 48 GB; float32: 4 bytes, so 24 GB.
+- One internal copy doubles it: 96 GB (float64) or 48 GB (float32).
+- Next year (+10%): about 106 GB or 53 GB.
+## Apply the 70% rule
+- 64 GB node: 70% is 44.8 GB, less than 53 GB.
+- 128 GB node: 70% is 89.6 GB; 53 GB fits, 106 GB does not.
+- 256 GB node: 179 GB, fits float64 too, but costs more.
+## Vertical versus horizontal
+The library runs on one node, so adding workers does not add usable memory: the matrix must sit in one process. This is a vertical-scaling decision; halving the bytes per value is the cheapest lever.
+W: 128 GB with float32: about 53 GB next year stays under the 89.6 GB limit, at a lower price than the 256 GB node.
+X: A=64 GB with float32: 53 GB exceeds the 44.8 GB that the 70% rule allows.
+B=128 GB with float64: the matrix plus its copy needs about 106 GB next year, which exceeds the 89.6 GB that the 70% rule allows on this node.
+C=Eight 32 GB workers: a single-node library cannot spread its matrix over workers, so each node would need the whole matrix anyway.
+T: For single-node libraries, scale up and shrink the data type; extra workers add no memory to one process.
+V: Databricks compute, Databricks Runtime ML
+
+@ DBX-MLP D1 T1.18 expert troubleshooting
+S: A time series feature table `ml.risk.card_counts` has primary key `(card_id, event_ts TIMESERIES)`. A streaming job writes one row per transaction, where `txn_count_1h` counts the card's transactions in the past hour including the transaction itself, stamped with that transaction's `event_ts`. Training labels are transactions keyed by `card_id` and `event_ts`, and the FeatureLookup uses `timestamp_lookup_key="event_ts"`. In training every row has txn_count_1h of at least 1, but at serving the lookup runs before the new transaction is written, so first transactions see no value. Offline precision is 0.71, online 0.48. The shared feature table must not change, and the label table must not be rewritten. Which fix restores point-in-time consistency?
+A: Add a derived lookup timestamp of event_ts minus one microsecond, so that the as-of join takes the latest row before each transaction
+B: Add a derived lookup timestamp equal to event_ts plus one microsecond, so that the as-of join also takes rows written in the same instant
+C: Keep timestamp_lookup_key="event_ts" and add lookback_window=timedelta(hours=1), so that only rows from the past hour join to labels
+D: Keep timestamp_lookup_key="event_ts" and publish the table in SNAPSHOT mode, so that the online store holds the same rows as training
+K: A
+G: ## As-of joins include equal timestamps
+A point-in-time lookup matches the most recent feature row whose timestamp is **not later than** the lookup timestamp. A row stamped with exactly the label's `event_ts` therefore joins to its own label, and here that row already counts the labeled transaction.
+## Training versus serving
+At serving, the request is scored before its own row exists, so the model sees the count of earlier transactions only. Training saw a count that includes the current event: a classic leak that inflates offline metrics.
+## Fixing it without touching the tables
+The lookup timestamp is just a column of the label DataFrame. A derived column `lookup_ts = event_ts - INTERVAL 1 MICROSECOND` (in the DataFrame passed to `create_training_set`, not in the stored label table) makes the join pick the latest row **strictly before** the transaction, matching what serving sees.
+W: Lookup at event_ts minus one microsecond: the join excludes the row created by the labeled transaction itself, so training sees the same history as serving.
+X: B=Plus one microsecond: it still includes the same-instant row, keeping the leak.
+C=One-hour lookback: the leaking row is zero seconds old, so the window keeps it; lookback drops only old values.
+D=SNAPSHOT publish: it changes how the online store is synced, not the leaked values in the training set.
+T: As-of lookups include rows at the same timestamp; shift the lookup time when a feature row is created by the labeled event itself.
+V: Feature Store
+
+@ DBX-MLP D1 T1.7 expert tradeoff
+S: A churn model registered as `prod.ml.churn` is served by an endpoint that handles about 2,000 rows per second at its current provisioned concurrency, whatever the batch size. A new nightly job must score 300 million customers between 01:00 and 05:00 with exactly the version that holds the `@champion` alias, so that promotions take effect without code changes. The batch cluster runs a Databricks Runtime ML whose scikit-learn version differs from the one pinned in the model's logged requirements, and the team must not raise endpoint capacity or cost. Which scoring setup meets all constraints?
+A: spark_udf on "models:/prod.ml.churn@champion" with env_manager="local", so executors score with the scikit-learn already on the cluster
+B: spark_udf on "models:/prod.ml.churn@champion" with env_manager="virtualenv", so executors rebuild the model's logged environment
+C: spark_udf on "models:/prod.ml.churn/7" with env_manager="virtualenv", so executors rebuild the logged environment of version 7
+D: mapInPandas that sends batches of 1,000 rows to the endpoint with the MLflow Deployments client, so the endpoint does the scoring
+K: B
+G: ## Endpoint or Spark for batch scoring
+Work the endpoint option: 300,000,000 rows / 2,000 rows per second = 150,000 seconds, about 42 hours, far beyond a 4-hour window, and the team may not add capacity. Batch scoring belongs in Spark.
+## spark_udf details that matter
+- **Model URI**: `models:/prod.ml.churn@champion` resolves the alias at load time, so a promotion changes what the job scores with no code change; `models:/prod.ml.churn/7` pins one version.
+- **env_manager**: `local` uses the cluster's libraries; `virtualenv` (or `uv`) recreates the model's logged Python environment on the executors, so the pinned scikit-learn version is used even when the runtime differs.
+Loading a scikit-learn model with a different library version can change behavior or fail, which is why the logged environment matters here.
+W: Alias URI with virtualenv: it follows the champion alias and scores with the scikit-learn version the model was logged with, inside the batch window and without endpoint cost.
+X: A=env_manager="local": executors use the cluster's different scikit-learn version, not the pinned one, which risks errors or changed predictions.
+C=Version 7 URI: it pins a version, so the next promotion would not take effect without changing the code.
+D=Endpoint batches: at 2,000 rows per second the job needs about 42 hours, and capacity may not be raised.
+T: For nightly batch scoring use spark_udf with the alias URI and the model's own environment (virtualenv) when cluster libraries differ.
+V: MLflow, Spark, Model Serving
+
+@ DBX-MLP D2 T2.11 expert troubleshooting
+S: The drift metrics table of an inference profile shows, for the categorical feature `device_type` in yesterday's daily window against the baseline: `js_distance` 0.41, `tv_distance` 0.38, `l_infinity_distance` 0.37 and a `chi_squared_test` p-value below 0.001, while `ks_test` and `population_stability_index` are null and `percent_null_delta` is 0. A mobile app release went out yesterday. The product owner asks which category values changed before deciding whether to retrain. The answer must come from the existing metric tables only, because scanning the 4 TB inference table is not approved this week. Which reading answers the question?
+A: Compare distinct_count for device_type in the profile metrics table between yesterday's INPUT row and the BASELINE row
+B: Compare frequent_items for device_type in the drift metrics table between yesterday's window and its comparison window
+C: Compare frequent_items for device_type in the profile metrics table between yesterday's INPUT row and the BASELINE row
+D: Compare population_stability_index for device_type in the drift metrics table between yesterday's window and the baseline
+K: C
+G: ## Two metric tables, two jobs
+- The **drift metrics table** holds comparison statistics (deltas, tests, distances) between a window and the previous window or the baseline. It says *how much* a distribution moved, not *which values*.
+- The **profile metrics table** holds per-window summaries for each column, with `log_type` INPUT (primary table) or BASELINE. For categorical columns it includes `frequent_items` (top 100 items with counts) and `distinct_count`.
+## Reading the evidence
+For categorical columns the drift table fills chi-squared, TV, L-infinity and JS distance; KS and PSI are numeric-only, so null is expected. L-infinity 0.37 says one category's share moved by 37 points. To see which one, compare yesterday's INPUT `frequent_items` with the BASELINE `frequent_items` in the profile metrics table.
+W: frequent_items in the profile metrics table: comparing the INPUT and BASELINE item counts shows which device_type values gained or lost share, from the metric tables alone.
+X: A=distinct_count: it shows how many values exist, not which values changed share; a renamed value can leave the count unchanged.
+B=frequent_items in the drift table: the drift table has no frequent_items column; it stores deltas and distances.
+D=PSI: PSI is computed for numeric columns only and is null for device_type, as the evidence shows.
+T: Drift metrics say how much a column moved; profile metrics (frequent_items) say which categorical values moved.
+V: Data profiling
+
+@ DBX-MLP D2 T2.13 expert troubleshooting
+S: An inference profile on `ml.ops.churn_log` uses `model_id_column="model_version"`, `label_column="churned"` and a baseline table built from a validation set that has the same feature columns plus `prediction` and `churned`, but no `model_version` column. Versions 11 and 12 are served side by side. In the profile metrics table, the BASELINE rows form a single group without a model version, so the team cannot compare each version's live quality and inputs against its own validation results. Version 12 was validated on a different validation set than version 11, and both validation sets must be used. Only one profile can exist on the table. What should the team change?
+A: Build one baseline table that holds both validation sets, with a model_version column set to 11 or 12 on each row
+B: Build two baseline tables, one per version, and attach both of them to the same profile through two baseline settings
+C: Keep the single baseline and add a slicing expression on model_version, so that baseline drift is computed for each version
+D: Build one baseline table that holds both validation sets, with a model_version column set to the newest version on every row
+K: A
+G: ## Baselines for inference profiles
+Databricks recommends the model's training or validation data as the baseline of an inference profile. The baseline should match the primary table's schema and **should have the same `model_id_col`** as the primary table, so that metrics are aggregated consistently per model version. Ideally it is the validation set used to evaluate each model, so quality metrics are comparable.
+## One profile, one baseline
+A table can have only one profile, and a profile has one baseline table. Several versions are supported by putting each version's reference rows into that one table, tagged with the version in the model id column.
+W: One baseline with a model_version column: each version's validation rows carry its id, so the profile groups baseline metrics per version and compares each version with its own validation set.
+X: B=Two baselines: a profile accepts exactly one baseline table, so there is no way to attach a second baseline setting to the same profile.
+C=Slicing on model_version: the baseline has no model_version column, so its rows cannot be split by version.
+D=Newest version on every row: version 11 would be compared with a baseline labeled as version 12, mixing both validation sets under one id.
+T: Give an inference profile's baseline the same model id column, with each version's reference rows tagged.
+V: Data profiling
+
+@ DBX-MLP D2 T2.20 expert troubleshooting
+S: A CPU custom model endpoint calls a partner geolocation SDK from a background thread started with `ThreadPoolExecutor` inside `predict`, to overlap the call with feature preparation. The SDK waits inside compiled code. When the partner slows to about 2 seconds per call, P99 latency of all requests on the endpoint rises at once, including requests that never call the SDK; CPU stays below 20%, and request queue time grows. At model load, `gevent.monkey.is_module_patched("threading")` is logged as True. The SDK cannot be dropped, and the contract requires that a partner call is abandoned after 3 seconds. Which change addresses the root cause?
+A: Run the SDK call on a larger ThreadPoolExecutor of 32 Python threads, so that more blocked partner calls can wait at the same time
+B: Run the SDK call on a gevent ThreadPool of OS threads through a run_blocking helper, without a timeout, so every slow call completes
+C: Raise the served entity's provisioned concurrency to absorb the stall, and keep the SDK call in the existing ThreadPoolExecutor
+D: Run the SDK call on a gevent ThreadPool of OS threads through a run_blocking helper, with a 3-second timeout on the call itself
+K: D
+G: ## gevent workers and blocking calls
+On CPU custom model endpoints that use **gevent workers**, one worker serves several requests concurrently. Python threads that model code starts (`threading.Thread`, `ThreadPoolExecutor`) become cooperative gevent tasks on the worker's single OS thread; they only switch at cooperative points such as socket I/O or sleep. A call that **blocks in compiled code** never yields, so it stalls every request on that worker, even from a background thread.
+## The documented fix
+Run such calls on a separate pool of **OS threads**: a helper (`run_blocking`) uses `gevent.threadpool.ThreadPool` when gevent is active and calls the function directly otherwise. Databricks adds: set a timeout on the blocking call itself, because pool threads cannot be cancelled, and offloading helps only if the compiled call releases the GIL while it waits.
+## Evidence
+All requests slow together, CPU is low and the threading module is patched: workers are blocked, not busy.
+W: gevent ThreadPool with a 3-second timeout: the blocking call leaves the worker's thread so other requests proceed, and the timeout enforces the contract and frees pool threads.
+X: A=Bigger ThreadPoolExecutor: under gevent these threads are still cooperative tasks on the same OS thread, so the compiled call keeps blocking the worker.
+B=OS-thread pool without timeout: it unblocks the worker, but hung calls hold pool threads forever and the 3-second contract is not enforced.
+C=More provisioned concurrency: each new replica's workers block the same way; capacity hides the symptom while costing more.
+T: On gevent-based CPU endpoints, run calls that block in compiled code on an OS-thread pool, with a timeout.
+V: Model Serving
+
+@ DBX-MLP D2 T2.17 expert troubleshooting
+S: A team trends daily request volume and accuracy of a classifier from the endpoint's inference table joined with labels. For one day the table holds 1,000,412 rows, while the client gateway logged exactly 1,000,000 successful calls; 412 request IDs appear twice with identical payloads and responses, and `sampling_fraction` is 1 on every row. The profile's accuracy for that day counts those requests twice. The raw inference table is an audit record and must stay unchanged, and no legitimate request may be dropped, including the many identical payloads that different users send every day. What should the monitoring pipeline do?
+A: Deduplicate on the payload contents when building the unpacked table that the profile monitors, keeping one row per distinct request body
+B: Deduplicate on the request ID when building the unpacked table that the profile monitors, keeping one row per request
+C: Deduplicate on the request ID directly in the inference table with a daily MERGE, keeping one row per request for every reader
+D: Weight each row by 1 / sampling_fraction in the unpacked table that the profile monitors, so that the duplicated rows count as half
+K: B
+G: ## Inference tables deliver at least once
+Databricks guarantees inference table log delivery **at least once**, so duplicate rows are possible though rare. Each row carries a request identifier (a Databricks-generated request ID, plus an optional client request ID in the legacy schema).
+## Where to clean
+Profiles usually monitor an **unpacked table** built from the raw inference table (JSON parsed into feature and prediction columns, labels joined). That build step is the right place to keep one row per request ID. The raw table stays untouched for audits.
+## Why the key matters
+Payload contents are not an identity: different users legitimately send identical bodies. The request ID identifies one call.
+W: Deduplicate on request ID in the unpacked table: the 412 redelivered rows collapse to one per request, accuracy is no longer double-counted, and the raw audit table is unchanged.
+X: A=Deduplicate on payload: identical requests from different users would be merged, dropping legitimate calls.
+C=MERGE on the inference table: it modifies the audit record, which must stay unchanged.
+D=Weight by sampling_fraction: the fraction is 1 on every row, so weighting changes nothing; it corrects down-sampling, not duplicates.
+T: Inference tables are at-least-once; deduplicate by request ID in the derived table you monitor.
+V: Model Serving, inference tables, data profiling
+
+@ DBX-MLP D2 T2.10 expert troubleshooting
+S: An automated retraining gate calls `mlflow.validate_evaluation_results` with the champion's evaluation result as `baseline_result` and the thresholds `{"log_loss": MetricThreshold(min_relative_change=0.05, greater_is_better=False)}`. Both models were evaluated with `mlflow.models.evaluate` on the same 200,000-row holdout. The champion's log_loss is 0.400 and the challenger's is 0.385. The gate raises `ModelValidationFailedException`, and an engineer files a bug claiming that the gate is broken because the challenger is better. The champion has served for six months, and the written policy says: "promote only when the loss improves by at least 5 percent of the champion's value." What does the evidence show?
+A: The gate is correct: 5% of 0.400 requires a loss of 0.380 or lower, and 0.385 improves the champion's loss by only 3.75%
+B: The gate is wrong: with greater_is_better=False the challenger must be 5% higher than the champion, and 0.385 is lower
+C: The gate is correct: a 5% relative change requires a loss of 0.350 or lower, and 0.385 improves the loss by only 0.015
+D: The gate is wrong: min_relative_change compares with 0.05 in absolute terms, so 0.385 is well within the allowed range
+K: A
+G: ## Relative change in MetricThreshold
+`MetricThreshold(min_relative_change=r, greater_is_better=...)` requires the candidate to beat the baseline by at least `r` times the magnitude of the baseline value.
+- `greater_is_better=True`: candidate >= baseline x (1 + r).
+- `greater_is_better=False` (losses): candidate <= baseline x (1 - r).
+## Work the numbers
+Baseline 0.400, r = 0.05: the challenger needs 0.400 x 0.95 = 0.380 or lower. It has 0.385, an improvement of 0.015 / 0.400 = 3.75%. The gate correctly rejects it, exactly as the policy wording says.
+(`min_absolute_change=0.05` would instead require 0.350 or lower.)
+W: Gate correct, 3.75% improvement: the policy and the threshold both require at least a 5% relative reduction (0.380), and 0.385 falls short.
+X: B=Must be higher: with greater_is_better=False lower is better, and the candidate must be at least 5% lower, not higher.
+C=Requires 0.350: that would be an absolute change of 0.05, which is min_absolute_change, not the relative rule configured here.
+D=Absolute 0.05 comparison: min_relative_change is a fraction of the baseline value, not an absolute amount.
+T: min_relative_change scales with the baseline: for a loss, the candidate must be at most baseline x (1 - r).
+V: MLflow
+
+@ DBX-MLP D2 T2.16 expert troubleshooting
+S: On 15 October a team created a time series profile with monthly granularity on an orders table that holds three years of history. On the first refresh after 1 November, the drift metrics table shows consecutive drift for October against September with `count_delta` of about +180,000 and `avg_delta` near zero for every numeric feature, and an alert on `count_delta` fired. The business confirms that order volume was steady in both months. The team must keep monthly windows and does not want to delete and recreate the profile. Which explanation fits the evidence, and what should be done?
+A: October is a partial window, because the profile analyzed only data from 30 days before its creation; exclude October from the alert
+B: Order volume really rose in October, because count_delta counts only non-null values; raise the alert threshold on count_delta
+C: September is a partial window, because the profile analyzed only data from 30 days before its creation; exclude September from the alert
+D: September is a partial window, because the Change Data Feed of the table keeps only 30 days of changes; extend the CDF retention
+K: C
+G: ## The 30-day look-back at creation
+When a time series or inference profile is first created, Databricks analyzes only data from the **30 days before creation**; after that, all new data is processed. With monthly windows, the cutoff can fall in the middle of a month, so the **first window is partial**. Databricks notes that this affects only the first window.
+## Reading the evidence
+Created on 15 October, the profile saw data from about 15 September. September's window therefore holds only half a month, while October is complete. Consecutive drift for October versus September shows a large positive `count_delta` (current minus previous) with unchanged averages: a volume artifact, not a distribution change.
+## What to do
+Treat the first window as incomplete: exclude it from the count-based alert, or alert on distribution statistics that do not depend on volume.
+W: September partial, exclude it: the creation cutoff left September half-filled, which explains the volume jump with flat averages; the alert should ignore that first window.
+X: A=October partial: October is after the cutoff and was fully processed; the incomplete window is the first one, September.
+B=Real volume increase: the business confirms steady volume, and the size of the delta matches half a month missing from September.
+D=CDF retention: the cutoff is the profile's documented 30-day initial analysis, not Change Data Feed retention.
+T: A new time series profile analyzes only the 30 days before creation, so its first window can be partial.
+V: Data profiling
+
+@ DBX-MLP D2 T2.8 expert troubleshooting
+S: A bundle has the targets dev, staging and prod. The staging target was copied from dev and still has `mode: development`. After the CI service principal runs `databricks bundle deploy -t staging`, the nightly retraining job and the quality monitor on the staging inference table exist, but nothing has run for a week; the job's name starts with "[dev " and its schedule shows Paused. Staging must run on schedule exactly like production, deployments must run as the CI service principal, and the team wants Databricks to validate the run identity and permissions of that target at deploy time. What should change?
+A: Keep mode: development on staging and set schedule.pause_status: UNPAUSED on the job, so the job runs while the target stays in dev mode
+B: Remove the mode mapping from staging entirely, so that the dev prefix and schedule pausing stop, while no production validation runs
+C: Set mode: production on the staging target without run_as, so that deployments run as whoever calls bundle deploy in CI
+D: Set mode: production on the staging target, with run_as and permissions defined, so schedules stay active and validations apply
+K: D
+G: ## Deployment modes in Declarative Automation Bundles
+Declarative Automation Bundles (formerly Databricks Asset Bundles) apply a group of settings per target `mode`:
+- **development**: prefixes resource names with `[dev <user>]`, **pauses all schedules and triggers** (jobs and quality monitors), allows concurrent runs, disables the deployment lock.
+- **production**: keeps schedules as defined, validates that pipelines are not in development mode, can check the Git branch, and **validates that `run_as` and `permissions` are specified**. Databricks recommends a service principal as `run_as` for production-like deployments.
+## Evidence
+The "[dev " prefix and the paused schedule are exactly the development-mode behaviors, applied to staging by the copied mapping.
+W: mode: production with run_as and permissions: schedules and monitors stay active, the job runs as the CI service principal, and deploys are validated for identity and permissions.
+X: A=Unpause the job only: the quality monitor's schedule stays paused, names keep the dev prefix, and no run_as or permissions validation happens.
+B=No mode: pausing stops, but the team loses the production-mode validation of run identity and permissions it asked for.
+C=Production without run_as: the target lacks the run identity that production mode validates, and runs would not be pinned to the service principal.
+T: Development mode pauses schedules and prefixes names; use production mode with run_as and permissions for staging and prod.
+V: Declarative Automation Bundles, Lakeflow Jobs, data profiling
+
+@ DBX-MLP D2 T2.15 expert troubleshooting
+S: A fraud model's input `amount_zscore` is standardized upstream. After a vendor change, the drift metrics table for yesterday's window against the baseline shows `avg_delta` 0.002, `percent_null_delta` 0, `wasserstein_distance` 0.31, `population_stability_index` 0.27 and a `ks_test` statistic of 0.14 with a p-value below 0.001. The profile metrics table shows `stddev` rising from 1.0 to 1.6. The existing alert fires only when the absolute value of avg_delta exceeds 0.1, and it stayed silent. Governance requires drift alerts on numeric features to follow the PSI bands documented for data profiling. What do the evidence and the policy imply?
+A: A mean shift hidden by rounding: avg_delta 0.002 is meaningful for z-scores, so lower the avg_delta threshold to 0.001 for this column
+B: A spread change with an unchanged mean: PSI 0.27 is in the significant band (0.2 or more), so alert on population_stability_index of 0.2 or more
+C: A spread change with an unchanged mean: PSI 0.27 is in the moderate band (0.1 to 0.2), so alert on population_stability_index of 0.3 or more
+D: A spread change with an unchanged mean: the KS p-value is significant, so alert only on a ks_test p-value below 0.05 for this column
+K: B
+G: ## What each statistic sees
+- `avg_delta` compares means. A distribution can widen or change shape with the same mean: a standardized feature whose stddev grows from 1.0 to 1.6 keeps a mean near 0.
+- `ks_test`, `wasserstein_distance` and `population_stability_index` compare **whole distributions** for numeric columns, so they detect spread changes.
+## Documented PSI bands
+Data profiling documents PSI in the range [0, inf): below 0.1 no significant population change, below 0.2 moderate change, **0.2 or more significant change**. 0.27 is significant.
+## Applying the policy
+The governance rule names PSI bands, so the alert should use `population_stability_index >= 0.2`. KS p-values with large samples flag tiny changes and are not the policy's measure.
+W: Spread change, PSI significant: the mean is flat while stddev rose, PSI 0.27 lies in the documented significant band, and the policy-conformant rule is PSI of 0.2 or more.
+X: A=Lower avg_delta threshold: the mean really did not move; any mean-based rule misses a pure spread change.
+C=Moderate band, 0.3 rule: 0.27 is above 0.2, which the docs call significant, and a 0.3 threshold would miss this very shift.
+D=KS p-value only: the KS test does detect it, but the policy requires PSI bands, and p-values become significant for trivial shifts on large data.
+T: Mean deltas miss spread changes; alert on distribution statistics, using the documented PSI bands (0.2 or more is significant).
+V: Data profiling, Databricks SQL alerts
+
+@ DBX-MLP D3 T3.4 expert troubleshooting
+S: A pricing model was logged with a signature inferred from training data in which `discount` is a double column. A Java service sends `{"dataframe_split": {"columns": ["sku", "qty", "discount"], "data": [["A1", 2, 0], ["B7", 1, 0]]}}` and receives HTTP 400 with a message that the input column `discount` cannot be safely converted from int64 to float64. Requests in which any row has a discount such as 0.15 succeed. The model must not be re-logged or re-registered this week, and the Java team may change only how its serializer writes numbers. Which change fixes the failing requests?
+A: Serialize every discount value as a JSON number with a decimal point, such as 0.0, so that the column parses as float64 when all values are whole
+B: Serialize every discount value as a JSON string, such as "0.0", so that the column parses as text and the schema check converts it to float64
+C: Serialize every discount value as a JSON integer, but send the rows in the dataframe_records format, so each record's value is converted on its own
+D: Serialize every qty value as a JSON number with a decimal point, such as 2.0, so that the integer columns of the request parse as float64
+K: A
+G: ## How a JSON request becomes a typed DataFrame
+The endpoint parses `dataframe_split` (or `dataframe_records`) into a pandas DataFrame, and pandas infers each column's dtype from the values. A column of only whole numbers like `0` becomes `int64`; one decimal value anywhere makes the column `float64`.
+## Schema enforcement
+MLflow then checks the input against the model signature. Safe conversions (int32 to int64, int32 to double, float to double) are applied, but conversions that may lose information are rejected: **long (int64) to double** is listed as unsafe, as is string to number. Hence the error only when every discount in a request is whole.
+## The fix within the constraints
+Write the numbers as `0.0`: JSON then carries a float, pandas infers `float64`, and the signature check passes. No model change is needed.
+W: Decimal JSON numbers: discount always parses as float64, so the signature check sees the expected double type even when every value is whole.
+X: B=JSON strings: a string column is not converted to double; string to number is an unsafe conversion and fails the check.
+C=dataframe_records with integers: the format changes the layout, not type inference; all-integer values still produce an int64 column.
+D=Decimals for qty: the failing column is discount; changing qty does not fix discount's int64 type and may break qty's own signature type.
+T: MLflow rejects int64-to-double conversion; make clients send whole numbers in double columns as decimals.
+V: Model Serving, MLflow
+
+@ DBX-MLP D3 T3.3 expert troubleshooting
+S: Version 7 of `prod.ml.pricing`, a custom pyfunc, was registered from run `abc123` with pip requirements that omit `lightgbm`, which `predict` imports lazily. The endpoint build reports "Container image creation finished successfully", but the first requests fail with "No module named 'lightgbm'". A check with `mlflow.models.predict(model_uri="runs:/abc123/model", input_data=sample, env_manager="uv", pip_requirements_override=["lightgbm==4.5.0"])` returns correct predictions. The nine-hour training must not be rerun, other teams already reference version 7 in their audit notes, the fix must be traceable as its own model version, and the endpoint must keep serving version 7 until the fix is ready. Which sequence is correct?
+A: Call update_model_requirements on "models:/prod.ml.pricing/7" to add lightgbm==4.5.0, then update the endpoint so that it rebuilds version 7
+B: Add lightgbm==4.5.0 to the served entity's environment variables, so that the endpoint installs it when it rebuilds version 7
+C: Call update_model_requirements on "runs:/abc123/model" to add lightgbm==4.5.0, register that model as version 8, and serve version 8
+D: Call update_model_requirements on "runs:/abc123/model" to add lightgbm==4.5.0, then update the endpoint so that it rebuilds version 7
+K: C
+G: ## Pre-deployment check
+`mlflow.models.predict` runs the model in a freshly built environment (`virtualenv`, `uv`, ...), and `pip_requirements_override` tests extra or changed dependencies without changing the model. A success shows that adding lightgbm is the fix.
+## Changing requirements without retraining
+`mlflow.models.update_model_requirements(model_uri, "add", ["lightgbm==4.5.0"])` rewrites `requirements.txt` and `conda.yaml` of a logged model in place. MLflow states that `models:/` URIs are not supported, because registry artifacts are read-only: **a registered model version is immutable**, so you register a new version from the updated logged model.
+## Rolling out
+Register the updated run model as version 8, then point the endpoint at version 8. Until that update is ready, the old configuration (version 7) keeps serving.
+W: Update the run's model, register version 8, serve it: the dependency fix lands in a new, traceable version without retraining, and version 7 serves until the switch.
+X: A=update on models:/ URI: registry artifacts are read-only, and the API does not accept models:/ URIs.
+B=Environment variables: environment variables do not install Python packages; the build installs only the logged requirements.
+D=Rebuild version 7: version 7's registered artifacts were copied at registration, so changing the run's model does not change them, and the fix would not be a new version.
+T: Fix dependencies with update_model_requirements on the logged model, then register a new version; registered versions are immutable.
+V: MLflow, Model Serving, Unity Catalog
+
+@ DBX-MLP D3 T3.2 expert troubleshooting
+S: The endpoint `churn-ep` serves one served entity named `current` (version 7 of `prod.ml.churn`) at 100%. A release script sends one configuration update with two served entities, `current` (version 7) and `challenger` (version 8), and with traffic routes `{"served_model_name": "churn-7", "traffic_percentage": 90}` and `{"served_model_name": "challenger", "traffic_percentage": 10}`. The update is rejected with a validation error about the traffic configuration, and the endpoint keeps serving the old configuration. Callers must not see an interruption, the release policy allows only one configuration update per release step, and the 90/10 split must take effect in that step. Which change to the payload is correct?
+A: Change the first route's traffic_percentage to 100 and keep "churn-7", so that the routes still add up for the served entities
+B: Change the first route's served_model_name to "current" and its traffic_percentage to 100, so that challenger gets 10% on top
+C: Rename the served entity "current" to "churn-7" in one update, then send the 90/10 traffic change as a second, separate update
+D: Change the first route's served_model_name to "current" and keep 90 and 10, so that every route names a served entity of this config
+K: D
+G: ## How traffic routes reference served entities
+In an endpoint configuration, each served entity has a `name` (here `current` and `challenger`). `traffic_config.routes` assigns a `traffic_percentage` to each **served entity by that name** through `served_model_name`, and the percentages of the routes add up to 100. A route that names something that is not a served entity of the same configuration ("churn-7") cannot be applied.
+## Update safety
+A configuration update that fails leaves the existing active configuration in effect, and while an update is in progress the old configuration keeps serving until the new one is ready. So fixing the payload and resending it once is safe for callers.
+W: Route to "current" with 90/10: both routes now name served entities of the configuration, the shares sum to 100, and one update applies the split.
+X: A=100 for "churn-7": the route still names no served entity, and 100 plus 10 exceeds 100.
+B="current" at 100 plus 10: the percentages must add up to 100, so a 110 total is invalid and would not give a 90/10 split.
+C=Rename then split: it needs two updates, which the release policy forbids for one step.
+T: Traffic routes name served entities of the same config, and their percentages sum to 100.
+V: Model Serving
