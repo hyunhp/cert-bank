@@ -25,7 +25,7 @@
 
 @ DBX-DEA D1 T1.1 expert troubleshooting
 S: On Monday a faulty job overwrote rows in the managed Delta table `silver.orders`, and an engineer ran `RESTORE TABLE silver.orders TO VERSION AS OF 812`, which reported success. A separate Structured Streaming job reads `silver.orders` as a stream with `skipChangeCommits` disabled and appends every new file's rows to `gold.order_events`, which feeds billing. After the restore, `gold.order_events` contains about 3 million duplicate rows, all from files that had been part of versions up to 812. The source table history shows only the bad write and the RESTORE since Friday, and billing must not see duplicates again during future restores. Which explanation and change fit the evidence?
-A: The restore commit re-adds old files with `dataChange` set to true, so the stream reads them as new data; dedupe gold by key, for example with an insert-only MERGE
+A: The restore commit re-adds old files with `dataChange` set to true, so the stream reads them as new data; write gold with an insert-only MERGE by key
 B: The restore commit re-adds old files with `dataChange` set to false, so the stream skipped them and gold lost rows; replay the stream from version 812
 C: The restore rewrote every file of the table into new files, so the stream read the whole table again; run VACUUM after each restore to remove the copies
 D: The restore reset the table's streaming checkpoint to version 812, so the stream read every later version again; keep checkpoints outside the table location
@@ -66,9 +66,9 @@ V: Auto Loader
 
 @ DBX-DEA D2 T2.1 expert troubleshooting
 S: A vendor sends a daily `positions.csv` into the same volume path, and when it finds an error it overwrites the file under the same name, sometimes twice a day. The Auto Loader stream uses directory listing with default options and appends to `bronze.positions`. Auditors found that corrected values never reached bronze, although the files in the volume are correct. The vendor refuses to change its naming. The bronze table must hold the latest version of each row by `position_id`, the stream must keep its checkpoint, and storage on the vendor side cannot be changed. Which configuration fits the evidence?
-A: Keep `cloudFiles.allowOverwrites` false and start the stream with a new checkpoint each night, so that every file in the path is treated as new again
-B: Set `cloudFiles.allowOverwrites` to true and keep appending each micro-batch, so that the corrected versions of a file are added to the bronze table
-C: Set `cloudFiles.allowOverwrites` to true and MERGE each micro-batch into bronze by `position_id`, so that a reprocessed file updates rows instead of duplicating them
+A: Keep `cloudFiles.allowOverwrites` false and start the stream with a new checkpoint each night, so that every file in the path is treated as new and loaded again
+B: Set `cloudFiles.allowOverwrites` to true and keep appending each micro-batch, so that the corrected versions of each file are added to the bronze table as well
+C: Set `cloudFiles.allowOverwrites` to true and MERGE each micro-batch into bronze by `position_id`, so reprocessed files update rows instead of adding them
 D: Set `cloudFiles.includeExistingFiles` to true on the running stream, so that overwritten files already present in the path are listed and loaded again
 K: C
 G: ## How Auto Loader decides that a file is new
@@ -88,7 +88,7 @@ V: Auto Loader
 @ DBX-DEA D2 T2.4 expert troubleshooting
 S: A managed SQL Server connector ingests 30 tables with Lakeflow Connect. Reconciliation for the table `dbo.scan_events` shows 1,204,331 rows in the source and 1,198,907 in the destination; all other tables match. The DBA confirms the table has no primary key, no unique key and no unique index, and that the barcode scanners sometimes send the same event twice, producing fully identical rows. CDC is enabled on that table, and the pipeline reports no errors. The source application cannot be changed this year, and analysts need every scan, including repeats, for throughput reports. Which explanation fits the evidence?
 A: CDC dropped the repeated inserts because CDC requires a primary key, so switching the table to change tracking would capture every repeated scan
-B: The connector treats all non-LOB columns as a bundled key when no key exists, so identical rows become one row; add a distinguishing column at the source
+B: Without any key, the connector uses all non-LOB columns as a bundled key, so identical rows become one row; add a distinguishing source column
 C: The connector deduplicates every table by the first column when no key exists, so repeats with the same scan ID collapse; reorder the source columns
 D: The gateway skipped rows that arrived during its restarts, so a full refresh of the table would restore the missing repeated scans to the destination
 K: B
@@ -132,9 +132,9 @@ V: Databricks SQL, VARIANT
 @ DBX-DEA D3 T3.1 expert troubleshooting
 S: A nightly job upserts customer changes into `silver.customers` with `MERGE INTO silver.customers t USING staging.customer_changes s ON t.customer_id = s.customer_id WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *`. Tonight it failed with: "Cannot perform Merge as multiple source rows matched and attempted to modify the same target row". `staging.customer_changes` is rebuilt every night from a CRM export, and the export now contains several change rows per customer when a customer was edited more than once in a day; each row has `changed_at`. Silver must hold the latest state per customer, the MERGE must stay one statement, and the CRM export cannot be changed. Which fix fits?
 A: Add `WHEN MATCHED AND s.changed_at > t.changed_at` to the MERGE, so that only the newer source rows update a target row
-B: Rewrite the source of the MERGE as a subquery that keeps one row per `customer_id` with the latest `changed_at`, using `row_number()` and `QUALIFY`
+B: Use as the MERGE source a subquery that keeps one row per `customer_id` with the latest `changed_at`, using `row_number()` and `QUALIFY`
 C: Run the MERGE once for each distinct `changed_at` value of the night, in ascending order, so that each run sees at most one row per customer
-D: Replace the MERGE with `INSERT OVERWRITE silver.customers SELECT DISTINCT * FROM staging.customer_changes`, so that duplicate rows are removed
+D: Replace the MERGE with `INSERT OVERWRITE silver.customers SELECT DISTINCT * FROM staging.customer_changes`, so that all duplicate rows are removed
 K: B
 G: ## The MERGE rule behind the error
 Only **one source row may match a given target row**. If several source rows match and the merge tries to update the same target row, the operation is ambiguous (which row should win?) and MERGE fails. The docs recommend preprocessing the source to remove the possibility of multiple matches.
@@ -172,8 +172,8 @@ V: Databricks SQL
 @ DBX-DEA D3 T3.5 expert troubleshooting
 S: A report must list all 4,000 promotions, including those without sales: `SELECT p.promo_id, s.amount FROM promotions p LEFT OUTER JOIN sales s ON p.promo_id = s.promo_id`, then a GROUP BY. `promotions` is 3 MB and `sales` is 4 TB. The engineer added `/*+ BROADCAST(p) */`, yet the plan still shows a sort merge join that shuffles both sides, and AQE does not switch to a broadcast join either. Statistics are current, AQE is on, and the threshold is far above 3 MB. The result must still include promotions without sales, and the team wants the 4 TB shuffle gone. Which explanation and change fit?
 A: The hint is ignored because statistics are stale; run ANALYZE TABLE on `promotions` and keep the left outer join with the broadcast hint on `p`
-B: The preserved side of a left outer join cannot be broadcast; aggregate `sales` by `promo_id` first, then left-join `promotions` to that small result
-C: The broadcast threshold applies to the larger side; raise it above 4 TB so that the join can broadcast `sales` to every executor
+B: The preserved side of a left outer join cannot be broadcast; aggregate `sales` by `promo_id` first, then left-join `promotions` to that result
+C: The broadcast threshold is compared with the larger side; raise it above 4 TB so that the join can broadcast `sales` to every executor instead
 D: The preserved side of a left outer join cannot be broadcast; switch to an inner join with the hint on `p`, which keeps promotions without sales
 K: B
 G: ## Which side can be broadcast
@@ -255,7 +255,7 @@ S: A job with a Quartz schedule at 23:50 UTC has max concurrent runs of 1 and qu
 A: Disable queueing for the job, so that a run that cannot start at 23:50 is skipped instead of loading the partition of the wrong day
 B: Set max concurrent runs to 2, so that the 23:50 run starts on time next to the overrunning run and its start time stays on the right day
 C: Use `{{job.start_time.iso_date}}` shifted back by one day, so that every run loads the partition of the day before it started
-D: Use `{{job.trigger.time.iso_date}}`, so that the date comes from the time the schedule triggered the run rather than the time it started
+D: Use `{{job.trigger.time.iso_date}}`, so that the date comes from when the schedule triggered the run rather than when it started
 K: D
 G: ## Start time versus trigger time
 Dynamic value references offer two clocks, both in UTC:
@@ -273,9 +273,9 @@ V: Lakeflow Jobs
 
 @ DBX-DEA D5 T5.3 expert troubleshooting
 S: A team copied its `dev` target settings into a new `prod` target with `mode: production`, a `run_as` service principal and `git: {branch: main}`. The pipeline resource is declared at the top level of the bundle with `development: true`, which dev relied on for fast iteration. In CI on `main`, `databricks bundle deploy -t prod` now fails during validation and names the pipeline. Jobs must keep running as the service principal, dev must keep its fast pipeline iteration, and the deployment must stay in production mode. Which change fits?
-A: Remove `git: {branch: main}` from the prod target, because production mode validation fails whenever a Git branch is pinned in the target
+A: Remove `git: {branch: main}` from the prod target, because production mode validation fails whenever a Git branch is pinned in the same target
 B: Set `development: false` for the pipeline under the prod target, because production mode requires deployed pipelines not to be in development mode
-C: Remove `run_as` from the prod target, because production mode validation fails when a service principal runs the deployed jobs
+C: Remove `run_as` from the prod target, because production mode validation fails whenever a service principal is set to run the deployed jobs
 D: Set `development: false` for the pipeline at the top level, because production mode reads only the top-level value of every pipeline setting
 K: B
 G: ## Production mode validations
@@ -295,9 +295,9 @@ V: Declarative Automation Bundles
 
 @ DBX-DEA D5 T5.4 expert troubleshooting
 S: To save cost during a release test, an engineer ran `databricks bundle deploy -t prod --cluster-id 0812-091544-abc123` so that the bundle's jobs would use an existing cluster instead of creating job clusters. The command failed with a validation error about overriding cluster definitions. The same flag works for the `dev` target. The `prod` target has `mode: production`, its jobs must keep their job cluster definitions in production, and the release test must still run the jobs from the deployed bundle. Which explanation and approach fit?
-A: The cluster ID belongs to another workspace; use a `lookup` variable for the cluster name so that the prod target resolves the right ID
-B: The flag must be set as `compute_id` inside the prod target; move the cluster ID into the bundle configuration and deploy again
-C: Production mode does not allow overriding cluster definitions; deploy prod unchanged and test against a non-production target that allows the override
+A: The cluster ID belongs to another workspace; use a `lookup` variable for the cluster name so that the prod target resolves the right cluster ID
+B: The flag must be set as `compute_id` inside the prod target; move the cluster ID into the bundle configuration file and deploy the bundle again
+C: Production mode forbids overriding cluster definitions; deploy prod unchanged and test in a non-production target that allows the override
 D: The flag works only together with `--force-lock`; add it to the command so that the prod deployment can replace the job clusters
 K: C
 G: ## Cluster overrides by deployment mode
@@ -316,7 +316,7 @@ V: Declarative Automation Bundles
 S: A FinOps analyst attributes cost per job with a query that joins `system.billing.usage` to `system.billing.list_prices` and groups by `usage_metadata.job_id` for the last 30 days. The nightly job `refresh_kpis` shows no cost at all, although the Jobs UI shows 30 successful runs of about an hour. Its two tasks are a SQL task on the shared serverless SQL warehouse `bi_wh` and a notebook task on the all-purpose cluster `analytics_shared`. Finance needs a cost estimate for this job, and the team can change compute but not the job's logic. Which explanation and change fit?
 A: System billing tables are delayed by 30 days; rerun the query next month, when the usage of the job's recent runs has been loaded
 B: The query must group by `usage_metadata.job_run_id` instead; job-level totals appear only after grouping by individual runs first
-C: Usage on SQL warehouses and all-purpose compute is not billed as jobs; move the notebook task to jobs compute or serverless to attribute it
+C: SQL warehouse and all-purpose usage is not billed as jobs; move the notebook task to jobs compute or serverless to attribute it
 D: The job's run-as identity lacks SELECT on `system.billing.usage`; grant it so that the job's own usage rows become visible in the query
 K: C
 G: ## What job cost attribution covers
@@ -332,9 +332,9 @@ V: System tables, Lakeflow Jobs
 
 @ DBX-DEA D6 T6.3 expert troubleshooting
 S: A nightly job adds a running total per customer: `df.withColumn("cum_amt", F.sum("amount").over(Window.orderBy("customer_id", "ts")))` on 900 million rows, on a 32-worker cluster. In the Spark UI, the longest stage has exactly one task running for 2 hours with spill, while all other executors are idle; adding workers last week changed nothing. The business definition is a running total within each customer, ordered by time. The output must not change, and the deadline is 1 hour. Which change fits?
-A: Set `spark.sql.shuffle.partitions` to `auto`, so that the window stage is split into many tasks sized from the input data
-B: Repartition the DataFrame by `customer_id` before the window, so that the window stage reads many partitions in parallel
-C: Use `Window.partitionBy("customer_id").orderBy("ts")`, so that each customer's rows form their own window and tasks run in parallel
+A: Set `spark.sql.shuffle.partitions` to `auto`, so that the window stage is split into many tasks that are sized from the input data
+B: Repartition the DataFrame by `customer_id` before the window, so that the window stage reads many partitions in parallel on all workers
+C: Use `Window.partitionBy("customer_id").orderBy("ts")`, so each customer's rows form their own window and tasks run in parallel
 D: Enable AQE skew join handling, so that the single oversized partition of the window stage is split into several smaller tasks
 K: C
 G: ## A stage with one task
@@ -370,8 +370,8 @@ V: Delta Lake, Liquid Clustering
 
 @ DBX-DEA D7 T7.3 expert troubleshooting
 S: A nightly Python job upserts HR changes with `DeltaTable.forName(spark, "main.hr.employees").merge(changes, "t.id = s.id").whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()`. Last week security added a column mask on `salary` and a row filter on `department` to `main.hr.employees`, and since then the job fails although the job's service principal still has SELECT and MODIFY and is exempted by both policy functions. A second job that reads the table with SQL works. The policies must stay, the upsert logic must stay identical, and the job may still use Python. Which change fits?
-A: Replace the Delta Lake Python API call with the same MERGE written in SQL through `spark.sql(...)`, because Delta Lake APIs are not supported on such tables
-B: Replace `forName` with `DeltaTable.forPath` on the table's storage location, because path-based access bypasses the policies for exempted principals
+A: Run the same MERGE as SQL through `spark.sql(...)` instead of the Delta Lake Python API, because Delta Lake APIs are not supported on such tables
+B: Replace `forName` with `DeltaTable.forPath` on the table's storage location, because path-based access bypasses the policies for any exempted principal
 C: Grant the service principal ALL PRIVILEGES on `main.hr.employees`, because the Delta Lake APIs need privileges beyond SELECT and MODIFY with policies
 D: Run the job on a dedicated access mode cluster, because Delta Lake APIs work on tables with policies only when the compute is single user
 K: A
@@ -394,7 +394,7 @@ V: Unity Catalog, Delta Lake
 S: Workspace `ws-sales` was created with automatic Unity Catalog enablement and has its own workspace catalog `ws_sales`, owned by the workspace admins. A new workspace `ws-finance` is attached to the same metastore. A finance job there runs as a service principal that holds `USE CATALOG`, `USE SCHEMA` and `SELECT` on `ws_sales.crm`, granted by a sales workspace admin, yet it fails with an error that the catalog is not accessible from this workspace. Other catalogs of the metastore work from `ws-finance`. Finance must only read, and grants must stay least-privilege. Which change fits?
 A: Grant the principal BROWSE on `ws_sales`, so that the catalog becomes visible to it in `ws-finance` and the existing grants then apply
 B: Add the principal to the workspace admins group of `ws-sales`, because that group owns the catalog and its members can read it from any workspace
-C: Bind `ws_sales` also to `ws-finance` with read-only access, which the catalog owner or a user with MANAGE on it can do; the existing grants then apply
+C: Bind `ws_sales` also to `ws-finance` with read-only access, as the catalog owner or a MANAGE holder can; the existing grants then apply
 D: Bind `ws_sales` also to `ws-finance` with read-write access, which only the metastore admin can do; the existing grants then apply
 K: C
 G: ## Workspace-catalog binding
