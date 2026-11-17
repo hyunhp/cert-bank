@@ -28,6 +28,8 @@
 # src: https://spark.apache.org/docs/latest/api/python/reference/api/pyspark.ml.evaluation.MulticlassClassificationEvaluator.html
 # src: https://spark.apache.org/docs/latest/ml-classification-regression.html
 # src: https://spark.apache.org/docs/latest/api/python/reference/api/pyspark.testing.assertDataFrameEqual.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/api/pyspark.ml.util.DefaultParamsWritable.html
+# src: https://mlflow.org/docs/latest/api_reference/python_api/mlflow.spark.html
 
 @ DBX-MLP D1 T1.1 advanced tradeoff
 S: A telecom team keeps 3 TB of raw call events in Delta. Aggregated per subscriber, the training set becomes 2 million rows and about 1.5 GB. The model must use the monotonic constraints of LightGBM, which Spark ML tree models do not offer, and the nightly job must finish within two hours. Which design meets these constraints at the LOWEST compute cost?
@@ -52,26 +54,27 @@ T: Use Spark to shrink terabytes into the training grain; if the result fits on 
 V: Spark ML, Databricks Runtime ML
 
 @ DBX-MLP D1 T1.2 advanced troubleshooting
-S: A weekly job refits a Spark ML Pipeline of StringIndexer on `merchant_category`, VectorAssembler and RandomForestClassifier, and a daily job scores new transactions with the latest fitted PipelineModel. New merchant categories appear between refits, and the daily job fails with an unseen-label error. Risk rules forbid dropping any transaction from scoring, and the model must keep using the category. Which change to the pipeline definition fixes the failure from the next refit on?
-A: Set handleInvalid="skip" on the StringIndexer, so that rows whose category was not seen at fit time are filtered out before they reach the assembler stage
-B: Fill nulls in merchant_category with the string "unknown" before indexing, so that every value that reaches the indexer belongs to an already known label
-C: Set handleInvalid="keep" on the StringIndexer, so that categories unseen at fit time map to one extra index value and every transaction is still scored
-D: Replace the StringIndexer with a VectorIndexer that has a high maxCategories, so that new merchant categories are recognized automatically while scoring
-K: C
-G: ## What a fitted StringIndexer does with new values
-`StringIndexer` learns a fixed mapping from string to index at `fit` time. When the fitted model meets a string it never saw, the `handleInvalid` parameter decides what happens:
-- `error` (default): throw an exception, which is what stops the daily job.
-- `skip`: drop the row.
-- `keep`: put all unseen values into one extra bucket at index `numLabels`.
-## Choosing under the stated rules
-"No transaction may be dropped" rules out `skip`. "Keep using the category" rules out removing the column. `keep` scores every row; unseen categories share one extra index until the next weekly refit learns them properly. Tree models handle the extra index like any other value.
-W: handleInvalid="keep": the fitted indexer maps every unseen category to the extra index, so the job no longer fails and no row is dropped.
-X: A=handleInvalid="skip": it removes the rows with new categories, which the risk rules forbid.
-B=Fill nulls with "unknown": the failing values are new non-null categories, not nulls, so they are still unseen labels after the fill.
-D=VectorIndexer: it works on numeric vector columns, not on string columns, so it cannot replace the string-to-index step.
-T: StringIndexer handleInvalid="keep" scores unseen categories through one extra index instead of failing or dropping rows.
-V: Spark ML
-
+S: A fraud team writes a custom Python Transformer subclass, `HourOfWeek`, that derives an hour-of-week feature from `event_ts`, and puts it first in a Spark ML Pipeline with StringIndexer, VectorAssembler and GBTClassifier. The fit works, but saving the fitted PipelineModel to a Unity Catalog volume fails because the custom stage is not writable. A nightly scoring job must reload the complete PipelineModel from that path, the hour-of-week logic must stay inside the saved pipeline, and the transformer keeps all its state in simple Param values. Which change fixes the save?
+A: Mix DefaultParamsReadable and DefaultParamsWritable into the HourOfWeek class, and keep the class in a module that the scoring job can import
+B: Save only the fitted GBT model with its own save method, and rebuild the hour-of-week, indexer and assembler stages inside the nightly scoring job
+C: Pickle the whole fitted PipelineModel object with cloudpickle into the volume, and unpickle it on the driver of the nightly scoring job instead
+D: Log the PipelineModel with mlflow.spark.log_model instead, because MLflow serializes custom Python stages itself without any writable mixins
+K: A
+G: ## How Spark ML persists a pipeline
+`PipelineModel.save` (or `write().save`) uses MLlib persistence: every stage writes its own metadata and data. Built-in stages implement this; a custom Python `Transformer` does not, so the save fails on that stage.
+## The documented helpers
+`pyspark.ml.util.DefaultParamsWritable` and `DefaultParamsReadable` give a `Params` class a default writer and reader, as long as the class stores all of its data as `Param` values (simple types, not DataFrames).
+```
+class HourOfWeek(Transformer, HasInputCol, HasOutputCol,
+                 DefaultParamsReadable, DefaultParamsWritable): ...
+```
+On load, Spark recreates the stage from its saved class name, so the scoring job must be able to import the same module (for example, a wheel installed on its cluster).
+W: DefaultParams mixins: they give the custom stage a writer and reader for its Param values, so the whole PipelineModel saves and reloads with the hour-of-week logic inside.
+X: B=Save only the GBT model: the save succeeds, but the feature logic leaves the saved pipeline and is rebuilt in the scoring job, which the requirement forbids.
+C=cloudpickle the PipelineModel: the built-in stages are wrappers around JVM objects, which Python pickling cannot serialize; MLlib persistence is the supported format.
+D=mlflow.spark.log_model: the Spark flavor stores the model in native Spark MLlib format, so it uses the same persistence and fails on the same non-writable stage.
+T: A custom Python Transformer can be saved inside a PipelineModel only when it mixes in DefaultParamsReadable and DefaultParamsWritable.
+V: Spark ML, MLflow
 @ DBX-MLP D1 T1.3 advanced troubleshooting
 S: An insurer must route 2 TB of claims into six handling queues with Spark ML. Its model validation process only covers gradient-boosted trees, so the risk team requires that algorithm family. Fitting GBTClassifier on the indexed six-class label fails with an error about the number of label classes. The team must stay within Spark ML and keep boosted trees. Which approach meets both requirements?
 A: Wrap GBTClassifier in OneVsRest, which trains one binary boosted model per queue and predicts the queue whose model gives the highest confidence
