@@ -179,3 +179,125 @@ E=Six checkpoints: the model allows at most four checkpoints per request.
 F=Batch inference: prompt caching is not supported with the batch inference API, and the stem rules out batch processing.
 T: Place checkpoints where the cumulative prefix meets the minimum, keep dynamic content after them, and choose a TTL longer than the gap between requests.
 V: Amazon Bedrock, Amazon CloudWatch
+
+@ AIP-C01 D2 T2.1 expert troubleshooting
+S: A retailer's Amazon Bedrock AgentCore gateway exposes 310 tools from OpenAPI and Lambda targets, behind an inbound OAuth authorizer. Agents call tools/list and pass all definitions to the model: about 300 tokens per tool, or 93,000 input tokens on each of 40,000 daily agent requests, and traces show frequent wrong-tool choices. The team wants agents to load only the 10 or so tools relevant to each task, with no self-managed vector store, and without changing targets or authorization. An engineer's UpdateGateway call to turn on semantic search was rejected. What should the team do?
+A: Create a new gateway with semantic search enabled, re-add the same targets and authorizer, and have agents call x_amz_bedrock_agentcore_search
+B: Call UpdateGateway with a semantic search type again after calling SynchronizeGatewayTargets, so that all of the existing tools are indexed first
+C: Split the 310 tools across four gateways of about 80 tools each, and configure every agent with the URLs of all four gateways it may need
+D: Index the tool descriptions in an Amazon OpenSearch Serverless collection, and add a Lambda target that returns the tool names best matching a task
+K: A
+G: ## Tool overload in agents
+Every tool definition an agent passes to the model costs input tokens and adds choices the model can get wrong. At 310 tools x 300 tokens, each request carries 93,000 tokens of definitions; across 40,000 requests that is about 3.7 billion input tokens per day before any real work. Loading 10 relevant tools would cut that to about 3,000 tokens per request.
+## Semantic search in AgentCore Gateway
+If semantic search is enabled for a gateway, agents call the built-in tool `x_amz_bedrock_agentcore_search` with a natural-language query and receive the tools relevant to it.
+Two documented constraints decide this case:
+- **Semantic search can only be enabled when the gateway is created.** You cannot change an existing gateway's configuration to enable it.
+- The identity that creates such a gateway needs permission for `bedrock-agentcore:SynchronizeGatewayTargets`.
+## Migration path
+Create a new gateway with semantic search, attach the same targets and inbound authorizer, switch agents to search-then-call, then retire the old gateway.
+W: New gateway with semantic search: it is the only documented way to get built-in tool search, targets and authorization stay the same, and agents load about 10 tools instead of 310.
+X: B=UpdateGateway after synchronizing: synchronizing does not change the rule that semantic search is set only at creation, so the update is still rejected.
+C=Four gateways: agents that know all four URLs still list all 310 tools, so token use and wrong-tool choices stay the same.
+D=Own OpenSearch index: it works in principle, but it builds and runs the self-managed vector store the team explicitly ruled out.
+T: AgentCore Gateway semantic tool search must be enabled when the gateway is created; plan a new gateway to add it later.
+V: Amazon Bedrock AgentCore
+
+@ AIP-C01 D2 T2.1 expert troubleshooting
+S: A bank runs an advisor assistant on Amazon Bedrock AgentCore Runtime with default lifecycle settings, and the agent keeps conversation history only in process memory. Advisors often pause for 20 to 45 minutes during client meetings, and some continue a conversation the next morning, about 16 hours later. In both cases the agent has forgotten everything, although the client sends the same runtimeSessionId. Security forbids the team from operating its own database, and each advisor's context must stay isolated from other advisors. Which change keeps the conversation context available in both cases?
+A: Store each turn as events in AgentCore Memory, and on any new session load the advisor's recent events with ListEvents before answering
+B: Raise idleRuntimeSessionTimeout to 28,800 seconds, so the microVM and its in-memory history survive any pause of up to eight hours
+C: Raise maxLifetime to 1,209,600 seconds, so that each advisor's microVM keeps its conversation history in memory for up to 14 days
+D: Write the history to the session's /tmp directory and reuse the same runtimeSessionId, so that the files are found again the next morning
+K: A
+G: ## Why the agent forgets
+An AgentCore Runtime session runs in a dedicated microVM. Its memory and disk are **ephemeral**: they live only as long as the compute.
+- A session stops after **inactivity (default 900 seconds, 15 minutes)** or at **maximum lifetime (default 28,800 seconds, 8 hours)**.
+- On microVMs both settings range from 60 to 28,800 seconds; up to 1,209,600 seconds applies to Instances.
+- The next invocation with the same `runtimeSessionId` gets a **new** microVM, so in-process history is gone.
+## Where conversation state belongs
+AWS recommends **AgentCore Memory** for data that must outlive a session. Short-term memory stores each turn as an **event** (`CreateEvent`) with a session ID; `ListEvents` returns the history so a new microVM can reload it. Long-term strategies can add preferences and summaries on top.
+## Working the numbers
+- 20-45 minute pause > 15-minute default idle timeout: session stops.
+- 16-hour gap > 8-hour maximum lifetime on microVMs: no timeout setting can bridge it.
+W: AgentCore Memory events: the history is stored outside the microVM, so it survives both the idle stop and the overnight gap, and it is keyed per advisor session without running a database.
+X: B=Idle timeout 28,800 seconds: it covers the meeting pauses, but a 16-hour overnight gap is twice the 8-hour maximum, so the next morning still starts empty.
+C=maxLifetime 1,209,600 seconds: that value is valid only for Instances; microVM lifetimes stop at 28,800 seconds, and an idle stop would still discard memory.
+D=/tmp files: the filesystem is ephemeral by default and disappears with the stopped microVM, even if the client reuses the session ID.
+T: AgentCore Runtime sessions are ephemeral; keep conversation state in AgentCore Memory so it survives idle stops and long gaps.
+V: Amazon Bedrock AgentCore
+
+@ AIP-C01 D2 T2.2 expert use-case
+S: A company fine-tuned a model whose base is not eligible for on-demand custom model deployment, so it bought Provisioned Throughput with 2 model units and a one-month commitment. Daytime interactive traffic uses about 70 percent of that capacity from 08:00 to 18:00, and it is nearly idle at night. Each night 50,000 claims must be scored with the same custom model by 07:00, with no additional spend. A batch inference job that named the provisioned model ARN was rejected, and so was an attempt to wrap the provisioned model in an application inference profile for cross-Region overflow. Which approach meets the requirements?
+A: Run the nightly claims as InvokeModel calls on the provisioned model ARN, from a Step Functions Map state with bounded concurrency after 18:00
+B: Submit the claims as a batch inference job on the provisioned model ARN again, this time with timeoutDurationInHours set to 12 hours
+C: Submit the claims as a batch inference job against the base foundation model, since the fine-tuned weights are applied automatically at run time
+D: Purchase one more model unit in a second Region and route the nightly claims through a cross-Region inference profile that spans both Regions
+K: A
+G: ## What Provisioned Throughput can and cannot do
+- A customized model needs **Provisioned Throughput** unless it qualifies for an on-demand custom model deployment.
+- Provisioned Throughput is **billed hourly** for the model units until it is deleted; a commitment term prevents deletion before it ends.
+- **Batch inference isn't supported for provisioned models.**
+- **Inference profiles don't support Provisioned Throughput**, so cross-Region routing cannot carry it.
+## Working the cost
+The two model units are paid every hour of the month whether used or not. Night hours are about 30 percent loaded at most, so 50,000 claims over roughly 13 hours (18:00 to 07:00) is about 64 claims per minute on capacity already paid for. Running them as on-demand calls against the provisioned model ARN adds **no** model cost.
+## Example
+A Step Functions Distributed Map reads claim IDs from S3 and calls InvokeModel with the provisioned model ARN, with a MaxConcurrency sized so throttling stays rare.
+W: InvokeModel on the provisioned ARN at night: it uses the hourly capacity the company already pays for, works with a custom model, and finishes well before 07:00 with controlled concurrency.
+X: B=Batch job again with a timeout: the rejection is because batch inference is not supported for provisioned models; a timeout setting does not change that.
+C=Batch on the base model: the base model does not include the fine-tuning, so the scores would come from a different model.
+D=Extra model unit plus cross-Region profile: inference profiles do not support Provisioned Throughput, and buying another unit adds the spend the company ruled out.
+T: Batch inference and inference profiles do not work with Provisioned Throughput; use spare provisioned hours with direct InvokeModel calls.
+V: Amazon Bedrock, AWS Step Functions
+
+@ AIP-C01 D2 T2.3 expert troubleshooting
+S: Finance chose a global cross-Region inference profile in eu-west-1 for an internal summarizer to get its roughly 10 percent saving. Calls fail with AccessDeniedException: for role A the message cites an explicit deny in a service control policy on arn:aws:bedrock:::foundation-model/<model>, and for role B no identity-based policy allows that ARN. The SCP denies all actions when aws:RequestedRegion is not eu-west-1 or eu-central-1. Role B's policy allows the inference profile and the eu-west-1 foundation model ARN. Security will not allow "unspecified" for other services. Which TWO changes fix the failures? (Select TWO)
+A: Exempt requests in the Region-deny SCP whose bedrock:InferenceProfileArn equals the approved global profile ARN, leaving all other services restricted
+B: Add a statement to role B allowing InvokeModel on arn:aws:bedrock:::foundation-model/<model> with aws:RequestedRegion unspecified and the profile ARN
+C: Add "unspecified" to the list of allowed Regions in the SCP condition for all actions, so that global routing is permitted across every service in the account
+D: Switch the summarizer to the EU geographic inference profile, so that requests stay in EU Regions and no longer touch the global model ARN
+E: Enable every commercial Region in the account, so that the global profile can route to destination Regions that are currently disabled
+K: A,B
+G: ## How a global profile is authorized
+A request through a global cross-Region inference profile is authorized against **three** resources:
+1. the inference profile in the source Region (`arn:aws:bedrock:eu-west-1:<acct>:inference-profile/global.<model>`), with the source Region as `aws:RequestedRegion`;
+2. the foundation model in the source Region;
+3. the **Region-agnostic global model** `arn:aws:bedrock:::foundation-model/<model>`, for which `aws:RequestedRegion` is **`unspecified`**.
+The `bedrock:InferenceProfileArn` condition key is populated for the two foundation model evaluations.
+## Two independent failures
+- **Role A** is blocked by the SCP: a Region allow-list without `unspecified` denies evaluation 3. AWS documents two fixes: allow `unspecified`, or exempt requests by `bedrock:InferenceProfileArn`, which keeps the Region rule for every other service.
+- **Role B** lacks the third statement of the documented three-part IAM policy.
+## Other facts
+Cross-Region inference does not require manually enabling destination Regions.
+W: A=SCP exemption by profile ARN: it permits the global model evaluation for this profile only, so other services keep the Region restriction security insists on.
+B=Third IAM statement: it grants the global model ARN with the unspecified Region and the profile ARN condition, completing role B's permissions.
+X: C="unspecified" for all actions: it works, but it relaxes the Region rule for every service, which security forbids.
+D=EU geographic profile: it would avoid the global ARN, but it gives up the saving finance chose and leaves both policy gaps in place for the global profile.
+E=Enable all Regions: cross-Region inference can route to Regions that are not manually enabled, and the errors are policy denials, not disabled Regions.
+T: Global cross-Region inference is authorized on a Region-agnostic model ARN with aws:RequestedRegion unspecified; scope SCP exemptions and IAM grants with bedrock:InferenceProfileArn.
+V: Amazon Bedrock, AWS Organizations, AWS IAM
+
+@ AIP-C01 D2 T2.4 expert troubleshooting
+S: A telecom company classifies 900,000 support transcripts each weekend with an Amazon Bedrock batch inference job. Each record must use the model's tool calling, because the downstream parser reads the toolUse blocks and cannot change. The job was created with modelInvocationType Converse and every record includes toolConfig; records fail with 400 errors. A smaller test job that did run stopped at its default timeout before finishing its records. A Lambda function that polls GetModelInvocationJob every 30 seconds to start the next workflow keeps hitting API throttling. Which THREE changes fix these problems? (Select THREE)
+A: Create the job with the InvokeModel invocation type and write each modelInput in the model's native request format with its tool definitions
+B: Set timeoutDurationInHours to 72 when creating the job, which is within the allowed range of 24 to 168 hours for a batch inference job
+C: Start the next workflow from an EventBridge rule that matches the batch job state-change event instead of polling the job status every 30 seconds
+D: Keep the Converse invocation type and move toolConfig from each record into the job-level settings, so that tool calling applies to every record in the job
+E: Set timeoutDurationInHours to 336, so that the largest weekend jobs have two full weeks to finish before the batch job is stopped by Bedrock
+F: Run the job against a Provisioned Throughput model ARN, so that the job gets dedicated capacity and finishes within the default 24-hour timeout
+K: A,B,C
+G: ## Batch inference facts that decide this case
+- **Invocation type**: a job uses `InvokeModel` (default, model-native request bodies) or `Converse` format. Batch inference **does not support tool calling for Converse-type jobs**: records with `toolConfig` fail with a 400 error. For tool calling, use the `InvokeModel` type with the tools in each native `modelInput`. Structured outputs work with both types.
+- **Timeout**: `timeoutDurationInHours` defaults to **24** and accepts **24 to 168** hours.
+- **Provisioned models**: batch inference isn't supported for them.
+- **Status**: instead of polling, Amazon EventBridge receives Bedrock job state-change events in near real time (best effort), which avoids API rate limits.
+## Working the timeout
+If the test job could not finish its records in 24 hours, 900,000 records need a longer window; 72 hours fits inside the 168-hour maximum and a weekend.
+W: A=InvokeModel type: native request bodies may carry tool definitions in batch jobs, so tool calling and the toolUse output the parser needs keep working.
+B=72-hour timeout: it lifts the 24-hour default that cut the test short and stays within the documented 24 to 168 range.
+C=EventBridge rule: state-change events start the next workflow without any polling, which removes the throttling.
+X: D=Job-level toolConfig: tool calling is unsupported for Converse-type batch jobs as such; moving the setting does not change the invocation type.
+E=336 hours: two weeks is above the 168-hour maximum, so the request is invalid.
+F=Provisioned Throughput ARN: batch inference isn't supported for provisioned models.
+T: For batch tool calling use the InvokeModel invocation type, size timeoutDurationInHours within 24-168, and react to job state changes with EventBridge.
+V: Amazon Bedrock, Amazon EventBridge, AWS Lambda

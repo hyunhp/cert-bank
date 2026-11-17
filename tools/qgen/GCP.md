@@ -177,3 +177,5 @@ exam page says "As of August 12, the new version of the exam is now live").
   limits, plan or tier names, no model versions. Product facts overlap GCP-ACE (hierarchy, storage classes, IAM) and
   GCP-GAIL (AI, security tools): test the business value and the reason to choose, not the configuration, and read
   `data/GCP-ACE.json` / `data/GCP-GAIL.json` questions before writing so scenarios are not repeated.
+
+- 2026-04-20: BigLake is documented as "Lakehouse", BigLake metastore as "Lakehouse runtime catalog" (options may keep BigLake; G: names both).
