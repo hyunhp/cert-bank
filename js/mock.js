@@ -141,14 +141,15 @@ export function draw(exam, n, docs, spec, map, seenIds, recentIds) {
 
 function timeFor(spec, n) { return Math.ceil((spec.minutes * n) / spec.questions) * 60; }
 
-// Practice targets sit a margin above the official pass mark: AWS scaled scores are not percentages, so
-// AWS and Azure (scaled 700/1000 or more) use 80% (Foundational/Associate) or 85% (Professional/Expert/Specialty); vendors that publish a percent
-// pass mark (Palantir: 70%) use that mark + 10. Google Cloud publishes no pass mark (pass/fail only): same 80/85% targets.
-// The score that counts as comfortably ready: 10 points over a published percent pass mark, else 80% (85% for professional-level exams).
+// Practice targets sit a margin above the official pass mark. AWS and Azure scaled scores are not percentages, so
+// they use 85% (Foundational/Associate) or 90% (Professional/Expert/Specialty); vendors that publish a percent pass
+// mark (Palantir: 70%) use that mark + 15; Google Cloud publishes no pass mark: same 85/90% targets.
+// Raised 2026-11-17: an owner scored 78% on this site's DEA-C01 mock but 45% on AWS's official practice set, so a
+// comfortable margin on our questions has to be wider than 80%.
 export function targetPct(spec) {
   const level = spec && spec.level;
-  return (spec && spec.passingPct) ? Math.min(100, spec.passingPct + 10)
-    : (level === "professional" || level === "expert" || level === "specialty") ? 85 : 80;
+  return (spec && spec.passingPct) ? Math.min(100, spec.passingPct + 15)
+    : (level === "professional" || level === "expert" || level === "specialty") ? 90 : 85;
 }
 export function verdictFor(spec, pct, mode) {
   const hi = targetPct(spec);

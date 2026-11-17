@@ -240,7 +240,7 @@ function dayListHTML(guide, progress) {
 
 function quizHTML(quiz) {
   return quiz.map((q, qi) => `<div class="quiz-q" data-q="${qi}"><p class="q">${qi + 1}. ${text(q.q)}</p>` +
-    q.choices.map((c, ci) => `<button class="choice" data-c="${ci}"><span class="k">${"ABCDE"[ci]}</span><span>${text(c)}</span></button>`).join("") +
+    q.choices.map((c, ci) => `<button class="choice" data-c="${ci}"><span class="k">${"ABCDEF"[ci]}</span><span>${text(c)}</span></button>`).join("") +
     `<div class="explain-slot"></div></div>`).join("") + `<div class="quizsum" id="quizSum" aria-live="polite"></div>`;
 }
 // One line under the quiz: progress while answering, the result once every question has an answer.
@@ -311,7 +311,7 @@ function answer(qEl, picked) {
     b.classList.toggle("dim", i !== q.answer && i !== picked);
   });
   qEl.querySelector(".explain-slot").innerHTML =
-    `<div class="explain${ok ? "" : " wrong"}"><b>${ok ? "Correct" : "Not quite — answer: " + "ABCDE"[q.answer]}</b>${text(q.explain)}</div><button class="retry">Try again</button>`;
+    `<div class="explain${ok ? "" : " wrong"}"><b>${ok ? "Correct" : "Not quite — answer: " + "ABCDEF"[q.answer]}</b>${text(q.explain)}</div><button class="retry">Try again</button>`;
   updateQuizSummary();
   saveQuizResult();
 }

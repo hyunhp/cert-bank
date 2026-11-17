@@ -24,7 +24,8 @@ Batch source format (one block per question, blocks start with '@'):
     B: choice text
     C: choice text
     D: choice text
-    E: optional fifth choice (multi-answer questions use 5)
+    E: optional fifth choice ("(Select TWO)" questions use 5)
+    F: optional sixth choice ("(Select THREE)" questions use 6)
     K: B            or  K: A,C
     W: why the correct answer is right (one or two sentences)
     X: A=why A is wrong | C=why C is wrong | D=why D is wrong      (one entry per wrong choice)
@@ -262,7 +263,7 @@ SVC_HEAD = re.compile(r"^@\s*(Q\d{6})\s+services\s*$")
 MULTILINE = {"G", "W", "X"}                       # continuation lines keep their line break
 RICH = "## "                                      # detailed explanations start with a heading
 MIN_RICH = {"G": 250, "W": 80, "X": 60}          # minimum characters (per X entry) for detailed blocks
-LETTER_REF = re.compile(r"\b(?:[Oo]ption|[Cc]hoice|[Aa]nswer)s?[ \t]+[A-E]\b|\([A-E]\)|\b[A-E] is (?:wrong|correct|right)\b")
+LETTER_REF = re.compile(r"\b(?:[Oo]ption|[Cc]hoice|[Aa]nswer)s?[ \t]+[A-F]\b|\([A-F]\)|\b[A-F] is (?:wrong|correct|right)\b")
 
 
 def parse(path):
@@ -289,8 +290,8 @@ def parse(path):
 def split_x(text):
     """X: entries, either "A=... | C=..." on one line or one "A=..." entry per line."""
     wrong = {}
-    for part in re.split(r"\s*\|\s*(?=[A-E]\s*=)|\n(?=\s*[A-E]\s*=)", text):
-        m = re.match(r"^\s*([A-E])\s*=\s*(.+)$", part, re.S)
+    for part in re.split(r"\s*\|\s*(?=[A-F]\s*=)|\n(?=\s*[A-F]\s*=)", text):
+        m = re.match(r"^\s*([A-F])\s*=\s*(.+)$", part, re.S)
         if m:
             wrong[m.group(1)] = m.group(2).strip()
     return wrong
@@ -408,8 +409,8 @@ def parse_shared_tags(extra, where):
 def field_errors(f, letters, where):
     """Missing or malformed top-level fields: choice letters and the required S/K/W/X/T lines."""
     errors = []
-    if letters not in (list("ABCD"), list("ABCDE")):
-        errors.append(f"{where}: choices must be A-D or A-E, got {letters}")
+    if letters not in (list("ABCD"), list("ABCDE"), list("ABCDEF")):
+        errors.append(f"{where}: choices must be A-D, A-E or A-F, got {letters}")
     for k in ("S", "K", "W", "X", "T"):
         if not f.get(k):
             errors.append(f"{where}: missing {k}:")
@@ -423,8 +424,11 @@ def answer_errors(f, letters, keys, wrong, where):
         want = f"(Select {NUM_WORD.get(len(keys), len(keys))})"
         if not f["S"].endswith(want):
             errors.append(f"{where}: multi-answer stem must end with {want}")
-        if len(letters) != 5:
-            errors.append(f"{where}: multi-answer questions use 5 choices")
+        want_n = {2: 5, 3: 6}.get(len(keys))
+        if want_n is None:
+            errors.append(f"{where}: multi-answer questions have two or three correct choices")
+        elif len(letters) != want_n:
+            errors.append(f"{where}: (Select {NUM_WORD[len(keys)]}) questions use {want_n} choices")
     elif len(letters) != 4:
         errors.append(f"{where}: single-answer questions use 4 choices")
     texts = [f[k] for k in letters]
@@ -458,7 +462,7 @@ def build(block, errors):
     errors += header_errors(exam, dom, task, diff, scen, where)
     shared, tag_errors = parse_shared_tags(extra, where)
     errors += tag_errors
-    letters = [k for k in "ABCDE" if k in f]
+    letters = [k for k in "ABCDEF" if k in f]
     errors += field_errors(f, letters, where)
     if errors and any(e.startswith(where) for e in errors):
         return None
@@ -499,7 +503,7 @@ def rich_explanation(item, order):
         text = re.sub(r"\s*\n\s*", " ", (item.get("why_by") or {}).get(k, item["why"]) if ok else item["wrong"][k]).strip()
         # "Short name: reason". The name may hold a colon (kms:Encrypt); a wrong option's name is its answer text, so it may run longer.
         m = re.match(r"^(.{2,%d}?):\s+(.*)$" % (60 if ok else 120), text, re.S)
-        label = f"{'ABCDE'[pos]}. {m.group(1)}" if m else f"{'ABCDE'[pos]}."
+        label = f"{'ABCDEF'[pos]}. {m.group(1)}" if m else f"{'ABCDEF'[pos]}."
         body = m.group(2) if m else text
         lines.append(f"- {'✓' if ok else '✗'} **{label}{' (correct)' if ok else ''}:** {body}")
     lines += ["", RICH + "Key idea", re.sub(r"\s*\n\s*", " ", item["take"]).strip()]
@@ -717,7 +721,7 @@ def check(path, write=False, siblings=False):
 
 def place(i, letters, n, pos, rng):
     """Put the correct answer(s) in the least-used positions for this exam; shuffle the distractors."""
-    slots = sorted(range(n), key=lambda p: (pos[i["exam"]]["ABCDE"[p]], rng.random()))[: len(i["keys"])]
+    slots = sorted(range(n), key=lambda p: (pos[i["exam"]]["ABCDEF"[p]], rng.random()))[: len(i["keys"])]
     wrongs = [k for k in letters if k not in i["keys"]]
     rng.shuffle(wrongs)
     corrects = list(i["keys"])
@@ -727,7 +731,7 @@ def place(i, letters, n, pos, rng):
         layout[s_] = k
     it = iter(wrongs)
     layout = [k if k else next(it) for k in layout]
-    return layout, {old: "ABCDE"[p] for p, old in enumerate(layout)}
+    return layout, {old: "ABCDEF"[p] for p, old in enumerate(layout)}
 
 
 def load_all_exams():
@@ -783,7 +787,7 @@ def choice_layout(i, prev, pos, rng):
     if same_choices(prev, i):
         by_text = {t: k for k, t in i["choices"].items()}
         layout = [by_text[c["text"]] for c in prev["choices"]]
-        return layout, {old: "ABCDE"[p] for p, old in enumerate(layout)}
+        return layout, {old: "ABCDEF"[p] for p, old in enumerate(layout)}
     letters = list(i["choices"])
     return place(i, letters, len(letters), pos, rng)
 
@@ -833,7 +837,7 @@ def ingest(items, state):
             state[i["hash"]] = i["pin"]           # I: Qxxxxxx keeps the id when a stem is rewritten
         prev = existing.get(state.get(i["hash"]))
         layout, newkey = choice_layout(i, prev, pos, rng)
-        choices = [{"key": "ABCDE"[p], "text": i["choices"][old]} for p, old in enumerate(layout)]
+        choices = [{"key": "ABCDEF"[p], "text": i["choices"][old]} for p, old in enumerate(layout)]
         keep_rich = keeps_rich_explanation(prev, i, choices)
         correct = sorted(newkey[k] for k in i["keys"])
         if not prev:
@@ -935,7 +939,7 @@ def report():
             if min(lens[k] for k in q["correctKeys"]) > max(wrong) * 1.08:   # clearly longest, ignoring near-ties
                 longest += 1
         print(f"{e:9} {len(qs):5} {target(e):6} {max(0, target(e) - len(qs)):5} {multi * 100 / len(qs):6.1f}  "
-              f"{' '.join(f'{k}{pos[k]}' for k in 'ABCDE')}   {longest * 100 / len(qs):.0f}%")
+              f"{' '.join(f'{k}{pos[k]}' for k in 'ABCDEF')}   {longest * 100 / len(qs):.0f}%")
 
 
 if __name__ == "__main__":
