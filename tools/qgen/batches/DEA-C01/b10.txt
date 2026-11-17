@@ -28,6 +28,7 @@
 # src: https://docs.aws.amazon.com/step-functions/latest/dg/choosing-workflow-type.html
 # src: https://docs.aws.amazon.com/step-functions/latest/apireference/API_StartSyncExecution.html
 # src: https://docs.aws.amazon.com/step-functions/latest/dg/state-map-inline.html
+# src: https://docs.aws.amazon.com/step-functions/latest/dg/state-map-distributed.html
 # src: https://docs.aws.amazon.com/step-functions/latest/dg/concepts-error-handling.html
 # src: https://docs.aws.amazon.com/athena/latest/ug/performance-tuning-query-optimization-techniques.html
 # src: https://docs.aws.amazon.com/athena/latest/ug/ctas-insert-into.html
@@ -102,7 +103,7 @@ G: ## When DMS writes a CDC file to S3
 For an S3 target, DMS holds changes in memory and writes a file when **either** condition is met first:
 - `CdcMaxBatchInterval`: maximum time in seconds (default **60**);
 - `CdcMinFileSize`: minimum size in KB (default **32000 KB**, about 32 MB).
-`MaxFileSize` is a different setting: it caps how large a file may grow (default 1 GB). It does not delay writes.
+`MaxFileSize` is a different setting: the docs describe it as the maximum size of .csv files created during full load (default 1 GB). It never holds changes back, so it cannot delay CDC writes.
 ## Working the numbers at 2 MB per minute
 - Defaults: 60 s is reached long before 32 MB, so one file of about 2 MB per minute.
 - 1800 s and 128000 KB: 128 MB would take 64 minutes, so the 30-minute interval fires first: one file of about **60 MB** every 30 minutes.
@@ -110,7 +111,7 @@ For an S3 target, DMS holds changes in memory and writes a file when **either** 
 - 1800 s and 32000 KB: 32 MB is reached after about **16 minutes**, so files of about 32 MB, twice as many as needed.
 W: A=1800 s and 128000 KB: the size threshold is out of reach in 30 minutes, so the interval closes every file at the 30-minute limit, giving the largest files the freshness rule allows.
 X: B=3600 s and 64000 KB: the 64 MB size trigger fires first, after about 32 minutes of changes, so the newest data in each file can be older than the analysts' 30-minute limit.
-C=MaxFileSize 128 MB: this only limits the maximum file size. With the 60-second interval still in place, DMS keeps writing a 2 MB file every minute.
+C=MaxFileSize 128 MB: this setting only caps file size (documented for full-load .csv files) and never delays a write. With the 60-second interval still in place, DMS keeps writing a 2 MB file every minute.
 D=1800 s with the default 32000 KB: the default size trigger fires first, after about 16 minutes, so files are about 32 MB and twice as many as necessary; it meets freshness but not "fewest, largest".
 T: DMS writes a CDC file when CdcMaxBatchInterval or CdcMinFileSize is reached, whichever comes first; size both against the change rate and the freshness limit.
 V: AWS DMS, Amazon S3, Amazon Aurora, Amazon Athena
@@ -200,7 +201,7 @@ A plain `spark.read.jdbc` call with no partitioning options issues **one query**
 The DBA's limit is 8 concurrent queries, so `hashpartitions` must be 8 or fewer. More workers alone change nothing, because the work is still a single query.
 W: A=DynamicFrame with hashpartitions 8: eight parallel queries spread the read across executors within the DBA's limit, and the 1,000-row fetch size removes the memory blow-up.
 X: B=40 workers: the table is still read by one query in one task, so extra executors sit idle and the single reader still runs out of memory.
-C=G.2X workers: doubling one executor's memory might delay the OOM, but a fetch size of 0 still tries to cache all 180 million rows, and a single reader cannot meet the one-hour window.
+C=G.2X workers: doubling one executor's memory might delay the OOM, but a fetch size of 0 still makes one task cache all 180 million rows from a single query, so the root cause stays.
 D=hashpartitions 32: the parallel read would work technically, but 32 concurrent queries break the DBA's limit of 8 on the source database.
 T: For large JDBC sources in Glue, use DynamicFrames with hashfield/hashpartitions sized to what the source database can take, instead of a single unpartitioned spark.read.jdbc.
 V: AWS Glue, Amazon RDS, Amazon S3
@@ -252,7 +253,7 @@ T: Express workflows allow only request-response integrations; to wait for a sho
 V: AWS Step Functions, AWS Glue
 
 @ DEA-C01 D1 T1.3 expert use-case
-S: A Step Functions Map state runs 200 iterations at once, and each iteration calls a Lambda function that loads data through a partner API. When the partner's rate limit is hit, the function raises a custom RateLimited error, and today all 200 iterations retry at the same instants and are throttled again. The new retrier for RateLimited must allow at least 5 retries, never wait more than 60 seconds before any single retry, keep the worst-case total waiting per iteration under 4 minutes, and spread retries out in time. Which Retry configuration meets every requirement?
+S: A Step Functions Distributed Map state runs 200 child workflow executions at once, and each one calls a Lambda function that loads data through a partner API. When the partner's rate limit is hit, the function raises a custom RateLimited error, and today all 200 executions retry at the same instants and are throttled again. The new retrier for RateLimited must allow at least 5 retries, never wait more than 60 seconds before any single retry, keep the worst-case total waiting per execution under 4 minutes, and spread retries out in time. Which Retry configuration meets every requirement?
 A: IntervalSeconds 10, BackoffRate 2, MaxAttempts 5, MaxDelaySeconds 60, JitterStrategy FULL
 B: IntervalSeconds 10, BackoffRate 2, MaxAttempts 5, MaxDelaySeconds 120, JitterStrategy FULL
 C: IntervalSeconds 60, BackoffRate 1, MaxAttempts 5, MaxDelaySeconds 60, JitterStrategy FULL
@@ -269,8 +270,8 @@ G: ## How a Step Functions retrier computes waits
 - 10, x2, 5 retries, cap 120: 10 + 20 + 40 + 80 + 120 = **270 s**, and two waits exceed 60.
 - 60, x1, 5 retries: 60 x 5 = **300 s**, over 240.
 - 5, x3, 4 retries, cap 60: 5 + 15 + 45 + 60 = 125 s, but only **4** retries.
-With `FULL` jitter the real waits are random values up to these numbers, which breaks up the lockstep of the 200 iterations.
-W: A=10 s, x2, 5 attempts, 60 s cap, FULL jitter: five retries with a longest wait of 60 s and a worst-case total of 190 s, and jitter spreads the 200 iterations apart.
+With `FULL` jitter the real waits are random values up to these numbers, which breaks up the lockstep of the 200 executions.
+W: A=10 s, x2, 5 attempts, 60 s cap, FULL jitter: five retries with a longest wait of 60 s and a worst-case total of 190 s, and jitter spreads the 200 executions apart.
 X: B=120 s cap: the fourth and fifth waits grow to 80 and 120 seconds, breaking the 60-second rule, and the worst case of 270 seconds is over 4 minutes.
 C=60 s fixed interval: every wait is 60 seconds, so five retries add up to 300 seconds of worst-case waiting, more than the 240-second budget.
 D=5 s, x3, 4 attempts: the waits fit under 60 seconds and total 125 seconds, but MaxAttempts 4 gives only four retries, one short of the requirement.
@@ -344,7 +345,7 @@ T: When S3 notification filters would overlap, enable EventBridge on the bucket 
 V: Amazon S3, Amazon EventBridge, AWS Step Functions
 
 @ DEA-C01 D3 T3.1 expert troubleshooting
-S: An AWS Glue workflow runs load_orders and load_customers in parallel, then a join job that must start only after both loads succeed. A cleanup job must run whenever either load does not succeed. Today a conditional trigger with Logical ANY watches both loads for SUCCEEDED, so the join sometimes starts with stale customer data while load_customers is still running. load_customers also hits its 60-minute job timeout every few weeks, and nothing runs cleanup then. The team wants to keep everything inside the Glue workflow, with no extra services. Which TWO trigger changes fix both problems? (Select TWO)
+S: An AWS Glue workflow runs load_orders and load_customers in parallel, then a join job that must start only after both loads succeed. A cleanup job must run whenever either load fails or is stopped by its job timeout. Today a conditional trigger with Logical ANY watches both loads for SUCCEEDED, so the join sometimes starts with stale customer data while load_customers is still running. load_customers also hits its 60-minute job timeout every few weeks, and nothing runs cleanup then. The team wants to keep everything inside the Glue workflow, with no extra services. Which TWO trigger changes fix both problems? (Select TWO)
 A: Change the join job's conditional trigger to Logical AND, with conditions load_orders SUCCEEDED and load_customers SUCCEEDED
 B: Add a conditional trigger for cleanup with Logical ANY and conditions FAILED and TIMEOUT for each of the two load jobs
 C: Add a conditional trigger for cleanup with Logical ANY and a FAILED condition for each of the two load jobs
@@ -356,7 +357,7 @@ A conditional trigger has a **predicate**: a list of conditions, each one a job 
 A trigger can watch these job states: **SUCCEEDED, STOPPED, FAILED and TIMEOUT**. TIMEOUT is its own state: a run that reaches its timeout ends in TIMEOUT, not FAILED.
 ## Mapping the requirements
 - "Join only after both succeed": AND over two SUCCEEDED conditions.
-- "Cleanup when either does not succeed": ANY over FAILED and TIMEOUT for each load (four conditions).
+- "Cleanup when either fails or times out": ANY over FAILED and TIMEOUT for each load (four conditions).
 - Glue job retries restart failed runs, but **runs that reach the timeout limit are not restarted**.
 W: A=Join trigger with AND: the join fires only when both loads have reached SUCCEEDED, so it never reads half-loaded customer data.
 B=Cleanup trigger on FAILED and TIMEOUT with ANY: any one of the four outcomes starts cleanup, including the recurring timeout of load_customers.
