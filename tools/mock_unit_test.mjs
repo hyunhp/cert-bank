@@ -81,10 +81,10 @@ ok("allocate caps by supply and redistributes", a.D1 === 2 && a.D2 === 8, JSON.s
 {
   const sp = { level: "associate", domains: [{ code: "D1", name: "a", weight: 50 }, { code: "D2", name: "b", weight: 50 }] };
   const run = (pct, o = {}) => ({ exam: "X", mode: "full", domain: null, timed: true, auto: false, fresh: 65, total: 65, correct: Math.round(65 * pct / 100), dom: { D1: [pct, 100], D2: [pct, 100] }, ...o });
-  ok("target: associate 80, professional 85, percent pass mark +10", targetPct(sp) === 80 && targetPct({ level: "professional" }) === 85 && targetPct({ passingPct: 70 }) === 80);
+  ok("target: associate 85, professional 90, percent pass mark +15", targetPct(sp) === 85 && targetPct({ level: "professional" }) === 90 && targetPct({ passingPct: 70 }) === 85);
   ok("no history is not ready", !readiness(sp, []).ready && readiness(sp, []).scoreStreak === 0);
-  ok("three qualifying exams are ready", readiness(sp, [run(82), run(85), run(81)]).ready);
-  ok("two are not enough", readiness(sp, [run(82), run(85)]).scoreStreak === 2 && !readiness(sp, [run(82), run(85)]).ready);
+  ok("three qualifying exams are ready", readiness(sp, [run(87), run(90), run(86)]).ready);
+  ok("two are not enough", readiness(sp, [run(87), run(90)]).scoreStreak === 2 && !readiness(sp, [run(87), run(90)]).ready);
   ok("a latest exam below target breaks the score streak", readiness(sp, [run(85), run(85), run(70)]).scoreStreak === 0);
   ok("running out of time does not count", readiness(sp, [run(85), run(85), run(85, { auto: true })]).scoreStreak === 0);
   ok("untimed does not count", readiness(sp, [run(85), run(85), run(85, { timed: false })]).scoreStreak === 0);

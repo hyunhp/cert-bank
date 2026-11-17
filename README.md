@@ -79,7 +79,7 @@ affiliated with Amazon Web Services, Palantir Technologies, Microsoft or Google,
 
 Some questions belong to more than one exam. Palantir publishes no section weights, so its sections count equally;
 Azure publishes weight ranges, and the mock exam uses their midpoints. Google Cloud publishes no pass mark (results are
-pass/fail only), so its mock exam aims at 80%.
+pass/fail only), so its mock exam aims at 85% (90% for professional exams), the same practice target as the other vendors.
 
 ## Your data
 
