@@ -64,13 +64,13 @@ def slug(code):
 
 # ---------------------------------------------------------------- page frame
 UI = {
-    "en": {"exams": "Exams", "bank": "Question bank", "study": "Study plans", "bank_s": "Bank", "study_s": "Study", "guides": "Guides", "about": "About",
+    "en": {"exams": "Exams", "bank": "Question bank", "study": "Study plans", "bank_s": "Bank", "study_s": "Study", "skip": "Skip to main content", "guides": "Guides", "about": "About",
            "contact": "Contact", "privacy": "Privacy", "support": "Support", "source": "Source on GitHub",
            "free": '<b>Every question here is free and will stay free.</b> No ads, no sign-up. If the site helped you, '
                    '<a href="{up}support.html">a coffee keeps new questions coming</a> (optional).',
            "fine": "Unofficial study material. Not affiliated with or endorsed by AWS, Palantir, Microsoft, Google, "
                    "Databricks or HashiCorp. Exam names belong to their owners."},
-    "ko": {"exams": "시험", "bank": "문제은행", "study": "학습 계획", "bank_s": "문제은행", "study_s": "학습", "guides": "가이드", "about": "소개",
+    "ko": {"exams": "시험", "bank": "문제은행", "study": "학습 계획", "bank_s": "문제은행", "study_s": "학습", "skip": "본문으로 건너뛰기", "guides": "가이드", "about": "소개",
            "contact": "문의", "privacy": "개인정보", "support": "후원", "source": "GitHub 소스",
            "free": '<b>모든 문제는 앞으로도 무료입니다.</b> 광고도 가입도 없습니다. 도움이 되셨다면 '
                    '<a href="{up}support.html">커피 한 잔으로 응원</a>해 주세요(선택).',
@@ -122,11 +122,12 @@ def page(title, desc, path, body, depth, crumbs=(), lang="en", alternates=None, 
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"></noscript>
 </head>
 <body>
+<a class="skip" href="#main">{t["skip"]}</a>
 <header class="gh"><div class="gh-in">
-  <a class="gh-brand" href="{up}./"><span class="gh-mark" aria-hidden="true">cb</span><span class="gh-name">{SITE}</span></a>
+  <a class="gh-brand" href="{up}./" aria-label="{SITE} home"><span class="gh-mark" aria-hidden="true">cb</span><span class="gh-name">{SITE}</span></a>
   <nav aria-label="Site"><a href="{up}exams/"{cur("exams")}>{t["exams"]}</a>{guides}<a href="{up}./"><span class="lg">{t["bank"]}</span><span class="sm">{t["bank_s"]}</span></a><a href="{up}study.html"><span class="lg">{t["study"]}</span><span class="sm">{t["study_s"]}</span></a><a href="{up}about.html"{cur("about.html")}>{t["about"]}</a></nav>
 </div></header>
-<main class="{cls}">
+<main class="{cls}" id="main" tabindex="-1">
 {side}<div class="content">
 {head}{body}
 </div>
