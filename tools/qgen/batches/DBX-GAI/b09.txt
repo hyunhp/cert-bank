@@ -19,6 +19,8 @@
 # src: https://docs.databricks.com/aws/en/ai-gateway/
 # src: https://docs.databricks.com/aws/en/ai-gateway/inference-tables
 # src: https://docs.databricks.com/aws/en/ai-gateway/model-services
+# src: https://docs.databricks.com/aws/en/ai-gateway/usage-tracking
+# src: https://docs.databricks.com/aws/en/genie/conversation-api
 
 @ DBX-GAI D1 T1.1 advanced tradeoff
 S: A claims team uses a chat model to label each incoming claim note as `fraud_review`, `standard` or `fast_track`. Asking the model to reason step by step raised accuracy on a 400-note evaluation set from 81% to 89%, but the downstream parser now fails on 30% of replies because the label is buried in free text. The team must keep the accuracy gain, keep one model call per note, and give the parser a field it can read from valid JSON on every reply. Which prompt design meets all three requirements?
@@ -126,25 +128,26 @@ D=One merged tool: the refund still uses whatever amount the model supplies, and
 E=Prompt rule and examples: they make the right order more likely but cannot guarantee it, which is not enough for refunds that cannot be undone.
 T: Enforce tool order for irreversible actions in code and with a human confirmation, not only in the prompt.
 
-@ DBX-GAI D1 T1.5 advanced troubleshooting
-S: A retail agent has two tools, `search_orders(query)` and `search_returns(query)`, both described as "Searches customer records". MLflow traces show that for questions such as "Where is the refund for my returned jacket?" the agent calls `search_orders` in 40% of cases and then answers that no return exists. The team cannot merge the two data sources and wants the fix that changes the fewest components. What should the team change?
-A: Rewrite both tool descriptions to state what each one returns, when to use it, and give an example question, so the model can tell the two tools apart
-B: Rename both tools to `tool_1` and `tool_2` and list them in the system prompt in the order the model should try them for every customer question
-C: Replace the chat model with a larger one, because a bigger model infers the right tool from the tool names alone without any change to the descriptions
-D: Remove `search_orders` from the agent and answer all order questions from `search_returns`, which also holds the order IDs of returned items
+@ DBX-GAI D1 T1.5 advanced tradeoff
+S: A travel-support agent answers requests such as "Can I move my Friday flight to Saturday and keep my hotel?" with four tools: `get_booking(booking_id)` returns the flight and hotel IDs, `search_flights(flight_id, date)`, `check_hotel_extension(hotel_id, date)` and `rebook_flight(flight_id, new_flight_id)`. Traces show one tool call per model turn, about 2 seconds per turn and under 0.5 seconds per tool, and a p95 of 14 seconds against a 9-second target. The customer must confirm before any rebooking. Which tool plan meets the target?
+A: Call `get_booking` first, then call `search_flights` and `check_hotel_extension` in parallel in one turn, and run `rebook_flight` only after the customer confirms
+B: Call all four tools in parallel in the first model turn, including `rebook_flight`, so that the whole request completes within a single turn of the model
+C: Keep one tool call per model turn but switch to a larger chat model, because a stronger model reasons about the rebooking in fewer and faster turns
+D: Call `search_flights` and `check_hotel_extension` in parallel first, with IDs guessed from the question, then call `get_booking` to verify the guesses
 K: A
-G: ## How a model chooses between tools
-In tool calling, the model sees each tool's name, description and parameter schema, and nothing else. When two tools have the same description, the choice is close to a guess. The description is therefore part of the prompt and should say:
-- what the tool returns (orders with shipping status vs. return requests with refund status),
-- when to use it and when not to,
-- the expected argument format, ideally with a short example.
-## Reading the evidence
-The trace shows the wrong tool was called, not that the tool failed. That points to tool selection, which the descriptions drive, rather than to the data, the model size or the retrieval quality.
-W: Distinct, specific descriptions: the model chooses tools from their descriptions, so stating what each returns and when to use it fixes the 40% mis-selection with no other change.
-X: B=Generic names and fixed order: meaningless names remove information, and a fixed order makes every question hit the first tool regardless of intent.
-C=Larger model: identical descriptions leave even a larger model guessing between the tools, and it costs more on every request.
-D=Remove a tool: order questions about items that were never returned would no longer find their data, so the agent loses a capability.
-T: Tool descriptions are prompts: make each one say what it returns and when to use it.
+G: ## Ordering tools by their dependencies
+A multi-step agent spends most of its latency in model turns, not in fast tool calls. Planning the tool order means looking at what each call needs:
+- **Dependent calls** must run in sequence: `search_flights` and `check_hotel_extension` need the IDs that `get_booking` returns.
+- **Independent calls** can run together: once the IDs are known, the flight search and the hotel check do not depend on each other, and many chat APIs let the model return several tool calls in one turn.
+- **Action tools** that change state (`rebook_flight`) come last and, when the business requires it, only after a human confirmation.
+## Working the numbers
+One call per turn needs a turn for every tool plus the final answer, and slow requests add an extra turn, which the traces show as a 14-second p95. Dependency-aware plan: turn 1 `get_booking`, turn 2 both lookups in parallel, turn 3 the answer that asks for confirmation: about 3 x 2 s + 1 s = 7 s, inside the 9-second target.
+W: Sequential lookup, parallel independent checks, confirmed action: it respects the ID dependency, saves the turns spent on independent lookups, and keeps the irreversible rebooking behind the customer's confirmation.
+X: B=Everything in the first turn: the searches cannot run without the IDs from `get_booking`, and calling `rebook_flight` before confirmation breaks the business rule.
+C=Larger model, one call per turn: the number of turns is set by the plan, not the model size, and a larger model usually takes longer per turn.
+D=Guessed IDs first: the searches would run on invented IDs, so their results are unreliable and need repeating after `get_booking`, which costs more turns.
+T: Run dependent tool calls in order, independent ones together, and state-changing actions last after any required confirmation.
+V: Agent tools
 
 @ DBX-GAI D2 T2.1 advanced use-case
 S: A telecom company indexes 2 million support chat transcripts so that agents can find how similar problems were solved before. A transcript averages 40 turns, and the fix is usually spread over several consecutive turns by the customer and the agent. The embedding model reads at most 512 tokens, and agents want each retrieved passage to show who said what. Which chunking strategy fits these documents and this model?
@@ -484,15 +487,15 @@ V: MLflow
 
 @ DBX-GAI D3 T3.13 advanced use-case
 S: A supervisor agent must answer questions about revenue, churn and pipeline from governed sales tables. Analysts have already defined these business metrics, the table joins and approved example SQL in a curated Genie Agent, and they update it every month. The agent's builders want answers that match the analysts' definitions and do not want to maintain a second copy of that logic. Which design fits?
-A: Call the curated Genie Agent as a tool of the supervisor, through the Genie Conversation API or its MCP endpoint, and return its answer and SQL
+A: Call the curated Genie Agent as a tool of the supervisor through the Genie Conversation API, and return its answer together with the generated SQL
 B: Give the supervisor a text-to-SQL tool that writes queries against the raw sales tables, with the analysts' metric definitions pasted into its system prompt
 C: Export the Genie Agent's example SQL into an AI Search index, and let the supervisor retrieve the closest query and run it with new filter values
 D: Create Unity Catalog SQL functions that reimplement each metric definition, register them as tools, and update them whenever analysts change the Genie Agent
 K: A
 G: ## Reusing curated analytics in a multi-agent system
 A Genie Agent (formerly Genie space) holds curated context for structured data: selected tables, instructions, metric definitions, joins and trusted example SQL. A multi-agent system can use it as a **tool**:
-- through the **Genie Conversation API**, which starts conversations, sends messages and returns the generated SQL and results;
-- or through the Genie Agent MCP endpoint, which uses the permissions of the Genie Agent and its data.
+- through the **Genie Conversation API** (documented as the Genie Agents API), which starts conversations, sends messages and returns the generated SQL and results.
+A workspace MCP endpoint for Genie Agents also exists, but it is in Public Preview, so the API is the stable choice here.
 The supervisor routes structured-data questions to the Genie Agent and keeps the analysts' logic in one place, so a monthly update applies immediately.
 ## Anti-pattern
 Copying definitions into prompts, indexes or functions creates a second source of truth that drifts from the curated one.
@@ -808,26 +811,26 @@ T: Use deterministic code-based scorers for rule checks that can be computed fro
 V: MLflow
 
 @ DBX-GAI D6 T6.4 advanced troubleshooting
-S: Users of a support assistant served through a Unity Gateway model service report intermittent failures and slow first tokens on Monday mornings. The service already logs to an inference table. The team wants, for each hour of last Monday and each requester, the share of failed requests and the slowest time to first byte, using only data it already has. Which approach fits?
-A: Query the inference table by hour and `requester`, computing the share of rows with a non-200 `status_code` and the maximum `time_to_first_byte_ms`
-B: Query `system.billing.usage` grouped by hour and user, since it records each request's status code and first-byte latency for every model service
-C: Run `mlflow.genai.evaluate()` with the Safety judge on last Monday's requests, since judge failures reveal which requests errored or answered slowly
-D: Query the inference table grouped by hour and `destination_name`, computing the share of rows with a non-200 `status_code` and the average `latency_ms`
+S: Users of a support assistant served through a Unity Gateway model service report intermittent HTTP 429 and 500 errors and slow first tokens on Monday mornings. The service logs to an inference table, and usage tracking is turned on. An engineer computed the failure share per hour from the inference table and found almost no non-200 rows. The team wants, for each hour of last Monday and each requester, the share of failed requests and the slowest time to first byte. Which approach fits?
+A: Query `system.ai_gateway.usage` for this service by hour and `requester`, computing the share of non-200 `status_code` rows and the maximum `time_to_first_byte_ms`
+B: Query the inference table again by hour and `requester` a day later, because failed requests are written only after every successful request has been delivered
+C: Query `system.billing.usage` by hour and user identity, because its usage metadata records the status code and first-byte latency of each model service request
+D: Query `system.ai_gateway.usage` for this service by hour and `destination_name`, computing the share of non-200 `status_code` rows and the average `latency_ms`
 K: A
-G: ## What a Unity Gateway inference table holds
-Unity Gateway (formerly AI Gateway) can log every request and response of a model service to a Unity Catalog Delta table. Useful columns include:
-- `event_time`, `requester` (who called), `status_code` (HTTP status),
-- `latency_ms` (total) and `time_to_first_byte_ms` (how fast the first part arrived, which matters for streaming),
-- `destination_name` / `destination_model` (which model handled it), `request`, `response`.
-Rows can take up to an hour to appear. Because it is a Delta table, plain SQL answers operational questions.
+G: ## Two Unity Gateway logs with different jobs
+Unity Gateway (formerly AI Gateway) offers two Delta-based records of a model service:
+- **Inference tables** hold the request and response payloads (`request`, `response`) with `status_code`, `latency_ms`, `time_to_first_byte_ms` and `requester`. They are built for payload analysis, and the docs list a limitation: logs **may not be populated for requests that return 401, 403, 429 or 500 errors**.
+- **Usage tracking** writes every request to the system table `system.ai_gateway.usage`, with `requester`, `status_code`, token counts, `latency_ms` and `time_to_first_byte_ms`. The built-in usage dashboard uses it to compare latency, time to first byte, errors and rate-limited calls. Records are typically available within one hour.
+## Reading the evidence
+Users see 429 and 500 errors, but the inference table shows almost no non-200 rows: exactly the documented gap. Error rates therefore come from the usage table.
 ## Example
-`SELECT date_trunc('hour', event_time) h, requester, avg(CASE WHEN status_code <> 200 THEN 1 ELSE 0 END) fail_share, max(time_to_first_byte_ms) FROM ... GROUP BY ALL`
-W: Inference table by hour and requester: it holds status codes and first-byte times for every request, so one SQL query gives the failure share and slowest first byte per user per hour.
-X: B=Billing usage table: billing records hold usage quantities for cost, not per-request status codes or first-byte latency.
-C=Safety judge: a judge scores content safety; it does not detect HTTP failures or measure latency.
-D=Grouped by destination with average latency: it answers per model rather than per requester, and average total latency is not the slowest time to first byte.
-T: Use the inference table's status_code, requester and time_to_first_byte_ms columns for per-user reliability and latency analysis.
-V: Unity Gateway
+`SELECT date_trunc('hour', event_time) h, requester, avg(CASE WHEN status_code <> 200 THEN 1 ELSE 0 END) fail_share, max(time_to_first_byte_ms) FROM system.ai_gateway.usage WHERE ... GROUP BY ALL`
+W: Usage table by hour and requester: it records error responses that the inference table may skip, and it has the requester and first-byte columns needed for the per-user, per-hour view.
+X: B=Inference table a day later: the rows are not delayed; error responses such as 429 and 500 may not be logged to the inference table at all.
+C=Billing usage table: billing records hold usage quantities for cost attribution, not per-request status codes or first-byte latency.
+D=Usage table by destination with average latency: the right table, but it groups per model rather than per requester, and average total latency is not the slowest time to first byte.
+T: Count errors from the Unity Gateway usage table, because inference tables may not log 401, 403, 429 or 500 responses.
+V: Unity Gateway, system tables
 
 @ DBX-GAI D6 T6.5 advanced troubleshooting
 S: Model Serving spend doubled last month. Finance suspects the scheduled jobs that call `ai_query` on Databricks-hosted foundation models, rather than the real-time chat endpoints, which kept a flat request volume. The platform team must name the responsible jobs and each job's share of batch inference spend from billing data alone, without changing any job or endpoint configuration. Which query approach identifies them?
@@ -850,22 +853,23 @@ T: Use system.billing.usage with the BATCH_INFERENCE offering type and job metad
 V: AI Functions, system tables
 
 @ DBX-GAI D6 T6.6 advanced troubleshooting
-S: At 09:00 an engineer enabled inference tables on a Unity Gateway model service and tried to point logging at the existing Delta table `ops.llm_log`, which already holds a month of custom logs written by the application. The configuration was rejected, so a new catalog and schema location was chosen instead. At 09:20, after hundreds of requests, the new inference table shows no rows yet. Which statement explains both observations?
-A: Logging into an existing table is not supported, so a new table is created; rows can take up to an hour to appear after the first requests
-B: Logging into an existing table is supported only when its schema matches; rows appear within seconds, so the missing rows show that logging failed
-C: Logging into an existing table needs MODIFY on it, which was missing; rows can take up to an hour to appear after the service gets its first request
-D: Logging into an existing table is not supported, so a new table is created; rows appear only after a manual table refresh is run by the table owner
+S: A team tracks a live support assistant through the inference table of its Unity Gateway model service, and a weekly report counts model calls with `COUNT(*)`. After input and output guardrails were added, the count rose by about 40% while the app's own request count stayed flat. A spot check finds a few rows that are exact copies, with the same `invocation_id`, and many rows that share a `request_id` but differ in `invocation_id`. The report must count every inference call exactly once. Which query change fits?
+A: Deduplicate on `invocation_id` before counting, because delivery is at least once and guardrail checks are separate invocations that share a request ID
+B: Count distinct `request_id` values, because all rows that share one request ID are repeated deliveries of the same model call to the inference table
+C: Divide `COUNT(*)` by the `sampling_fraction` column, because enabling guardrails turns on down-sampling and inflates the row count of the table
+D: Keep `COUNT(*)` but filter to rows whose `status_code` is 200, because duplicate rows are written only for failed requests that the gateway retried
 K: A
-G: ## How inference tables are created and filled
-When inference tables are enabled on a Unity Gateway model service (formerly an AI Gateway-enabled endpoint):
-- You choose a catalog and schema; **specifying an existing table is not supported**. Databricks creates a new table after the service receives its first request.
-- **Rows can take up to an hour to appear** after requests arrive, so an empty table 20 minutes later is expected.
-- Do not change the table's schema or name, or delete it: logging can stop or the table can be corrupted.
-## Requirements
-`USE CATALOG`, `USE SCHEMA` and `CREATE TABLE` on the target location.
-W: New table only, delayed rows: an existing table cannot be the target, and up to an hour of delay explains the empty table after 20 minutes.
-X: B=Existing table with matching schema: existing tables are not supported at all, and rows are not expected within seconds.
-C=MODIFY on the existing table: no privilege makes an existing table a valid target; the creator needs CREATE TABLE on the schema instead.
-D=Manual refresh: the table fills automatically; no refresh is needed, only time.
-T: Inference tables are always new tables created by Databricks, and rows can take up to an hour to appear.
+G: ## What one inference-table row means
+A Unity Gateway (formerly AI Gateway) inference table logs requests and responses of a model service. Three columns matter for counting:
+- `request_id`: one value per request to the service.
+- `invocation_id`: one value per individual inference call. **Several invocations can share a `request_id`**, for example guardrail checks or multi-turn agent calls.
+- `sampling_fraction`: 1 when no down-sampling is used.
+Inference tables deliver logs through Zerobus and share its **at-least-once delivery**, so an occasional row can arrive twice.
+## Reading the evidence
+The 40% rise with flat app traffic is the guardrail invocations: real extra calls that share a request ID. The exact copies with one `invocation_id` are at-least-once repeats. Counting distinct `invocation_id` values handles both.
+W: Deduplicate on invocation_id: it removes repeated deliveries and still counts each guardrail check and model call as its own invocation.
+X: B=Distinct request_id: it collapses guardrail checks and the model call of one request into a single count, so it counts requests, not inference calls.
+C=Divide by sampling_fraction: guardrails do not turn on sampling, and dividing by a fraction would raise the count instead of removing duplicates.
+D=Only status 200: duplicates come from at-least-once delivery, not from retries of failed requests, and the filter would also drop real failed calls.
+T: In inference tables, count calls by distinct `invocation_id`: one request can hold several invocations, and delivery is at least once.
 V: Unity Gateway

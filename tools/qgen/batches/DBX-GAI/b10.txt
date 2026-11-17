@@ -7,7 +7,7 @@
 # src: https://docs.databricks.com/aws/en/mlflow3/genai/eval-monitor/evaluate-app
 # src: https://docs.databricks.com/aws/en/generative-ai/agent-framework/deploy-agent
 # src: https://docs.databricks.com/aws/en/generative-ai/agent-framework/agent-authentication-model-serving
-# src: https://docs.databricks.com/aws/en/generative-ai/mcp/managed-mcp
+# src: https://docs.databricks.com/aws/en/generative-ai/agent-framework/langchain-uc-integration
 # src: https://docs.databricks.com/aws/en/machine-learning/foundation-model-apis/
 # src: https://docs.databricks.com/aws/en/sql/language-manual/functions/ai_query
 # src: https://docs.databricks.com/aws/en/ai-gateway/rate-limits
@@ -310,25 +310,27 @@ D=Metadata columns not synced: storage-optimized endpoints sync all columns, and
 T: On storage-optimized endpoints filters apply after an overfetch, so rare filter values can return no results.
 V: Databricks AI Search
 
-@ DBX-GAI D4 T4.13 expert troubleshooting
-S: An agent on Model Serving uses the Databricks managed MCP endpoint `https://<host>/api/2.0/mcp/functions/prod/billing`. In September it was logged with `resources` taken from `DatabricksMCPClient().get_databricks_resources(url)`, which then listed the three functions in `prod.billing`, and deployed with automatic authentication passthrough. On October 2 a data engineer added `prod.billing.refund_status`. Since then, the endpoint's calls to that tool fail with a permission error, while the other three tools work; in the developer's notebook all four work. The deploying user has `EXECUTE` on all four functions. Security forbids grants to broad groups such as all account users. What fixes the endpoint?
-A: Log a new agent version with `resources` recomputed by `get_databricks_resources(url)`, now including `refund_status`, and deploy it
-B: Grant `EXECUTE` on `refund_status` to the endpoint's system-generated service principal, and keep the deployed agent version unchanged
-C: Grant `EXECUTE` on `refund_status` to the account users group, so the endpoint's credentials can call it without a new agent version
-D: Restart the serving endpoint, so that automatic authentication passthrough refreshes its credentials and picks up the new function
+@ DBX-GAI D4 T4.2 expert troubleshooting
+S: An agent on Model Serving calls three Unity Catalog functions in `prod.billing` as tools through `UCFunctionToolkit`. Version 4 was logged with a `DatabricksFunction` resource for each of the three and deployed with automatic authentication passthrough. Version 5 adds a fourth tool, `prod.billing.refund_status`; the developer copied version 4's `resources` list when logging it. After version 5 is deployed, every call to the new tool fails with a permission error while the other three work, and in the developer's notebook all four work. The deploying user has `EXECUTE` on all four functions. Security forbids grants to broad groups such as all account users. What fixes the endpoint?
+A: Log version 6 with a `DatabricksFunction` resource for `refund_status` added to the other three, then deploy version 6 to the same endpoint
+B: Grant `EXECUTE` on `refund_status` to the endpoint's system-generated service principal, and keep version 5 deployed without any change
+C: Grant `EXECUTE` on `refund_status` to the account users group, so that the endpoint's credentials can call it without a new model version
+D: Restart the serving endpoint, so that automatic authentication passthrough refreshes its credentials and picks up the fourth function
 K: A
 G: ## Credentials follow the declared resources
-With automatic authentication passthrough, Databricks creates a service principal **for each agent model version**, grants it access to the resources declared at **logging time**, and injects short-lived credentials that it rotates. The service principal does not appear in API or UI listings and is deleted when the version leaves the endpoint.
-For workspace MCP endpoints, the docs say to declare **all** resources behind the server URL (every function in the schema), and `DatabricksMCPClient().get_databricks_resources(<url>)` lists them. A function added later is not covered until a new version is logged with the updated list.
+With automatic authentication passthrough, the resources are declared when the agent is **logged** (`resources=[...]` on `log_model`). At deployment:
+- Databricks verifies that the endpoint creator can access every declared resource.
+- It creates a service principal **for that agent model version** and grants it access to the declared resources only.
+- It injects short-lived credentials for that principal and rotates them.
+The system-generated service principal does not appear in API or UI listings, and it is deleted when the version leaves the endpoint. Unity Catalog functions are declared as `DatabricksFunction` and need `EXECUTE` (plus `USE CATALOG` and `USE SCHEMA`) for the deploying user.
 ## Reading the evidence
-Three old tools work and the new one fails on the endpoint but not in the notebook (where the developer's identity is used): the deployed version's resource list is outdated.
-W: Re-log with recomputed resources: the new version's service principal is granted access to all four functions, including the one added after the first logging.
-X: B=Grant to the system service principal: that principal is created and managed by Databricks per version and is not listed for manual grants; the supported path is declaring the resource.
-C=Grant to all account users: it would bypass the issue by granting broadly, which security forbids.
-D=Restart the endpoint: rotation refreshes credentials for the same declared resources; the new function is still not among them.
-T: With automatic authentication passthrough, a newly added tool needs a new agent version whose declared resources include it.
-V: Agent Framework, Model Serving, MCP
-
+The notebook runs as the developer, who has `EXECUTE` on all four functions, so the code and grants are fine. On the endpoint, only the new function fails: version 5's resource list, copied from version 4, does not declare it, so its service principal never received access.
+W: New version with the fourth function declared: the new version's service principal is granted `EXECUTE` on all four declared functions, and the deploying user already holds the needed privileges.
+X: B=Grant to the system service principal: that principal is created and managed by Databricks per model version and is not listed for manual grants; the supported path is declaring the resource.
+C=Grant to all account users: it would work around the missing declaration with a broad grant, which security forbids.
+D=Restart the endpoint: rotation refreshes credentials for the same declared resources; the fourth function is still not among them.
+T: With automatic authentication passthrough, a new tool works on the endpoint only after a new model version declares it as a resource.
+V: Agent Framework, Model Serving, Unity Catalog
 @ DBX-GAI D4 T4.4 expert troubleshooting
 S: A workspace uses a restricted egress network policy that allows only approved domains. A new agent version adds `langgraph` to its pip requirements, and `agents.deploy()` now fails while the serving container is built. The build logs show pip timing out while downloading the package files. In `system.access.outbound_network`, rows with `network_source_type` set to `ML Build` show denied requests to `files.pythonhosted.org`, while requests to `pypi.org` are allowed. Security approves only the minimum set of extra domains, and packages must come from public PyPI rather than a private mirror. What should the team do before redeploying?
 A: Add `files.pythonhosted.org` to the allowed domains, because pip reads the index on `pypi.org` and then downloads package files from that host
@@ -429,7 +431,7 @@ V: Unity Gateway
 S: A Unity Gateway model service logs to the inference table `ops.ai.support_payload`. On October 3 an analyst ran `ALTER TABLE ... ADD COLUMNS (sentiment STRING)` on it to store a nightly sentiment score next to each request. Since then the table has received no new rows, although the service returns HTTP 200 to thousands of requests a day and has not been reconfigured. Table history shows no writes after the ALTER. The team needs the sentiment scores and complete request logs from now on. Which TWO statements are correct? (Select TWO)
 A: Changing an inference table's schema can stop logging or corrupt the table, which matches the missing rows after the ALTER on October 3
 B: Enrichments such as sentiment belong in a separate table keyed by `request_id`, or a view joining the two, never in the inference table
-C: Logging stopped because some payloads exceed 1 MiB, and one oversized request blocks every later request from being written to the table
+C: Logging stopped because some payloads exceed 10 MiB, and one oversized request blocks every later request from being written to the table
 D: Rows can take up to an hour to appear, so the missing rows since October 3 are expected and will arrive once the backlog has cleared
 E: Pointing the service at a new table that the team creates in advance with the extra `sentiment` column restores logging with the scores
 K: A,B
@@ -438,12 +440,12 @@ When inference tables are enabled on a Unity Gateway model service, Databricks c
 - change the table schema,
 - change the table name,
 - delete the table.
-Specifying an existing table as the target is not supported. Payloads larger than 1 MiB are not logged (for that request), and rows can take up to an hour to appear.
+Specifying an existing table as the target is not supported. Requests and responses larger than 10 MiB are not logged (for that request only, flagged in `logging_error_codes`), and rows can take up to an hour to appear.
 ## Adding your own data
 Keep derived data (scores, labels, enrichments) in your own table keyed by `request_id`, or build a view that joins it to the inference table. The managed table stays untouched.
 W: A=Schema change stops logging: the documented warning matches the evidence exactly: no writes since the ALTER while the service keeps serving.
 B=Separate enrichment table or view: the sentiment scores can be stored and joined on request_id without altering the managed table.
-X: C=Oversized payloads: requests over 1 MiB are skipped individually; they do not stop every later write.
+X: C=Oversized payloads: requests over 10 MiB are skipped individually; they do not stop every later write.
 D=Normal delay: the delay is up to an hour, not weeks; missing rows since October 3 are not a backlog.
 E=Pre-created target table: specifying an existing table is not supported; Databricks creates the inference table itself.
 T: Never alter a managed inference table; store enrichments in your own table keyed by request_id.
