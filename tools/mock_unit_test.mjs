@@ -1,5 +1,5 @@
 // Unit tests for mock exam drawing: node tools/mock_unit_test.mjs
-import { draw, drawFocused, allocate, domainOf, shuffle, verdictFor, readiness, targetPct, isEmptyAttempt } from "../js/mock.js";
+import { draw, drawFocused, HARD_SHARE, allocate, domainOf, shuffle, verdictFor, readiness, targetPct, isEmptyAttempt } from "../js/mock.js";
 import fs from "fs";
 const specs = JSON.parse(fs.readFileSync("data/exam-specs.json"));
 const map = JSON.parse(fs.readFileSync("data/exam-domains.json"));
@@ -114,6 +114,20 @@ ok("allocate caps by supply and redistributes", a.D1 === 2 && a.D2 === 8, JSON.s
   const worst = Math.max(...slots.flat().map(c => Math.abs(c / N - 0.25)));
   ok("shuffle is uniform", worst < 0.01, worst);
   ok("shuffle keeps every item once", shuffle([1, 2, 3, 4, 5]).sort().join() === "1,2,3,4,5");
+}
+// regular mocks mix in exam-level questions: about HARD_SHARE of a full draw when the pool has enough of them
+for (const exam of ["SAA-C03", "DEA-C01"]) {
+  const spec = specs[exam], docs = JSON.parse(fs.readFileSync(`data/${exam}.json`));
+  const byId = new Map(docs.map(q => [q.id, q]));
+  const hard = ids => ids.filter(id => ["exam", "expert"].includes(byId.get(id).tier)).length;
+  const ids = draw(exam, spec.questions, docs, spec, map, [], []);
+  const share = hard(ids) / ids.length;
+  ok(`${exam} full mock mixes in exam-level questions`, Math.abs(share - HARD_SHARE) < 0.06, share);
+  const d = spec.domains[0].code, f = drawFocused(exam, 20, docs, d, map, []);
+  ok(`${exam} section mock mixes in exam-level questions`, hard(f) >= 4, hard(f));
+  // a pool without hard questions still fills the draw
+  const easy = docs.filter(q => !["exam", "expert"].includes(q.tier));
+  ok(`${exam} draw without hard questions is full`, draw(exam, spec.questions, easy, spec, map, [], []).length === spec.questions);
 }
 console.log(fails ? `${fails} FAILED` : "ALL PASS");
 process.exit(fails ? 1 : 0);

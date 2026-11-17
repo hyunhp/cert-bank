@@ -114,11 +114,31 @@ export function allocate(n, domains, supply) {
   return alloc;
 }
 
+// Regular mocks mix in exam-level questions (tiers exam + expert, qgen tier_of): up to HARD_SHARE of each domain's
+// share comes from them, unseen first; the rest from the other tiers. Owner 2026-11-17: a normal mock must not be
+// only the easier questions. "Exam-level questions only" mode passes hard docs alone, so the mix is a no-op there.
+export const HARD_SHARE = 0.3;
+const HARD_TIER = new Set(["exam", "expert"]);
+function mixPick(qs, k, seen, recent) {
+  // Priority levels (unseen first) still come first; inside a level, exam-level questions fill their quota first.
+  const lv = [[[], []], [[], []], [[], []], [[], []]];
+  qs.forEach(q => lv[tierOf(q.id, seen, recent)][HARD_TIER.has(q.tier) ? 0 : 1].push(q.id));
+  let hq = Math.round(k * HARD_SHARE), out = [];
+  for (const [hard, rest] of lv) {
+    if (out.length >= k) break;
+    const h = shuffle(hard), r = shuffle(rest);
+    const takeH = h.splice(0, Math.min(hq, k - out.length)); hq -= takeH.length; out = out.concat(takeH);
+    out = out.concat(r.splice(0, Math.max(0, k - out.length - hq)));
+    out = out.concat(shuffle(h.concat(r)).slice(0, k - out.length));   // level still has items: never skip to a seen level
+  }
+  return out;
+}
+
 // Section-only draw: n questions of one domain, unseen first, final order shuffled.
 export function drawFocused(exam, n, docs, domain, map, seenIds, recentIds) {
   const seen = new Set(seenIds || []), recent = new Set(recentIds || []);
-  const pool = docs.filter(q => domainOf(q, exam, map) === domain).map(q => q.id);
-  return shuffle(byTier(pool, seen, recent).slice(0, n));
+  const pool = docs.filter(q => domainOf(q, exam, map) === domain);
+  return shuffle(mixPick(pool, n, seen, recent));
 }
 
 // Draw n question ids: stratified by domain, unseen first, then final order shuffled.
@@ -129,13 +149,13 @@ export function draw(exam, n, docs, spec, map, seenIds, recentIds) {
   for (const q of docs) {
     const g = groups[domainOf(q, exam, map)];
     if (!g) continue;              // question tagged with a domain this exam doesn't have
-    g.push(q.id);
+    g.push(q);
   }
   const supply = {};
   for (const k in groups) supply[k] = groups[k].length;
   const alloc = allocate(n, spec.domains, supply);
   let picked = [];
-  for (const k in groups) picked = picked.concat(byTier(groups[k], seen, recent).slice(0, alloc[k] || 0));
+  for (const k in groups) picked = picked.concat(mixPick(groups[k], alloc[k] || 0, seen, recent));
   return shuffle(picked);
 }
 
