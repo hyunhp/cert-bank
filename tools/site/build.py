@@ -64,13 +64,13 @@ def slug(code):
 
 # ---------------------------------------------------------------- page frame
 UI = {
-    "en": {"exams": "Exams", "bank": "Question bank", "study": "Study plans", "guides": "Guides", "about": "About",
+    "en": {"exams": "Exams", "bank": "Question bank", "study": "Study plans", "bank_s": "Bank", "study_s": "Study", "guides": "Guides", "about": "About",
            "contact": "Contact", "privacy": "Privacy", "support": "Support", "source": "Source on GitHub",
            "free": '<b>Every question here is free and will stay free.</b> No ads, no sign-up. If the site helped you, '
                    '<a href="{up}support.html">a coffee keeps new questions coming</a> (optional).',
            "fine": "Unofficial study material. Not affiliated with or endorsed by AWS, Palantir, Microsoft, Google, "
                    "Databricks or HashiCorp. Exam names belong to their owners."},
-    "ko": {"exams": "시험", "bank": "문제은행", "study": "학습 계획", "guides": "가이드", "about": "소개",
+    "ko": {"exams": "시험", "bank": "문제은행", "study": "학습 계획", "bank_s": "문제은행", "study_s": "학습", "guides": "가이드", "about": "소개",
            "contact": "문의", "privacy": "개인정보", "support": "후원", "source": "GitHub 소스",
            "free": '<b>모든 문제는 앞으로도 무료입니다.</b> 광고도 가입도 없습니다. 도움이 되셨다면 '
                    '<a href="{up}support.html">커피 한 잔으로 응원</a>해 주세요(선택).',
@@ -94,7 +94,7 @@ def page(title, desc, path, body, depth, crumbs=(), lang="en", alternates=None, 
         alt += f'<link rel="alternate" hreflang="x-default" href="{BASE}{alternates.get("en", path)}">\n'
     img = f'<meta property="og:image" content="{esc(image)}">\n' if image else ""
     sect = path.split("/")[1] if path.startswith("ko/") else path.split("/")[0]
-    cur = lambda k: ' class="on" aria-current="page"' if sect == k else ""
+    cur = lambda k: ' aria-current="page"' if sect == k else ""
     guides = f'<a href="{up}{"ko/" if lang == "ko" else ""}guides/"{cur("guides")}>{t["guides"]}</a>'
     crumb = f'<p class="crumbs">{nav}</p>' if crumbs else ""
     head = f'<div class="pagehead">{crumb}{hero}</div>\n' if hero else crumb
@@ -115,21 +115,26 @@ def page(title, desc, path, body, depth, crumbs=(), lang="en", alternates=None, 
 {img}<link rel="apple-touch-icon" href="{up}assets/icon-180.png">
 <meta name="theme-color" content="#1E5AA8">
 <link rel="stylesheet" href="{up}assets/site.css">
+<link rel="stylesheet" href="{up}assets/chrome.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"></noscript>
 </head>
 <body>
-<header class="site"><div class="in">
-  <a class="brand" href="{up}exams/"><span class="mark" aria-hidden="true">cb</span>{SITE}</a>
-  <nav><a href="{up}exams/"{cur("exams")}>{t["exams"]}</a>{guides}<a href="{up}./">{t["bank"]}</a><a href="{up}study.html">{t["study"]}</a><a href="{up}about.html"{cur("about.html")}>{t["about"]}</a></nav>
+<header class="gh"><div class="gh-in">
+  <a class="gh-brand" href="{up}./"><span class="gh-mark" aria-hidden="true">cb</span><span class="gh-name">{SITE}</span></a>
+  <nav aria-label="Site"><a href="{up}exams/"{cur("exams")}>{t["exams"]}</a>{guides}<a href="{up}./"><span class="lg">{t["bank"]}</span><span class="sm">{t["bank_s"]}</span></a><a href="{up}study.html"><span class="lg">{t["study"]}</span><span class="sm">{t["study_s"]}</span></a><a href="{up}about.html"{cur("about.html")}>{t["about"]}</a></nav>
 </div></header>
 <main class="{cls}">
 {side}<div class="content">
 {head}{body}
 </div>
 </main>
-<footer class="site"><div class="in">
-  <p class="support">{t["free"].format(up=up)}</p>
-  <p class="links"><a href="{up}about.html">{t["about"]}</a><a href="{up}contact.html">{t["contact"]}</a><a href="{up}privacy.html">{t["privacy"]}</a><a href="{up}support.html">{t["support"]}</a><a href="https://github.com/hyunhp/cert-bank">{t["source"]}</a></p>
-  <p class="fine">{t["fine"]}</p>
+<footer class="gf"><div class="gf-in">
+  <p class="gf-support">{t["free"].format(up=up)}</p>
+  <p class="gf-links"><a href="{up}about.html">{t["about"]}</a><a href="{up}contact.html">{t["contact"]}</a><a href="{up}privacy.html">{t["privacy"]}</a><a href="{up}support.html">{t["support"]}</a><a href="https://github.com/hyunhp/cert-bank">{t["source"]}</a></p>
+  <p class="gf-fine">{t["fine"]}</p>
 </div></footer>
 </body>
 </html>
@@ -394,7 +399,7 @@ export a bookmark backup yourself. Clearing your browser's site data deletes it.
 <ul>
 <li><b>GitHub Pages</b> hosts the site. Like any web server it receives your IP address and browser details when a page
 loads; see the GitHub privacy statement.</li>
-<li><b>Google Fonts</b> serves the typefaces on the question bank, study and support pages, so your browser requests them
+<li><b>Google Fonts</b> serves the typefaces (IBM Plex) on every page, so your browser requests them
 from Google's servers.</li>
 <li>Images on guide pages are served from <code>hyunhp.github.io</code> (also GitHub Pages).</li>
 </ul>
