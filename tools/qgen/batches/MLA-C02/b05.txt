@@ -505,24 +505,29 @@ F=AssembleWith None: it does not add loan_id to predictions; Line assembly keeps
 T: Batch transform InputFilter, JoinSource and OutputFilter let you hide ID columns from the model and still write them next to each prediction.
 V: Amazon SageMaker AI
 
-@ MLA-C02 D3 T3.1 advanced use-case
-S: A quality-inspection company has 300 small PyTorch vision models, one per production line, and each needs a GPU to meet its 150 ms latency target. About 20 lines are busy at any time; the rest are called a few times per hour. All models are served by the same NVIDIA Triton container. The company wants to cut GPU hosting cost, and a slower first request for a rarely used line is acceptable. Which hosting design fits BEST?
-A: Deploy each of the 300 models as its own inference component with one GPU reserved per copy, all on one endpoint that scales each component independently
-B: Host all 300 models on SageMaker Serverless Inference endpoints, which provide GPU capacity on demand and charge only for the processing time of each request
-C: Host the models on a GPU-backed multi-model endpoint with the Triton container, which loads models into GPU memory on demand and caches the busy ones
-D: Combine all models into one multi-container endpoint with direct invocation, giving each of the 300 containers its own GPU on the shared instances
-K: C
-G: ## Multi-model endpoints on GPUs
-A **multi-model endpoint (MME)** serves many models that use the same framework from one shared serving container and fleet. SageMaker AI loads a model from S3 into the container's memory when it is first invoked and caches it; on GPU instances that memory is GPU memory. Rarely used models may see a cold start; frequently used ones stay loaded. AWS shows GPU MMEs with the NVIDIA Triton Inference Server container.
-## Why not one reservation per model
-Inference components reserve accelerators per copy. Reserving a GPU for each of 300 models means paying for 300 GPUs even though only about 20 are busy.
-W: GPU-backed multi-model endpoint with Triton: many models share a few GPUs, busy models stay in memory, and rare models load on demand, which matches the accepted cold start.
-X: A=Inference component per model with a GPU each: per-copy GPU reservations keep about 300 GPUs allocated, which is the cost the company wants to cut.
-B=Serverless Inference: serverless endpoints do not support GPUs, so they cannot meet the GPU requirement.
-D=Multi-container endpoint with 300 containers: a multi-container endpoint is meant for a small set of different containers, not hundreds of models, and per-container GPUs would again reserve hardware for idle models.
-T: Many same-framework GPU models with skewed traffic and tolerated cold starts → a GPU-backed multi-model endpoint (for example with Triton).
-V: Amazon SageMaker AI
-
+@ MLA-C02 D3 T3.1 advanced troubleshooting
+S: A quality-inspection company serves 300 small PyTorch vision models, one per production line, from a GPU-backed SageMaker AI multi-model endpoint with the NVIDIA Triton container. Its two GPU instances together hold about 30 loaded models in GPU memory. After 40 new lines went live, about 40 lines are busy at once instead of 20, and p99 latency for busy lines rose far above the 150 ms target. CloudWatch shows ModelCacheHit falling from 0.99 to 0.60 and ModelUnloadingTime and ModelLoadingWaitTime rising, while InvocationsPerInstance is flat. What should the ML engineer do?
+A: Add GPU instances to the endpoint, for example with auto scaling, so that their combined GPU memory keeps the roughly 40 busy models loaded
+B: Raise the Triton instance count for each model, so that every busy model runs several parallel copies on the GPU and serves its requests faster
+C: Move the model artifacts to an S3 Express One Zone directory bucket, so that each reload of an evicted model downloads much faster from Amazon S3
+D: Configure Triton to preload all 300 models into GPU memory when the endpoint starts, so that no invocation ever has to wait for a model to load
+K: A
+G: ## How a multi-model endpoint caches models
+A **multi-model endpoint (MME)** serves many same-framework models from one shared container and fleet. On an invocation SageMaker AI routes the request to an instance, downloads the model from S3 to the instance's storage volume if needed, and loads it into the container's memory (GPU memory on GPU instances). Requests for a model keep going to an instance where it is already loaded.
+When memory is full and another model must be loaded, SageMaker AI **unloads unused models** from that instance's container. Unloaded models stay on the storage volume, so a reload does not download from S3 again, but it still has to be loaded into memory before the request runs.
+## Reading the evidence
+- `ModelCacheHit` is the share of requests for models that were already loaded; 0.60 means 40 percent of requests wait for a load.
+- Rising `ModelUnloadingTime` and `ModelLoadingWaitTime` show models being evicted and reloaded (cache thrashing).
+- Flat `InvocationsPerInstance` shows that request volume is not the problem.
+- Example: about 40 busy models but room for about 30 means busy models keep evicting each other.
+## The fix
+Give the endpoint more total memory for loaded models: more instances (auto scaling on the MME) or instances with more GPU memory, so the busy working set fits.
+W: More GPU instances: the busy working set of about 40 models no longer fits in memory for about 30, so adding memory stops the evictions and restores cache hits.
+X: B=More Triton instances per model: each extra copy uses more GPU memory, so even fewer models fit and evictions get worse, while request volume is not the bottleneck.
+C=S3 Express One Zone for artifacts: evicted models stay on the instance's storage volume and are reloaded from there, so faster S3 downloads do not remove the load wait.
+D=Preload all 300 models: about 300 models cannot fit in memory sized for about 30, so the container would still have to unload and reload models.
+T: On a multi-model endpoint, a falling ModelCacheHit with rising unload and load-wait times means the busy models no longer fit in memory; add instances or memory.
+V: Amazon SageMaker AI, Amazon CloudWatch
 @ MLA-C02 D3 T3.2 advanced troubleshooting
 S: A chat assistant streams tokens from an open-weight LLM on a SageMaker AI real-time endpoint. Requests last 20 to 40 seconds each. Auto scaling uses target tracking on InvocationsPerInstance, yet during sudden bursts requests queue inside the containers for over a minute before new instances are added, and responses start late. The team wants scaling to react much sooner to concurrent load. What should the ML engineer change?
 A: Switch to the high-resolution ConcurrentRequestsPerModel metric, emitted every 10 seconds and counting streamed requests until the last token
