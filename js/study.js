@@ -335,7 +335,7 @@ async function show(exam, day) {
   $("#main").innerHTML = `<div class="loading">Loading ${exam}…</div>`;
   let guide;
   try { [guide] = await Promise.all([loadGuide(exam), glossaryReady]); }
-  catch (e) { $("#main").innerHTML = `<div class="empty">Could not load the ${exam} study guide.</div>`; return; }
+  catch (e) { $("#main").innerHTML = `<div class="empty">Could not load the ${exam} study plan.</div>`; return; }
   if (current.exam !== exam) return;   // another exam was picked while loading
   const total = guide.days.length;
   current.day = Math.min(Math.max(day || StudyStore.get(exam).lastDay || 1, 1), total);
@@ -343,7 +343,7 @@ async function show(exam, day) {
   StudyStore.setLastExam(exam);
   const want = `#exam=${exam}&day=${current.day}`;
   if (location.hash !== want) history.replaceState(null, "", want);
-  document.title = `${exam} Day ${current.day} · Study Guide`;
+  document.title = `${exam} Day ${current.day} · Study Plan`;
   renderDay();
 }
 
@@ -469,5 +469,5 @@ window.addEventListener("hashchange", () => {
   const exam = exams.some(([c]) => c === last) ? last : exams.length ? exams[0][0] : null;
   if (exam) return show(exam, null);
   renderExamRow();
-  $("#main").innerHTML = `<div class="empty">No study guides found.</div>`;
+  $("#main").innerHTML = `<div class="empty">No study plans found.</div>`;
 })();
