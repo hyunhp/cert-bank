@@ -690,3 +690,230 @@ C=Migrate first: RAG evaluations accept your own inference response data from ex
 D=Count guardrail interventions: content filters block categories such as hate or violence; they do not measure stereotyping or refusals, and a block count is not a graded evaluation.
 T: Bedrock RAG evaluations can score external RAG systems with your own responses, including Stereotyping, Harmfulness, and Refusal metrics.
 V: Amazon Bedrock
+
+@ AIP-C01 D4 T4.1 advanced troubleshooting
+S: A contract-review app sends each request with a 9,000-token system prompt (review rules plus a clause library) followed by the user's question. Explicit prompt caching is enabled with a cache checkpoint after the system prompt, yet CloudWatch shows CacheReadInputTokenCount at zero and CacheWriteInputTokenCount on every request. The system prompt template begins with "Current time: {timestamp}; Reviewer: {user_name}". Users send a request every few seconds. What should the team change?
+A: Move the timestamp and reviewer name after the cache checkpoint, so the 9,000-token prefix is identical across requests and can be read from cache
+B: Add a second cache checkpoint right after the timestamp line, so that the stable rules that follow it are cached separately from the dynamic header
+C: Switch from explicit to implicit prompt caching, which matches prompts by meaning and therefore tolerates small differences such as timestamps
+D: Raise the cache TTL from 5 minutes to 1 hour, so that the cached system prompt survives between requests and is read instead of written again
+K: A
+G: ## Prompt caching caches a prefix
+A cache checkpoint marks the end of a **prefix**: everything from the start of the prompt up to the checkpoint. A later request gets a cache hit only if its prefix is **identical**. AWS states that changes to a prompt prefix in later requests cause cache misses, and recommends keeping static content at the beginning and dynamic content at the end.
+## Reading the metrics
+- `CacheWriteInputTokenCount` on every request: each request writes a new cache entry.
+- `CacheReadInputTokenCount` at zero: no request ever matches an earlier entry.
+That pattern means the prefix changes every time. A timestamp and a user name at the very top make every 9,000-token prefix unique.
+## Other facts
+- The cache TTL (often 5 minutes) **resets with every hit**; requests every few seconds would keep a matching entry alive.
+- Implicit caching also depends on an exact prefix match and is best effort.
+W: Dynamic values after the checkpoint: with the timestamp and name moved below the checkpoint, the first 9,000 tokens are the same for every request, so later requests read them from cache.
+X: B=Checkpoint after the timestamp: a checkpoint caches everything before it, so both prefixes still start with a changing timestamp, and the first one is also far below any minimum token count.
+C=Implicit caching: implicit caching reuses exact prompt prefixes too, not prompts with similar meaning, so the changing header still prevents hits.
+D=Longer TTL: entries are not expiring, since requests arrive every few seconds; they never match because the prefix differs each time.
+T: Put static content before the cache checkpoint and anything per-request, such as timestamps and user names, after it.
+V: Amazon Bedrock, Amazon CloudWatch
+
+@ AIP-C01 D4 T4.1 advanced use-case
+S: A team serves a fine-tuned open-weight model through Amazon Bedrock Custom Model Import and must explain a monthly bill that is higher than expected. The model details show 2 custom model units per model copy. Traffic is light overnight but heavy during business hours, and finance wants a formula-based estimate that matches how the model is billed. Which data should the estimate combine?
+A: The ModelCopy CloudWatch metric over time, the CMUs per copy, the per-CMU rate for the model's CMU version, and 5-minute billing windows
+B: The InputTokenCount and OutputTokenCount metrics multiplied by the on-demand per-token price of the base model that the import started from
+C: The number of InvokeModel calls from CloudTrail multiplied by a per-request price and by the 2 CMUs that each request reserves while it runs
+D: The hours since the import job completed multiplied by 2 CMUs and the hourly rate, because one model copy stays loaded for the model's whole life
+K: A
+G: ## How Custom Model Import is billed
+An imported model is not billed per token. A **Custom Model Unit (CMU)** is an abstract measure of the hardware needed to host **one copy** of the model; Bedrock sets the CMUs per copy at import time.
+Bedrock scales the number of **running model copies** with demand, and AWS gives this estimate:
+`Total cost = running copies x CMUs per copy x price per CMU per minute x billed time`
+- **Running copies** come from the CloudWatch metric `ModelCopy`.
+- **CMUs per copy** come from the model details or `customModelUnitsPerModelCopy` in GetImportedModel.
+- **Price per CMU** depends on the CMU version (`customModelUnitsVersion`) listed on the pricing page.
+- Billing is charged in **5-minute windows** from the first successful inference call.
+## Why the bill grows by day
+During business hours more copies run; each extra copy multiplies the CMUs billed in every 5-minute window.
+W: Copy-based formula: the bill is copies x CMUs x rate over 5-minute windows, so the ModelCopy history explains exactly why heavy business hours cost more.
+X: B=Token metrics: imported models are billed for running copies, not per token, so a token-based estimate will not match the bill.
+C=Per-request pricing: there is no per-request charge, and CMUs belong to a model copy, not to an individual request.
+D=One copy forever: Bedrock adds and removes copies with demand and removes inactive models, so a fixed single copy since import misstates both peaks and idle periods.
+T: Custom Model Import cost follows running model copies x CMUs per copy, billed in 5-minute windows; read copies from the ModelCopy metric.
+V: Amazon Bedrock, Amazon CloudWatch
+
+@ AIP-C01 D4 T4.2 advanced troubleshooting
+S: A coding assistant runs on Amazon Bedrock AgentCore Runtime. At the start of each session, the agent clones a 1.5 GB repository and builds a code index, which takes about 40 seconds. The web client generates a new runtimeSessionId for every message, so users wait about 40 seconds on every turn of a conversation. Each user must keep an isolated environment. Which change reduces per-turn latency the most?
+A: Reuse one runtimeSessionId per user conversation, so later invocations reach the same microVM and its already built repository index
+B: Store the repository index in AgentCore Memory as long-term records, so that each new session retrieves it instead of rebuilding it
+C: Raise the runtime's maxLifetime to 8 hours, so that the microVM created for each message stays alive and its index can be reused later
+D: Share one runtimeSessionId across all users of a team, so that a single warm microVM serves every request from the team's members
+K: A
+G: ## Sessions in AgentCore Runtime
+A session is created by the **first invocation with a new runtimeSessionId**. AgentCore Runtime provisions a dedicated **microVM** for it, with isolated compute, memory, and filesystem, and preserves context between invocations **to the same session ID**.
+- A session becomes **idle** between requests and stays available; it stops after inactivity (default 15 minutes, configurable with `idleRuntimeSessionTimeout`) or at its maximum lifetime (default 8 hours, `maxLifetime`).
+- A new session ID always means a new microVM, so per-session setup work runs again.
+- AgentCore does not enforce a mapping between users and sessions; the client backend keeps it.
+## Applying it
+A new ID for every message pays the 40-second clone and index on every turn. One ID per user conversation pays it once.
+W: One session ID per conversation: follow-up messages land in the microVM that already holds the cloned repository and index, so only the first turn pays the 40 seconds, and each user stays isolated.
+X: B=Index in Memory: AgentCore Memory stores conversational events and extracted insights, not a working 1.5 GB code index, and the session would still have to rebuild its filesystem.
+C=Longer maxLifetime: a microVM belongs to one session ID; with a new ID per message, each message still gets a fresh microVM no matter how long the old one lives.
+D=Shared team session: it removes the per-user isolation the stem requires, since everyone would share one filesystem and process.
+T: Reuse a runtimeSessionId for the whole conversation so AgentCore Runtime keeps the same warm microVM; a new ID always starts from scratch.
+V: Amazon Bedrock AgentCore
+
+@ AIP-C01 D4 T4.2 advanced tradeoff
+S: A ticket-booking app uses an Amazon Bedrock model on demand for its customer chat. During on-sale events, which happen at unpredictable times a few times a month, chat response times rise sharply although the account stays below its quotas. The business will pay more per request for faster responses during those events but will not reserve or commit to capacity. Which change fits these requirements?
+A: Set service_tier to priority on the chat requests, so they are prioritized over Standard and Flex requests without needing a reservation
+B: Reserve tokens-per-minute capacity in the Reserved tier for the chat, with any overflow beyond the reservation served by the Standard tier
+C: Purchase a one-month Provisioned Throughput commitment for the model and switch the chat to the provisioned model ARN for every request
+D: Set service_tier to flex on the background jobs only, so that the chat requests automatically receive the capacity those jobs release
+K: A
+G: ## Matching a tier to a latency goal
+Amazon Bedrock has four service tiers, chosen per request with `service_tier`:
+- **Priority**: the fastest response times, for a **price premium** over Standard; **no prior reservation**; prioritized over Standard and Flex requests. AWS describes it for customer-facing, mission-critical workflows that do not warrant a 24x7 reservation.
+- **Reserved**: reserved tokens-per-minute capacity for 1 or 3 months, arranged with the AWS account team.
+- **Standard**: the default.
+- **Flex**: a discount for work that tolerates longer processing.
+Provisioned Throughput is a separate purchase billed hourly until deleted, with optional 1- or 6-month commitments.
+## The constraint that decides
+"Pay more per request, no reservation, unpredictable timing" describes Priority exactly.
+W: Priority tier: the business pays a premium only on requests that use it, gets faster responses during spikes, and commits to nothing.
+X: B=Reserved tier: it requires reserving capacity for a 1- or 3-month term, which the business refuses.
+C=Provisioned Throughput: it is dedicated capacity billed hourly, here with a one-month commitment, for events that happen a few times a month.
+D=Flex for background jobs: lowering other jobs' tier does not give the chat requests any priority; they stay Standard requests.
+T: Use the Priority tier for faster, unreserved, per-request prioritization of customer-facing traffic.
+V: Amazon Bedrock
+
+@ AIP-C01 D4 T4.3 advanced troubleshooting
+S: An SRE team builds an Amazon Bedrock dashboard that computes error rate as (InvocationClientErrors + InvocationServerErrors) / Invocations, filtered by the ModelId dimension. During an incident, users saw many failed chat requests, yet the dashboard's error rate stayed below 1 percent. The application uses the SDK's default retry settings. Which TWO facts explain why the dashboard understated the problem? (Select TWO)
+A: Throttled requests are counted only in InvocationThrottles and are excluded from Invocations, InvocationClientErrors, and InvocationServerErrors
+B: Requests that fail before Amazon Bedrock determines the target model are published without the ModelId dimension, so the filter misses them
+C: InvocationClientErrors excludes requests rejected for exceeding a service quota, so these quota failures do not appear in any Bedrock metric at all
+D: Errors are published to the AWS/Bedrock namespace only after all SDK retries finish, so retried failures are never counted in any metric
+E: EstimatedTPMQuotaUsage drives throttling decisions, so failures caused by quota limits appear only in that metric and not in error metrics
+K: A,B
+G: ## What each runtime metric counts
+- **Invocations**: requests Bedrock accepted for processing, including ones that later fail; **not** throttled requests or requests rejected during input validation.
+- **InvocationClientErrors** and **InvocationServerErrors**: invocations ending in client or server errors; both are also in Invocations. Client errors include requests rejected for exceeding a service quota.
+- **InvocationThrottles**: throttled requests, which are in **none** of the three metrics above. The count you see depends on SDK retry settings, because each retried attempt can be throttled again.
+- **EstimatedTPMQuotaUsage**: an approximation; throttling is decided by the upfront reservation of input tokens plus `max_tokens`.
+## The dimension trap
+Metrics are published with and without `ModelId`. If a request fails **before** Bedrock knows the target model, it is published **without** ModelId, so filtering by ModelId can undercount errors. AWS recommends querying without a dimension to count all requests.
+W: A=Throttles excluded: a throttling incident barely moves the formula, because throttled requests are in neither the numerator nor the denominator.
+B=ModelId filter: early failures carry no ModelId, so the filtered series silently drops them.
+X: C=Quota rejections uncounted: AWS documents that InvocationClientErrors includes requests rejected for exceeding a service quota.
+D=Published after retries: each throttled attempt can appear in InvocationThrottles, which is why the throttle count depends on SDK retry settings.
+E=EstimatedTPMQuotaUsage decides throttling: it is an approximation that does not reflect the reservation-based accounting used for throttling.
+T: Track InvocationThrottles separately and query Bedrock metrics without the ModelId dimension when you need every failure.
+V: Amazon Bedrock, Amazon CloudWatch
+
+@ AIP-C01 D5 T5.1 advanced use-case
+S: A team changed the chunking strategy of its Bedrock knowledge base and wants to know whether retrieval now captures all the facts needed to answer, independent of any generator model. It plans a retrieve-only RAG evaluation job with the Context relevance and Context coverage metrics, using 500 questions taken from production logs. What must the prompt dataset contain for the job to report Context coverage?
+A: A ground truth answer for each question, because coverage measures how much of the ground truth information the retrieved texts contain
+B: The model responses previously served for each question, because coverage compares the retrieved text with what users were actually told
+C: A list of expected document IDs for each question, because coverage is calculated as recall over the expected source documents only
+D: Nothing beyond the questions, because the evaluator model infers which facts are required from the question text and scores the passages
+K: A
+G: ## Two retrieve-only metrics, two different inputs
+A retrieve-only RAG evaluation scores only what the knowledge base returns, so it isolates retrieval changes such as chunking from the generator.
+- **Context relevance** (`Builtin.ContextRelevance`): how relevant the retrieved texts are to the question. The question alone is enough to judge this.
+- **Context coverage** (`Builtin.ContextCoverage`): how much of the information in the **ground truth** the retrieved texts cover. AWS states you **must supply a ground truth** in the prompt dataset to use it.
+## Example record
+`{"conversationTurns": [{"prompt": {"content": [{"text": "What is the refund window for annual plans?"}]}, "referenceResponses": [{"content": [{"text": "30 days from purchase, pro-rated after that."}]}]}]}`
+The evaluator checks whether the retrieved chunks contain both facts, 30 days and pro-rating.
+W: Ground truth answers: coverage is defined against the ground truth, so each question needs a reference answer that lists the facts retrieval should surface.
+X: B=Previously served responses: past answers may be wrong or incomplete, and coverage is defined against ground truth, not against what users were told.
+C=Expected document IDs: the metric judges information in the retrieved text against the ground truth answer; it is not a document-ID recall calculation.
+D=Questions only: questions are enough for context relevance, but coverage cannot be computed without knowing which facts a complete answer requires.
+T: Context coverage needs a ground truth answer per question; context relevance needs only the question.
+V: Amazon Bedrock, Amazon Bedrock Knowledge Bases
+
+@ AIP-C01 D5 T5.1 advanced use-case
+S: Legal reviewers report that a contract assistant built on Amazon Bedrock Knowledge Bases cites passages that do not support the sentences they are attached to, and that some claims carry no citation at all. The team will run a retrieve-and-generate RAG evaluation job to compare two prompt templates on exactly these two problems before release. Which TWO built-in metrics should the job include? (Select TWO)
+A: Citation precision, which measures how many of the cited passages were correctly cited for the statements in each response
+B: Citation coverage, which measures how well each response is supported by its cited passages and whether any citations are missing
+C: Context relevance, which measures how relevant the retrieved passages are to each question before any answer has been generated at all
+D: Faithfulness, which measures how well each response avoids hallucinating information that is absent from the retrieved passages
+E: Completeness, which measures how well each response answers and resolves every aspect of the question that the user has asked
+K: A,B
+G: ## Citation metrics in RAG evaluations
+Retrieve-and-generate RAG evaluation jobs include two metrics aimed at citations:
+- **Citation precision** (`Builtin.CitationPrecision`): how many of the cited passages were correctly cited. A citation that does not support its sentence lowers it.
+- **Citation coverage** (`Builtin.CitationCoverage`): how well the response is supported by the cited passages and whether citations are **missing**.
+## Neighbors that measure something else
+- **Faithfulness** checks whether the response invents information absent from the retrieved texts, regardless of which passage is cited.
+- **Context relevance** is a retrieve-only metric about the retrieved passages.
+- **Completeness** checks whether all parts of the question are answered.
+## Mapping the complaint
+"Cites passages that do not support the sentence" is a precision problem; "claims with no citation" is a coverage problem.
+W: A=Citation precision: it directly scores wrong citations, the first complaint.
+B=Citation coverage: it directly scores claims that lack supporting citations, the second complaint.
+X: C=Context relevance: it judges retrieval before generation and belongs to retrieve-only jobs, so it cannot see how citations are attached.
+D=Faithfulness: an answer can be faithful to the retrieved set as a whole while citing the wrong passage for a sentence, so it misses both complaints.
+E=Completeness: it measures whether every part of the question is answered, not whether citations are correct or present.
+T: Use citation precision for wrong citations and citation coverage for missing citations in Bedrock RAG evaluations.
+V: Amazon Bedrock, Amazon Bedrock Knowledge Bases
+
+@ AIP-C01 D5 T5.2 advanced troubleshooting
+S: A Python service on Amazon EKS calls Amazon Bedrock through an interface VPC endpoint with a pooled boto3 client. After quiet periods of 10 minutes or more, the first request often hangs for over a minute and then fails with a connection reset, while the requests that follow are fast. Bedrock metrics show no throttling or server errors at those times. Which TWO changes fix the problem? (Select TWO)
+A: Create the boto3 client with Config(tcp_keepalive=True), so that the SDK enables TCP keep-alive on its pooled endpoint connections
+B: Set the pods' net.ipv4.tcp_keepalive_time to a value well below 350 seconds, such as 45 seconds, through the pod security context
+C: Raise the client read_timeout to 300 seconds, so that the first request after a quiet period waits long enough for the endpoint to reconnect
+D: Raise the SDK max retry attempts to 10 with exponential backoff, so a reset connection is retried until the pooled connection recovers
+E: Replace the interface VPC endpoint with a NAT gateway path, because NAT gateways keep idle TCP connections open without any time limit
+K: A,B
+G: ## The 350-second idle timeout
+NAT gateways, interface VPC endpoints, and Network Load Balancers drop a TCP connection that has been **idle for 350 seconds**, without telling either side. A pooled SDK connection that sat idle for 10 minutes is already dead; the client finds out only when it reuses it and waits for the operating system's TCP retries to time out. That produces the "first call after a quiet period hangs, then resets" pattern, with nothing wrong on the Bedrock side.
+## Both settings are needed
+- The SDK must **enable keep-alive** on its sockets (boto3 `Config(tcp_keepalive=True)`; the default is False).
+- The OS must **send keep-alives often enough**: Linux defaults `net.ipv4.tcp_keepalive_time` to 7,200 seconds (2 hours), far above 350, so SDK keep-alive alone has no effect. AWS suggests a value such as 45 seconds; on EKS apply it in the pod security context, an init container, or the node AMI.
+W: A=SDK keep-alive: turns on TCP keep-alive probes for the pooled connections, which is half of the documented fix.
+B=Kernel keep-alive interval: makes those probes fire well before the 350-second idle limit, so the endpoint never drops the connection.
+X: C=Longer read timeout: the connection is already silently dropped; waiting longer only stretches the hang before the reset.
+D=More retries: retries recover after the failure, but the first request still hangs through the TCP timeout, so the symptom remains.
+E=NAT gateway instead: NAT gateways have the same fixed 350-second idle timeout, and the change would also drop private connectivity.
+T: Behind NAT gateways, interface endpoints, or NLBs, enable SDK keep-alive and lower the kernel keep-alive time below 350 seconds.
+V: Amazon Bedrock, Amazon EKS, AWS PrivateLink
+
+@ AIP-C01 D5 T5.2 advanced troubleshooting
+S: During a product launch, a chatbot receives HTTP 529 overloaded_error responses from an Amazon Bedrock model in us-east-1, sometimes with a Retry-After header. Service Quotas shows the account at 40 percent of its tokens-per-minute quota, and the InvocationThrottles metric is near zero. The team's runbook says to request a quota increase for any capacity error. What should the team do instead?
+A: Retry with exponential backoff and jitter that honors Retry-After, and route through a cross-Region inference profile if the model supports one
+B: Request a tokens-per-minute quota increase immediately, because 529 responses indicate that the account exceeded its on-demand quota
+C: Retry every failed request immediately from all clients at the same moment, so that requests are served as soon as model capacity becomes available
+D: Lower max_tokens on every request, because 529 errors occur when the reserved quota of input plus max_tokens exceeds the per-minute limit
+K: A
+G: ## Three different capacity errors
+- **429 ThrottlingException**: the request exceeded **your account's quota**. Remedies include backoff, quota increases, Reserved tier, or Provisioned Throughput.
+- **503 ServiceUnavailable**: the service is temporarily unable to handle the request; not related to account quotas.
+- **529 overloaded_error**: the **model** is temporarily unable to serve because of high demand or insufficient serving capacity. AWS calls it a transient capacity error, different from a 429.
+## Documented handling for 529
+- Retry with **exponential backoff and random jitter**; if the response has `Retry-After`, wait that long.
+- Avoid immediate or synchronized retries from many clients, which increase load and delay recovery.
+- If the model supports it, use **cross-Region inference** to spread requests over several Regions.
+- If it persists, contact AWS Support with the request ID, model ID, Region, and timestamp.
+W: Backoff with jitter plus cross-Region inference: this is the documented response to a transient serving-capacity error, and routing across Regions adds capacity that a quota change cannot.
+X: B=Quota increase: the account is at 40 percent of its quota and is not being throttled; 529 is about model serving capacity, so a higher quota changes nothing.
+C=Immediate synchronized retries: AWS warns that they increase load and delay recovery.
+D=Lower max_tokens: the max_tokens reservation affects quota throttling (429), not the model-side overload that produces 529.
+T: A 529 overloaded_error is a transient model-capacity problem: back off with jitter and use cross-Region inference, not a quota increase.
+V: Amazon Bedrock
+
+@ AIP-C01 D5 T5.2 advanced troubleshooting
+S: A team deployed an agent on Amazon Bedrock AgentCore Runtime together with an AgentCore Memory resource. The AgentCore observability dashboard in CloudWatch shows no traces or spans for the agent, although the runtime's built-in metrics appear and the agent is instrumented with the ADOT SDK. The team also needs spans for the memory operations to debug slow recalls. What should the team do?
+A: Turn on CloudWatch Transaction Search once for the account, and get memory spans by enabling tracing when the memory is created
+B: Add an AWS X-Ray daemon sidecar to the runtime, because AgentCore Runtime sends spans only through a locally running X-Ray daemon process
+C: Enable CloudTrail data events for the runtime and memory resources, because AgentCore observability builds its traces from CloudTrail
+D: Create a CloudWatch Logs subscription filter on the runtime log group, so that span data in the logs is copied into the observability dashboard
+K: A
+G: ## What AgentCore observability needs
+AgentCore emits metrics, spans, and logs in OpenTelemetry-compatible form and stores them in Amazon CloudWatch.
+- **Built-in metrics** for runtime, memory, gateway, built-in tools, and identity appear by default.
+- To view **spans and traces**, you must complete a **one-time setup**: turn on **CloudWatch Transaction Search**.
+- To view **service-provided spans for memory resources**, you must also **enable tracing when you create the memory**.
+- The ADOT SDK adds custom spans, metrics, and logs from your agent code, including for agents hosted outside AgentCore Runtime.
+## Reading the symptom
+Metrics without traces is the signature of the missing Transaction Search setup; the instrumentation is already in place.
+W: Transaction Search plus memory tracing: the one-time Transaction Search setup makes runtime spans and traces visible, and memory spans need tracing enabled at memory creation.
+X: B=X-Ray daemon sidecar: AgentCore Runtime is a managed runtime that emits OTEL telemetry to CloudWatch; the documented gap is Transaction Search, not a missing daemon.
+C=CloudTrail data events: CloudTrail is for auditing API activity; traces in AgentCore observability come from emitted spans, not CloudTrail records.
+D=Subscription filter: a log subscription streams log events to another destination; it does not turn logs into the dashboard's traces.
+T: AgentCore traces need CloudWatch Transaction Search turned on once, and memory spans need tracing enabled when the memory is created.
+V: Amazon Bedrock AgentCore, Amazon CloudWatch
