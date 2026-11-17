@@ -94,7 +94,7 @@ SPECS = read_json(DATA / "exam-specs.json")
 TASKS = read_json(ROOT / "tools/qgen/tasks.json")
 EXAMS = [k for k in SPECS if not k.startswith("_")]
 TARGET_MULT = 5                                   # pool target = 5 full exams
-DIFFS = {"applied", "advanced"}
+DIFFS = {"applied", "advanced", "expert"}
 SCEN = {"use-case", "troubleshooting", "definition", "comparison", "tradeoff"}
 NUM_WORD = {2: "TWO", 3: "THREE"}
 
