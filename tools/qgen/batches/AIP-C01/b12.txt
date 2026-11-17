@@ -301,3 +301,208 @@ E=336 hours: two weeks is above the 168-hour maximum, so the request is invalid.
 F=Provisioned Throughput ARN: batch inference isn't supported for provisioned models.
 T: For batch tool calling use the InvokeModel invocation type, size timeoutDurationInHours within 24-168, and react to job state changes with EventBridge.
 V: Amazon Bedrock, Amazon EventBridge, AWS Lambda
+
+@ AIP-C01 D3 T3.1 expert troubleshooting
+S: A bank's guardrail uses a Standard-tier contextual grounding check with grounding and relevance thresholds of 0.7 and an EU guardrail profile. A CI pipeline updates its denied topics weekly by calling UpdateGuardrail with the full policy JSON from a repository template, which includes the EU guardrail profile but predates the tier setting, and then creates a new version. Since version 9, answers that restate policy in other words are blocked; guardrail traces show grounding scores of 0.35-0.55 for answers that scored 0.85-0.92 on version 8. No thresholds, prompts, or retrieval settings changed. The bank must keep strict thresholds and EU-only processing. What is the root cause, and what is the fix?
+A: The update omitted tierConfig, so grounding reset to Classic; add tierConfig STANDARD to the template, create a new version, and retest thresholds
+B: Version 9 lost its guardrail profile, so grounding ran in only one Region; re-add the EU profile and keep the template's policy as it is today
+C: The weekly denied-topic changes lowered grounding scores, because all policies share one score; move the denied topics into a separate guardrail
+D: Grounding scores drift as the model is updated, so lower both thresholds to 0.35 so that version 9 accepts the same answers as version 8 did
+K: A
+G: ## UpdateGuardrail replaces everything
+`UpdateGuardrail` is not a patch: it **replaces the entire policy configuration**. AWS warns specifically: if a guardrail uses the **STANDARD** tier for contextual grounding checks, include `tierConfig` in the update request; **omitting it resets the tier to CLASSIC**.
+## Why the scores fell
+- **Classic tier** evaluates strict grounding: anything not stated in the source, including reasonable inferences and conversational phrasing, lowers the grounding score.
+- **Standard tier** handles reasoning and conversational content and gives more consistent scores for differently worded answers with the same meaning.
+- The two tiers score differently, so AWS advises testing thresholds whenever the tier changes.
+## Reading the evidence
+Same thresholds, prompts, and retrieval, but paraphrased answers drop from about 0.9 to under 0.55 exactly at the version created by the template-driven update: that is a tier change, not drift.
+W: Omitted tierConfig: the template silently moved grounding to Classic, which penalizes paraphrase; adding tierConfig STANDARD to the template, publishing a new version, and retesting restores the behavior with strict thresholds and the EU profile.
+X: B=Lost guardrail profile: the template includes the EU profile, and a missing profile would not explain lower scores for paraphrased answers specifically.
+C=Shared score: contextual grounding produces its own grounding and relevance scores; denied topics do not change them.
+D=Lower thresholds to 0.35: it hides the symptom, lets genuinely ungrounded answers through, and breaks the strict-threshold requirement.
+T: UpdateGuardrail replaces the whole configuration; omit tierConfig and a Standard-tier grounding check silently becomes Classic.
+V: Amazon Bedrock Guardrails
+
+@ AIP-C01 D3 T3.2 expert troubleshooting
+S: A health insurer's RAG service calls InvokeModel with a guardrail that has content filters, a prompt attack filter, a sensitive information filter blocking US Social Security numbers, and a contextual grounding check. The request text holds an untagged system preamble in which a developer pasted a member's SSN for testing, the retrieved passages in a groundingSource tag, the question in a query tag, and the user's free-text note in a guardContent tag, all with a matching tagSuffix. A red-team passage with "ignore prior rules" inside the retrieved text was not flagged, and the SSN in the preamble did not trigger the input filter. The trace shows an input assessment of the user's note only. Which TWO facts explain the trace? (Select TWO)
+A: Content inside groundingSource and query tags is skipped by every policy except contextual grounding, unless it is nested inside a guardContent tag
+B: When guardContent tags are present, the other policies evaluate only tagged content, so untagged text such as the preamble is skipped
+C: The contextual grounding check runs before the other policies and suppresses their findings for every passage that it scores as grounded
+D: The prompt attack filter detects injection only on Standard tier, so Classic tier treats instructions inside retrieved passages as normal text
+E: Sensitive information filters evaluate model responses only, so an SSN in any part of the input prompt can never be detected on the input side
+K: A,B
+G: ## Tags decide what each policy sees
+With InvokeModel, you mark parts of the prompt with tags that share a `tagSuffix`:
+- `amazon-bedrock-guardrails-guardContent_xyz`: content the guardrail policies should evaluate as user input.
+- `amazon-bedrock-guardrails-groundingSource_xyz` and `amazon-bedrock-guardrails-query_xyz`: the reference text and question for the contextual grounding check.
+## Documented evaluation rules
+- Content inside groundingSource and query tags is **excluded from every policy except contextual grounding** (word, topic, content filters, sensitive information).
+- **With guardContent tags present**, the other policies evaluate **only** content inside them; untagged text and grounding/query content are skipped.
+- To have grounding source content checked by the other policies too, **nest** the groundingSource tag inside a guardContent tag.
+- Contextual grounding is evaluated on the model output only, so it never produces an input finding.
+## Reading the trace
+Only the user's note was in guardContent, so only the note was assessed; the passages (grounding tag) and the preamble (untagged) were skipped by design.
+W: A=Grounding tags are excluded: the planted instruction sat inside groundingSource, which content, prompt attack, and PII policies skip unless the tag is nested in guardContent.
+B=Only tagged content is evaluated: because a guardContent tag was used, the untagged preamble with the SSN was outside every input policy.
+X: C=Grounding suppresses other findings: no such interaction exists; grounding is checked on the output, and the other policies simply never saw the text.
+D=Prompt injection only on Standard: Classic tier detects jailbreaks and prompt injection; only prompt leakage is Standard-only.
+E=PII only on responses: sensitive information filters evaluate input prompts and model responses; the preamble was skipped because it was untagged.
+T: With guardrail tags, only guardContent is evaluated by input policies; nest groundingSource inside guardContent to screen retrieved text too.
+V: Amazon Bedrock Guardrails
+
+@ AIP-C01 D3 T3.3 expert troubleshooting
+S: A company enforces guardrail G1 version 3 (content filters and denied topics) through an Amazon Bedrock policy attached at the AWS Organizations root. The security team later attached a second Bedrock policy to the Payments OU that specifies guardrail G2 version 1 (PII masking), expecting payments accounts to get both. Tests in a payments account show PII masked but hateful prompts no longer blocked, and DescribeEffectivePolicy for that account lists only G2. Payments teams must not be able to weaken the controls, and every invocation must get both safeguards without application changes. What should the team do?
+A: Publish one guardrail version that combines G1's and G2's safeguards, reference it in the Payments OU policy, and verify with DescribeEffectivePolicy
+B: Keep both policies and also attach G1 directly to each payments account, because account attachments are enforced in addition to OU attachments
+C: Have each payments account enforce G1 with PutEnforcedGuardrailConfiguration in every Region, so the account and organization guardrails combine
+D: Replace the Bedrock policies with SCPs that deny InvokeModel unless bedrock:GuardrailIdentifier names G1 or G2, so both are always applied
+K: A
+G: ## Bedrock policies are declarative, not additive
+Amazon Bedrock policies are a **declarative** policy type in AWS Organizations, and they do not behave like SCPs. When policies are attached at the root, an OU, and an account, Organizations applies **inheritance rules** and resolves them into **one effective policy** per account. If parent and child set the same value, such as the guardrail identifier, the inheritance operators decide which value survives; it is **not a union**.
+AWS advises verifying the result with **DescribeEffectivePolicy** for the target account.
+## What is combined
+Guardrails enforced at **different levels** (organization, account, and the guardrail passed in a request) are combined as a union, with the most restrictive control winning. Account-level enforcement, however, is configured inside each account.
+## Applying it
+The OU attachment replaced G1 with G2 in the effective policy. One guardrail version containing both sets of safeguards, referenced by the OU policy, delivers both protections centrally.
+W: Combined guardrail version: the effective policy can hold only one guardrail value, so putting both safeguard sets in one immutable version gives payments accounts both, enforced from the organization and verifiable.
+X: B=Attach G1 to each account: an account attachment is also resolved by inheritance into one effective value; it does not add a second guardrail.
+C=Account-level enforcement: it would combine with the organization guardrail, but it is configured by each payments account, so those teams could change or remove it, which the requirement forbids.
+D=SCPs on GuardrailIdentifier: they only deny calls that do not pass the guardrail, which requires application changes, and naming G1 or G2 lets a call carry just one of them.
+T: Bedrock policies resolve to a single effective guardrail per account; combine safeguards into one guardrail version and confirm with DescribeEffectivePolicy.
+V: Amazon Bedrock Guardrails, AWS Organizations
+
+@ AIP-C01 D3 T3.1 expert troubleshooting
+S: An HR assistant validates answers with an Automated Reasoning policy built from the company leave policy and attached to a guardrail; the application regenerates any answer with an INVALID finding. Auditors found an answer stating "With 3 years of tenure you get 22 days of leave, and unused days carry over without limit." Its finding was VALID, although the source document caps carry-over at 5 days. The policy's variables cover tenure, leave days, and employment type, and its test suite passes. Separately, about 4 percent of answers return TRANSLATION_AMBIGUOUS. What is the most likely cause of the VALID finding, and the right fix?
+A: The carry-over claim maps to no policy variable, so it was never checked; add a carry-over variable and rule, then add tests with such answers
+B: The confidence threshold is too low, so weak translations pass as VALID; raise it until the carry-over answer is reported as INVALID instead
+C: Automated Reasoning validates only the first sentence of each answer; split every response into sentences and validate each sentence alone
+D: The TRANSLATION_AMBIGUOUS rate shows the policy is too complex; remove the employment type variable so the carry-over rule is evaluated again
+K: A
+G: ## What a VALID finding guarantees
+Automated Reasoning checks translate an answer into the **variables** of your policy and prove whether the resulting statements follow from the policy's rules.
+AWS spells out the scope limit: **a VALID result guarantees validity only for the parts of the input captured through policy variables.** Statements outside the variables are not validated. Their example: "I can submit my homework late because I have a fake doctor's note" can be VALID if no variable captures whether the note is fake.
+## Other findings
+- `TRANSLATION_AMBIGUOUS`: the natural language could not be translated into logic unambiguously; better variable descriptions help.
+- `TOO_COMPLEX`: too many variables or complex rules.
+## Applying it
+Tenure (3 years) and leave days (22) map to variables and were proven; "carry over without limit" maps to nothing, so it was never checked, and the overall finding was still VALID.
+W: Missing variable: adding a carry-over variable with the 5-day rule brings the claim into scope, so such answers become INVALID and get regenerated; new tests keep it covered.
+X: B=Raise the confidence threshold: the threshold concerns how confident the translation must be; it cannot validate a statement that maps to no variable at all.
+C=Only the first sentence: the checks evaluate the content they receive; the issue is coverage by variables, not sentence position.
+D=Remove a variable: fewer variables shrink the policy's scope further; it does not create the missing carry-over rule.
+T: Automated Reasoning proves only what your policy variables capture; uncovered claims pass as VALID, so model every rule that answers can mention.
+V: Amazon Bedrock Guardrails
+
+@ AIP-C01 D4 T4.2 expert troubleshooting
+S: A document Q&A service on Amazon Bedrock has an account quota of 1,000,000 tokens per minute for its model, whose output tokens burn down quota at 5x. Requests average 4,000 input tokens with max_tokens set to 8,000, while CloudWatch shows outputs averaging 500 tokens with a p99 of 900. At 120 requests per minute the service is throttled, although EstimatedTPMQuotaUsage shows about 780,000. A quota increase was declined for now, answers must not be cut short, and the model cannot change. Which change lets the service run 120 requests per minute?
+A: Set max_tokens to 1,000, so each request reserves about 5,000 tokens when it starts, or 600,000 per minute at 120 requests
+B: Cache a 3,000-token shared prefix of each prompt, so that every request reserves about 9,000 tokens at the start of the request
+C: Set max_tokens to 400, so the reservation drops to about 4,400 tokens per request and roughly 220 requests per minute fit in the quota
+D: Switch to ConverseStream, so tokens are deducted while they are streamed instead of being reserved when each request is first accepted
+K: A
+G: ## How tokens are counted against the quota
+Amazon Bedrock deducts quota in stages:
+- **At the start** of a request: total input tokens + `max_tokens`. The request is throttled if this exceeds the quota.
+- **During** processing, the deduction is adjusted to the actual output.
+- **At the end**: `InputTokenCount + CacheWriteInputTokenCount + OutputTokenCount x burndown rate`; unused tokens are returned. Cache reads do not count.
+`EstimatedTPMQuotaUsage` is an approximation that does **not** reflect the upfront reservation that drives throttling.
+## Working the numbers
+- Today: start = 4,000 + 8,000 = **12,000**; 120 x 12,000 = 1,440,000 > 1,000,000, so requests throttle. End = 4,000 + 500 x 5 = 6,500; 120 x 6,500 = 780,000, which is what the metric shows.
+- max_tokens 1,000: start = 5,000; 120 x 5,000 = 600,000; end stays about 780,000. Both fit, and 1,000 is above the p99 of 900.
+- Caching 3,000 tokens: start = 1,000 + 8,000 = 9,000; 120 x 9,000 = 1,080,000, still over.
+- max_tokens 400: below the average output of 500, so most answers would be cut off.
+W: max_tokens 1,000: the start-of-request reservation falls to 5,000 tokens, so 120 requests per minute fit in the quota, and the setting stays above the p99 output so answers are not truncated.
+X: B=Prompt caching: cache reads leave the quota, but the oversized max_tokens still dominates; 1,080,000 per minute is still above the quota.
+C=max_tokens 400: it frees quota, but it is below the typical answer length, so most responses would stop at max_tokens.
+D=ConverseStream: streaming changes delivery, not quota accounting; the input plus max_tokens reservation still applies at the start.
+T: Throttling is driven by input plus max_tokens reserved up front; set max_tokens just above real output lengths to raise throughput within the quota.
+V: Amazon Bedrock, Amazon CloudWatch
+
+@ AIP-C01 D4 T4.3 expert troubleshooting
+S: An insurer's audit team must be able to search the full prompt and response of every Amazon Bedrock call for seven years. Model invocation logging delivers to a CloudWatch Logs log group in us-east-1, and Logs Insights queries work for chat traffic. For a claims-summary feature that sends 150-400 KB claim files with each Converse request, partly as document blocks, the log events show metadata and token counts but no input body. Security requires the logs to stay in the same account and Region, and the auditors also need the documents. What should the team change?
+A: Add an S3 delivery location for large data in the same account and Region, so bodies over 100 KB and Converse document data are stored as objects
+B: Raise the maximum event size of the CloudWatch Logs log group to 1 MB, so that the 150-400 KB claim prompts fit into single log events
+C: Send the claims logs to an S3 bucket in the security account's eu-west-1 archive, which already has the seven-year Object Lock retention
+D: Enable CloudTrail data events for the Bedrock runtime, because CloudTrail records the full request body whenever the body exceeds 100 KB
+K: A
+G: ## What each logging destination can hold
+Model invocation logging records the request, response, and metadata of calls to the bedrock-runtime endpoint. Supported destinations are CloudWatch Logs and Amazon S3, **in the same account and Region** only.
+- **CloudWatch Logs**: each log event holds the metadata and input and output JSON bodies **up to 100 KB**. If an S3 location for **large data** is configured, bodies larger than 100 KB and binary data go to that bucket under a data prefix instead.
+- **Amazon S3**: gzipped JSON batches; bodies over 100 KB are written as separate objects.
+- With the **Converse API**, image and document data is logged **in Amazon S3** when S3 delivery is enabled.
+## Reading the symptom
+Chat prompts are small and appear in full. Claim prompts of 150-400 KB exceed 100 KB, and their documents are binary content blocks, so without a large-data S3 location the bodies cannot be delivered to CloudWatch Logs.
+W: Large-data S3 location: bodies over 100 KB and Converse documents land in a same-account, same-Region bucket next to the existing log group, where they can be retained for seven years and queried with Athena.
+X: B=Raise the event size: the 100 KB body limit belongs to invocation logging's CloudWatch delivery, so a log group setting cannot lift it.
+C=Bucket in another account and Region: invocation logging supports only destinations in the same account and Region, and the security rule forbids it too.
+D=CloudTrail data events: CloudTrail records who called which API and when, not prompt or response bodies.
+T: Invocation logs keep bodies up to 100 KB in CloudWatch Logs; configure a same-Region S3 large-data location for larger bodies and Converse documents.
+V: Amazon Bedrock, Amazon CloudWatch, Amazon S3
+
+@ AIP-C01 D4 T4.1 expert use-case
+S: A bank moves its fraud-explanation assistant to the Amazon Bedrock Reserved tier. At peak it sends 500 requests per minute; each request has 1,500 uncached input tokens, reads 6,000 tokens from the prompt cache, writes 300 new tokens to the cache, and generates 250 output tokens. The model's output tokens count 1:1 toward quotas. The bank wants the smallest reservation that covers the peak without overflowing to the Standard tier, and it accepts the documented minimum sizes. Which reservation should the team request?
+A: 900,000 input tokens per minute and 125,000 output tokens per minute, counting uncached input plus cache writes as input tokens
+B: 3,900,000 input tokens per minute and 125,000 output tokens per minute, counting cache reads together with all other input tokens
+C: 750,000 input tokens per minute and 125,000 output tokens per minute, counting only the uncached input tokens of each request
+D: 1,025,000 tokens per minute in a single shared pool, because a reservation covers input and output tokens together in one limit
+K: A
+G: ## How the Reserved tier is sized
+The Reserved tier reserves prioritized capacity in **tokens per minute**, with **separate input and output TPM** values, for 1 or 3 months. Minimums are **100,000 input TPM** and **10,000 output TPM**. Traffic above the reservation overflows to the Standard tier.
+AWS adds a sizing rule: the TPM consumption of a reservation includes **InputTokenCount and CacheWriteInputTokens**; with prompt caching you should sum both metrics. Cache reads are not counted toward quota.
+## Working the numbers
+- Input: 500 x (1,500 + 300) = **900,000 TPM** (cache reads of 6,000 excluded).
+- Output: 500 x 250 = **125,000 TPM**.
+- Both are above the minimums.
+- Counting cache reads gives 3,900,000 (oversized); ignoring writes gives 750,000 (overflow at peak).
+W: 900,000 input and 125,000 output: it counts exactly what the tier consumes, uncached input plus cache writes, with output sized separately, so peak traffic fits without overflow.
+X: B=Count cache reads: cache reads do not consume quota, so this reserves more than four times the needed input capacity.
+C=Ignore cache writes: 150,000 cache-write tokens per minute would exceed the reservation at peak and overflow to Standard.
+D=One shared pool: the Reserved tier lets you allocate input and output tokens per minute separately rather than as one combined limit.
+T: Size Reserved tier input as uncached input plus cache writes, exclude cache reads, and size output separately.
+V: Amazon Bedrock, Amazon CloudWatch
+
+@ AIP-C01 D5 T5.2 expert troubleshooting
+S: A procurement team adds structured outputs to an existing Converse integration. Its JSON schema requires "line_items" with "minItems": 3, because valid invoices have at least three lines, and "invoice_id" with "pattern": "^(?!TEST-).*$" to exclude test invoices. Every request now fails immediately with a 400 error before any tokens are generated, while the same prompt without the schema works. The team must keep schema-guaranteed JSON and must still reject invoices with fewer than three lines or a TEST- prefix. Which change fixes the integration?
+A: Use minItems 1 and a pattern without lookaround in the schema, and enforce the three-line minimum and TEST- exclusion in application code
+B: Keep the schema and raise max_tokens, because a 400 error appears when the output is too short to satisfy the minItems constraint
+C: Move the same schema into a tool definition with strict set to true, because strict tool schemas accept every JSON Schema keyword
+D: Keep the schema and resend after about 90 seconds, because the first requests fail with a 400 error while a new schema is compiling
+K: A
+G: ## Structured outputs accept a subset of JSON Schema
+Before compiling a schema, Amazon Bedrock validates it against the supported subset of **JSON Schema Draft 2020-12**. If the schema uses unsupported features, Bedrock returns a **400 error immediately**.
+Relevant documented limits:
+- Array `minItems`: **only 0 and 1** are supported.
+- `pattern`: regular expressions are supported **excluding lookaround and backreferences**. `^(?!TEST-)` is a negative lookahead.
+Compilation of a new valid schema can take up to about 90 seconds, but it is slow, not a 400 error.
+## Design pattern
+Keep the schema to the supported subset, so the model output is always valid JSON with the right shape, and enforce business rules the schema language cannot express (at least three items, a forbidden prefix) in application code after parsing.
+W: Supported subset plus code checks: the schema becomes valid, so JSON stays guaranteed, and the three-line and TEST- rules are still enforced deterministically after parsing.
+X: B=Raise max_tokens: the request fails during schema validation before generation starts, so output length is irrelevant.
+C=Strict tool definition: strict tool use relies on the same schema validation, so the unsupported keywords fail there too.
+D=Wait for compilation: compilation makes the first call slow; an immediate 400 means the schema was rejected and will be rejected again.
+T: Structured outputs support only a JSON Schema subset (minItems 0 or 1, no lookaround); enforce richer rules in code.
+V: Amazon Bedrock
+
+@ AIP-C01 D5 T5.1 expert troubleshooting
+S: A bank evaluates its Bedrock knowledge base assistant with two RAG evaluation jobs on 400 questions that have ground truth answers. The retrieve-and-generate job reports Faithfulness 0.95, Citation precision 0.92, Correctness 0.61, and Completeness 0.57. The retrieve-only job reports Context relevance 0.89 and Context coverage 0.44. Most failing questions ask about two or three separate products, and retrieval uses numberOfResults 3 with semantic search. The team has time for one round of changes before release and must not lower Faithfulness. Which change addresses the main cause?
+A: Improve retrieval coverage by enabling query decomposition and raising numberOfResults, then rerun both jobs to confirm higher Context coverage
+B: Rewrite the generation prompt to demand complete answers covering every product, so that Completeness rises while the passages stay the same
+C: Switch the response generator to a larger model, so that it can infer the missing product details from its own knowledge when passages lack them
+D: Add a reranker model to reorder the three retrieved passages by relevance, so that the most useful passage is placed first in the final prompt
+K: A
+G: ## Reading RAG metrics as a chain
+A RAG answer can fail at **retrieval** (the right facts never reach the model) or at **generation** (the model misuses good context). Pairing retrieve-only and retrieve-and-generate metrics locates the failure:
+- **Context relevance** high (0.89): what is retrieved is on topic.
+- **Context coverage** low (0.44): retrieved text covers less than half of the facts in the ground truth.
+- **Faithfulness** high (0.95) and **Citation precision** high (0.92): the generator sticks to and cites the retrieved text.
+- **Correctness** and **Completeness** low: answers miss facts.
+Together: the model is faithfully answering from **incomplete context**. The cause is retrieval coverage.
+## Why multi-product questions suffer
+Three results for a question about three products leaves about one passage per product at best. Query decomposition splits the question into sub-queries (one per product), and a higher numberOfResults leaves room for each.
+W: Retrieval coverage first: decomposition and more results bring each product's facts into context; the faithful generator then answers more completely, and Context coverage confirms the fix.
+X: B=Demand completeness in the prompt: the facts are not in the passages, so the model can only add them by inventing them, which lowers Faithfulness.
+C=Larger generator model: answering from the model's own knowledge is exactly unfaithful generation, and bank product details may be wrong.
+D=Reranker on three passages: reordering the same three passages cannot add the missing products' facts.
+T: High relevance and faithfulness with low coverage means retrieval misses facts; fix retrieval, not the generator.
+V: Amazon Bedrock, Amazon Bedrock Knowledge Bases
