@@ -138,26 +138,26 @@ C=Stale on file changes: staleness is detected against state, not against the co
 T: Applying a saved plan executes exactly the planned actions from its own configuration snapshot, regardless of later file edits.
 
 @ TF-TA004 D3 T3.2 expert troubleshooting
-S: A pipeline's `backend "s3"` block is being moved to a new bucket: the team changes `bucket` from `acme-tf-old` to `acme-tf-state` and keeps `key` and `region` unchanged. The state at the old location must be copied to the new one, the old object must stay in place for a possible rollback, and the job runs with `-input=false` because nobody can answer prompts in CI. The first run of `terraform init -input=false` stops with an error saying the backend configuration has changed and that a migration or reconfiguration option is required. Which command lets the job continue as required?
-A: `terraform init -upgrade -input=false`, which upgrades the backend to the new bucket and carries the state along with the provider plugins
-B: `terraform init -migrate-state -force-copy -input=false`, which copies the state to the new bucket and answers the migration prompts with yes
-C: `terraform init -migrate-state -input=false`, which copies the state silently because `-input=false` answers every migration prompt with yes
-D: `terraform init -reconfigure -input=false`, which switches to the new bucket and copies the state there without asking any migration question
-K: B
-G: ## Changing backend settings
-When the `backend` block changes in an initialized directory, `terraform init` must be told what to do with the existing state:
-- `-migrate-state` copies the existing state to the new backend. Depending on what changed, Terraform may ask interactive questions to confirm the migration.
-- `-force-copy` suppresses those prompts and answers yes. It also enables `-migrate-state` automatically.
-- `-reconfigure` uses the new settings and disregards the old configuration, so no state is migrated.
+S: A CI system mounts the repository read-only at `/src/infra`, so `terraform init` failed when it tried to create the `.terraform` directory. The team exported `TF_DATA_DIR=/tmp/tfdata` in the init step only, and init now succeeds: the S3 backend is configured, the providers are installed, and the committed lock file already matches. The next step runs `terraform plan` in a fresh shell, in the same container and the same working directory, and it fails saying that the backend must be initialized first. The repository must stay read-only, and the team does not want to run init a second time, to save minutes per job. What fixes the plan step?
+A: Export `TF_DATA_DIR=/tmp/tfdata` for the plan step as well, because the backend settings and installed providers live in that directory
+B: Run the plan as `terraform -chdir=/tmp/tfdata plan`, because Terraform must start in the directory that holds the initialized backend data
+C: Copy `/tmp/tfdata` into `/src/infra/.terraform` after init, because plan reads backend settings only from `.terraform` in the working directory
+D: Pass the same `-backend-config` options to `terraform plan`, because plan re-reads partial backend settings from the command line in a new shell
+K: A
+G: ## The per-working-directory data
+`terraform init` writes data that later commands need into a data directory: the current backend configuration, the installed providers and modules, and the selected workspace. By default that is `.terraform` inside the working directory.
 
-Migration copies the state; it does not delete the object in the old bucket, so it remains for rollback.
+`TF_DATA_DIR` moves this data elsewhere, which is useful when the working directory is not writable. Every command reads the same variable to find the data. If `plan` runs without it, Terraform looks in `/src/infra/.terraform`, finds no backend configuration, and asks for init.
 
-`-input=false` only disables prompts. It does not answer them, so a migration that needs confirmation cannot proceed without `-force-copy`.
-W: migrate-state with force-copy: the state is copied to `acme-tf-state`, the confirmation is answered automatically, and the old object is left untouched.
-X: A=-upgrade: it upgrades provider and module selections and has nothing to do with moving state between backends.
-C=-input=false answers yes: disabling input does not approve anything; the migration still needs the confirmation that `-force-copy` supplies.
-D=-reconfigure: it explicitly prevents migration, so the new bucket would start without the existing state.
-T: In non-interactive jobs, use `terraform init -migrate-state -force-copy` to copy state to a changed backend.
+## Fix
+Set `TF_DATA_DIR=/tmp/tfdata` for the whole job, or for every step. The configuration and the committed `.terraform.lock.hcl` are still read from `/src/infra`.
+
+`-chdir` changes the configuration directory, not the data directory, and `terraform plan` has no `-backend-config` option.
+W: Same TF_DATA_DIR everywhere: plan then finds the backend configuration and providers that init wrote to `/tmp/tfdata`, with no second init and no write to the repository.
+X: B=-chdir to the data directory: `-chdir` sets where the configuration is read from, and `/tmp/tfdata` holds no `.tf` files.
+C=Copy into .terraform: the repository is mounted read-only, so the copy is impossible, and it is unnecessary once the variable is set.
+D=-backend-config on plan: backend settings are supplied only to `terraform init`; plan has no such option.
+T: When `TF_DATA_DIR` is used, every Terraform command in the job must see the same value.
 
 @ TF-TA004 D3 T3.6 expert use-case
 S: A test environment is one root module that calls `module "env"` from a shared registry module the team cannot change. The module manages 40 resources, including `aws_s3_bucket.data`, whose contents another team now owns and will manage with its own configuration. The environment must be torn down this week, the bucket and its objects must survive, and the review board requires the teardown to be reviewed as a saved plan before anything is deleted. The board rejects any approach that deletes first and checks afterwards. Which THREE steps together meet these requirements? (Select THREE)
@@ -382,24 +382,27 @@ C=Credentials via -backend-config: values passed this way are saved in `.terrafo
 D=Variables in the backend: backend blocks cannot reference input variables, so `terraform init` rejects this.
 T: Supply backend locations with `-backend-config` and credentials only through environment variables or credential files.
 
-@ TF-TA004 D7 T7.1 expert troubleshooting
-S: An existing instance, `i-0abc123`, runs in `eu-west-1b`. An engineer writes an `import` block for it and a `resource "aws_instance" "legacy"` block copied from a template that sets `subnet_id = aws_subnet.a.id`, a subnet in `eu-west-1a`. `terraform plan` shows `aws_instance.legacy will be imported`, followed by `must be replaced` with `~ subnet_id = "subnet-0bbb" -> "subnet-0aaa" # forces replacement`, and the summary `Plan: 1 to import, 1 to add, 0 to change, 1 to destroy.` The instance hosts a licence server whose network interface must not change, and the import must be finished today. What should the engineer do?
-A: Apply with `-target=aws_instance.legacy` so only the import action runs, and fix the subnet in a later change that updates it in place
-B: Change `subnet_id` in the resource block to the instance's current subnet, re-run plan until it shows only the import, and then apply
-C: Apply the plan as it is, because during an import Terraform only records the instance and skips any replacement shown in the same plan
-D: Add `lifecycle { ignore_changes = all }`, apply, and then remove the rule again, so the import succeeds and later plans keep the instance
-K: B
-G: ## An import plan is a normal plan
-When a plan contains an `import` block, Terraform imports the object **and** compares it with the resource block in the same plan. Any difference becomes a planned action. If an argument that cannot be changed in place differs, such as the subnet of an instance, the plan proposes a replacement.
+@ TF-TA004 D7 T7.3 expert troubleshooting
+S: A shared CI template exports `TF_LOG=$DEBUG_TERRAFORM`, and `DEBUG_TERRAFORM` defaults to `false` so that normal runs stay quiet. Since the template was rolled out, every normal job's console shows thousands of detailed log lines on stderr, and a secrets scanner rejects the job logs as too large to scan. Jobs that set `DEBUG_TERRAFORM=TRACE` must still get full logs, which those jobs write to `tf.log` through `TF_LOG_PATH`. The template owners want the smallest change that keeps normal runs free of detailed logs. Which change does this?
+A: Default `DEBUG_TERRAFORM` to `off`, or leave `TF_LOG` unset unless debugging, because any other value of `TF_LOG` turns detailed logging on
+B: Default `DEBUG_TERRAFORM` to `0`, because Terraform reads a numeric zero in `TF_LOG` as disabled while the string `false` counts as a level
+C: Default `DEBUG_TERRAFORM` to `ERROR`, because ERROR is the setting at which Terraform stops writing any detailed log lines to stderr
+D: Keep `false` and also set `TF_IN_AUTOMATION=1`, because automation mode suppresses detailed logs in CI while keeping the normal plan output
+K: A
+G: ## How TF_LOG is read
+Terraform enables detailed logs when `TF_LOG` is set **to any value**. The levels are `TRACE`, `DEBUG`, `INFO`, `WARN` and `ERROR`, from most to least verbose, and `JSON` gives TRACE-level output in JSON. To disable logging, either unset the variable or set it to `off`.
 
-HashiCorp's import workflow: run `terraform plan`, and if it proposes unexpected changes, **update the configuration until it matches the real object**, then apply. Here that means setting `subnet_id` to the instance's real subnet (`subnet-0bbb`, the one in eu-west-1b). The next plan should read `Plan: 1 to import, 0 to add, 0 to change, 0 to destroy.`
+So a template default of `false` (or `0`, or `no`) does not mean "disabled". It is just another non-empty value, and the job prints detailed logs on stderr.
 
-Applying the plan as shown would import the instance and then destroy it and build a new one, with a new network interface.
-W: Match the configuration first: once the resource block describes the real subnet, the plan is a pure import, so the licence server keeps its interface.
-X: A=-target: targeting the instance still includes its planned replacement, and a subnet change cannot be made in place later.
-C=Import skips replacement: the plan is applied as shown, so the replacement would run right after the import.
-D=Temporary ignore_changes all: it hides the difference only while the rule exists; once removed, the next plan proposes the same replacement.
-T: Before applying an import, adjust the resource block until the plan shows only the import with no replacement or unexpected changes.
+`TF_LOG_PATH` chooses a file for the logs; it does not enable them on its own. `TF_IN_AUTOMATION` only adjusts Terraform's human-readable output so it does not suggest next commands; it is a cosmetic change.
+
+## Fix
+`TF_LOG=off`, or no `TF_LOG` at all, for normal runs; `TF_LOG=TRACE` with `TF_LOG_PATH=tf.log` for debug runs.
+W: off or unset: these are the documented ways to disable detailed logs, so normal jobs go quiet while debug jobs still set TRACE.
+X: B=Numeric zero: Terraform has no numeric off switch; only an unset variable or `off` disables logging, so `0` enables it like `false` does.
+C=ERROR level: ERROR is a real log level that still writes log lines; it is the least verbose level, not a way to turn logging off.
+D=TF_IN_AUTOMATION: it is a purely cosmetic change to the normal output and does not affect detailed logging.
+T: Any `TF_LOG` value other than `off` enables detailed logs; unset it or use `off` to disable them.
 
 @ TF-TA004 D7 T7.2 expert troubleshooting
 S: A root module calls `module "app"` with `for_each = toset(var.envs)`. The team renames the environment key `stg` to `staging` in `var.envs` and wants the 18 resources of that module instance kept rather than destroyed and recreated. An engineer first runs `terraform state mv module.app["stg"] module.app["staging"]` in bash, and Terraform rejects the address because the double quotes around the key never reached it. The team accepts either a one-off state command run by an approver or a change that is reviewed in the plan. Which TWO approaches keep the resources? (Select TWO)
@@ -457,24 +460,27 @@ D=Evaluated once: with `for_each`, `to` is evaluated for each element; the stagi
 T: In a `for_each` import block, every generated `to` address must match a module instance key and resource key that the configuration declares.
 
 @ TF-TA004 D8 T8.1 expert troubleshooting
-S: A monorepo holds the root module in `envs/prod/` and a certificate in `shared/certs/ca.pem`, and `envs/prod/main.tf` reads it with `file("${path.module}/../../shared/certs/ca.pem")`. Plans on a laptop with local state work. After the team adds a `cloud` block for the CLI-driven workspace `prod` and runs `terraform plan` from `envs/prod`, the remote plan fails because no file exists at that path. The workspace has no working directory set, the certificate must stay in `shared/`, and the team wants no copy of it inside `envs/prod`. The monorepo also holds other environments under `envs/`. Which change fixes the remote plan?
-A: Run `terraform -chdir=envs/prod plan` from the repository root, so the CLI uploads the current shell directory instead of the configuration
-B: Add a `.terraformignore` in `envs/prod` that includes `../../shared/certs`, so the CLI adds the parent folder's certificate to the upload
-C: Set `envs/prod` as the workspace's Terraform working directory, so the CLI uploads the whole repository and the path resolves
-D: Change the path to `file("${path.root}/../../shared/certs/ca.pem")`, because `path.root` always resolves against the repository root during remote runs
-K: C
-G: ## What a CLI-driven run uploads
-In the CLI-driven workflow, the CLI uploads the configuration directory to HCP Terraform, and the run executes there. Files outside that directory are not part of the run unless the upload includes them.
+S: An engineer adds a `cloud` block for the CLI-driven workspace `billing-dev`, whose execution mode is Remote. On the laptop, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `TF_VAR_owner=finops` are exported, and local plans worked before the change. Now `terraform plan` streams a remote run that fails because the AWS provider finds no valid credentials. Policy says runs must execute in HCP Terraform for audit and no long-lived AWS keys may be stored in HCP Terraform. The platform team has already created an AWS role that trusts this workspace through workload identity. Which change fixes the run?
+A: Add the workspace environment variables `TFC_AWS_PROVIDER_AUTH=true` and `TFC_AWS_RUN_ROLE_ARN` with the role's ARN, so each run gets temporary credentials
+B: Export the keys as `TF_VAR_AWS_ACCESS_KEY_ID` and `TF_VAR_AWS_SECRET_ACCESS_KEY`, so the CLI forwards them to the remote run like the other `TF_VAR_` values
+C: Switch the workspace to Local execution mode, so the plan runs on the laptop with the exported keys while HCP Terraform keeps only the state
+D: Store both keys as sensitive environment variables in the workspace, so they are hidden in the UI and injected into every remote run
+K: A
+G: ## Where remote runs get their environment
+In a CLI-driven remote run, the plan executes on HCP Terraform's infrastructure, not on the laptop. The run uses:
+- workspace variables and variable sets,
+- `*.auto.tfvars` files in the uploaded configuration,
+- local `TF_VAR_` variables, which become input variables for the run.
 
-- With **no working directory** set on the workspace, the upload is the directory you run Terraform in, here `envs/prod`. A path that climbs to `../../shared` points outside the archive and fails remotely, even though it works on the laptop.
-- With a **working directory** set (for a combined repository), you can run Terraform from that directory or the repository root, and in both cases Terraform uploads the **entire combined configuration directory**. The run then starts in `envs/prod` and `../../shared/certs/ca.pem` exists.
+Other shell variables, such as `AWS_ACCESS_KEY_ID`, are **not** sent. Required environment variables like provider credentials must be set in the workspace.
 
-`.terraformignore` only excludes files from the upload; it cannot add files from outside the directory.
-W: Working directory setting: with `envs/prod` set as the workspace's working directory, the whole repository is uploaded and the relative path to `shared/` exists in the remote run.
-X: A=-chdir: `-chdir` switches to `envs/prod` before anything else, so the same directory is uploaded and the certificate is still missing.
-B=.terraformignore to include: the file lists exclusions within the uploaded directory; it cannot reach parent folders.
-D=path.root: `path.root` is the root module directory, `envs/prod`, in remote runs as well, so the path still leaves the archive.
-T: For monorepos in CLI-driven runs, set the workspace's working directory so the CLI uploads the whole repository.
+## Dynamic provider credentials
+With dynamic credentials, HCP Terraform obtains short-lived AWS credentials for each run through workload identity. For AWS, set the workspace environment variables `TFC_AWS_PROVIDER_AUTH = true` and `TFC_AWS_RUN_ROLE_ARN = <role ARN>`. No long-lived key is stored anywhere.
+W: Dynamic credentials: the two workspace variables make every remote run assume the trusted role with temporary credentials, which satisfies both the remote-execution rule and the no-stored-keys rule.
+X: B=TF_VAR_ keys: `TF_VAR_` values become Terraform input variables, not provider environment variables, so the AWS provider still has no credentials.
+C=Local execution: the run would no longer execute in HCP Terraform, which the audit policy requires.
+D=Sensitive keys in the workspace: it would work technically, but it stores long-lived keys in HCP Terraform, which the policy forbids.
+T: Remote runs do not receive local shell credentials; use workspace-level dynamic provider credentials instead of stored keys.
 
 @ TF-TA004 D8 T8.3 expert troubleshooting
 S: Workspace `app-prod` has a run trigger with `net-prod` as its source workspace and reads network outputs through `terraform_remote_state`. Its main auto-apply setting is on, and VCS and API runs in `app-prod` apply without confirmation as intended. After a successful apply in `net-prod`, a run is queued in `app-prod`, plans successfully, and then waits for someone to confirm it, which delayed last night's release. The platform team wants run-trigger runs in `app-prod` to apply automatically as well, while VCS runs in `net-prod` must still need manual confirmation. Which change does this?
