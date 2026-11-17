@@ -36,13 +36,13 @@
 # src: https://docs.aws.amazon.com/glue/latest/dg/workflows_overview.html
 # src: https://docs.aws.amazon.com/glue/latest/dg/starting-workflow-eventbridge.html
 # src: https://docs.aws.amazon.com/glue/latest/dg/monitor-data-warehouse-schedule.html
-# src: https://docs.aws.amazon.com/scheduler/latest/UserGuide/schedule-types.html
+# src: https://docs.aws.amazon.com/scheduler/latest/UserGuide/managing-schedule-flexible-time-windows.html
 # src: https://docs.aws.amazon.com/scheduler/latest/UserGuide/what-is-scheduler.html
 # src: https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-create-rule-schedule.html
 # src: https://docs.aws.amazon.com/athena/latest/ug/troubleshooting-athena.html
 # src: https://docs.aws.amazon.com/athena/latest/ug/tables-location-format.html
 # src: https://docs.aws.amazon.com/glue/latest/dg/add-job.html
-# src: https://aws.amazon.com/glue/pricing/
+# src: https://docs.aws.amazon.com/glue/latest/dg/monitor-spark-shuffle-manager.html
 # src: https://docs.aws.amazon.com/glue/latest/dg/auto-scaling.html
 # src: https://docs.aws.amazon.com/glue/latest/dg/monitor-debug-capacity.html
 # src: https://docs.aws.amazon.com/glue/latest/dg/worker-types.html
@@ -204,7 +204,7 @@ A: Raise the buffer interval to 900 seconds and the buffer size to 128 MB, so ea
 B: Change the dynamic partitioning keys from customer_id to region and event date, so far fewer partitions each receive a larger share of the records
 C: Set the buffer interval to 0 seconds, so Firehose writes records to S3 at once and the nightly Glue job can begin reading the files earlier
 D: Schedule an extra AWS Glue job before the main job that merges each customer prefix into a few large Parquet files for the main job to read
-E: Lower the buffer size to 1 MB, so that Firehose flushes each partition sooner and spreads its writes more evenly across all customer prefixes
+E: Turn on GZIP compression for the S3 destination, so every delivered object holds fewer bytes and the nightly Glue job reads less data per run
 K: A,B
 G: ## Where small files come from in Firehose
 Firehose writes one object per buffer flush. A flush happens when the **buffer size** (1 to 128 MB for S3) or the **buffer interval** (0 to 900 seconds for S3) is reached, whichever comes first.
@@ -217,7 +217,7 @@ W: A=Longer buffers: a 900-second interval with the maximum size makes every flu
 B=Coarser partition keys: partitioning by region and date cuts the number of parallel buffers from thousands to a handful, so each object is much larger and still matches how analysts filter.
 X: C=Zero buffering: it is not supported with dynamic partitioning, and if it were, it would create even more, smaller objects.
 D=Compaction job: merging files would help the main job, but it is the separate compaction job the team refuses to run.
-E=1 MB buffer size: a smaller size triggers flushes sooner, which produces more and smaller objects, the opposite of the goal.
+E=GZIP compression: it shrinks the bytes per object, but Firehose still writes one object per partition per flush, so the job still opens millions of objects, now even smaller.
 T: Firehose small files: lengthen buffering hints toward 900 s / 128 MB and partition only by low-cardinality keys that queries filter on.
 V: Amazon Data Firehose, Amazon S3, AWS Glue
 
@@ -225,7 +225,7 @@ V: Amazon Data Firehose, Amazon S3, AWS Glue
 S: An Amazon Data Firehose stream invokes a Lambda transformation that enriches IoT readings before delivery to S3. Devices also send heartbeat records with no business value, and the function currently returns them with the result ProcessingFailed. That fills the processing-failed S3 prefix and fires the alarm that should signal real failures. Heartbeats must never reach the delivered data, real failures must stay visible, and the device firmware cannot change. How should the function handle heartbeat records?
 A: Return each heartbeat with its original recordId and the result Dropped, so Firehose counts it as processed successfully and delivers nothing for it
 B: Leave the heartbeat records out of the response, so the function returns fewer records than it received and Firehose discards the ones that are missing
-C: Return heartbeats with the result Ok and an empty data payload, then add an S3 lifecycle rule that deletes any zero-byte objects from the delivery prefix
+C: Return heartbeats with the result Ok and a heartbeat partition key, so dynamic partitioning delivers them to a separate S3 prefix that analysts never query
 D: Keep returning ProcessingFailed for heartbeats and change the alarm's metric math to subtract the expected heartbeat count from the failure count
 K: A
 G: ## The Firehose transformation contract
@@ -236,7 +236,7 @@ For every record it receives, the Lambda function must return one entry with:
 Firehose treats **Ok and Dropped as success**. Only `ProcessingFailed` records go to the error output and count as failures. `Dropped` is the built-in way to filter records out of a stream.
 W: Dropped result: it is designed for records your logic filters out on purpose; nothing is delivered and the record is not counted as a failure, so the alarm again reflects only real errors.
 X: B=Omit records from the response: the response must account for every recordId; missing or mismatched IDs are treated as transformation failures, recreating the noise.
-C=Ok with empty payload: heartbeats still count as delivered data and objects still have to be cleaned up afterwards, so heartbeats do reach the delivered data.
+C=Ok with a separate partition: routing heartbeats to their own prefix keeps them out of the analysts' queries, but they are still delivered to S3, which breaks the rule that they never reach the delivered data.
 D=Alarm metric math: real and heartbeat failures stay mixed in the processing-failed prefix, and any change in heartbeat volume would hide or fake real failures.
 T: In a Firehose Lambda transformation, filter unwanted records by returning result Dropped with the original recordId.
 V: Amazon Data Firehose, AWS Lambda
@@ -253,6 +253,7 @@ G: ## Storage options inside Lambda
 - **/tmp (ephemeral storage)**: 512 MB to 10,240 MB, but **private to one execution environment**. Each new environment starts empty, so a large file must be copied in again on every cold start.
 - **Layers and deployment packages**: read-only and limited to **250 MB unzipped** in total.
 - **Amazon EFS**: a shared, elastic NFS file system. All concurrent invocations see the same files, and a new version written by another job is visible at once.
+- **Amazon S3 Files**: Lambda can also mount an S3 bucket as a file system. A function uses either EFS or S3 Files, not both; this question's options build on EFS.
 ## What mounting EFS requires
 - An EFS file system with an **access point**, configured on the function with a local mount path under `/mnt`.
 - The function attached to the **VPC**, in subnets where the file system has **mount targets** (one per Availability Zone used), with security groups allowing NFS on TCP `2049`.
@@ -280,7 +281,7 @@ W: EFS through the EFS CSI driver: it is the only option that gives many pods sh
 X: B=gp3 EBS volume: it persists, but it is bound to one Availability Zone and one node, so pods cannot share it concurrently or follow it to another zone, and its size must be planned.
 C=emptyDir: the data is private to each pod and is deleted when the pod is removed, so it neither survives rescheduling nor is shared.
 D=Generic ephemeral volumes: each pod gets its own volume, and it is deleted with the pod, which fails both sharing and persistence.
-T: Shared, multi-AZ, persistent read-write storage for many EKS pods means Amazon EFS through the EFS CSI driver.
+T: Shared, multi-AZ, persistent read-write storage for many EKS pods calls for a shared file system such as Amazon EFS through the EFS CSI driver, not EBS or ephemeral volumes.
 V: Amazon EKS, Amazon EFS, Amazon EBS
 
 @ DEA-C01 D1 T1.3 advanced use-case
@@ -463,23 +464,24 @@ T: Filter Kinesis records with event source mapping filter criteria; skipped rec
 V: AWS Lambda, Amazon Kinesis Data Streams
 
 @ DEA-C01 D3 T3.1 advanced use-case
-S: A data engineer is retiring an EC2 instance whose crontab runs a 4-minute Python extract script at 06:00 New York time every weekday. After the move, the script must still run at 06:00 local time across daylight saving time changes, be retried automatically if its target is briefly unavailable, and need no servers. The Python code will move as-is into a Lambda function. Which scheduling approach has the LEAST operational overhead?
-A: An EventBridge Scheduler cron schedule in the America/New_York time zone with a retry policy, using the Lambda function as a templated target
-B: An EventBridge scheduled rule with a cron expression for 11:00 UTC on weekdays that invokes the Lambda function as the rule's single target
-C: An Amazon MWAA DAG scheduled at 06:00 New York time on weekdays that invokes the Lambda function through the Airflow Lambda operator
-D: An AWS Glue Python shell job with the same code and a scheduled Glue trigger set to the matching UTC time on weekdays to start each run
+S: A marketing analytics company has one EventBridge Scheduler cron schedule per customer, about 3,000 in total, all set to 01:00 UTC. Each schedule invokes a Lambda export function that pulls that customer's data from a partner API. The partner now throttles the account because every export starts in the same minute, but it accepts the load if starts are spread across an hour. Exports must start before 02:00, the per-customer schedules must stay, and new customers are added weekly. Which change needs the LEAST ongoing maintenance?
+A: Set each schedule's flexible time window to FLEXIBLE with a 60-minute maximum window, so Scheduler disperses the invocations between 01:00 and 02:00
+B: Give each schedule its own fixed start minute between 01:00 and 01:59 in rotation, and assign a free minute to every new customer when it is onboarded
+C: Replace the schedules with one 01:00 schedule that starts a Step Functions Distributed Map over the customer list with a MaxConcurrency limit on the exports
+D: Point every schedule at one SQS queue configured with the maximum DelaySeconds, and let the export function consume that queue instead of being invoked directly
 K: A
-G: ## Two schedulers in EventBridge
-- **EventBridge Scheduler** creates schedules (rate, cron or one-time) that are evaluated **in a time zone you choose**, and it handles daylight saving time for that zone. It supports templated targets such as Lambda, retry policies, dead-letter queues and flexible time windows.
-- **Scheduled rules** on an event bus (the older approach) always use **UTC**. A cron of 11:00 UTC is 06:00 in New York only in winter; in summer it fires at 07:00 local time.
-## Glue triggers
-Time-based schedules for Glue jobs and crawlers are also written in **UTC**.
-W: EventBridge Scheduler with a time zone: it fires at 06:00 New York time all year, retries failed deliveries, and needs nothing beyond the schedule and the function.
-X: B=Scheduled rule in UTC: rules have no time zone, so the job drifts by an hour when daylight saving time starts or ends.
-C=MWAA DAG: Airflow can schedule in a time zone, but running an Airflow environment for one script is far from the least operational overhead.
-D=Glue Python shell with a UTC trigger: Glue schedules are in UTC, so the run time shifts with daylight saving time, and the code would move to Glue instead of Lambda.
-T: Local-time schedules that must follow daylight saving time belong in EventBridge Scheduler, not UTC-only EventBridge rules or Glue triggers.
-V: Amazon EventBridge Scheduler, AWS Lambda
+G: ## Flexible time windows in EventBridge Scheduler
+A schedule normally invokes its target at the exact scheduled time. With a **flexible time window** (`Mode: FLEXIBLE` plus `MaximumWindowInMinutes`), Scheduler may invoke the target at any point within that window after the scheduled time. AWS describes this as a way to improve reliability **by dispersing target invocations**.
+- 3,000 schedules at 01:00 with a 60-minute window start somewhere between 01:00 and 02:00 instead of all in the same minute.
+- It is one setting per schedule (`--flexible-time-window '{"Mode":"FLEXIBLE","MaximumWindowInMinutes":60}'`), so a new customer's schedule simply gets the same value.
+## Why queue delays do not spread load
+An SQS **delay queue** holds every new message for the same `DelaySeconds` (0 to 900 seconds, at most 15 minutes). The whole burst is shifted by the same amount, so the exports would still start together.
+W: Flexible time window: Scheduler itself spreads each schedule's start across the 60-minute window, so starts finish before 02:00, the per-customer schedules stay, and new schedules need only the same setting.
+X: B=Fixed minute per customer: this spreads the load, but someone has to track and assign start minutes for every new customer each week, which is the ongoing maintenance the team wants to avoid.
+C=Single schedule with Distributed Map: concurrency limits would protect the partner, but it removes the per-customer schedules, which must stay.
+D=SQS delay queue: a queue-level delay postpones every message by the same amount (at most 15 minutes), so the exports still start in one burst.
+T: To stop many schedules from firing in the same minute, give EventBridge Scheduler schedules a flexible time window instead of hand-staggering start times.
+V: Amazon EventBridge Scheduler, AWS Lambda, Amazon SQS
 
 @ DEA-C01 D3 T3.1 advanced use-case
 S: Partner systems drop CSV files into an S3 bucket throughout the day, usually about 100 files in a burst and then nothing for hours. Today an EventBridge rule starts an AWS Glue workflow for every object, producing hundreds of short, overlapping runs. The team wants one workflow run per 100 files, or after 10 minutes if fewer arrive, no runs when no files arrive, and no custom code. What should the data engineer configure?
@@ -541,24 +543,26 @@ D=Longer timeout and result reuse: the errors come from changed files, not slow 
 T: Never overwrite files under a live Athena table; write new files or partitions and switch the table to them.
 V: Amazon Athena, AWS Glue, Amazon S3
 
-@ DEA-C01 D3 T3.3 advanced use-case
-S: A data team runs 40 AWS Glue 4.0 Spark jobs on G.1X workers each night to rebuild test and pre-production datasets. The jobs start at midnight and usually finish within an hour, the results are needed by 8 AM, and a delayed start is acceptable. Finance asks to reduce the cost of these jobs without rewriting them and without moving them off AWS Glue. What should the data engineer do?
-A: Set the jobs' execution class to FLEX, so they run on spare capacity at the lower Flex rate, accepting that start and finish times may vary
-B: Move the jobs to G.4X workers with fewer workers in total, so each executor has more memory and the nightly jobs finish well before 8 AM
-C: Convert the jobs to Amazon EMR on EC2 Spot Instances, rewriting their job parameters and Glue-specific transforms to run on EMR instead
-D: Switch the jobs to Glue Python shell jobs with 1 DPU each, so the nightly datasets are rebuilt without starting a Spark cluster at all
+@ DEA-C01 D3 T3.3 advanced troubleshooting
+S: A nightly AWS Glue 4.0 Spark job on 20 G.1X workers aggregates clickstream data by customer_id. Since a very large customer was onboarded, the job fails in a groupBy stage with No space left on device on a few executors, while executor memory use stays moderate. A handful of customer_id values hold most of the rows. The job's DPU-hour budget is fixed, and the team cannot change the job script this month. What should the data engineer do?
+A: Add the --write-shuffle-files-to-s3 job parameter, so the Glue Spark shuffle manager writes shuffle data to an S3 prefix instead of local executor disks
+B: Change the workers from G.1X to G.2X with the same worker count, so each executor gets about 78 GB of free local disk for its shuffle files
+C: Add a random salt to customer_id before the groupBy and aggregate in two steps, so the rows of the largest customers spread across many shuffle partitions
+D: Set the job's execution class to FLEX with the same workers, so the failed stage is retried on fresh capacity and the nightly run completes at a lower rate
 K: A
-G: ## Glue execution classes
-Spark jobs (Glue 3.0 or later, `G.1X` or `G.2X` workers) can run with one of two execution classes:
-- **STANDARD**: dedicated resources and fast startup, for time-sensitive work.
-- **FLEX**: for non-urgent work such as pre-production, testing and one-time loads. Start and completion times may vary, and Flex is billed at a lower rate per DPU-hour (the Glue pricing page shows $0.29 versus $0.44 in its example).
-Switching is a job setting (`ExecutionClass`), so the script stays the same.
-W: FLEX execution class: these are exactly the non-urgent pre-production jobs Flex is meant for, the 8-hour window absorbs variable start times, and only one job property changes.
-X: B=G.4X workers: larger workers cost more per worker-hour and the jobs are not memory-bound, so this is unlikely to cut cost.
-C=EMR on Spot: Spot can be cheap, but rewriting jobs for EMR is the rewrite and move off Glue that finance ruled out.
-D=Python shell jobs: they cannot run the existing Spark code, so every job would need to be rewritten.
-T: Non-urgent Glue Spark jobs with flexible deadlines: set ExecutionClass to FLEX for a lower price.
-V: AWS Glue
+G: ## Why a shuffle can fill the disk
+Wide operations such as `groupBy`, `join` and `repartition` **shuffle** data: Spark writes it to the executors' local disks and moves it across the network. When a few keys hold most of the rows, the executors that own those keys write far more shuffle data than the rest. Spark then fails with `No space left on device` or `MetadataFetchFailedException`.
+A `G.1X` worker has a 94 GB disk with about 44 GB free; a `G.2X` worker has about 78 GB free, but it is 2 DPUs instead of 1.
+## The Glue Spark shuffle manager
+Glue ETL jobs can store shuffle data in **Amazon S3** with the Cloud Shuffle Storage Plugin. It is switched on by adding the job parameter `--write-shuffle-files-to-s3` (a presence flag: even the value `false` turns it on), optionally with `--conf spark.shuffle.glue.s3ShuffleBucket=s3://bucket/prefix/`.
+- It removes the local disk limit, and AWS notes it can be used with skewed data.
+- It needs no script change. Shuffle may be marginally slower, and the shuffle files are not cleaned up, so put a short S3 lifecycle rule on the prefix.
+W: S3 shuffle: the skewed partitions no longer depend on one executor's local disk, the script is untouched, and the worker type and count, and so the DPU-hours, stay the same.
+X: B=G.2X workers: the larger disks would probably hold the shuffle, but each G.2X worker is 2 DPUs, so the same count doubles the DPU-hours the budget fixes.
+C=Salting the key: spreading the hot keys is a sound fix for skew, but it changes the job script, which the team cannot do this month.
+D=FLEX execution class: Flex lowers the price for non-urgent jobs, but a retry on the same G.1X workers has the same local disk and fails in the same stage.
+T: Glue jobs that fail with No space left on device during a shuffle can move shuffle data to S3 with --write-shuffle-files-to-s3, without code changes or bigger workers.
+V: AWS Glue, Amazon S3
 
 @ DEA-C01 D3 T3.3 advanced troubleshooting
 S: An AWS Glue 4.0 Spark job on 10 G.1X workers converts 2,000 gzipped JSON files to Parquet and takes 70 minutes, but it must finish within 30 minutes. Job metrics show the maximum needed executors staying near 120 for most of the run, while active executors stay flat at the allocated maximum. Driver and executor memory use stay below 40 percent. The team wants to fix this through configuration only. Which TWO actions help? (Select TWO)
