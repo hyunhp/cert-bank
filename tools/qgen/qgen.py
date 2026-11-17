@@ -200,8 +200,26 @@ def exam_task(q, exam, tmap):
     return tmap.get(q["id"], {}).get(exam) or (q.get("taskId") if SPECS[exam].get("tasksFrom") == primary else None)
 
 
+TIERS = ("basic", "standard", "exam", "expert")
+
+
+def tier_of(q):
+    """Difficulty tier from the question's shape, one rule for every reader (bank filter, mock 'exam-level' draw,
+    blog sets): expert = written at the expert level; exam = AWS-practice-set length (stem 55+ words and options
+    13+ words on average) or a (Select THREE); standard = stem 30+ words or options 10+ words; basic = the rest.
+    The author's `difficulty` label alone is not used for the lower tiers: old 'applied' and 'advanced' questions
+    turned out to be the same length (36 vs 39 words), see TODO 2026-11-17."""
+    if q.get("difficulty") == "expert":
+        return "expert"
+    sw = len(q["stem"].split())
+    ow = sum(len(c["text"].split()) for c in q["choices"]) / len(q["choices"])
+    if (sw >= 55 and ow >= 13) or len(q["correctKeys"]) >= 3:
+        return "exam"
+    return "standard" if sw >= 30 or ow >= 10 else "basic"
+
+
 def stamp_exam_fields():
-    """Write `examDomain` and `examTask` into every question of every exam file: the domain and task of THAT exam.
+    """Write `examDomain`, `examTask` and `tier` into every question of every exam file (domain and task of THAT exam).
     A question shared from another exam keeps that exam's `domainCode`/`taskId` (the site reads exam-domains.json and
     exam-shared-tasks.json for the other exams), so anything that reads a data file directly should use these two fields."""
     dmap, tmap = domain_map(), task_map()
@@ -211,9 +229,10 @@ def stamp_exam_fields():
             continue
         qs = read_json(path)
         for q in qs:
-            q.pop("examDomain", None); q.pop("examTask", None)
+            q.pop("examDomain", None); q.pop("examTask", None); q.pop("tier", None)
             q["examDomain"] = domain_of(q, code, dmap)
             q["examTask"] = exam_task(q, code, tmap)
+            q["tier"] = tier_of(q)
         write_json(path, qs)
     rebuild_site()
 
