@@ -1,0 +1,476 @@
+# VLT-VA003 b11 (expert tier, level expert): 20 questions over D1-D9
+# src: https://developer.hashicorp.com/vault/docs/auth/kubernetes
+# src: https://developer.hashicorp.com/vault/docs/concepts/identity
+# src: https://developer.hashicorp.com/vault/api-docs/auth/token
+# src: https://developer.hashicorp.com/vault/docs/auth/jwt
+# src: https://developer.hashicorp.com/vault/docs/auth/aws
+# src: https://developer.hashicorp.com/vault/docs/auth/github
+# src: https://developer.hashicorp.com/vault/docs/concepts/policies
+# src: https://developer.hashicorp.com/vault/docs/commands/token/capabilities
+# src: https://developer.hashicorp.com/vault/docs/concepts/tokens
+# src: https://developer.hashicorp.com/vault/api-docs/auth/approle
+# src: https://developer.hashicorp.com/vault/docs/commands/token/create
+# src: https://developer.hashicorp.com/vault/docs/concepts/lease
+# src: https://developer.hashicorp.com/vault/api-docs/secret/databases
+# src: https://developer.hashicorp.com/vault/docs/commands/lease/renew
+# src: https://developer.hashicorp.com/vault/docs/concepts/response-wrapping
+# src: https://developer.hashicorp.com/vault/api-docs/secret/kv/kv-v2
+# src: https://developer.hashicorp.com/vault/docs/commands/kv/metadata
+# src: https://developer.hashicorp.com/vault/docs/secrets/transit
+# src: https://developer.hashicorp.com/vault/api-docs/secret/transit
+# src: https://developer.hashicorp.com/vault/docs/commands/operator/unseal
+# src: https://developer.hashicorp.com/vault/docs/commands/status
+# src: https://developer.hashicorp.com/vault/docs/concepts/seal
+# src: https://developer.hashicorp.com/vault/docs/commands
+# src: https://developer.hashicorp.com/hcp/docs/vault/what-is-hcp-vault
+# src: https://developer.hashicorp.com/vault/docs/internals/integrated-storage
+# src: https://developer.hashicorp.com/vault/docs/concepts/integrated-storage/autopilot
+# src: https://developer.hashicorp.com/vault/docs/commands/operator/raft
+# src: https://developer.hashicorp.com/vault/docs/enterprise/replication
+# src: https://developer.hashicorp.com/vault/api-docs/system/replication/replication-dr
+# src: https://developer.hashicorp.com/vault/docs/agent-and-proxy/agent/apiproxy
+# src: https://developer.hashicorp.com/vault/docs/deploy/kubernetes/vso/api-reference
+
+@ VLT-VA003 D1 T1.6 expert troubleshooting
+S: Vault 1.19 runs on virtual machines outside Kubernetes. Last year an operator configured the Kubernetes auth method with `token_reviewer_jwt` set to a token copied from the projected volume of the `vault-reviewer` service account. Logins worked for months, then every pod login began failing on the same day, although no role or bound service account had changed. The cluster now issues only short-lived projected service-account tokens, and the security policy forbids creating long-lived token Secrets. Security also requires that deleting a service account stops its pods' logins at once, not when a token expires. The platform team accepts maintaining extra ClusterRoleBindings. What should the Vault team change?
+A: Remove token_reviewer_jwt, so that Vault presents each client's own JWT to the TokenReview API, and bind system:auth-delegator to the client service accounts
+B: Remove token_reviewer_jwt and kubernetes_ca_cert, so that Vault loads a reviewer token and CA certificate from its own local service account mount path
+C: Create a service-account token Secret for vault-reviewer, which Kubernetes does not expire, and set that Secret's value as the new token_reviewer_jwt
+D: Replace the Kubernetes method with the jwt method and the cluster's OIDC discovery URL, so that pod tokens are validated offline without any TokenReview
+K: A
+G: ## How Kubernetes auth validates a pod
+The pod sends its service-account JWT to Vault. Vault calls the Kubernetes **TokenReview API** to confirm the token, and it needs a token of its own (the reviewer JWT) for that call.
+## Options with short-lived tokens
+The documentation compares four set-ups:
+- **Local token as reviewer**: Vault reads its own pod's token and CA from `/var/run/secrets/kubernetes.io/serviceaccount/`; only possible when Vault runs in Kubernetes.
+- **Client JWT as reviewer**: omit `token_reviewer_jwt`; Vault uses the client's JWT for the TokenReview call. All tokens stay short-lived and can be revoked early, at the cost of giving each client service account the `system:auth-delegator` ClusterRole.
+- **Long-lived reviewer token**: a service-account token Secret; it works but keeps a long-lived credential.
+- **JWT auth instead**: Kubernetes acts as an OIDC provider; no reviewer is needed, but tokens **cannot be revoked before their TTL** ends.
+## Why it broke
+The copied projected token expired, so Vault could no longer call TokenReview and every login failed.
+W: Client JWT as reviewer: no stored reviewer token can expire again, TokenReview still sees deleted service accounts immediately, and the extra ClusterRoleBindings are accepted overhead.
+X: B=Local token and CA: that mode reads files that exist only when Vault runs in a Kubernetes pod; these VMs have no such mount path.
+C=Long-lived token Secret: it would fix the expiry, but the security policy explicitly forbids long-lived service-account token Secrets.
+D=jwt method with OIDC discovery: it avoids a reviewer, but tokens are checked offline and cannot be revoked early, which fails the requirement on deleted service accounts.
+T: When Vault runs outside Kubernetes with short-lived tokens, omit token_reviewer_jwt so the client's own JWT is used, and grant clients system:auth-delegator.
+
+@ VLT-VA003 D1 T1.4 expert troubleshooting
+S: An on-call engineer, mlee, logs in with userpass. Until this morning the userpass user had token_policies `default,prod-admin`; at 09:00 an administrator ran `vault write auth/userpass/users/mlee token_policies=default`. At 09:40 mlee can still change production secrets. mlee's token was issued at 08:30 with an 8-hour TTL, and `vault token lookup -accessor <accessor>` shows `policies [default prod-admin]` and `identity_policies []`; mlee's entity belongs to no groups. Security wants mlee's production access gone now, without affecting other users who hold prod-admin, and mlee should keep working with the default policy only. What should the administrator do?
+A: Revoke mlee's current token by its accessor and have mlee log in again, because the policy names on a token are fixed when the token is created
+B: Wait for mlee's next token renewal, because at renewal Vault replaces the token's policy names with the user's updated token_policies value
+C: Remove prod-admin from mlee's entity through the identity API, because the entity's policies are what still grant the production access today
+D: Edit the prod-admin policy to deny the production paths, because Vault re-reads the contents of every policy named on a token for each request
+K: A
+G: ## Token policies versus identity policies
+A token carries two kinds of policies:
+- **Token policies** (`policies` in a lookup): the policy **names** attached when the token was created, for example from the userpass user's `token_policies`. The names are immutable for the life of the token, although the policy contents can change.
+- **Identity policies** (`identity_policies`): policies from the entity and its groups, evaluated **at request time**, so changes apply immediately.
+## Reading the evidence
+`identity_policies []` and "no groups" show that identity is not the source. prod-admin is a token policy, set at 08:30 before the user record changed. Changing the user record only affects tokens issued later.
+## The narrow fix
+Revoking the token ends access now, and the accessor lets the administrator do it without ever holding the token. mlee's next login receives `default` only.
+W: Revoke by accessor and log in again: the old token with prod-admin stops working at once, and the new login reflects the updated token_policies.
+X: B=Wait for renewal: token policy names do not change during the token's life, and waiting would leave access in place for hours anyway.
+C=Entity policies: the lookup shows no identity policies, so removing anything from the entity changes nothing; prod-admin sits on the token.
+D=Deny in prod-admin: this would stop mlee, but it also removes production access from every other holder of prod-admin, which is ruled out.
+T: Changing an auth method's user or role policies affects only new tokens; revoke existing tokens to remove token policies now, while identity policies change at request time.
+
+@ VLT-VA003 D1 T1.2 expert use-case
+S: A company is standardising authentication. Engineers must sign in to the Vault UI and CLI through Okta, where MFA is enforced. GitHub Actions workflows receive OIDC ID tokens from GitHub and must be limited to the `main` branch of the `payments` repository. Workloads on EC2 have instance profiles, and the security team rejects any method that relies on the EC2 instance identity document, because that document is readable by every process on the instance. No long-lived secret may be stored for any of these clients. Which THREE configurations should the team use? (Select THREE)
+A: The oidc auth method with a role whose allowed_redirect_uris cover the UI and the localhost CLI callback, so engineers sign in through Okta
+B: The jwt auth method with a role that sets bound_audiences and bound_claims for the repository and ref, so only main-branch workflows log in
+C: The aws auth method with an iam-type role bound to the instance profile's IAM role ARN, so EC2 workloads log in with signed STS requests
+D: The github auth method for GitHub Actions workflows, sending each workflow's OIDC ID token in place of a GitHub personal access token
+E: The userpass auth method for engineers, with a password policy matched to Okta, so that Okta's MFA also applies when engineers log in
+F: The aws auth method with an ec2-type role bound to the AMI ID, so EC2 workloads log in with the PKCS#7 signature of their identity document
+K: A,B,C
+G: ## Choosing a method per client
+- **OIDC** (oidc mount of the JWT/OIDC plugin): a browser-based login through an identity provider. Roles list `allowed_redirect_uris`, including `http://localhost:8250/oidc/callback` for `vault login -method=oidc`; MFA happens at the IdP.
+- **JWT**: a client presents a signed JWT (such as a CI ID token). Roles can require `bound_audiences` and `bound_claims` (for example repository and ref).
+- **AWS iam type**: the client signs an STS `GetCallerIdentity` request with its IAM credentials. The documentation calls iam the recommended approach.
+- **AWS ec2 type**: uses the instance identity document and its PKCS#7 signature, which every process on the instance can read.
+- **GitHub method**: logs in with a GitHub **personal access token**; it is meant for humans.
+## Mapping the constraints
+Okta plus MFA means OIDC, CI ID tokens with branch limits mean JWT with bound claims, and the identity-document ban leaves the iam type for EC2.
+W: A=OIDC role with redirect URIs: engineers authenticate in the browser at Okta, where MFA is enforced, from both the UI and the CLI.
+B=JWT role with bound claims: GitHub's ID token is verified and only tokens whose repository and ref claims match main of payments are accepted.
+C=AWS iam type: EC2 workloads sign requests with instance-profile credentials, nothing is stored, and the identity document is not involved.
+X: D=GitHub method: it accepts personal access tokens, not workflow ID tokens, and it would require storing a long-lived PAT.
+E=Userpass with matched passwords: userpass checks passwords stored in Vault and never involves Okta, so Okta MFA does not apply and passwords are stored secrets.
+F=AWS ec2 type: it relies on the instance identity document, which the security team has rejected.
+T: Pick OIDC for browser SSO, JWT with bound claims for CI ID tokens, and the AWS iam type for EC2 workloads.
+
+@ VLT-VA003 D2 T2.4 expert troubleshooting
+S: A token holds the policies `app` and `ops`. Policy app contains `path "secret/data/billing/*" { capabilities = ["read"] }`, and policy ops contains `path "secret/data/+/reports" { capabilities = ["create", "update", "read"] }`. An operator expects to update `secret/data/billing/reports`, but `vault kv put -mount=secret billing/reports total=10` returns permission denied, `vault kv get` on the same key succeeds, and `vault token capabilities` for that path prints only `read`. The policy app must not change, ops must keep its grant for every other folder's reports secret, and the operator must not gain write access to any other billing secret. Which change gives update on billing/reports?
+A: Add `path "secret/data/billing/reports"` with create, update and read to ops, because an exact path outranks the billing/* glob for that key
+B: Add `path "secret/data/billing/*"` with create, update and read to ops, because identical patterns from two policies have their capabilities merged
+C: Change the ops path to `secret/data/+/reports*`, because a pattern that ends in a glob ranks above billing/* when both match the same key path
+D: Move the ops stanza into the app policy, because the priority rules apply only between path stanzas that come from two different policies
+K: A
+G: ## Priority between different patterns
+Vault merges the stanzas of all a token's policies. For one request path:
+- identical patterns from several policies are **unioned**;
+- different matching patterns are **not** combined: only the highest-priority one applies.
+For two patterns P1 and P2 the documentation ranks P1 lower if, in order: its first wildcard (`+` or `*`) comes **earlier**; it ends in `*` and P2 does not; it has more `+` segments; it is shorter; it is lexicographically smaller.
+## Working the example
+- `secret/data/+/reports`: first wildcard at the segment after `data/`.
+- `secret/data/billing/*`: first wildcard after `billing/`, which is later.
+So the billing glob wins and grants only `read`; the ops `update` never applies to this key, matching the capabilities output.
+## Fixes and side effects
+An exact path has no wildcard and outranks both, so it restores update on that one key only. Adding the same billing/* pattern to ops would union `update` into every billing secret.
+W: Exact path in ops: it is the highest-priority match for billing/reports and grants update there, while other billing keys and other folders' reports are unchanged.
+X: B=Same billing/* pattern in ops: the union would grant create and update on every billing secret, which the operator must not get.
+C=Glob after reports: the first wildcard is still the `+` right after data/, earlier than in billing/*, so the pattern still loses.
+D=Move into app: Vault merges all stanzas before ranking them, so the result is the same whichever policy holds the stanza, and app must not change.
+T: When several patterns match, only the highest-priority one counts; an earlier wildcard loses, and an exact path beats any glob.
+
+@ VLT-VA003 D2 T2.2 expert use-case
+S: A KV v2 mount is enabled at `kv/`. A token holds exactly one policy with two stanzas: `path "kv/data/apps/+/config*" { capabilities = ["read"] }` and `path "kv/metadata/apps/*" { capabilities = ["list"] }`. Keys that exist include `apps/web/config`, `apps/web/config-eu`, `apps/web/eu/config` and `apps/config`. A reviewer must predict, before rollout, which commands this token can run successfully, because the application team plans its deployment scripts around the answer. No other policy, including default, grants anything on these mounts, and the reviewer has only this policy text and the key list. Which THREE commands succeed? (Select THREE)
+A: `vault kv get -mount=kv apps/web/config`, because + matches the single segment web and the config* glob matches the key name config itself
+B: `vault kv get -mount=kv apps/web/config-eu`, because the glob after config also matches the extra suffix -eu at the end of that key name
+C: `vault kv list -mount=kv apps/web`, because listing reads the path kv/metadata/apps/web, which falls under the list stanza's glob pattern
+D: `vault kv get -mount=kv apps/web/eu/config`, because + matches the two segments web/eu that come between apps and the config key name
+E: `vault kv metadata get -mount=kv apps/web/config`, because list on the metadata path also covers reading the key's version history
+F: `vault kv get -mount=kv apps/config`, because + also matches an empty segment, so apps/config fits the read stanza's pattern
+K: A,B,C
+G: ## Wildcards in policy paths
+- `+` matches **exactly one** path segment (any characters except `/`).
+- `*` at the end is a **glob**: it matches any remaining characters, including further segments.
+## KV v2 paths behind the commands
+- `vault kv get` reads `kv/data/<key>`.
+- `vault kv list` lists `kv/metadata/<prefix>`.
+- `vault kv metadata get` **reads** `kv/metadata/<key>`.
+## Working through the keys
+- `kv/data/apps/web/config`: `+` = web, `config*` matches config. Allowed.
+- `kv/data/apps/web/config-eu`: `config*` matches config-eu. Allowed.
+- `kv/data/apps/web/eu/config`: `+` cannot span web/eu. Denied.
+- `kv/data/apps/config`: `config` would have to be the `+` segment, and nothing follows for `config*`. Denied.
+- `kv/metadata/apps/web` with list: matched by `apps/*`. Allowed.
+- `kv/metadata/apps/web/config` with read: the stanza grants only list. Denied.
+W: A=Exact config key: one segment for +, and the glob matches the key name config with nothing after it.
+B=Suffixed key: a trailing glob matches any characters after config, including -eu.
+C=List under web: the list command uses the metadata path, which apps/* covers with the list capability.
+X: D=Two segments: + matches exactly one segment, so web/eu does not fit.
+E=Metadata read: reading version history needs read on the metadata path; list does not include read.
+F=Empty segment: + must match one real segment, and apps/config leaves no segment for config* after it.
+T: + matches exactly one segment, a trailing * matches everything after it, and each KV v2 command maps to its own data or metadata path and capability.
+
+@ VLT-VA003 D3 T3.4 expert use-case
+S: The AppRole mount is tuned with `default-lease-ttl=1h` and `max-lease-ttl=8h`, and the system max TTL is the default 32 days. The role `report` sets token_ttl=2h, token_max_ttl=12h and token_explicit_max_ttl=6h; no period is used. A report job logs in at 09:00 and runs `vault token renew` without an increment at 10:30, 12:00 and 13:30, and it plans to renew again at 15:00. The job needs Vault until 16:30 and must not fail midway, so the team wants to know exactly what the renewals will return and checks each one with `vault token lookup`. Which statement is accurate?
+A: The 13:30 renewal returns a TTL of 1h30m, the token expires at 15:00, and the job must log in again before 15:00 to keep working until 16:30
+B: The 13:30 renewal returns a TTL of 2h, the token expires at 17:00 under the 8-hour mount cap, and the renewal at 15:00 carries the job to 16:30
+C: The 13:30 renewal returns a TTL of 2h, the token expires at 21:00 under the role's 12-hour cap, and the planned renewals carry the job to 16:30
+D: The 13:30 renewal returns a TTL of 1h, the token expires at 14:30, because the mount's 1-hour default replaces token_ttl at every renewal
+K: A
+G: ## Three ceilings on a token
+- **System max TTL**: 32 days by default.
+- **Mount max TTL** from tuning: here 8 hours.
+- **Auth method suggestion**: the role's token_max_ttl may lower the mount max but never raise it, so 12 hours becomes 8 hours.
+- **Explicit max TTL**: a hard cap encoded on the token at creation; no renewal can go past it. Here 6 hours.
+The role's `token_ttl` (2 hours) is the length of each renewal period; the mount default applies only when the role sets none.
+## Timeline
+- 09:00 login: TTL 2h, explicit cap at 15:00.
+- 10:30 renew: until 12:30.
+- 12:00 renew: until 14:00.
+- 13:30 renew: 2h would reach 15:30, so Vault returns 1h30m, ending at 15:00.
+- 15:00: the token has expired; the planned renewal fails.
+W: 1h30m and 15:00: the explicit max TTL of 6 hours is the lowest ceiling, so the last renewal is shortened and the job must re-authenticate before 15:00.
+X: B=17:00 under the mount cap: the mount cap is 8 hours, but the explicit max TTL of 6 hours is lower and always wins.
+C=21:00 under the role cap: the role's token_max_ttl cannot exceed the 8-hour mount maximum, and the explicit 6-hour cap is lower still.
+D=Mount default replaces token_ttl: the role's token_ttl overrides the mount default, so renewals return 2 hours until a cap applies.
+T: A token lives until the lowest ceiling: explicit max TTL, then the lower of the role and mount max TTLs; check renewal responses for a shrinking TTL.
+
+@ VLT-VA003 D3 T3.1 expert troubleshooting
+S: A Vault Enterprise customer runs a performance primary in Frankfurt and a performance secondary in Singapore. A CI system in Frankfurt mints tokens for build agents that run in Singapore and call the Singapore cluster for KV reads. The CI system authenticates with AppRole, and its token has update on `auth/token/create` and `auth/token/create/*` but no sudo. Today it runs `vault token create -type=batch -ttl=20m -policy=build`; every request with those tokens to the Singapore cluster is rejected, while the same tokens work in Frankfurt. Token creation must stay lightweight, and agents must not log in themselves. Which change fixes this?
+A: Create a token store role with orphan=true, token_type=batch and allowed_policies=build, and have CI create the tokens through auth/token/create/<role>
+B: Keep `vault token create -type=batch -ttl=20m -policy=build` and add the -orphan flag, so that the batch tokens are created without a parent token
+C: Create a token store role with orphan=true, token_type=service and allowed_policies=build, so orphan service tokens are accepted on any cluster
+D: Keep `vault token create -type=batch -policy=build` and raise -ttl to 2h, so the tokens stay valid while Singapore replicates the parent token
+K: A
+G: ## Tokens across performance replication
+Performance secondaries share configuration and policies with the primary but keep **their own tokens and leases**. The token comparison table says batch tokens can be used across performance replication clusters **only if they are orphan**: a non-orphan batch token depends on a parent token that the secondary cannot check. Service tokens cannot be used across clusters at all.
+## Making orphan tokens without sudo
+Orphan tokens can be created through `auth/token/create-orphan`, with sudo on `auth/token/create` (the `-orphan` flag), or through a **token store role** with `orphan=true`. A role can also force `token_type=batch` and limit policies with `allowed_policies`.
+Example: `vault write auth/token/roles/build orphan=true token_type=batch allowed_policies=build`, then `vault token create -role=build -ttl=20m`.
+W: Orphan batch tokens from a role: they are lightweight, carry no parent dependency, and are accepted by the performance secondary; the CI token already has update on auth/token/create/*.
+X: B=-orphan flag: the flag requires sudo, which the CI token does not have, so the command fails.
+C=Orphan service tokens: service tokens are not usable across performance clusters and are the heavyweight type the team wants to avoid.
+D=Longer TTL: tokens are never replicated to performance secondaries, so a longer TTL changes nothing; the parent dependency is the problem.
+T: For tokens used on performance secondaries, issue orphan batch tokens, for example from a token store role with orphan=true and token_type=batch.
+
+@ VLT-VA003 D3 T3.6 expert use-case
+S: Two weeks ago a token store role `svc` was created with token_period=24h, and a long-running service holds a periodic token created from it; the service renews that token every 6 hours. After a review, an administrator runs `vault write auth/token/roles/svc token_period=1h token_explicit_max_ttl=720h` and expects new tokens to be tighter while the existing service continues as before. The service team will not change its renewal interval this quarter, and nobody has revoked any token; the role's other settings are unchanged. Which TWO statements about the existing service token are accurate? (Select TWO)
+A: At the service's next renewal the token's TTL is reset to 1 hour, because a periodic token from a role uses the role's current period at renewal
+B: The token will expire about an hour after its next renewal, unless the service starts renewing at intervals shorter than one hour
+C: The token keeps renewing to 24 hours, because a periodic token's period is fixed at the moment the token is created from the role
+D: The token will be revoked 720 hours after the role change, because the new explicit max TTL also applies to tokens already issued
+E: The token is revoked straight away, because changing a role's token_period invalidates every token that was issued from that role
+K: A,B
+G: ## Periodic tokens and roles
+A periodic token's TTL is reset to its period at every renewal, so it can live indefinitely while it is renewed in time. The tokens documentation adds two details:
+- When a periodic token was created via a **token store role**, the **current** value of the role's period is used at renewal time.
+- A token with both a period and an explicit max TTL is revoked when the explicit max TTL is reached; the explicit max TTL is **encoded on the token at creation**.
+## Applying it
+- Next renewal (within 6 hours): Vault applies the role's new 1-hour period, so the TTL becomes 1 hour.
+- The service waits 6 hours before renewing again, so the token expires about 1 hour after that renewal.
+- The existing token was created without an explicit max TTL, and the new role value is encoded only on tokens created later.
+W: A=Current role period at renewal: the role change reaches the existing token at its next renewal, which returns a 1-hour TTL.
+B=Expiry after one hour: with 6-hour renewals and a 1-hour period, the token lapses about an hour after the next renewal.
+X: C=Period fixed at creation: for role-created periodic tokens the documentation says the role's current period is used at renewal.
+D=Explicit max for old tokens: token_explicit_max_ttl is encoded onto tokens when they are created, so it does not reach a token issued two weeks ago.
+E=Immediate revocation: changing a role does not revoke tokens; the effect appears only when the token renews.
+T: Role-created periodic tokens pick up the role's current period at renewal, while an explicit max TTL is fixed onto each token when it is created.
+
+@ VLT-VA003 D4 T4.2 expert troubleshooting
+S: The `database/` mount is tuned with max-lease-ttl=4h. The role `etl` sets default_ttl=2h and max_ttl=6h. A job obtained credentials at 08:00, and at 09:30 it ran `vault lease renew -increment=4h <lease_id>`; the output shows `lease_duration 2h30m` and `lease_renewable true`. The job must keep the same database user until 13:00 because its open transactions are tied to that login, and nobody may change Vault configuration today. A colleague claims the renewal failed. The job's own Vault token is periodic and stays valid all day. The output above is the only evidence available. Which conclusion and plan are correct?
+A: The 4-hour mount maximum caps the role's 6-hour max_ttl, so the lease ends at 12:00 whatever the increment, and the job cannot keep this user until 13:00
+B: The role's 6-hour max_ttl applies, so the lease can reach 14:00, and the job should renew again at 11:30 with -increment=2h to stay valid until 13:30
+C: The renewal failed and the output shows the previous lease's remaining time, so the job should retry the renewal with the increment given as 14400
+D: The increment was honoured in full, so the lease now ends at 13:30, and the 2h30m value shows the remaining TTL of the job's token, not of the lease
+K: A
+G: ## How renewal answers are computed
+`vault lease renew -increment=4h` asks for a TTL of 4 hours **from now**. The increment is advisory; the engine grants at most what the lease's maximum allows. The maximum comes from:
+- the role's `max_ttl`, which may be lower than the mount max but **not longer**;
+- the mount's `max-lease-ttl` from tuning.
+Here 6 hours on the role cannot exceed 4 hours on the mount, so the lease may live until **08:00 + 4h = 12:00**.
+## Reading the output
+At 09:30 the remaining time to 12:00 is 2h30m, exactly the returned `lease_duration`. If the renewal had failed, the old lease would have shown about 30 minutes (issued at 08:00 with a 2-hour TTL, ending 10:00), and the command would report an error.
+## Consequence
+After 12:00 the credentials are revoked; the job would need new credentials, which means a different database user, so the 13:00 requirement cannot be met without a configuration change.
+W: Mount cap at 12:00: the returned 2h30m is the time left until the 4-hour mount ceiling, and no increment can push the lease past it.
+X: B=Role max applies: the role's max_ttl may not be longer than the mount maximum, so 14:00 is never reachable.
+C=Renewal failed: a failed renewal returns an error; the old lease had only 30 minutes left, and 14400 seconds equals the 4h already requested.
+D=Increment honoured: lease_duration in a lease renewal is the lease's TTL, and a full 4-hour increment would have shown 4h, not 2h30m.
+T: Renewal output shows the lease's new TTL; when it is shorter than requested, a max TTL (the lower of role and mount) has been reached.
+
+@ VLT-VA003 D4 T4.3 expert use-case
+S: A deployer authenticates with AppRole and receives service token D. With D it runs `vault token create -policy=app` to make service token S, and `vault token create -type=batch -policy=jobs -ttl=1h` to make batch token B. S reads `database/creds/app`, creating lease L1, and B reads `aws/creds/jobs`, creating lease L2. Separately, an orphan token O issued to another team reads `database/creds/app`, creating lease L3. At 10:00, before any TTL ends, the security team runs `vault token revoke D` with the default mode. Which THREE statements describe the state right after the revocation? (Select THREE)
+A: Token S and lease L1 are revoked, because revoking a parent revokes its child tokens together with the leases that those child tokens created
+B: Token B stops working and lease L2 is revoked, because leases created by a non-orphan batch token are assigned to and tracked by its parent
+C: Lease L3 stays valid until its own TTL ends or someone revokes it, because the token that created it is outside the revoked token tree
+D: Lease L2 stays valid until its TTL ends, because batch tokens cannot be revoked manually, so leases created with them are never revoked early
+E: Lease L3 is revoked, because revoking D also revokes every lease under the database/creds/app prefix that is still active at that moment
+F: Token S keeps working as an orphan, because tokens created by a token that came from an auth method login are orphans by default
+K: A,B,C
+G: ## What revoking a token removes
+- The token itself and, in the default mode, **all its child tokens** and their children.
+- **All leases created by those tokens.**
+Login through an auth method creates an orphan (D is the root of its own tree), but tokens that D creates with `vault token create` are D's children.
+## Batch tokens in a tree
+The comparison table says a non-orphan batch token **stops working** when its parent is revoked, and that its dynamic-secret leases are assigned to the **parent**. So L2 belongs to D's tree and is revoked with D.
+## Outside the tree
+Revocation follows tokens, not request paths. O is an unrelated orphan, so L3 is untouched even though it came from the same role path; only a prefix revocation would reach it.
+W: A=S and L1 revoked: S is a child of D, so it and the lease it created are revoked.
+B=B stops and L2 revoked: B's lease is tracked by its parent D, and a non-orphan batch token stops working when the parent goes.
+C=L3 untouched: O is outside D's tree, so its lease lives on until expiry or explicit revocation.
+X: D=L2 survives: batch tokens cannot be revoked individually, but their leases are tied to the parent, so revoking D revokes L2.
+E=L3 revoked by prefix: token revocation never sweeps a path prefix; that needs `vault lease revoke -prefix`.
+F=S as an orphan: D itself is an orphan from the login, but tokens D creates are its children unless created as orphans.
+T: Revoking a token removes its whole tree and every lease created in it, including leases of non-orphan batch children; tokens outside the tree are untouched.
+
+@ VLT-VA003 D5 T5.5 expert troubleshooting
+S: A trusted orchestrator is supposed to deliver an AppRole secret ID for the role `web` to a new VM as a response-wrapping token. On the VM a bootstrap script first runs `vault write sys/wrapping/lookup token=<wrapping-token>`, which succeeds and shows `creation_path sys/wrapping/wrap`, `creation_ttl 2m` and a creation_time 40 seconds ago. The orchestrator's log shows that it requested the secret ID from `auth/approle/role/web/secret-id` with `-wrap-ttl=2m` and recorded the returned secret ID accessor. The VM has not unwrapped anything, and the orchestrator can issue new secret IDs at any time. Which TWO actions should follow? (Select TWO)
+A: Do not unwrap the token and raise an alert, because a creation path of sys/wrapping/wrap suggests the data may have been read and wrapped again
+B: Destroy the earlier secret ID through auth/approle/role/web/secret-id-accessor/destroy with the recorded accessor, then deliver a new wrapped one
+C: Unwrap the token as planned, because a successful lookup proves that nobody has unwrapped it and so the secret ID inside is still confidential
+D: Call sys/wrapping/rewrap with the token, so that Vault issues a new wrapping token whose creation path is set back to the secret-id path
+E: Unwrap with Vault Agent and set secret_id_response_wrapping_path to sys/wrapping/wrap, so that the creation-path check passes for this token
+K: A,B
+G: ## Validating a wrapping token
+The response-wrapping documentation lists the checks a receiver should make:
+- If an expected token never arrives, alert.
+- **Look up** the token (`sys/wrapping/lookup`, always allowed for the token holder): an invalid token means it was already unwrapped, expired or revoked.
+- **Check the creation path.** It should match where the data came from, here `auth/approle/role/web/secret-id`. A different path, especially one starting with `cubbyhole` or `sys/wrapping/wrap`, means the data may have been read and put into a new wrapping token.
+- Only then unwrap; a failed unwrap also triggers an investigation.
+## Containing a possible leak
+If the secret ID may have been seen, invalidate it. AppRole can destroy a secret ID by its accessor (`secret-id-accessor/destroy`) without knowing the secret ID, and the orchestrator can issue a fresh wrapped one.
+W: A=Do not unwrap; alert: the creation path does not match the expected AppRole path, which the documentation treats as a sign of tampering.
+B=Destroy by accessor and reissue: the possibly exposed secret ID becomes useless, and the VM gets a new single-use delivery.
+X: C=Unwrap anyway: a successful lookup only shows the token has not been unwrapped; it does not show the data inside is the original or unseen.
+D=Rewrap: rewrap moves the same data into a new token and keeps its origin; it cannot make tampered data trustworthy or change where it came from.
+E=Agent with the wrong path: Agent's check exists to reject tokens from unexpected paths; configuring it to accept sys/wrapping/wrap defeats that protection.
+T: A wrapping token whose creation path is not the expected source is a tampering signal: do not unwrap, alert, and revoke what may have leaked.
+
+@ VLT-VA003 D5 T5.8 expert troubleshooting
+S: The KV v2 mount `secret/` was configured with `vault write secret/config cas_required=true`. For the key `app/db`, `vault kv metadata get -mount=secret app/db` shows `current_version 4`, and version 4 has a deletion_time set because a developer soft-deleted it yesterday; version 3 is intact. An engineer must write a new password to `app/db` in one command, and the write must fail if anyone else has written the key in the meantime. The first attempt, `vault kv put -mount=secret app/db password=n3w`, is rejected because a check-and-set parameter is required. Nobody else is expected to write the key today. Which command succeeds?
+A: `vault kv put -mount=secret -cas=4 app/db password=n3w`, because cas must equal the key's current version even when that version is soft-deleted
+B: `vault kv put -mount=secret -cas=3 app/db password=n3w`, because cas must name the latest version whose data has not been soft-deleted yet
+C: `vault kv put -mount=secret -cas=0 app/db password=n3w`, because a cas value of 0 allows the write whenever the key's latest version is deleted
+D: `vault kv patch -mount=secret app/db password=n3w`, because a patch merges into existing data and is therefore exempt from check-and-set rules
+K: A
+G: ## Check-and-set in KV v2
+With `cas_required=true` on the engine (or on a key's metadata), every write must include `cas`:
+- `cas` must equal the key's **current version**, otherwise the write is refused; this blocks lost updates.
+- `cas=0` allows a write **only if the key does not exist yet**.
+- Soft deletes keep the version data in storage, and the documentation states that to write to a soft-deleted key, `cas` must match the key's **current version**.
+- Patch requests also need `cas` when it is required, with a value greater than 0.
+## Applying it
+The current version is 4, even though it is soft-deleted, so `-cas=4` creates version 5. If someone writes in between, the current version becomes 5 and the command fails, as required.
+W: -cas=4: the value matches the current version (soft-deleted or not), so the write succeeds and any concurrent write would make it fail.
+X: B=-cas=3: the current version is 4; skipping soft-deleted versions is not how check-and-set works, so the write is refused.
+C=-cas=0: zero means "only if the key does not exist", and app/db exists with four versions.
+D=Patch without cas: patch is subject to cas_required too, and patching a key whose latest version is deleted has no live data to merge into.
+T: With cas_required, pass the key's current version number in cas, even when that version is soft-deleted; cas=0 is only for new keys.
+
+@ VLT-VA003 D6 T6.2 expert use-case
+S: A legal hold requires reading 2,000 archived invoices encrypted with the transit key `invoices` as `vault:v1:` values. `vault read transit/keys/invoices` shows `latest_version 4`, `min_decryption_version 3` and `min_encryption_version 0`, and the key has never been trimmed. Decrypt calls for the v1 records now fail. Security insists that once the hold work is done, any v1 ciphertext still circulating elsewhere must again be undecryptable, and the 2,000 invoices must end up stored under the newest key version. The hold work must be finished this week, and the hold service already has update on transit/decrypt/invoices and transit/rewrap/invoices. Which plan works?
+A: Lower min_decryption_version to 1, rewrap the 2,000 v1 values to version 4 and store them, then raise min_decryption_version back to 3
+B: Rewrap the 2,000 v1 values to version 4 without changing the key, because rewrap is exempt from min_decryption_version as it returns no plaintext
+C: Lower min_decryption_version to 1, decrypt the 2,000 values for the hold, and leave the setting at 1 so that later audits can read the archive too
+D: Restore version 1 from a key backup with the transit restore endpoint, because raising min_decryption_version deleted version 1 from the key ring
+K: A
+G: ## Archived versus deleted key versions
+Raising `min_decryption_version` does **not** delete older versions. The transit documentation says versions below it are **archived**, outside the working set, and that in an emergency `min_decryption_version` can be moved back to allow legitimate decryption.
+Old versions are deleted only by **trimming** (`min_available_version`), which this key has never had.
+## Rewrap still needs to decrypt
+Rewrap decrypts inside Vault and re-encrypts with the latest version. It never returns plaintext, but the decrypt step is still subject to `min_decryption_version`, so v1 values are refused while the minimum is 3.
+## The emergency sequence
+1. Lower the minimum to 1.
+2. Rewrap the 2,000 values (or decrypt what the hold needs) and store the `vault:v4:` results.
+3. Raise the minimum back to 3, so stray v1 ciphertext is undecryptable again.
+W: Lower, rewrap, raise: the archived version 1 becomes usable for the window, the invoices move to version 4, and restoring the minimum blocks v1 again.
+X: B=Rewrap without lowering: rewrap's decrypt step honours min_decryption_version, so v1 values are rejected exactly like decrypt calls.
+C=Leave the minimum at 1: it reopens decryption of every stray v1 ciphertext permanently, which security forbids, and the invoices stay on version 1.
+D=Restore from backup: version 1 was archived, not deleted, so no restore is needed; only trimming removes versions.
+T: Raising min_decryption_version archives old versions; lower it temporarily to rewrap old data, then raise it again.
+
+@ VLT-VA003 D6 T6.1 expert troubleshooting
+S: A SaaS platform encrypts tenant records with the transit key `tenants`, created with `derived=true` so that each tenant gets its own derived key. Until last week the service sent `context` as base64 of the tenant's numeric ID; a refactor changed it to base64 of the tenant's display name. Since then, decrypting records written before the refactor fails, while records written after it decrypt fine. Per-tenant isolation must remain, no data may be lost, and every record must end up readable with one context convention. The team prefers the numeric ID, because display names can change. Which plan works?
+A: Revert to the tenant ID as context, and re-encrypt the records written since the refactor by decrypting them with the display name and encrypting with the ID
+B: Revert to the tenant ID as context, and send the records written since the refactor to transit/rewrap with the tenant ID given as their context value
+C: Keep the display name as context, and decrypt the older records without any context, because Vault embeds the original context in each derived ciphertext
+D: Set derived=false in the key's configuration, so that Vault ignores context on decryption and records written under either convention can be read
+K: A
+G: ## Key derivation in transit
+With `derived=true`, Vault derives a separate encryption key from the named key and the **context** supplied on each request. Different contexts give different keys, which is how tenants stay isolated with one named key.
+- The context is **required** on encrypt, decrypt and rewrap for a derived key.
+- The ciphertext does **not** carry the context; the caller must supply the same value again.
+- Derivation is chosen when the key is created; the key configuration endpoint has no setting to turn it off.
+## Repairing mixed contexts
+Old records were encrypted with the ID context, new ones with the name context. Reverting to the ID fixes the old records. The new ones must be decrypted with the name and encrypted again with the ID. Rewrap cannot do it, because it uses a single `context` for both its decrypt and encrypt steps.
+W: Revert and re-encrypt the new records: old records decrypt with the ID again, and the post-refactor records move to the ID convention without losing anything.
+X: B=Rewrap with the ID: rewrap decrypts with the same context it encrypts with, so the decrypt step fails for records written under the display name.
+C=No context on decrypt: the context is not stored in the ciphertext, and a derived key requires it on every decrypt call.
+D=derived=false: derivation cannot be switched off through the key configuration, and turning it off would also remove per-tenant isolation.
+T: For derived transit keys, the same context is needed on encrypt and decrypt; rewrap uses one context for both steps, so changing context requires decrypt and re-encrypt.
+
+@ VLT-VA003 D7 T7.2 expert troubleshooting
+S: In a three-node cluster with the default Shamir seal (five shares, threshold three), vault-2 was restarted. At 10:00 two officers each entered a share on vault-2 from their own laptops. At 10:05 a third operator, unsure about an earlier typo, ran `vault operator unseal -reset` against vault-2 and then entered his own share. At 10:07 `vault status` against vault-2 shows `Sealed true`, `Total Shares 5`, `Threshold 3` and `Unseal Progress 1/3`. vault-1 is unsealed and active. The two officers from 10:00 are still available, and no share has been compromised. What is needed to unseal vault-2?
+A: Two more shares entered on vault-2, which may come from the officers who entered theirs at 10:00, because -reset discarded those entries but not the shares
+B: One more share entered on vault-2, because -reset discarded only the share entered at 10:05, and the progress display lags behind the real count
+C: Three new shares entered on vault-2 after a rekey, because -reset invalidated the shares the two officers had already entered at 10:00 on that node
+D: No further shares, because vault-2 receives the root key from the active vault-1 once its unseal progress is above zero and Raft reconnects
+K: A
+G: ## The unseal process
+Unsealing is stateful: each `vault operator unseal` adds one share to the node's progress, from any machine, until the threshold is reached. `vault status` on a sealed node shows `Unseal Progress` and the attempt's nonce.
+- `vault operator unseal -reset` **discards previously entered keys** for the current attempt. The key shares themselves stay valid.
+- Each node must be unsealed with the threshold of shares; Vault does not pass unseal state from one node to another.
+## Reading the evidence
+The reset at 10:05 removed the two 10:00 entries; the share entered right after made the progress 1/3. Two more distinct shares are needed, and the two officers can simply enter theirs again.
+W: Two more shares: progress is 1 of 3, the reset only cleared the attempt, and the original officers' shares are still valid for a new entry.
+X: B=One more share: the reset cleared the 10:00 entries, not the 10:05 one, and the progress shown is the node's real state.
+C=Rekey and three new shares: -reset does not touch the key shares; rekeying would be a needless change of all shares.
+D=Root key from vault-1: with Shamir every node needs its own threshold of shares; no node hands the root key to another.
+T: unseal -reset clears the entered shares of the current attempt, not the shares themselves; count the remaining shares from the node's Unseal Progress.
+
+@ VLT-VA003 D7 T7.3 expert troubleshooting
+S: An engineer runs scripts from a laptop against an HCP Vault Dedicated cluster. The shell has `VAULT_ADDR` set to the cluster's public address, `VAULT_TOKEN` set to an admin token that was generated in the HCP portal yesterday afternoon, and `VAULT_SKIP_VERIFY=1` left over from a lab. `vault kv get -mount=secret app/config` now fails with a permission error, although the engineer created the KV mount `secret/` last week in the cluster's top-level customer namespace while working in the portal's web CLI. The scripts must not use any other credential type, and the address is correct. Which TWO changes fix the failure? (Select TWO)
+A: Generate a new admin token in the HCP portal and set it as VAULT_TOKEN, because portal admin tokens are valid for only six hours after creation
+B: Set VAULT_NAMESPACE=admin, because on HCP Vault Dedicated the top-level customer namespace is admin, and the secret/ mount lives inside it
+C: Unset VAULT_SKIP_VERIFY, because skipping TLS verification makes the cluster treat every request from the laptop as an unauthenticated one
+D: Set VAULT_NAMESPACE=root, because a mount created in a top-level namespace is reached through the root namespace on every Vault cluster
+E: Set VAULT_CACERT to HashiCorp's CA bundle, because HCP Vault Dedicated rejects tokens sent over connections that skip certificate checks
+K: A,B
+G: ## HCP Vault Dedicated specifics
+- The top-level namespace for customers is **`admin`**, not `root`. Mounts created there are reached with `VAULT_NAMESPACE=admin` (or `-namespace=admin`); without it the CLI targets the root namespace.
+- Super-user access comes from the portal's **Generate token** button, which returns an **admin token valid for 6 hours**.
+## The environment variables
+- `VAULT_TOKEN` supplies the token for every CLI call.
+- `VAULT_NAMESPACE` sets the namespace for every call.
+- `VAULT_SKIP_VERIFY` disables TLS certificate verification on the client. It weakens security and should be removed, but it does not change authentication or authorisation.
+- `VAULT_CACERT` points the CLI at a CA bundle for verification.
+## Two independent faults
+A token from yesterday afternoon is far older than 6 hours, and the request goes to the wrong namespace. Both must be fixed.
+W: A=New admin token: the old portal token has expired after six hours, so every request with it is denied.
+B=VAULT_NAMESPACE=admin: the secret/ mount lives in the admin namespace, so requests must target it.
+X: C=Unset VAULT_SKIP_VERIFY: worth doing for security, but TLS verification on the client has no effect on Vault's permission decision.
+D=Root namespace: on HCP Vault Dedicated customer mounts live under admin; targeting root keeps the request away from the mount.
+E=Custom CA bundle: certificate checks happen in the client; Vault does not reject tokens because a client skipped verification.
+T: On HCP Vault Dedicated, target the admin namespace and remember that portal admin tokens expire after six hours.
+
+@ VLT-VA003 D8 T8.1 expert troubleshooting
+S: A self-managed Vault Community cluster was built with five Integrated Storage voters. Last week the autoscaling group replaced vault-d and vault-e, and their replacements vault-f and vault-g joined through retry_join. Autopilot runs with its default configuration. Today `vault operator raft list-peers` shows seven entries, all with Voter true: vault-a (leader), vault-b, vault-c, vault-f and vault-g, plus vault-d and vault-e, whose instances no longer exist. The team believes the cluster still tolerates two node failures. It must tolerate two failures again, and future replacements must be cleaned up without manual steps. What should the operator do?
+A: Run vault operator raft remove-peer for vault-d and vault-e, then set cleanup_dead_servers=true with min_quorum=5 in the autopilot configuration
+B: Set cleanup_dead_servers=true in the autopilot configuration and leave min_quorum unset, so autopilot prunes vault-d, vault-e and later dead nodes
+C: Make no change, because peers whose instances no longer exist are left out of the quorum count, so five live voters still tolerate two failures
+D: Run vault operator raft remove-peer for vault-d and vault-e, then set dead_server_last_contact_threshold=1m so that replacements are pruned fast
+K: A
+G: ## Quorum counts every voter in the peer set
+For a peer set of N voters, Raft needs `ceil((N + 1) / 2)` of them. Dead peers that were never removed still belong to the set.
+- 7 voters: quorum 4. With 5 alive, the cluster survives **one** more failure, not two.
+- 5 voters: quorum 3. Five alive voters survive **two** failures.
+## Removing dead peers
+- `vault operator raft remove-peer <node>` removes a node from the peer set; `list-peers` confirms the result.
+- Autopilot's **dead server cleanup** is **off by default**. `cleanup_dead_servers=true` requires `min_quorum`, which should be the expected number of voters; autopilot never prunes below it.
+- `dead_server_last_contact_threshold` defaults to 24h, and the documentation strongly recommends keeping it high, because a low value can remove nodes that are not actually dead.
+W: Remove the dead peers and enable cleanup with min_quorum: the peer set returns to five voters (quorum 3, two failures tolerated), and autopilot prunes future dead nodes but never below five.
+X: B=Cleanup without min_quorum: dead server cleanup requires min_quorum to be set, so this configuration does not enable pruning.
+C=No change: the seven listed voters all count, so quorum is four and the cluster tolerates only one more failure.
+D=One-minute threshold: removing the peers is right, but a 1-minute threshold risks pruning healthy nodes during short outages, and cleanup is still not enabled.
+T: Dead Raft peers still count toward quorum; remove them and enable autopilot dead server cleanup with min_quorum set to the intended voter count.
+
+@ VLT-VA003 D8 T8.4 expert use-case
+S: A Vault Enterprise customer has a primary cluster in us-east, a performance secondary in eu-west and a disaster recovery secondary in us-west. A regional outage takes us-east offline for several days. Applications in the US hold service tokens and database leases issued by us-east, and the business requires that they continue without re-authenticating. The eu-west cluster has more capacity and is closer to the operations team, who suggest using it. The operators can obtain a DR operation token for the us-west cluster. Which plan restores service for the US applications as required?
+A: Promote the us-west DR secondary to primary with a DR operation token, because it mirrors the tokens and leases and serves clients once promoted
+B: Promote the eu-west performance secondary to primary, because it already serves client requests and holds copies of the primary's tokens and leases
+C: Promote the us-west DR secondary to primary, then have every US application log in again, because DR secondaries replicate configuration only
+D: Point the US applications at the us-west DR secondary without promoting it, because DR secondaries answer read requests while the primary is down
+K: A
+G: ## What each secondary holds
+- A **DR secondary** mirrors the primary, **including tokens and leases**, but does not serve client requests until it is **promoted**. Promotion is authorised by a **DR operation token**, not a normal client token.
+- A **performance secondary** shares configuration, policies and supporting secrets, but tracks **its own** tokens and leases. If it is promoted, applications must re-authenticate and obtain new leases.
+## Matching the requirement
+"Keep existing tokens and leases" points to the DR secondary. The eu-west cluster's size and location do not matter, because it never had the US applications' tokens.
+W: Promote the DR secondary: after promotion it serves clients with the same tokens and leases that us-east issued, so applications carry on.
+X: B=Promote the performance secondary: it does not hold the primary's tokens and leases, so every US application would have to log in again.
+C=Promote and re-authenticate: DR secondaries mirror tokens and leases, so re-authentication is unnecessary and violates the requirement.
+D=Use the DR secondary unpromoted: DR secondaries do not serve read or write requests until they are promoted.
+T: For failover that keeps tokens and leases, promote a DR secondary with a DR operation token; performance secondaries keep only their own tokens.
+
+@ VLT-VA003 D9 T9.1 expert troubleshooting
+S: A legacy reporting tool on a VM cannot be modified. It sends every Vault API request to a local Vault Agent listener at 127.0.0.1:8100 and always attaches an `X-Vault-Token` header holding a token that was hard-coded years ago and has long expired. Agent uses AppRole auto-auth successfully, its file sink holds a valid token, the AppRole role carries the tool's policies, and the `api_proxy` stanza sets `use_auto_auth_token = true`. The tool's requests still fail with permission errors. Only this tool uses this listener. Which change makes the tool's requests succeed?
+A: Set use_auto_auth_token = "force" in api_proxy, so that Agent ignores the expired token on each request and forwards it with the auto-auth token
+B: Keep use_auto_auth_token = true and add a cache stanza, so that Agent answers the tool's requests from responses cached with the auto-auth token
+C: Keep use_auto_auth_token = true and point the tool's VAULT_TOKEN variable at the sink file, so that the tool sends Agent's valid token instead
+D: Set use_auto_auth_token = false in api_proxy, so that Agent stops adding its own token and passes the request's header to Vault unchanged instead
+K: A
+G: ## Agent as an API proxy
+A Vault Agent listener proxies requests to Vault. The `api_proxy` option `use_auto_auth_token` controls which token is used:
+- `true`: requests **without** a token are sent with the auto-auth token; if a request **already has a token**, that token is used.
+- `"force"`: Agent **ignores any token in the request** and always uses the auto-auth token.
+- `false` (default): requests are forwarded with whatever token they carry.
+## Applying it
+The tool always sends a token, so with `true` Agent forwards the expired one and Vault denies the request. `force` replaces it with the valid auto-auth token. Because only this tool uses the listener, forcing the auto-auth token does not change behaviour for anyone else.
+W: force: the tool's stale header is overwritten with the auto-auth token, whose AppRole policies allow the tool's requests.
+X: B=Add caching: the cache answers only qualifying requests and still uses the token that the request carries, so the expired token keeps causing denials.
+C=VAULT_TOKEN from the sink: the tool cannot be modified and sends its hard-coded header regardless of environment variables.
+D=false: Agent would forward the expired token for every request, exactly the failing behaviour.
+T: With use_auto_auth_token = true a request's own token wins; use "force" when clients send stale tokens you cannot remove.
+
+@ VLT-VA003 D9 T9.2 expert troubleshooting
+S: A VaultStaticSecret syncs the KV v2 secret `web/config` into the Kubernetes Secret `web-config` with refreshAfter: 30s, and lists the Deployment `web` under rolloutRestartTargets because the application reads its values only at start-up. To avoid storing a data MAC in the resource status, an engineer set hmacSecretData: false last month. Today an operator changed the secret in Vault; within a minute `kubectl get secret web-config -o yaml` shows the new values, but the web pods were never restarted and still use the old configuration. Nothing else changed. Which change makes VSO restart the Deployment on future secret changes?
+A: Set hmacSecretData: true again, because the operator ignores every rollout restart target when it does not compute a data MAC for changes
+B: Lower refreshAfter to 5s, because the operator restarts targets only when it notices a change within one refresh interval of the Vault write
+C: Set destination.create: true, because rollout restarts are triggered only for Kubernetes Secrets that the operator created and owns itself
+D: Move rolloutRestartTargets into the VaultAuth resource, because restart targets are configured once for each authentication method used
+K: A
+G: ## Change detection in VSO
+For a VaultStaticSecret, `hmacSecretData` (default **true**) makes VSO compute an HMAC of the secret data and store it in the resource status. VSO uses that MAC for drift detection and to compare incoming Vault data with what it last synced.
+`rolloutRestartTargets` lists Deployments, StatefulSets and similar objects to restart when the secret changes, for applications that cannot reload secrets. The API reference states: **all configured targets are ignored if HMACSecretData is set to false.**
+## Reading the evidence
+The Kubernetes Secret updated within a minute, so syncing works; only the restart is missing, which matches the documented effect of `hmacSecretData: false`.
+W: hmacSecretData true: VSO again computes the MAC, detects the change, and triggers a rollout restart of the web Deployment.
+X: B=Shorter refreshAfter: syncing already works within the interval; restarts are skipped because targets are ignored without the MAC, not because of timing.
+C=destination.create: it controls whether VSO creates the Secret; the Secret already exists and updates, and creation has nothing to do with restarts.
+D=Targets on VaultAuth: rolloutRestartTargets is a field of the secret resources such as VaultStaticSecret, not of VaultAuth.
+T: VSO rollout restarts depend on hmacSecretData; with it set to false, configured restart targets are ignored.
