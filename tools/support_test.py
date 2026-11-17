@@ -78,10 +78,11 @@ with sync_playwright() as p:
     check("study header support link", pg.get_attribute(".supportlink", "href") == "support.html")
 
     # Header pills share one size on every page (and the support page's language toggle matches them).
-    for url in ["", "study.html", "support.html"]:
-        pg.goto(BASE + url); pg.wait_for_selector(".toplinks .pill:not([hidden])")
+    # (site navigation lives in the shared header; pills are page actions only: index 3, study 1, support = language toggle)
+    for url, n in [("", 2), ("study.html", 1), ("support.html", 1)]:
+        pg.goto(BASE + url); pg.wait_for_selector(".toplinks .pill:not([hidden]), .langseg")
         hs = pg.eval_on_selector_all(".toplinks .pill:not([hidden]), .langseg", "els => els.map(e => Math.round(e.getBoundingClientRect().height))")
-        check(f"{url or 'index'}: header pills same height", len(hs) >= 2 and len(set(hs)) == 1, hs)
+        check(f"{url or 'index'}: header pills same height", len(hs) >= n and len(set(hs)) == 1, hs)
     # Blog link in the footnote: hidden before BLOG_FROM (or always while BLOG_FROM is ""), external and marked afterwards.
     blog_from = re.search(r'const BLOG_FROM = "([^"]*)";', open(os.path.join(ROOT, "index.html")).read()).group(1)
     def clock(day):
