@@ -126,6 +126,8 @@ with sync_playwright() as pw:
         f = ROOT / (path + "index.html" if path == "" or path.endswith("/") else path)
         t = f.read_text(encoding="utf-8")
         C.check(f"{path or 'index'}: shared header, footer and chrome.css", 'class="gh' in t and 'class="gf' in t and "assets/chrome.css" in t)
+        C.check(f"{path or 'index'}: skip link to #main, named logo link (WCAG 2.4.1, 4.1.2)",
+                '<a class="skip" href="#main">' in t and 'id="main"' in t and 'class="gh-brand"' in t and 'aria-label="cert-bank home"' in t)
     for w in (1280, 390):
         c = b.new_context(viewport={"width": w, "height": 800}); q = c.new_page()
         q.route("**/fonts.googleapis.com/**", lambda r: r.abort())
