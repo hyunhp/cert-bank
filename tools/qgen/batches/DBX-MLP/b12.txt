@@ -1,0 +1,820 @@
+# DBX-MLP b12: hard set, exam level (level advanced), D1 19, D2 17, D3 4 (guide read 2026-11-08, docs read 2026-11-17)
+# Single answer only (DBX-MLP rule). Stems 60-90 words with 2-3 binding constraints and a named deciding criterion.
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/monitor-output
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/create-monitor-api
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/index
+# src: https://docs.databricks.com/aws/en/data-quality-monitoring/data-profiling/monitor-alerts
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/model-serving-debug
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/production-optimization
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/serve-multiple-models-to-serving-endpoint
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/deploy-custom-python-code
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/time-series
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/online-feature-store
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/on-demand-features
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/lineage
+# src: https://docs.databricks.com/aws/en/machine-learning/automl-hyperparam-tuning/optuna
+# src: https://docs.databricks.com/aws/en/machine-learning/ray/scale-ray
+# src: https://docs.databricks.com/aws/en/machine-learning/ray/
+# src: https://docs.databricks.com/aws/en/machine-learning/mlops/mlops-workflow
+# src: https://docs.databricks.com/aws/en/dev-tools/bundles/variables
+# src: https://docs.databricks.com/aws/en/structured-streaming/foreach
+# src: https://mlflow.org/docs/latest/ml/model/signatures
+# src: https://mlflow.org/docs/latest/ml/evaluation/
+# src: https://mlflow.org/docs/latest/ml/deployment/deploy-model-locally/
+# src: https://mlflow.org/docs/latest/api_reference/python_api/mlflow.html
+# src: https://mlflow.org/docs/latest/api_reference/python_api/mlflow.models.html
+# src: https://mlflow.org/docs/latest/api_reference/python_api/mlflow.data.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/api/pyspark.ml.classification.GBTClassifier.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/api/pyspark.ml.evaluation.MulticlassClassificationEvaluator.html
+# src: https://spark.apache.org/docs/latest/ml-classification-regression.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/api/pyspark.testing.assertDataFrameEqual.html
+
+@ DBX-MLP D1 T1.1 advanced tradeoff
+S: A telecom team keeps 3 TB of raw call events in Delta. Aggregated per subscriber, the training set becomes 2 million rows and about 1.5 GB. The model must use the monotonic constraints of LightGBM, which Spark ML tree models do not offer, and the nightly job must finish within two hours. Which design meets these constraints at the LOWEST compute cost?
+A: Train a Spark ML GBTClassifier directly on the raw 3 TB of events across a large cluster, then impose the monotonic behavior afterwards by post-processing the scores
+B: Aggregate the raw events with Spark into the 1.5 GB subscriber table, then convert it with toPandas and fit LightGBM with monotonic constraints on a single node
+C: Fit one LightGBM model per Spark partition of the raw events with mapInPandas, then average the partition models into one ensemble used for nightly scoring
+D: Start a Ray cluster on the Spark cluster and run distributed LightGBM over the raw 3 TB of events, so that every single event row contributes directly to the fit
+K: B
+G: ## Scale the step that is large, not every step
+SparkML is the right tool when the data that the **learning algorithm** sees does not fit on one machine, or when the algorithm you need exists in Spark ML. Neither is true here:
+- The raw data (3 TB) is large, but the **model's training grain is one row per subscriber**, and that table is only 1.5 GB.
+- The required feature (monotonic constraints in LightGBM) is not available in Spark ML trees.
+## The usual pattern
+1. Use Spark for what it is good at: scanning, joining and aggregating terabytes into features.
+2. Hand the small result to a single-node library (`toPandas()` on a driver with enough memory) and train there.
+This keeps the expensive distributed part short and avoids paying for a cluster during training.
+W: Aggregate with Spark, train on one node: Spark handles the 3 TB scan once, the 1.5 GB subscriber table fits easily in one node's memory, and LightGBM provides the required monotonic constraints.
+X: A=Spark ML GBT on raw events: Spark ML trees lack monotonic constraints, post-processing does not make a model monotonic, and training on raw events uses the wrong grain at a much higher cost.
+C=Per-partition models averaged: each partition sees an arbitrary slice of subscribers' events, so the models are trained on the wrong grain, and averaging independent boosted models is not equivalent to one fit.
+D=Distributed LightGBM on Ray: it pays for distributed training on 3 TB of event rows, although the model is defined per subscriber and the aggregated data fits on one node.
+T: Use Spark to shrink terabytes into the training grain; if the result fits on one node and needs a single-node library, train there.
+V: Spark ML, Databricks Runtime ML
+
+@ DBX-MLP D1 T1.2 advanced troubleshooting
+S: A weekly job refits a Spark ML Pipeline of StringIndexer on `merchant_category`, VectorAssembler and RandomForestClassifier, and a daily job scores new transactions with the latest fitted PipelineModel. New merchant categories appear between refits, and the daily job fails with an unseen-label error. Risk rules forbid dropping any transaction from scoring, and the model must keep using the category. Which change to the pipeline definition fixes the failure from the next refit on?
+A: Set handleInvalid="skip" on the StringIndexer, so that rows whose category was not seen at fit time are filtered out before they reach the assembler stage
+B: Fill nulls in merchant_category with the string "unknown" before indexing, so that every value that reaches the indexer belongs to an already known label
+C: Set handleInvalid="keep" on the StringIndexer, so that categories unseen at fit time map to one extra index value and every transaction is still scored
+D: Replace the StringIndexer with a VectorIndexer that has a high maxCategories, so that new merchant categories are recognized automatically while scoring
+K: C
+G: ## What a fitted StringIndexer does with new values
+`StringIndexer` learns a fixed mapping from string to index at `fit` time. When the fitted model meets a string it never saw, the `handleInvalid` parameter decides what happens:
+- `error` (default): throw an exception, which is what stops the daily job.
+- `skip`: drop the row.
+- `keep`: put all unseen values into one extra bucket at index `numLabels`.
+## Choosing under the stated rules
+"No transaction may be dropped" rules out `skip`. "Keep using the category" rules out removing the column. `keep` scores every row; unseen categories share one extra index until the next weekly refit learns them properly. Tree models handle the extra index like any other value.
+W: handleInvalid="keep": the fitted indexer maps every unseen category to the extra index, so the job no longer fails and no row is dropped.
+X: A=handleInvalid="skip": it removes the rows with new categories, which the risk rules forbid.
+B=Fill nulls with "unknown": the failing values are new non-null categories, not nulls, so they are still unseen labels after the fill.
+D=VectorIndexer: it works on numeric vector columns, not on string columns, so it cannot replace the string-to-index step.
+T: StringIndexer handleInvalid="keep" scores unseen categories through one extra index instead of failing or dropping rows.
+V: Spark ML
+
+@ DBX-MLP D1 T1.3 advanced troubleshooting
+S: An insurer must route 2 TB of claims into six handling queues with Spark ML. Its model validation process only covers gradient-boosted trees, so the risk team requires that algorithm family. Fitting GBTClassifier on the indexed six-class label fails with an error about the number of label classes. The team must stay within Spark ML and keep boosted trees. Which approach meets both requirements?
+A: Wrap GBTClassifier in OneVsRest, which trains one binary boosted model per queue and predicts the queue whose model gives the highest confidence
+B: Set the lossType of GBTClassifier to a multinomial loss, so that the boosted trees fit all six queues jointly inside one single classification model
+C: Fit a GBTRegressor on the numeric queue index and round its predictions, so that one boosted model returns an integer between zero and five
+D: Switch to LogisticRegression with family="multinomial", which supports six classes natively and keeps the whole pipeline inside Spark ML
+K: A
+G: ## GBTClassifier is binary only
+In Spark ML, `GBTClassifier` supports **binary labels only**; the API notes say multiclass labels are not currently supported, and its `lossType` offers only `logistic`. Random forests, decision trees, logistic regression (multinomial) and others handle many classes directly.
+## OneVsRest
+`OneVsRest` is an Estimator that takes any binary `Classifier`, builds one binary problem per class (class i versus all others), trains one model each, and predicts the class whose model is most confident. With six queues it trains six boosted models, so the validated algorithm family is kept.
+W: OneVsRest with GBTClassifier: it turns the six-class task into six binary problems that GBTClassifier supports, so the team keeps boosted trees inside Spark ML.
+X: B=Multinomial lossType: GBTClassifier only offers the logistic loss for binary labels; there is no multinomial option.
+C=GBTRegressor on the index: queue numbers are nominal, so regression treats queue 5 as "more" than queue 1 and rounding produces meaningless neighbors.
+D=Multinomial LogisticRegression: it handles six classes, but it abandons the boosted-tree family that the risk team requires.
+T: Spark ML GBTClassifier is binary; wrap it in OneVsRest for multiclass problems.
+V: Spark ML
+
+@ DBX-MLP D1 T1.4 advanced use-case
+S: A team tunes a Spark ML GBTClassifier on 900 million rows. Nobody knows how many boosting iterations help, and a CrossValidator grid over maxIter would repeat a 3-hour fit several times, which the nightly window cannot afford. The team wants training to stop adding trees once loss on held-out rows stops improving, within one single fit. What should it configure?
+A: A CrossValidator with numFolds=2 and a grid of three maxIter values, so that the search needs fewer model fits than the default number of folds
+B: A checkpointInterval of 10 with a large maxIter, so that the fit writes intermediate trees and later resumes from the best saved checkpoint
+C: A TrainValidationSplit with trainRatio=0.9 over several maxIter values, run with parallelism=3 so that the candidates are fitted together
+D: A Boolean column that marks the validation rows, set as validationIndicatorCol with a validationTol, together with a large maxIter value
+K: D
+G: ## Early stopping in Spark ML boosting
+`GBTClassifier` and `GBTRegressor` accept `validationIndicatorCol`: the name of a Boolean column where `false` marks training rows and `true` marks validation rows. While boosting, the algorithm measures the validation error after each iteration and stops when the improvement falls below `validationTol`. `maxIter` then acts as an upper bound, not as the number you must guess.
+## Why it fits the constraints
+- One fit instead of a grid: no repeated 3-hour runs.
+- The stop rule uses held-out rows, which is what the team asked for.
+Example: add `is_val = rand(seed=7) < 0.1`, set `validationIndicatorCol="is_val"`, `maxIter=500`.
+W: validationIndicatorCol with validationTol: the single fit evaluates the marked validation rows after each tree and stops adding trees when the improvement becomes smaller than the tolerance.
+X: A=Two-fold CrossValidator over maxIter: it still fits several full models (folds times grid values), which the nightly window cannot afford.
+B=checkpointInterval: checkpointing truncates lineage for fault tolerance; it does not evaluate held-out loss or stop boosting early.
+C=TrainValidationSplit with parallelism: it still trains one full model per maxIter value; running them together needs more cluster capacity rather than fewer fits.
+T: For Spark ML boosted trees, validationIndicatorCol plus validationTol gives early stopping in one fit.
+V: Spark ML
+
+@ DBX-MLP D1 T1.5 advanced use-case
+S: A logistics firm predicts one of four delivery outcomes and feeds the class probabilities, not the predicted labels, into a capacity plan that sums the expected parcels per outcome. Two Spark ML models are tuned with CrossValidator, and the chosen model must give the most trustworthy probabilities. The evaluator still uses its default metric. Which evaluator setting should drive model selection?
+A: MulticlassClassificationEvaluator with metricName="accuracy", because the largest share of correct labels also yields the best probability estimates
+B: MulticlassClassificationEvaluator with metricName="logLoss", which reads the probability column and penalizes confident wrong probabilities
+C: MulticlassClassificationEvaluator with its default metricName="f1", which weights each class by its frequency in the evaluation data
+D: BinaryClassificationEvaluator with metricName="areaUnderROC", computed once for every outcome so that each class receives its own ranking score
+K: B
+G: ## Match the metric to how predictions are used
+When a business process **uses the probabilities themselves** (summing expected counts, pricing risk), the model must be judged on probability quality. Accuracy and F1 only look at the arg-max label, and ranking metrics (AUC) only look at order.
+## Log loss in Spark ML
+`MulticlassClassificationEvaluator` supports `metricName="logLoss"`; it reads `probabilityCol` and grows sharply when the model is confident and wrong. For log loss smaller is better, and `CrossValidator` reads the evaluator's `isLargerBetter()` so it still picks the right model.
+The default metric of this evaluator is `f1` (weighted by class frequency), which says nothing about calibration.
+W: logLoss: it scores the full probability vector of each row, so the selected model is the one whose probabilities best match observed outcomes, which the capacity plan relies on.
+X: A=Accuracy: two models with equal accuracy can have very different probabilities; accuracy ignores everything but the top label.
+C=Default f1: weighted F1 also judges only predicted labels and is the setting that is already failing the requirement.
+D=Per-class areaUnderROC: AUC measures ranking, not whether probabilities are well calibrated, and BinaryClassificationEvaluator expects a binary label.
+T: When probabilities feed a calculation, select models with a probability metric such as logLoss.
+V: Spark ML
+
+@ DBX-MLP D1 T1.7 advanced tradeoff
+S: A retailer must score 40,000 clickstream events per second with a scikit-learn model registered in Unity Catalog. Scores land in a Delta table that dashboards read, and a delay of up to two minutes is acceptable. One proposal calls the Model Serving endpoint once per event from the stream. The team wants the LOWEST cost and no dependency on endpoint capacity. Which design fits?
+A: Keep the per-event endpoint calls but enable route optimization, so that the endpoint absorbs about 40,000 requests per second with lower overhead
+B: Group events into batches of 1,000 inside foreachBatch and send each batch to the endpoint, so that the number of requests drops sharply
+C: Load the model with mlflow.pyfunc.spark_udf and apply it inside the Structured Streaming query, so that the executors score each micro-batch
+D: Collect every micro-batch to the driver with toPandas and call model.predict there, so that the model is loaded only once for the stream
+K: C
+G: ## Real-time serving versus streaming scoring
+A Model Serving endpoint is built for **request/response** callers that need an answer in milliseconds. A stream whose results only need to land in a table within minutes does not need that: the model can run **inside** the streaming job.
+## spark_udf
+`mlflow.pyfunc.spark_udf(spark, "models:/catalog.schema.model@alias")` wraps any pyfunc model as a Spark UDF. Each executor loads the model and scores its partition of every micro-batch, so throughput grows with the cluster, and there is no per-request cost or endpoint quota.
+W: spark_udf in the stream: scoring runs on the executors that already process the micro-batches, which meets the two-minute delay without paying for or depending on endpoint capacity.
+X: A=Route optimization: it raises endpoint throughput but still pays for serving capacity for 40,000 requests per second and keeps the dependency the team wants to avoid.
+B=Batched endpoint calls: fewer requests, but the stream still depends on endpoint capacity and pays for serving that a UDF on the existing cluster avoids.
+D=toPandas on the driver: all scoring runs on one machine, which does not scale to 40,000 events per second and wastes the executors.
+T: For streams that write results to tables, score inside Spark with spark_udf; keep endpoints for low-latency callers.
+V: MLflow, Structured Streaming, Model Serving
+
+@ DBX-MLP D1 T1.8 advanced troubleshooting
+S: A feature job computes a 30-day rolling spend per customer with groupBy("customer_id").applyInPandas and pandas rolling windows. Three wholesale customers hold 40% of the 5 billion rows, and their tasks fail with out-of-memory errors, while the other tasks finish in minutes. The features feed a nightly training job. The cluster size is fixed by budget, and the features must stay exact. Which change fixes the job?
+A: Replace the grouped pandas function with a Spark window function partitioned by customer_id, ordered by event time, with a 30-day range frame
+B: Raise spark.sql.execution.arrow.maxRecordsPerBatch, so that each customer group reaches the Python worker in fewer but larger Arrow batches
+C: Add a random salt to customer_id before applyInPandas and combine the salted partial results, so that large customers spread over many tasks
+D: Switch from applyInPandas to a Series-to-Series pandas UDF, so that the rolling sum runs per Arrow batch without loading a whole group at once
+K: A
+G: ## Why grouped map fails on skew
+`applyInPandas` hands each **whole group** to Python as one pandas DataFrame. A customer with billions of rows must fit into one Python worker's memory, whatever the Arrow batch settings are.
+## Native window functions
+A rolling sum is a built-in Spark operation: `Window.partitionBy("customer_id").orderBy(col("ts").cast("long")).rangeBetween(-30*86400, 0)`. Spark evaluates it in the JVM over sorted rows and can spill to disk, so a large partition does not have to sit in Python memory at once. The result is exact, and no cluster growth is needed.
+W: Spark window function: it computes the same 30-day rolling sum exactly in native code that streams over sorted rows and spills, instead of materializing each giant group in pandas.
+X: B=maxRecordsPerBatch: that setting splits batches for scalar pandas UDFs; grouped map still loads the whole group, so the big customers still run out of memory.
+C=Salted groups: a rolling window needs every earlier row of the same customer, so salting splits windows across groups and the features stop being exact.
+D=Series-to-Series pandas UDF: each call sees an arbitrary batch of rows without group boundaries or order, so a correct per-customer rolling sum cannot be computed.
+T: Prefer native Spark window functions for per-key rolling features; grouped pandas functions load each whole group into memory.
+V: Apache Spark, pandas function APIs
+
+@ DBX-MLP D1 T1.9 advanced tradeoff
+S: A team tunes a gradient-boosted model with MlflowSparkStudy and the default TPE sampler. The budget is 120 trials of about 10 minutes each, the job must finish within 3 hours, and the cluster could run 64 trials at the same time. Earlier searches showed that adaptive sampling found clearly better parameters than random sampling. Which n_jobs value balances the deadline and search quality BEST?
+A: n_jobs=64, so that almost all trials start in the first two rounds and the whole search finishes in roughly twenty minutes of wall-clock time
+B: n_jobs=1, so that every trial is informed by all previous results and the sampler stays fully adaptive across the entire trial budget
+C: n_jobs=120, so that every trial starts at once and cluster autoscaling adds the capacity that is missing for the additional 56 trials
+D: n_jobs=8, so that 15 rounds of about 10 minutes fit the deadline while most trials can still learn from many completed results
+K: D
+G: ## Parallelism versus adaptivity
+TPE (the default sampler of `MlflowSparkStudy`) proposes the next trial from the results of **finished** trials. Trials that run at the same time cannot learn from each other.
+- With n_jobs close to n_trials, most trials start before any result exists, so the search behaves almost like random sampling.
+- With n_jobs=1, the search is fully adaptive but slowest.
+## Work the numbers
+- n_jobs=1: 120 x 10 min = 1,200 min (20 h), far past 3 h.
+- n_jobs=8: 120 / 8 = 15 rounds x 10 min = 150 min, inside 180 min.
+- n_jobs=64: about 2 rounds, about 20 min, but nearly no adaptivity.
+The smallest parallelism that meets the deadline keeps the most adaptivity.
+W: n_jobs=8: 150 minutes fits the 3-hour limit, and later trials still benefit from more than a hundred completed results.
+X: A=n_jobs=64: it meets the deadline easily but launches nearly every trial without feedback, throwing away the adaptive advantage the team measured.
+B=n_jobs=1: fully adaptive, but 20 hours of sequential trials miss the 3-hour deadline.
+C=n_jobs=120: everything starts blind (pure random-like search), and the cluster cannot even run more than 64 trials at once.
+T: With adaptive samplers, use the lowest parallelism that still meets the time budget.
+V: Optuna, MLflow
+
+@ DBX-MLP D1 T1.10 advanced use-case
+S: A nightly Lakeflow job starts a Ray cluster with setup_ray_cluster, runs a Ray Tune search and calls shutdown_ray_cluster at the end. Some trials fail with worker errors, but when engineers investigate the next morning, the Ray worker logs are gone because the cluster has terminated. Policy requires keeping these logs for 30 days in governed storage. What should be configured?
+A: Raise autoscale_idle_timeout_minutes, so that idle Ray worker nodes stay alive with their logs until engineers inspect them the next morning
+B: Pass collect_log_to_path with a Unity Catalog volume path to setup_ray_cluster, so that Ray copies the head and worker logs there at shutdown
+C: Set num_cpus_head_node to a positive value, so that the head node runs the trials and their logs stay on the driver after the cluster ends
+D: Log each trial's stdout to MLflow with mlflow.log_text inside the trainable, and remove the shutdown_ray_cluster call at the end of the job
+K: B
+G: ## Ray on Spark keeps logs on the nodes
+`setup_ray_cluster` runs the Ray head on the driver and Ray workers as long-running Spark tasks. Their log files live on those nodes, so they disappear when the Ray cluster or the job cluster ends.
+## collect_log_to_path
+`setup_ray_cluster(..., collect_log_to_path="/Volumes/<catalog>/<schema>/<volume>/ray_logs")` tells Ray on Spark to collect the head and worker logs to that path when the nodes terminate. A Unity Catalog volume is governed storage with access control, and a retention job or lifecycle rule can enforce the 30 days.
+W: collect_log_to_path to a volume: the logs are copied to governed storage when the Ray nodes stop, so they survive the job and can be read the next morning.
+X: A=Longer idle timeout: it only delays downscaling of idle Ray workers while the cluster runs; the job still ends and the logs vanish with the nodes.
+C=CPUs on the head node: running trials on the driver does not persist anything, and the driver's local logs also vanish when the job cluster terminates.
+D=log_text and no shutdown: trainable stdout misses worker-level crash logs, and leaving the Ray cluster running wastes resources while the job cluster still terminates.
+T: Use collect_log_to_path (for example a Unity Catalog volume) to keep Ray on Spark logs after the cluster ends.
+V: Ray on Databricks, Unity Catalog volumes
+
+@ DBX-MLP D1 T1.12 advanced use-case
+S: A recommender has a 90 GB embedding table and small dense layers. It is trained with PyTorch on nodes that each have 4 GPUs with 24 GB of memory. Plain DistributedDataParallel fails with out-of-memory errors at start-up because each process holds a full model copy. The team wants to use all 16 GPUs of 4 nodes without dropping embedding rows. Which strategy addresses the root cause?
+A: Shard the model parameters across the GPUs with fully sharded data parallelism or DeepSpeed ZeRO, so that no single GPU holds the whole table
+B: Use gradient accumulation with a smaller per-GPU batch size, so that activations shrink until each full copy of the model fits on one GPU
+C: Increase the number of DistributedDataParallel processes to 16, so that each process trains on a smaller share of the training data
+D: Switch all GPUs to mixed-precision training only, so that each copy of the 90 GB table becomes small enough to fit on one 24 GB GPU
+K: A
+G: ## Data parallelism copies the model
+`DistributedDataParallel` (DDP) gives every GPU a **full replica** of the parameters, gradients and optimizer state, and splits only the data. It speeds up training of models that fit on one GPU; it cannot help when the model itself is too big.
+## Sharding the model
+Fully sharded data parallelism (PyTorch FSDP) and DeepSpeed ZeRO split parameters, gradients and optimizer states across the GPUs, gathering pieces only when a layer needs them. A 90 GB table over 16 GPUs is about 5.6 GB of parameters per GPU (plus the sharded optimizer state). On Databricks, `TorchDistributor` and the DeepSpeed distributor launch such multi-node jobs.
+W: FSDP or ZeRO sharding: splitting the parameters (and their optimizer state) across all GPUs removes the need for any GPU to hold the full 90 GB table.
+X: B=Gradient accumulation: it reduces activation memory per step, but the 90 GB of parameters per replica still cannot fit into 24 GB.
+C=More DDP processes: each extra process still holds a full model copy, so every one of them runs out of memory the same way.
+D=Mixed precision alone: halving the bytes per value still leaves about 45 GB of embeddings per replica, well over 24 GB.
+T: When the model does not fit on one GPU, shard it (FSDP/ZeRO); plain data parallelism only splits the data.
+V: PyTorch, TorchDistributor, DeepSpeed
+
+@ DBX-MLP D1 T1.13 advanced comparison
+S: A reinforcement-learning team tunes a PyTorch policy with population-based training: running trials are paused at intervals, and weak trials copy the checkpoints and perturbed hyperparameters of strong ones before they continue. The team must use its existing Databricks cluster, which also runs the Spark data preparation, and log every trial to MLflow. Which approach supports this method with the LEAST custom code?
+A: MlflowSparkStudy with Optuna and its default MedianPruner, which stops weak trials early so that the strong trials can keep on running
+B: CrossValidator with a ParamGridBuilder on a Spark ML estimator, with parallelism set to the number of members in the population
+C: Ray Tune with its population-based training scheduler on a Ray cluster started by setup_ray_cluster, logging all trials to MLflow
+D: A grouped-map applyInPandas job in which each group is one population member that trains independently on its own executor
+K: C
+G: ## Ray and Spark have different strengths
+Databricks describes Ray as strong at **logical parallelism**: dynamic, stateful, compute-heavy tasks such as reinforcement learning and tuning, while Spark excels at **data parallelism** over large datasets. Ray runs on Databricks through `setup_ray_cluster` on an existing Spark cluster.
+## Population-based training
+PBT needs a scheduler that can pause trials, copy checkpoints between them and mutate hyperparameters while they run. Ray Tune ships this scheduler, and Ray Tune trials can log to MLflow. Optuna pruners only stop trials; they do not exploit or copy state between trials.
+W: Ray Tune PBT on Ray on Spark: the built-in scheduler implements pause, copy and perturb, it runs on the existing cluster, and trials can log to MLflow.
+X: A=Optuna with MedianPruner: pruning stops weak trials but never copies a strong trial's checkpoint or perturbs its hyperparameters, so PBT would need custom code.
+B=CrossValidator grid: it fits fixed Spark ML parameter combinations independently and has no notion of pausing or exchanging state between running trials.
+D=applyInPandas per member: groups run independently with no way to exchange checkpoints during training, so the population logic would have to be built by hand.
+T: Stateful, dynamic tuning such as population-based training fits Ray Tune on Ray on Spark.
+V: Ray on Databricks, Ray Tune, MLflow
+
+@ DBX-MLP D1 T1.14 advanced use-case
+S: A bank has 12 regional credit models of about 50 MB each. A nightly job scores 2 billion rows, and each row's `region` column decides which model scores it. The current code uses groupBy("region").applyInPandas, and the task of the largest region runs out of memory. The cluster size is fixed. Which design scores every row with the correct model and avoids the failure?
+A: Increase spark.sql.shuffle.partitions, so that the groupBy creates more shuffle partitions and each region is spread over several pandas groups
+B: Repartition by region and use a Series-to-Series pandas UDF that loads the matching regional model again for every Arrow batch it receives
+C: Train one global model on all regions and score it with spark_udf, so that the scoring job no longer needs to route any rows by region
+D: Use mapInPandas, load all 12 models once per task into a dictionary, and score each Arrow batch by looking up every row's region value
+K: D
+G: ## Grouping is only needed when rows must be seen together
+`applyInPandas` is the right tool when a function needs **all rows of a group at once** (for example to train one model per group). Scoring is row-wise: each row needs only its region's model, not the other rows of its region. Grouping by region forces one region's 300 million rows into one pandas DataFrame.
+## mapInPandas for routed scoring
+`mapInPandas` streams each partition as an iterator of pandas DataFrames (Arrow batches). Load the 12 small models once per task, then for each batch split by `region` and call the matching model. Memory stays bounded by the batch size, and every row is still scored by its own regional model.
+W: mapInPandas with a model dictionary: models load once per task, batches stay small, and each row is routed to its regional model without building a giant group.
+X: A=More shuffle partitions: all rows with the same key still land in one group, so the largest region still arrives as one huge pandas DataFrame.
+B=Series UDF reloading per batch: loading a 50 MB model for every Arrow batch adds heavy overhead, and a Series UDF does not see the region column unless more columns are passed.
+C=One global model: it changes the approved models instead of fixing the scoring job, which the bank did not ask for.
+T: For row-wise scoring with per-key models, use mapInPandas with models loaded once per task; reserve applyInPandas for whole-group work.
+V: pandas function APIs, Apache Spark
+
+@ DBX-MLP D1 T1.16 advanced use-case
+S: Auditors require that every registered churn model can be traced to the exact version of the Delta table `ml.crm.train_set` it was trained on. The table is rewritten every night, and the team trains from a notebook with MLflow. The link must be visible on the run and usable to reload identical data later, without copying the data anywhere. What should the training code do?
+A: Build the dataset with mlflow.data.load_delta(table_name=..., version=v) and record it with mlflow.log_input(dataset, context="training")
+B: Log the table name with mlflow.log_param and the training start time as a tag, then reload later with a time-travel query by timestamp
+C: Export the training DataFrame to CSV and attach it to the run with mlflow.log_artifact, so that the exact rows can be reloaded later
+D: Call mlflow.autolog(log_datasets=False) and rely on the notebook revision of the run, which records the table that the code has read
+K: A
+G: ## Datasets as run inputs
+MLflow records datasets as **inputs** of a run. `mlflow.data.load_delta(table_name="ml.crm.train_set", version=v)` returns a `SparkDataset` whose source is the Delta table at that version; it also computes a digest. `mlflow.log_input(dataset, context="training")` attaches it to the run, where it appears in the run's inputs and can be read back with `mlflow.data.get_source()`.
+## Why the version matters
+A nightly rewrite creates a new Delta version each night. Recording the version number points at exactly the rows used, and Delta time travel (`VERSION AS OF v`) reloads them without a copy, as long as the history is retained.
+W: load_delta with version plus log_input: the run stores the table name and exact version as a dataset input, which reloads the identical data through time travel without duplicating it.
+X: B=Name plus timestamp: a timestamp only approximates which version was read, and the parameter is not a dataset input that MLflow can resolve.
+C=CSV artifact: it copies the training data into run artifacts, which the requirement forbids, and creates an ungoverned duplicate.
+D=autolog without datasets: it explicitly turns dataset logging off, and a notebook revision shows code, not which table version was read.
+T: Log the Delta table and version as a run input with mlflow.data.load_delta and mlflow.log_input.
+V: MLflow, Delta Lake
+
+@ DBX-MLP D1 T1.17 advanced use-case
+S: A churn model needs standard scaling, one-hot encoding of `plan`, and a log transform of `tenure_days`, with the scaling learned on training data. Callers of the endpoint send raw columns only. The team wants the transforms applied identically in training and serving, with the LEAST custom code to maintain and no extra service in the request path. Which packaging should it choose?
+A: A custom PythonModel whose predict method reimplements scaling, encoding and the log transform by hand from constants copied out of the notebook
+B: One on-demand feature function in Unity Catalog per transform, registered as FeatureFunction lookups that run in front of the model when serving
+C: A scikit-learn Pipeline with a ColumnTransformer and the estimator, fitted together and logged as one model with mlflow.sklearn
+D: A separate preprocessing endpoint that transforms the raw rows and forwards them to the model endpoint, which serves the bare estimator
+K: C
+G: ## Put fitted preprocessing inside the model
+When preprocessing has **learned state** (means and standard deviations, category lists), the safest way to keep training and serving identical is to fit it together with the estimator and save them as one object. In scikit-learn that is a `Pipeline([("prep", ColumnTransformer(...)), ("model", estimator)])`, logged with `mlflow.sklearn.log_model`. Serving loads the whole pipeline and accepts raw columns.
+## When to reach further
+A custom pyfunc is needed for logic a library pipeline cannot express (business rules, several models). On-demand features fit **request-time values that do not depend on training statistics**. Neither is needed here.
+W: scikit-learn Pipeline: scaling and encoding are fitted with the model and travel inside the logged artifact, so serving applies exactly the learned transforms with no extra code.
+X: A=Hand-written predict: copying fitted constants by hand is extra code that silently drifts after the next retraining.
+B=On-demand functions: they cannot learn the scaling statistics from training data, so the constants would be hard-coded and maintained separately.
+D=Preprocessing endpoint: it adds a second service and network hop in the request path, which the team ruled out.
+T: Fit learned preprocessing and the estimator as one pipeline and log it as one model.
+V: MLflow, scikit-learn, Model Serving
+
+@ DBX-MLP D1 T1.18 advanced troubleshooting
+S: A daily job writes `orders_today` per store into a time series feature table and stamps each row with the date at 00:00, although the value counts the orders up to 23:59. Labels are stockout events with exact timestamps during the day. Offline AUC is excellent, but the served model performs far worse. Point-in-time correctness must hold without changing the label data. What is the fix?
+A: Add lookback_window=timedelta(days=1) to the FeatureLookup, so that only feature rows from the previous 24 hours can join to each label
+B: Convert the timestamp key to the DATE type, so that the as-of join matches only rows from earlier dates and skips the label's own day
+C: Republish the online table in SNAPSHOT mode, so that the served model receives the same daily values that the training set used
+D: Stamp each row with the time its value became complete, the end of the day, so the as-of join only sees counts known at the label time
+K: D
+G: ## As-of joins trust your timestamps
+A point-in-time lookup joins, for each label, the latest feature row whose timestamp is **not later than** the label's lookup timestamp. It cannot know what the value contained; it relies on the timestamp meaning "this value was known at this time".
+## The leak here
+A row stamped `00:00` but holding the whole day's orders is joined to a stockout at `15:00` the same day. The feature contains orders placed after the stockout, information the model never has at serving time. Offline metrics look excellent; production does not.
+## The fix
+Stamp each row with the time it became available (end of day, or the job's completion time). Then a label at 15:00 joins the previous day's complete row, exactly what serving sees.
+W: Stamp at availability time: with end-of-day timestamps, the as-of join can only pick values that were already complete before the label event.
+X: A=One-day lookback window: the leaking row is less than a day old at 15:00, so the window keeps it; lookback only drops stale values.
+B=DATE key: a label on that date still matches the same date's row, because the join takes rows not later than the label time.
+C=SNAPSHOT publish: it changes how the online store is synced, not the leaked values baked into the training set.
+T: Point-in-time joins are only correct if feature timestamps mean "known at"; stamp aggregates at the end of their window.
+V: Feature Store, Unity Catalog
+
+@ DBX-MLP D1 T1.19 advanced use-case
+S: The marketing team refreshes customer engagement features every hour, and the finance team refreshes customer credit features once a month; each team must be the only writer of its own features, and neither team wants to wait for the other's schedule. A churn model needs both groups for training and automatic feature lookup when it is served. Which FeatureEngineeringClient design fits these constraints?
+A: One shared feature table that both teams update with write_table in merge mode, each team sending a DataFrame with only its own feature columns
+B: Two feature tables keyed by customer_id, each created and written by one team, combined at training time through two separate FeatureLookups
+C: One shared feature table rebuilt hourly by marketing, which copies the monthly finance values into it from a view during every single run
+D: Two feature tables joined into a third combined table by a nightly job, so that the model performs its lookups against one single table
+K: B
+G: ## Split feature tables by owner and cadence
+A feature table in Unity Catalog is a Delta table with a primary key. Access control is per table, so "only one writer per feature group" is easy when each group has its own table and its own `MODIFY` grant. Different refresh schedules also stay independent.
+## Combining at training time
+`create_training_set` accepts a list of `FeatureLookup` objects; each lookup names its table, the features and the `lookup_key`. Two lookups on `customer_id` join both groups. When the model is logged with `fe.log_model`, the lookups are stored with it, so batch scoring and serving fetch both tables automatically.
+W: Two owned tables and two FeatureLookups: each team writes only its table on its own schedule, and the logged model looks up both groups automatically.
+X: A=Shared table with merge writes: both teams need write access to the same table, which breaks the single-writer rule.
+C=Marketing copies finance values: marketing becomes a writer of finance's features, and every hourly rebuild duplicates monthly data.
+D=Nightly combined table: hourly engagement features become up to a day stale, and a third job writes both groups' features.
+T: Give each owner and refresh cadence its own feature table and combine them with several FeatureLookups.
+V: Feature Store, Unity Catalog
+
+@ DBX-MLP D1 T1.20 advanced troubleshooting
+S: A feature table of 30 million customers was created with CREATE TABLE AS SELECT, and a non-null primary key was added afterwards. About 2% of rows change each night. Calling fe.publish_table with the online store, source table and online table name, and no other options, fails on a prerequisite check. The team wants nightly incremental syncs at the LOWEST cost. What should it do?
+A: Pass publish_mode="SNAPSHOT" in every nightly call, so that each sync copies the whole table without needing any extra table property
+B: Pass publish_mode="CONTINUOUS", so that a streaming pipeline keeps the online table current without any change tracking on the source
+C: Enable Change Data Feed on the source table and keep the default TRIGGERED mode, scheduled to run right after the nightly feature job
+D: Recreate the table with timeseries_columns on the key, because only time series feature tables can be published to online stores
+K: C
+G: ## Prerequisites for publishing
+Before `publish_table` can sync a feature table to a Databricks Online Feature Store (Lakebase-backed, formerly online tables), the source needs:
+- a primary key constraint with non-nullable key columns, and
+- **Change Data Feed** enabled, for the `TRIGGERED` and `CONTINUOUS` modes.
+`TRIGGERED` is the default mode: each call (for example a scheduled job) syncs only the changes since the last sync.
+## Choosing the mode
+- `TRIGGERED`: incremental, on demand; fits nightly 2% changes.
+- `CONTINUOUS`: always-on streaming pipeline; also needs CDF.
+- `SNAPSHOT`: full copy each time; efficient only when a large share of rows changes between syncs.
+Enable CDF with `ALTER TABLE ... SET TBLPROPERTIES (delta.enableChangeDataFeed = true)`.
+W: Enable CDF and keep TRIGGERED: the missing prerequisite is the change feed, and triggered syncs then copy only the nightly 2% of changed rows.
+X: A=SNAPSHOT every night: it avoids the CDF requirement but copies all 30 million rows to sync 2% of them, which is the costly choice.
+B=CONTINUOUS: it requires Change Data Feed as well, and an always-on pipeline costs more than a nightly sync.
+D=Time series key: both plain and time series feature tables can be published; the failing check is the change feed.
+T: Online store publishing in TRIGGERED or CONTINUOUS mode needs Change Data Feed on the source table.
+V: Online Feature Store, Lakebase, Delta Lake
+
+@ DBX-MLP D1 T1.21 advanced tradeoff
+S: Session features for a recommendation model are computed from a Kafka stream. Product owners accept features up to 15 minutes old, and finance wants the LOWEST compute cost. The model is served with automatic feature lookup from an online store. Today a continuously running streaming query writes the feature table, and the table is published with publish_mode="CONTINUOUS". Which design keeps the freshness target at a lower cost?
+A: Run the query with trigger availableNow every 10 minutes from a scheduled job, then publish in TRIGGERED mode right after each run
+B: Keep the continuous query but lower its trigger interval to one second, so that each micro-batch is smaller and cheaper to process
+C: Replace streaming with a nightly batch job and publish in SNAPSHOT mode, because a daily full copy is the cheapest available sync option
+D: Keep both continuous parts, but move the online store to a smaller capacity unit, so that the always-on part costs less every hour
+K: A
+G: ## Freshness is a requirement, not a reflex
+A continuously running stream and a continuous publish pipeline keep compute running 24 hours a day to deliver second-level freshness. When the business accepts 15 minutes, an **incremental batch** cadence is cheaper.
+## availableNow
+`trigger(availableNow=True)` processes all data available at start (with the same checkpoint and exactly-once semantics as a continuous stream), then stops. Scheduled every 10 minutes from a Lakeflow job, the cluster runs only while there is work. A `TRIGGERED` publish after each run then syncs the changes to the online store (Change Data Feed required).
+Worst-case age: about 10 minutes of schedule plus run time, inside the 15-minute target.
+W: availableNow every 10 minutes plus TRIGGERED publish: it keeps the stream's incremental semantics and meets 15 minutes, while compute runs only during each short run.
+X: B=One-second trigger: it keeps the cluster running all day and adds per-batch overhead, raising cost for freshness nobody needs.
+C=Nightly batch with SNAPSHOT: features would be up to a day old, which breaks the 15-minute target.
+D=Smaller store capacity: the always-on streaming query and continuous pipeline still run all day, and a smaller store can hurt lookup latency.
+T: When minutes of staleness are acceptable, scheduled availableNow runs with triggered publishing beat always-on streaming on cost.
+V: Structured Streaming, Online Feature Store, Lakeflow Jobs
+
+@ DBX-MLP D1 T1.22 advanced use-case
+S: A fraud model uses `local_hour`, computed from the request timestamp and the cardholder's home time zone stored in a feature table. In training a notebook computed it with pandas; for serving, the application team re-implemented it in Java, and scores now disagree for travelers. The fix must give one definition for training, batch scoring and serving. What should the team do?
+A: Precompute local_hour for every card every hour into a feature table, and publish that table to the online store for real-time lookups
+B: Ask the callers to send local_hour in each request, and document the pandas logic so that every client team implements it identically
+C: Keep the pandas code in the training notebook and copy it into a custom pyfunc predict method, while the Java implementation stays in place
+D: Register a Python UDF in Unity Catalog, bind it with FeatureFunction to the request timestamp and the time zone lookup, and log with fe.log_model
+K: D
+G: ## On-demand features
+Some features depend on values that exist only in the request (here the transaction timestamp). Databricks computes them with **on-demand features**: a Python UDF registered in Unity Catalog, referenced through `FeatureFunction(udf_name=..., input_bindings={...}, output_name="local_hour")`.
+- `input_bindings` can map UDF arguments to request columns and to values from `FeatureLookup`s (the time zone).
+- The model must be logged with `fe.log_model`; then `score_batch` and Model Serving both call the same UDF automatically.
+One governed definition removes the training/serving skew caused by two implementations.
+W: Unity Catalog UDF with FeatureFunction: training, batch scoring and serving all execute the same registered function, so local_hour is computed identically everywhere.
+X: A=Hourly precompute: local_hour depends on each transaction's exact timestamp, not on the card alone, so a precomputed value is wrong between refreshes.
+B=Callers send it: every client keeps its own implementation, which is exactly what caused the disagreement.
+C=Copy into predict: training keeps the notebook version and serving the copy, and the Java version still exists, so definitions can drift again.
+T: Compute request-time features with a Unity Catalog Python UDF used through FeatureFunction and fe.log_model.
+V: Feature Store, Unity Catalog, Model Serving
+
+@ DBX-MLP D2 T2.1 advanced tradeoff
+S: A bank retrains a credit model every month on customer data that only the production workspace may read. Auditors require that every change to feature engineering and training logic is reviewed and tested before it reaches production. Training takes about 40 minutes on a modest cluster, and the data distribution shifts noticeably from month to month. Which lifecycle pattern meets these constraints?
+A: Deploy models: train in development on a masked extract of the data, then copy the resulting model version into the production catalog
+B: Deploy code: promote reviewed training code through tests in staging to production, where the job trains the model on production data
+C: Deploy models: train once in staging on synthetic data, then promote that same model artifact to production by moving an alias
+D: Deploy code only for inference, while data scientists train the production models interactively inside the production workspace
+K: B
+G: ## Two ways to move ML to production
+- **Deploy models**: train once (dev or staging), then promote the model artifact. Useful when training is very expensive or must happen once.
+- **Deploy code**: promote the reviewed, tested training code; the production job trains the model on production data. Databricks recommends this for most cases.
+## Deciding factors here
+- Only production may read the real data, so a model trained elsewhere never sees it.
+- Auditors want all logic changes reviewed and tested before production: code review plus CI in staging.
+- 40-minute training is cheap enough to rerun in production.
+All three point to deploy code.
+W: Deploy code: reviewed and staged code reaches production, and the production job trains on the only data that is allowed and representative.
+X: A=Deploy models from a masked extract: the model learns from different data than production, and the reviewed artifact is a model rather than tested code.
+C=Deploy models trained on synthetic data: synthetic data is not the production distribution, so the promoted model is not fit for purpose.
+D=Interactive training in production: unreviewed manual training in production contradicts the audit requirement.
+T: When production data cannot leave production and training is affordable, deploy code and train in production.
+V: MLOps, Unity Catalog, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.2 advanced use-case
+S: Data governance wants to drop the column `legacy_score` from the feature table `ml.crm.cust_features`. Before approving, it must list every registered model that uses the column, across dozens of teams, without asking each team. All models were logged with fe.log_model and registered in Unity Catalog, and several of them belong to teams that have since been reorganized. Which Databricks capability answers this?
+A: Unity Catalog lineage of the feature table, which shows the models that consume its features as tracked when they were logged
+B: An MLflow experiment search for runs whose logged parameters mention the table name and the column name among their values
+C: The workspace audit log, filtered on SELECT statements against the table across the last 90 days of the query history only
+D: The Delta history of the feature table, which records every reader job and notebook that loaded the column in recent days
+K: A
+G: ## Feature lineage
+When a model is logged with `FeatureEngineeringClient.log_model`, the feature tables, features and on-demand functions it uses are recorded automatically. Catalog Explorer shows this in the **Lineage** tab of the feature table and of the model, governed by Unity Catalog.
+## Why the alternatives fall short
+Parameters only contain what someone chose to log. Audit logs and query history show reads, not which model depends on a column, and they miss models that have not run in the window. Delta history records **writes** (versions), not readers.
+W: Unity Catalog lineage: fe.log_model records which features each model uses, so the feature table's lineage lists every dependent model without asking teams.
+X: B=Experiment search on parameters: teams rarely log table and column names as parameters, and runs in other teams' experiments may not be visible.
+C=Audit log of SELECTs: it shows who read the table recently, not which registered model needs the column, and misses models that did not run in the window.
+D=Delta history: it records write operations and versions of the table, not the jobs or notebooks that read it.
+T: Use Unity Catalog lineage (captured by fe.log_model) to find models that depend on a feature.
+V: Feature Store, Unity Catalog
+
+@ DBX-MLP D2 T2.3 advanced troubleshooting
+S: A unit test for `dedupe_orders(df)` builds a small input DataFrame and checks `actual.collect() == expected.collect()`. It fails now and then because row order differs between runs, and because a computed `avg_amount` differs from the expected value in the seventh significant digit. The same pattern is used in about forty other tests, and the team wants a robust assertion without sorting code in every test. What should the assertion use?
+A: actual.exceptAll(expected).count() == 0, which ignores row order and treats float values that differ only in late digits as equal values
+B: actual.toPandas().equals(expected.toPandas()), which compares all the values after conversion while ignoring both row order and float precision
+C: assertDataFrameEqual(actual, expected, checkRowOrder=True), so that the comparison is strict about row order and exact about float values
+D: pyspark.testing.assertDataFrameEqual(actual, expected), whose defaults ignore row order and compare float values with a relative tolerance
+K: D
+G: ## Comparing DataFrames in unit tests
+`collect()` returns rows in whatever order the plan produced, and floating-point aggregates can differ in the last digits. Exact list equality is therefore brittle.
+## assertDataFrameEqual
+PySpark ships `pyspark.testing.assertDataFrameEqual(actual, expected, checkRowOrder=False, rtol=1e-05, atol=1e-08, ...)`.
+- `checkRowOrder=False` (default) compares the rows as a multiset.
+- `rtol`/`atol` compare floats with a tolerance; a difference in the seventh significant digit is far below `rtol=1e-5`.
+- It also checks the schema and prints a readable diff when the test fails.
+W: assertDataFrameEqual with defaults: it already ignores row order and tolerates tiny float differences, so the flaky failures disappear without per-test sorting.
+X: A=exceptAll: it ignores order, but it compares values exactly, so the float difference still fails.
+B=pandas equals: DataFrame.equals is order-sensitive and exact, so both causes of failure remain.
+C=checkRowOrder=True: it makes the comparison order-sensitive, reintroducing the first cause of flakiness.
+T: Use pyspark.testing.assertDataFrameEqual for DataFrame unit tests: order-insensitive by default with float tolerances.
+V: PySpark, pytest
+
+@ DBX-MLP D2 T2.4 advanced use-case
+S: In a deploy-code workflow, an engineer proposes adding the full unit-test suite and the end-to-end integration test as the first tasks of the nightly production retraining job, "to be safe". The job runs in a tight two-hour window, production data scientists have read-only access, and production code can only change through the release branch. Which allocation of checks follows Databricks MLOps guidance?
+A: Run every unit and integration test in production on each run, because only production data can reveal defects in the pipeline logic
+B: Run unit tests only in production, because staging data differs and makes the quick unit tests unreliable for any release decision
+C: Run unit tests in CI on pull requests, integration tests in staging, and only model validation and monitoring checks in production
+D: Run integration tests by hand in development notebooks, and run the unit tests in the production job right before model registration
+K: C
+G: ## Where each check belongs
+The Databricks MLOps workflow places checks where they can stop a bad change earliest:
+- **Development / pull request (CI)**: unit tests of functions; fast, no production data.
+- **Staging**: integration tests that run the pipelines end to end (features, training, validation, deployment, inference) on staging data and compute.
+- **Production**: the tested code runs; the pipeline includes **model validation** of the newly trained model (thresholds, comparison with the champion) and monitoring afterwards.
+Code is immutable between staging and production in this pattern, so repeating unit tests in production adds time without new information.
+W: CI, staging, production split: unit tests catch logic errors before merge, integration tests prove the pipeline in staging, and production only validates the new model and monitors it.
+X: A=All tests in production: the code was already tested and cannot change, so rerunning tests wastes the tight window and finds defects only after release.
+B=Unit tests only in production: unit tests do not depend on data, and running them last means defects are found after deployment.
+D=Manual integration tests in dev: manual runs are not a reliable release gate, and unit tests in production come too late.
+T: Unit tests in CI, integration tests in staging, model validation and monitoring in production.
+V: MLOps, Lakeflow Jobs
+
+@ DBX-MLP D2 T2.5 advanced troubleshooting
+S: A staging integration test runs the feature, training and batch inference jobs on a 1% sample, then asserts that validation AUC is at least 0.85. About one run in five fails although no code changed, and these failures block releases. Model quality is checked separately on full data by the validation task in production. How should the integration test be redesigned?
+A: Raise the sample to 10% and repeat the AUC assertion three times, passing the test whenever most of the three runs reach 0.85
+B: Assert that each component runs and that outputs have the expected schema, row counts and registered model version, not a quality score
+C: Lower the AUC threshold to 0.70, so that sampling noise no longer fails the test while gross regressions in quality are still caught
+D: Remove the integration test entirely and rely on the production validation task, which already evaluates quality on the full data
+K: B
+G: ## What an integration test is for
+An ML integration test checks that the **pieces work together**: the feature job writes the expected table, training registers a version, validation runs, inference produces a correctly shaped output. It runs on a small, fast sample in staging.
+## Why a quality threshold makes it flaky
+On a 1% sample, AUC varies from run to run because of sampling and training randomness. A pass/fail gate on a noisy number blocks releases for no real reason. Quality belongs in **model validation** on full data, which this team already runs in production.
+Good assertions: tables exist with the expected schema and non-zero row counts, a new model version with a signature was registered, the inference output has one score per input row.
+W: Contract assertions: schema, row counts and a registered version are deterministic, so the test catches broken wiring without flaking on sample noise.
+X: A=Bigger sample, majority vote: it reduces noise but still gates on quality, triples the runtime and can still fail randomly.
+C=Lower threshold: the gate remains a noisy quality check, now too weak to mean anything and still not a test of integration.
+D=No integration test: broken wiring between components would only show up in production.
+T: Integration tests verify that components work together; leave quality thresholds to model validation on full data.
+V: MLOps, Lakeflow Jobs, MLflow
+
+@ DBX-MLP D2 T2.6 advanced use-case
+S: Twelve pytest files for feature functions each create their own SparkSession at module level. The CI run in a Git folder spends most of its time starting sessions, and some tests break when another file stops its session. The suite also runs locally through Databricks Connect, and the team wants one shared session, reusable fixtures and no repeated setup code. How should the tests be organized?
+A: Move every test into one large test file, so that a single module-level SparkSession serves all tests and nothing is created more than once
+B: Keep the per-file sessions but add spark.stop() at the end of each file, so that the next file always starts from a completely fresh session
+C: Call each feature function from a notebook with %run and assert the results there, so that the notebook's existing session is reused
+D: Put a session-scoped spark fixture in conftest.py at the test root and request it as an argument in each test that needs Spark
+K: D
+G: ## pytest fixtures for Spark
+pytest discovers `conftest.py` files automatically and shares their fixtures with every test below that folder. A fixture declared with the decorator `pytest.fixture(scope="session")` is created once per test run and passed to any test that names it as an argument, for example a function `spark()` that returns `SparkSession.builder.getOrCreate()`.
+## Why this structure helps
+- One session for the whole run: no repeated start-up cost.
+- No test stops a session that another test uses.
+- Test files stay small and focused on their functions, while setup lives in one place.
+W: Session-scoped fixture in conftest.py: pytest builds the session once and injects it into every test, removing duplicated setup and cross-file interference.
+X: A=One big file: it hides the problem by merging unrelated tests and makes the suite harder to maintain and to run selectively.
+B=spark.stop() per file: stopping sessions is what breaks other tests, and starting a fresh session per file keeps the slow start-up.
+C=%run in notebooks: it leaves pytest behind, so CI loses test discovery and reports.
+T: Share a SparkSession through a session-scoped fixture in conftest.py.
+V: pytest, Databricks Git folders
+
+@ DBX-MLP D2 T2.7 advanced use-case
+S: A five-person ML team uses one Databricks workspace with Unity Catalog and has no budget for more workspaces this year. Data scientists work interactively in notebooks every day. Security requires that development experiments can never overwrite production feature tables or models, and that only an automated identity can write to production. Which setup meets this with the LEAST operational overhead?
+A: Separate dev, staging and prod catalogs, with data scientists limited to read on prod and a service principal as the only writer to it
+B: One shared catalog with dev_, stg_ and prod_ table name prefixes, plus a code review rule that forbids any writes to the prod_ tables
+C: Separate schemas inside one catalog, with every data scientist holding ALL PRIVILEGES so that they can fix production during emergencies
+D: A second workspace for production bound to the same catalogs, with the same group permissions as the existing development workspace
+K: A
+G: ## Environments as catalogs
+In the Databricks MLOps reference architecture, each environment (development, staging, production) is represented by a **Unity Catalog catalog**. Grants on the catalogs, not naming conventions, enforce who may write where. Separate workspaces add isolation but are optional; one workspace with three catalogs is a valid setup for a small team.
+## Production writes by an automated identity
+Production jobs run as a **service principal** that alone holds write privileges on the prod catalog. Data scientists get read access there (useful for analyzing production data and monitoring tables) but cannot modify anything.
+W: Catalog per environment with grants: Unity Catalog enforces that only the service principal writes to prod, inside the single existing workspace.
+X: B=Name prefixes and review: nothing technical stops a write to a prod_ table; a convention is not access control.
+C=ALL PRIVILEGES for everyone: every data scientist can overwrite production, the opposite of the requirement.
+D=Second workspace with the same permissions: it costs the budget the team does not have and, with identical grants, enforces nothing new.
+T: Separate environments with catalogs and grants; let only a service principal write to production.
+V: Unity Catalog, MLOps
+
+@ DBX-MLP D2 T2.8 advanced use-case
+S: A bundle defines a training job, the registered model `churn` and the serving endpoint `churn-ep`. The team deploys from CI with `databricks bundle deploy -t <target>`. Each target (dev, staging, prod) must use its own catalog, and the endpoint must serve the model from the same catalog that the job writes to, without editing YAML for each release. Which bundle construct meets this?
+A: Three copies of the resources section, one in each target, each with the catalog name hard-coded and kept in sync through code review
+B: A lookup variable that resolves the catalog's ID during deployment and passes that ID to the endpoint in place of the catalog name
+C: A custom variable catalog with one value per target, used as ${var.catalog} in the job parameters, the model and the endpoint entity
+D: An environment variable read by the training notebook, while the endpoint keeps pointing at the production catalog in every target
+K: C
+G: ## Variables in Declarative Automation Bundles
+Declarative Automation Bundles (formerly Databricks Asset Bundles) support **custom variables**: declare `variables: catalog: {description: ...}`, give each target its own value under `targets.<name>.variables`, and reference it anywhere as `${var.catalog}`.
+```yaml
+targets:
+  staging: {variables: {catalog: staging}}
+  prod:    {variables: {catalog: prod}}
+```
+Used in the job's parameters, the registered model's `catalog_name` and the endpoint's served entity name (`${var.catalog}.ml.churn`), one definition deploys consistently to every target.
+## Lookups
+A `lookup` variable resolves the ID of a named object of certain types (cluster, job, warehouse, service principal and others); it is not for catalog names.
+W: Per-target custom variable: the same YAML resolves to the right catalog in each target, so job, model and endpoint always agree.
+X: A=Copied resource sections: duplicated YAML drifts between targets and needs manual syncing, which the team wants to avoid.
+B=Lookup variable: lookups return IDs of supported object types such as clusters or jobs; catalogs are not among them, and the endpoint needs a name.
+D=Notebook environment variable: only the job changes catalog, while the endpoint keeps serving production's model in every target.
+T: Use bundle variables with per-target values for environment-specific catalogs.
+V: Declarative Automation Bundles, Unity Catalog, Model Serving
+
+@ DBX-MLP D2 T2.9 advanced use-case
+S: A team wants automatic retraining only when the population stability index of any key feature against the baseline reaches 0.2 in the latest daily window. It has no external orchestrator, does not want to spend compute on retraining when drift is low, and needs a run history for audits. The data profile refreshes on a schedule each morning. Which Lakeflow Jobs design implements this?
+A: A job with a table update trigger on the drift metrics table, which starts the retraining every time the profile writes new rows there
+B: A job with a profile refresh task, a check task that reads drift metrics into a task value, and an if/else task that gates retraining
+C: A SQL alert on the drift metrics table that emails the team, who then start the retraining job manually from the Jobs UI when they agree
+D: A retraining job scheduled every morning that always trains and registers a new model, and leaves the decision to its validation task
+K: B
+G: ## Conditional retraining inside one job
+Lakeflow Jobs can express "retrain only if" without an external tool:
+1. **Refresh** the data profile (or wait for its schedule).
+2. **Check task**: a notebook or SQL task queries the drift metrics table, for example the maximum `population_stability_index` with `drift_type = 'BASELINE'` in the newest window, and publishes the result with `dbutils.jobs.taskValues.set`.
+3. **If/else condition task**: compares the task value with 0.2 and runs the retraining tasks only on the true branch.
+Every run, including skipped branches, stays in the job's run history for audits.
+## PSI bands
+Databricks documents PSI below 0.1 as no significant change, below 0.2 as moderate, and 0.2 or more as significant.
+W: Refresh, check, if/else: the job reads the drift metric, passes it as a task value and retrains only when the threshold is crossed, with every decision recorded in the run history.
+X: A=Table update trigger: the profile writes rows on every refresh, so retraining would start every morning whether or not drift occurred.
+C=Alert plus manual start: the retraining is not automatic, and the decision is not part of a job run history.
+D=Always retrain: it spends compute every day and retrains even without significant drift.
+T: Gate retraining in a job with a check task, task values and an if/else condition task.
+V: Lakeflow Jobs, data profiling
+
+@ DBX-MLP D2 T2.10 advanced use-case
+S: In automated retraining, a challenger may replace the champion only if its validation roc_auc is at least 0.80 and at least 0.01 higher than the champion's roc_auc on the same validation data. The pipeline already runs mlflow.models.evaluate for both models on one shared validation table, and the rule must be enforced in code, not by a reviewer. Which validation setup enforces both rules?
+A: Evaluate only the challenger and use MetricThreshold(threshold=0.81, greater_is_better=True) without any baseline, because 0.80 plus 0.01 already covers both rules
+B: Evaluate both models on the same data and use MetricThreshold(threshold=0.80, min_relative_change=0.01, greater_is_better=True) with the champion as baseline
+C: Compare the challenger's validation roc_auc with the roc_auc stored on the champion's training run, and promote it when the new value is higher
+D: Evaluate both models on the same data and use MetricThreshold(threshold=0.80, min_absolute_change=0.01, greater_is_better=True) with the champion as baseline
+K: D
+G: ## Model validation in MLflow
+`mlflow.validate_evaluation_results(validation_thresholds, candidate_result, baseline_result=None)` checks a candidate's evaluation result and raises `ModelValidationFailedException` if a rule fails. (Since MLflow 2.18 this replaces validation inside `evaluate`.) Each rule is a `MetricThreshold`:
+- `threshold`: an absolute bound on the candidate's metric.
+- `min_absolute_change`: the candidate must beat the baseline by at least this amount (higher or lower, per `greater_is_better`).
+- `min_relative_change`: the candidate must beat the baseline by at least this fraction of the baseline value.
+## Example
+Champion roc_auc 0.83: with `min_absolute_change=0.01` the challenger needs at least 0.84; with `min_relative_change=0.01` it would need only about 0.838.
+W: threshold plus min_absolute_change with the champion as baseline: one rule enforces the 0.80 floor and the 0.01-point improvement over the champion on the same data.
+X: A=Fixed 0.81 threshold: a challenger at 0.81 passes even when the champion scores 0.86; the rule never looks at the champion.
+B=min_relative_change=0.01: it demands a 1% relative gain (0.0083 when the champion has 0.83), not the 0.01-point gain in the policy.
+C=Stored training-time metric: the champion's old metric came from different data, so the comparison is not on the same validation set.
+T: Use MetricThreshold with threshold and min_absolute_change against a baseline result evaluated on the same data.
+V: MLflow
+
+@ DBX-MLP D2 T2.11 advanced troubleshooting
+S: An alert rule on the drift metrics table fires when population_stability_index reaches 0.2 for any column against the baseline. After a mobile release, the categorical feature `device_type` shifted heavily, yet the alert stayed silent, while numeric features alert as expected. The model has 40 numeric and 12 categorical features, and the team wants one rule set that covers both feature kinds with built-in drift columns. What should change?
+A: Keep PSI for numeric columns and add a condition on js_distance for categorical columns, since PSI is null for categorical data
+B: Lower the PSI threshold to 0.1 for all columns, so that the smaller categorical shift also crosses the limit and fires the alert
+C: Replace PSI with ks_test p-values for all columns, because the KS test is computed for both numeric and categorical feature types
+D: Cast device_type to integer codes in the primary table, so that PSI is computed for it in the same way as for numeric features
+K: A
+G: ## Drift statistics depend on the column type
+The drift metrics table of a data profile (documented earlier as Lakehouse Monitoring) computes different statistics per type, and leaves the others null:
+- **Numeric**: `ks_test`, `wasserstein_distance`, `population_stability_index`.
+- **Categorical**: `chi_squared_test`, `tv_distance`, `l_infinity_distance`, `js_distance`.
+A rule on PSI alone can never fire for a categorical column, because the value is null.
+## A rule set that covers both
+For numeric columns alert on PSI (0.2 or more is documented as significant). For categorical columns use a distance such as `js_distance` (0 means identical distributions) or the chi-squared test, with a threshold agreed with the business.
+W: PSI for numeric, js_distance for categorical: each feature kind is checked with a statistic that is actually computed for it, so the device_type shift would have fired.
+X: B=Lower PSI threshold: PSI is null for categorical columns, so no threshold makes the rule fire for device_type.
+C=KS test for all: ks_test is computed for numeric columns only and is null for categorical ones.
+D=Integer codes: codes impose a fake order and distances on categories, and changing the logged table is not needed when categorical drift columns exist.
+T: PSI, KS and Wasserstein are numeric-only; use chi-squared, TV, L-infinity or JS distance for categorical drift.
+V: Data profiling
+
+@ DBX-MLP D2 T2.12 advanced tradeoff
+S: An inference profile is attached to a materialized view that unpacks a 3 TB request log into feature columns. Each daily refresh reprocesses the whole view, and profiling cost keeps growing as the log gets longer every week. The log is append-only, a streaming job already writes it, and the team must keep daily drift metrics at the LOWEST profiling cost. What should it change?
+A: Change the profile type to Snapshot, so that each refresh profiles the current content of the view in one window instead of daily windows
+B: Lower the refresh schedule to once a week, so that the full reprocessing of the view happens only one seventh as often as it does today
+C: Write the unpacked rows to a Delta table with Change Data Feed enabled and profile that table, so that refreshes process only new rows
+D: Add more slicing expressions, so that each refresh computes smaller groups and the work in each window drops for every single slice
+K: C
+G: ## Incremental profiling
+Time series and inference profiles can process data **incrementally**: with Change Data Feed (CDF) enabled on the monitored table, a refresh reads only newly appended rows instead of the whole table. Databricks documents this as a best practice that reduces cost.
+Profiles on **materialized views do not support incremental processing**, so every refresh rescans everything.
+## The design
+Unpack the log into a regular Delta table (for example with a streaming job that appends), enable CDF, and profile that table. Daily windows stay; each refresh only handles the new day.
+Snapshot profiles also have a 4 TB table size limit and compute one window of the whole table per refresh.
+W: Delta table with CDF: incremental refreshes process only appended rows, keeping daily windows at a cost that tracks daily volume instead of total size.
+X: A=Snapshot: it still scans the whole data on each refresh, loses the daily windows, and snapshot profiles are limited to 4 TB.
+B=Weekly refresh: each run still reprocesses all data, and drift metrics arrive a week late.
+D=More slices: slicing adds metrics per slice value, increasing the work instead of reducing it.
+T: Profile append-only data from a Delta table with Change Data Feed; materialized views are reprocessed in full.
+V: Data profiling, Delta Lake
+
+@ DBX-MLP D2 T2.13 advanced use-case
+S: A regression model's predictions are logged to `ml.ops.pred_log` with a timestamp and the model version. True values arrive three days later in `ml.ops.actuals`, keyed by request ID. Two model versions are served at the same time. The team wants an inference profile with RMSE per daily window and per model version, without writing custom metrics. How should the monitored table be set up?
+A: Profile pred_log and set label_column to "ml.ops.actuals.value", so that the profile joins the actuals table during every refresh
+B: Merge the actuals into a table holding the request, prediction, label, timestamp and version, and profile that table as InferenceLog
+C: Create two profiles, one on pred_log and one on actuals, and compute RMSE by joining their profile metrics tables in a dashboard
+D: Profile actuals as a TimeSeries table with pred_log as its baseline, so that the baseline drift metrics measure the prediction error
+K: B
+G: ## What an inference profile reads
+An `InferenceLog` profile monitors **one table** in which each row is a prediction. You name columns of that table: `timestamp_column`, `prediction_column`, `model_id_column`, optional `label_column`, and the `problem_type` (regression or classification). Model quality metrics such as `root_mean_squared_error` are computed only when both label and prediction columns are present, and they are grouped per window and per model id.
+## Late labels
+Labels that arrive later must be **joined into the monitored table** (for example a daily job that merges actuals into the prediction rows by request ID). The profile then computes RMSE for those windows on the next refresh.
+W: One joined table as InferenceLog: label and prediction live in the same rows, so the profile computes RMSE per window and per model version with built-in metrics.
+X: A=Label column from another table: profile columns are columns of the monitored table; a profile does not join other tables.
+C=Two profiles joined in a dashboard: each profile has only half of each pair, so neither can compute RMSE, which needs row-level differences.
+D=pred_log as baseline: baseline drift compares distributions of the same columns, not row-by-row prediction errors.
+T: Join late labels into the monitored table; an inference profile computes quality only from label and prediction columns in the same rows.
+V: Data profiling
+
+@ DBX-MLP D2 T2.15 advanced use-case
+S: A SQL alert must fire when, for the champion model version, any feature's population_stability_index against the baseline reaches 0.2 in the most recent daily window, measured on the whole population rather than on slices. The drift metrics table holds rows for all windows, both drift types, every slice and two model versions. The alert will run every morning after the profile refresh. Which query filter set is correct?
+A: drift_type = 'CONSECUTIVE', slice_key IS NULL, the champion's model id and the latest window, with the alert on MAX(population_stability_index)
+B: drift_type = 'BASELINE', any slice_key, the champion's model id and every window, with the alert on AVG(population_stability_index)
+C: drift_type = 'BASELINE', slice_key IS NULL, every model id and the latest window, with the alert on MAX(population_stability_index)
+D: drift_type = 'BASELINE', slice_key IS NULL, the champion's model id and the latest window, with the alert on MAX(population_stability_index)
+K: D
+G: ## Reading the drift metrics table
+Each row of the drift metrics table is one combination of grouping columns: `window` (and `window_cmp` for consecutive drift), `drift_type` (`BASELINE` or `CONSECUTIVE`), `granularity`, model id (inference profiles), `slice_key`/`slice_value`, and `column_name`.
+- The whole population is the row with `slice_key IS NULL`.
+- "Against the baseline" is `drift_type = 'BASELINE'`.
+- One model version means filtering the model id column.
+- "Most recent window" means the maximum `window.start` for the chosen granularity.
+## Alerts
+Profile alerts are Databricks SQL alerts on a query over these tables. Taking `MAX(population_stability_index)` over the feature rows fires when any feature reaches 0.2.
+W: Baseline, no slice, champion, latest window, MAX: every filter matches one requirement, and MAX over the features fires when any single feature reaches 0.2.
+X: A=CONSECUTIVE: it compares the window with the previous window, not with the baseline the rule asks for.
+B=Any slice, every window, AVG: it mixes slices and old windows, and an average can stay below 0.2 while one feature drifts.
+C=Every model id: drift of the other version can fire the alert, although only the champion matters.
+T: Filter drift metrics by drift_type, slice_key, model id and window before aggregating for an alert.
+V: Data profiling, Databricks SQL alerts
+
+@ DBX-MLP D2 T2.16 advanced use-case
+S: A time series profile with daily granularity compares consecutive windows of an orders table. The order mix differs strongly between weekdays and weekends, so consecutive drift alerts fire every Saturday and Monday, while the real concern is a shift lasting several weeks. Baseline drift against last year's training data is also used. What should change to cut false alarms and still detect multi-week shifts?
+A: Add a weekly granularity and alert on the consecutive drift of the weekly windows, which compare full weeks that share the same weekday mix
+B: Remove the baseline table, so that only consecutive drift is computed and the alert rule has fewer rows left to evaluate every day
+C: Raise the PSI threshold of the daily consecutive drift to 0.5, so that the weekday changes stay below the threshold every week
+D: Switch to a Snapshot profile, so that each refresh measures the whole table and the weekly order pattern is averaged out entirely
+K: A
+G: ## Granularity sets what "consecutive" means
+`granularities` defines the window lengths; a profile can have several (for example 1 day and 1 week). **Consecutive drift** compares each window with the previous window of the same granularity. With daily windows, Saturday is compared with Friday and Monday with Sunday: a predictable weekly cycle shows up as drift.
+## Weekly windows
+Each weekly window contains every weekday once, so the cycle cancels out and consecutive weekly drift reflects week-over-week change. A shift that lasts several weeks shows up in the weekly consecutive comparison and in baseline drift.
+W: Weekly granularity: comparing full weeks removes the weekday cycle from consecutive drift, while sustained shifts still change week-over-week and baseline metrics.
+X: B=Remove the baseline: it drops the comparison that detects slow multi-week change and does nothing about the weekday alarms.
+C=PSI threshold 0.5: it hides real daily changes as well and still compares unlike days.
+D=Snapshot: it gives up time windows, so week-over-week drift can no longer be computed.
+T: Choose a granularity that spans a full seasonal cycle when consecutive drift should ignore that cycle.
+V: Data profiling
+
+@ DBX-MLP D2 T2.17 advanced use-case
+S: A demand model is monitored with an inference profile. Many store-days have actual sales of zero or one unit, and the planning team wants a daily error trend in units that stays stable even when such days are frequent. The current dashboard trends mean_absolute_percentage_error, which jumps erratically from day to day although planners see no real change in forecast quality. Which profile metric should the dashboard trend instead?
+A: r2_score, because it is scale-free and always stays between zero and one, regardless of how many store-days have small actual values
+B: mean_average_error, the absolute difference between prediction and label in the label's own units, which never divides by the actual value
+C: mean_squared_error, because squaring the errors returns values in units and keeps the trend smooth on the days with small actual values
+D: mean_absolute_percentage_error computed on a slice that excludes zero actuals, which keeps the familiar percentage scale for the planners
+K: B
+G: ## Regression metrics in the profile metrics table
+For regression inference profiles, the profile metrics table holds `mean_squared_error`, `root_mean_squared_error`, `mean_average_error` (mean absolute error), `mean_absolute_percentage_error` and `r2_score`.
+## Why MAPE jumps
+MAPE divides each error by the actual value. When actuals are zero or one, a one-unit miss is a 100% (or undefined) error, so a few low-volume days dominate the daily value.
+## Picking the trend
+- MAE (`mean_average_error`) is in units and treats every unit of error equally.
+- MSE is in squared units and emphasizes large errors.
+- R2 can be negative and is not in units.
+W: mean_average_error: it measures the average miss in units without dividing by actuals, so frequent small-volume days do not distort it.
+X: A=r2_score: it is not in units, it can fall below zero, and it depends on the variance of each day's actuals.
+C=mean_squared_error: it is in squared units, not units, and amplifies occasional large misses.
+D=MAPE on a slice: excluding zero-sales days hides exactly the days the planners care about, and one-unit actuals still inflate it.
+T: Use MAE when errors must be read in units and actuals can be near zero; MAPE explodes on small actuals.
+V: Data profiling
+
+@ DBX-MLP D2 T2.20 advanced troubleshooting
+S: A custom model endpoint serves steady traffic of 40 requests per second at about 150 ms model latency. A marketing push sends sudden bursts of 400 requests per second for a few minutes, and clients get HTTP 429 "Too many concurrent requests. Consider increasing the provisioned concurrency of the served entity." Autoscaling is enabled, and latency outside the bursts is fine. Which change addresses the bursts?
+A: Move the endpoint to route optimization, because this message means that the workspace limit on parallel requests has been reached
+B: Enable scale to zero on the served entity, so that the endpoint restarts with fresh replicas whenever the burst traffic starts arriving
+C: Raise the minimum provisioned concurrency toward the burst need (about 400 x 0.15 = 60) or pre-scale it before campaigns, plus client retries
+D: Ask the clients to send all their requests through one shared connection, so that concurrency at the endpoint falls to a single request
+K: C
+G: ## Two different 429 errors
+- `Too many concurrent requests. Consider increasing the provisioned concurrency of the served entity.`: this **endpoint** cannot absorb the traffic with its current provisioned concurrency.
+- `Exceeded max number of parallel requests...`: a **workspace** limit; Databricks recommends route-optimized endpoints, where that limit is removed.
+## Sizing concurrency
+Required concurrency is about queries per second times latency in seconds. Steady state: 40 x 0.15 = 6. Burst: 400 x 0.15 = 60. Autoscaling needs time to detect load and add capacity, so sudden spikes queue and then fail. Raising the minimum provisioned concurrency (at least during campaigns) covers the burst; retries with exponential backoff smooth the rest.
+W: More minimum provisioned concurrency: it sizes capacity for the burst before it arrives, which autoscaling alone cannot do for a sudden spike.
+X: A=Route optimization: it removes the workspace parallel-request limit, a different error; this message is about the served entity's concurrency.
+B=Scale to zero: it removes capacity when idle and adds cold starts, making bursts worse.
+D=One shared connection: connection reuse lowers overhead, but concurrency is the number of requests in flight, not the number of connections.
+T: "Too many concurrent requests" means provisioned concurrency is too low for the load; size it as QPS x latency.
+V: Model Serving
+
+@ DBX-MLP D3 T3.1 advanced tradeoff
+S: A scoring model is called by 300 store devices whose firmware hard-codes the endpoint name and cannot be updated for six months. A new model version must go live with real traffic exposure ramped up gradually, and the team must be able to stop the new version within minutes if errors rise. The endpoint already serves the current version. Which rollout strategy fits?
+A: Blue-green: create a new endpoint for the version and switch the devices to its name once validation on the new endpoint has passed
+B: Shadow: call a second endpoint from each device in parallel and compare scores before deciding which of the two endpoints to keep
+C: Big-bang: replace the served entity's version in place at 100 percent, and roll back by updating the version again if it is needed
+D: Canary inside the existing endpoint: add the new version as a served entity at a small traffic share and raise that share in steps
+K: D
+G: ## Where the switch happens
+- **Blue-green** runs a second, complete environment and moves callers to it. With separate endpoints, callers must change the endpoint name or URL, or a gateway in front must switch.
+- **Canary** keeps callers on the same endpoint and shifts a percentage of traffic to the new version. In Model Serving this is a second served entity with a `traffic_config` split.
+## The deciding detail
+The devices cannot change the endpoint name for six months, so the switch must happen **behind** the existing endpoint. A canary split gives gradual exposure, and one configuration update setting the old entity back to 100% stops the new version within minutes (the old configuration serves until the update is ready).
+W: In-endpoint canary: the devices keep calling the same endpoint while traffic shifts gradually, and one update moves everything back if errors rise.
+X: A=Blue-green with a new endpoint: devices with hard-coded names cannot be switched to it.
+B=Shadow from the devices: it requires firmware changes to call a second endpoint, and it never gives users the new version gradually.
+C=Big-bang: all traffic hits the new version at once, with no gradual ramp.
+T: When callers cannot change the endpoint they call, roll out with a traffic split inside that endpoint.
+V: Model Serving
+
+@ DBX-MLP D3 T3.2 advanced troubleshooting
+S: A pricing team runs an A/B test of two price models on one endpoint. Each customer must see prices from the same model for the whole test, and the split must be 50/50 by customer. Today traffic_config routes 50% of requests to each served entity, and customers see prices jump between requests, which has already caused complaints. How should the test be implemented?
+A: Hash the customer ID in the application and call the served-model-specific invocation URL of the entity assigned to each customer
+B: Keep the 50/50 traffic_config and add the customer ID to every request, so that the endpoint pins each customer to one served entity
+C: Create one endpoint per customer segment, and change traffic_config every week so that each segment alternates between the models
+D: Set the challenger to scale to zero, so that it only serves those customers who arrive while its replicas are already running
+K: A
+G: ## Traffic split is per request
+An endpoint's `traffic_config` routes a percentage of **requests** to each served entity. Nothing in the request ties a customer to an entity, so the same customer can hit both models on consecutive calls.
+## Sticky assignment
+For tests that need per-user consistency, the application assigns the variant (for example `hash(customer_id) % 2`) and calls that entity directly:
+`POST /serving-endpoints/{endpoint}/served-models/{served-model-name}/invocations`
+Traffic settings are ignored for these calls, so each customer always reaches the same model, and the split by customer is 50/50.
+W: Hash and call the served model directly: assignment is deterministic per customer, and the served-model URL bypasses the per-request random split.
+X: B=Customer ID in the payload: the endpoint does not use request content to route, so customers keep switching models.
+C=Weekly alternation by segment: customers change models mid-test, which breaks the per-customer consistency requirement.
+D=Scale to zero: it adds cold starts and changes nothing about which customer gets which model.
+T: Endpoint traffic splits are per request; for sticky A/B tests, assign in the client and call served-model-specific URLs.
+V: Model Serving
+
+@ DBX-MLP D3 T3.3 advanced troubleshooting
+S: A custom pyfunc imports `from churn_features.transforms import build_features`, a package folder in the team's Git folder. The model predicts correctly in the notebook, but the serving endpoint fails at load with "No module named 'churn_features'". The package is internal, must not be published to any package index, and must be versioned together with the model. What should change when logging?
+A: Add churn_features to pip_requirements, so that the serving build installs it together with the other dependencies of the model
+B: Set the PYTHONPATH environment variable of the served entity to the Git folder path that holds churn_features in the workspace
+C: Pass the package folder in code_paths when calling log_model, so that it is stored with the model and put on the path at load time
+D: Copy the transforms into a Unity Catalog volume and import them from the volume path inside load_context while the model is serving
+K: C
+G: ## The notebook path is not the serving path
+In a notebook, a Git folder's files are importable because they sit on the notebook's path. The serving container only has what the model artifact and its environment contain: the Git folder is not there.
+## code_paths
+`mlflow.pyfunc.log_model(..., code_paths=["churn_features/"])` (shown as `code_path` in older docs) copies the listed files or folders into the model artifact and adds them to `sys.path` when the model loads. The code is versioned with the model version and needs no package index.
+For packaged libraries (wheels) on a private mirror, `pip_requirements` is the tool instead.
+W: code_paths: the package is copied into the logged model and imported from there at serving time, so it travels with each model version without publishing.
+X: A=pip_requirements: pip would look for a package called churn_features on an index, where it does not exist and must not be published.
+B=PYTHONPATH to the Git folder: the serving container has no access to the workspace Git folder, so the path points nowhere.
+D=Import from a volume: the code is no longer versioned with the model, and the endpoint must read workspace storage at load time instead of using its own artifact.
+T: Ship internal helper code with the model through code_paths.
+V: MLflow, Model Serving
+
+@ DBX-MLP D3 T3.4 advanced use-case
+S: A fraud model returns a probability, and its custom pyfunc applies a decision threshold. Two client teams need different thresholds (0.3 and 0.6) and may change them weekly, without redeploying the model or creating new versions. The input schema is monitored for drift and must contain only model features, and both teams call the same endpoint. Which design supports this?
+A: Store both thresholds as environment variables of the served entity, and let predict choose between them by looking at the caller's IP address
+B: Log the model with a signature that includes a params schema with a default threshold, read params in predict, and have clients send "params"
+C: Register two model versions that differ only in a hard-coded threshold, and serve each version on its own endpoint for one client team
+D: Add threshold as an extra input column in the signature, so that every row of each request carries the threshold that should be applied
+K: B
+G: ## Inference parameters
+An MLflow model signature has three parts: inputs, outputs and an optional **params** schema. Params are per-call settings that are not part of the data, each with a type and a default. A pyfunc reads them in `predict(self, context, model_input, params=None)`.
+Example: `infer_signature(X_sample, y_pred, params={"threshold": 0.5})`.
+## Sending params
+A request carries them next to the data, for example `{"dataframe_split": {...}, "params": {"threshold": 0.3}}`. Missing params fall back to the default; values are type-checked against the schema.
+So each team sets its own threshold per call, changes it any week, and the model is deployed once.
+W: Params schema: the threshold travels as a typed call parameter, outside the feature columns, so each team chooses its value without a redeploy.
+X: A=Environment variables by IP: changing them means an endpoint update, and routing on IP addresses is fragile and undocumented behavior for a model.
+C=Two hard-coded versions: every threshold change needs a new version and deployment, the opposite of the requirement.
+D=Threshold as an input column: it puts a non-feature into the monitored input schema, which the drift monitoring rule forbids.
+T: Use a signature params schema for per-request settings such as thresholds.
+V: MLflow, Model Serving
