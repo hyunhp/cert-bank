@@ -120,5 +120,22 @@ with sync_playwright() as pw:
         bg = q.evaluate("getComputedStyle(document.body).backgroundColor")
         C.check(f"[{scheme}] page background follows the color scheme", (bg == "rgb(16, 21, 28)") == (scheme == "dark"), bg)
         c.close()
+    # one site chrome on every page: same sticky header (stays at the top while scrolling) and footer
+    pages = ["", "study.html", "support.html", "exams/", "exams/saa-c03/", "guides/", "guides/guide-saa-c03-study-plan/", "about.html"]
+    for path in pages:
+        f = ROOT / (path + "index.html" if path == "" or path.endswith("/") else path)
+        t = f.read_text(encoding="utf-8")
+        C.check(f"{path or 'index'}: shared header, footer and chrome.css", 'class="gh' in t and 'class="gf' in t and "assets/chrome.css" in t)
+    for w in (1280, 390):
+        c = b.new_context(viewport={"width": w, "height": 800}); q = c.new_page()
+        q.route("**/fonts.googleapis.com/**", lambda r: r.abort())
+        for path in pages:
+            q.goto(BASE + path); q.wait_for_selector(".gh")
+            q.mouse.wheel(0, 1500); q.wait_for_timeout(300)
+            top = q.evaluate("document.querySelector('.gh').getBoundingClientRect().top")
+            C.check(f"[{w}px] {path or 'index'}: header stays at the top after scrolling", abs(top) < 1, top)
+            C.check(f"[{w}px] {path or 'index'}: header nav fits (no clipped links)",
+                    q.evaluate("(() => { const n = document.querySelector('.gh nav'); return n.scrollWidth <= n.clientWidth + 1; })()"))
+        c.close()
     b.close()
 sys.exit(C.exit())

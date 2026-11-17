@@ -239,7 +239,7 @@ function injectStyles() {
 .mk td,.mk th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left}
 .mk th{color:var(--muted);font-weight:500}
 .mk .v-ready{color:var(--good)} .mk .v-border{color:var(--amber)} .mk .v-work{color:var(--bad)}
-.mkbar{position:sticky;top:0;z-index:15;background:var(--bg);border-bottom:1px solid var(--line);padding:calc(env(safe-area-inset-top,0px) + 8px) 0 8px;margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.mkbar{position:sticky;top:var(--gh-h,0px);z-index:15;background:var(--bg);border-bottom:1px solid var(--line);padding:calc(env(safe-area-inset-top,0px) + 8px) 0 8px;margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .mkbar .code{font-family:"IBM Plex Mono","IBM Plex Sans KR",monospace;font-weight:600;font-size:.82rem}
 .mkbar .mkfill{position:absolute;left:0;bottom:-1px;height:3px;border-radius:2px;background:var(--accent);transition:width .2s}
 .mkbar .prog{font-size:.85rem;color:var(--muted)}

@@ -92,7 +92,7 @@ with sync_playwright() as p:
     for day, shown in days:
         c = b.new_context(); c.add_init_script(clock(day)); q = c.new_page()
         q.route("**/fonts.googleapis.com/**", lambda r: r.abort())
-        q.goto(BASE); q.wait_for_selector(".footnote")
+        q.goto(BASE); q.wait_for_selector(".gf")
         check(f"blog link on {day}: {'shown' if shown else 'hidden'}", q.is_visible("#blogLink") == shown)
         if shown:
             check("blog link is the hub page, opens in a new tab, is marked external", q.get_attribute("#blogLink a", "href") == "https://bigdatabreakthroughs.blogspot.com/p/exams.html"

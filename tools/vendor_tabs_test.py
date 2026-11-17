@@ -16,7 +16,12 @@ C = Checker(); check = C.check
 
 specs = json.load(open(pathlib.Path(ROOT, "data", "exam-specs.json"), encoding="utf-8"))
 idx = json.load(open(pathlib.Path(ROOT, "data", "exams-index.json"), encoding="utf-8"))
-def total(vendor): return sum(idx["exams"].get(c, {}).get("count", 0) for c, s in specs.items() if isinstance(s, dict) and s.get("vendor") == vendor)
+import datetime as _dt
+TODAY = _dt.date.today().isoformat()
+def retired(s): return s.get("lastDay", "9999") < TODAY          # retired exams move to the Archive tab by themselves
+def total(vendor): return sum(idx["exams"].get(c, {}).get("count", 0) for c, s in specs.items() if isinstance(s, dict) and "vendor" in s
+                              and (retired(s) if vendor == "archive" else s.get("vendor") == vendor and not retired(s)))
+VENDOR_TABS = ["aws", "palantir", "azure", "gcp", "databricks", "hashicorp"] + (["archive"] if any(isinstance(s, dict) and "vendor" in s and retired(s) for s in specs.values()) else [])
 pl_exams = [c for c, s in specs.items() if isinstance(s, dict) and s.get("vendor") == "palantir"]
 
 with sync_playwright() as p:
@@ -27,7 +32,7 @@ with sync_playwright() as p:
     pg.route("**/fonts.googleapis.com/**", lambda r: r.abort())
     pg.goto(BASE + "#exam=SAA-C03"); pg.wait_for_selector(".qcard")
     tabs = pg.eval_on_selector_all(".vtab", "els => els.map(e => [e.dataset.vendor, e.getAttribute('aria-selected'), e.querySelector('.cnt').textContent])")
-    check("vendor tabs", [t[0] for t in tabs] == ["aws", "palantir", "azure", "gcp", "databricks", "hashicorp"], tabs)
+    check("vendor tabs", [t[0] for t in tabs] == VENDOR_TABS, tabs)
     check("aws selected for AWS exam link", tabs[0][1] == "true" and tabs[1][1] == "false", tabs)
     # index.html keeps its own exam list (EXAMS, EXAM_LEVEL): it must match exam-specs.json
     ex = pg.evaluate("EXAMS.map(([c, n, v]) => [c, v, EXAM_LEVEL[c] || null])")
@@ -41,7 +46,7 @@ with sync_playwright() as p:
     last = pg.evaluate("LAST_DAY")
     check("LAST_DAY matches lastDay in exam-specs.json", last == {c: v["lastDay"] for c, v in spec_exams.items() if "lastDay" in v}, last)
     check("tab counts use thousands separators", tabs[0][2] == f"{total('aws'):,}" and "," in tabs[0][2], tabs[0])
-    check("tab totals", [int(t[2].replace(",", "")) for t in tabs] == [total(v) for v in ("aws", "palantir", "azure", "gcp", "databricks", "hashicorp")], tabs)
+    check("tab totals", [int(t[2].replace(",", "")) for t in tabs] == [total(v) for v in VENDOR_TABS], tabs)
     codes = pg.eval_on_selector_all("#chipRow .chip[data-code]", "els => els.map(e => e.dataset.code)")
     check("aws chips only", "SAA-C03" in codes and not any(c.startswith("PLTR-") for c in codes), codes)
     check("bookmarks is an icon, not an exam chip", "__BOOKMARKS__" not in codes and pg.is_visible("#bmIcon"), codes)
