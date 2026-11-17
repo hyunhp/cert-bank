@@ -1,0 +1,452 @@
+# DBX-GAI batch 10: expert tier (level expert), D1 3, D2 3, D3 6, D4 4, D5 2, D6 2 (guide 2026-03-18, docs read 2026-11-17)
+# src: https://docs.databricks.com/aws/en/vector-search/vector-search
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/ai_mask
+# src: https://docs.databricks.com/aws/en/vector-search/query-vector-search
+# src: https://docs.databricks.com/aws/en/vector-search/create-vector-search
+# src: https://docs.databricks.com/aws/en/mlflow3/genai/eval-monitor/concepts/judges/
+# src: https://docs.databricks.com/aws/en/mlflow3/genai/eval-monitor/evaluate-app
+# src: https://docs.databricks.com/aws/en/generative-ai/agent-framework/deploy-agent
+# src: https://docs.databricks.com/aws/en/generative-ai/agent-framework/agent-authentication-model-serving
+# src: https://docs.databricks.com/aws/en/generative-ai/agent-framework/langchain-uc-integration
+# src: https://docs.databricks.com/aws/en/machine-learning/foundation-model-apis/
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/ai_query
+# src: https://docs.databricks.com/aws/en/ai-gateway/rate-limits
+# src: https://docs.databricks.com/aws/en/ai-gateway/inference-tables
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/monitor-diagnose-endpoints
+
+@ DBX-GAI D1 T1.4 expert use-case
+S: A telecom's analytics team works only in SQL. Every night, 2 million new call transcripts must get two columns: `cancel_intent` (true or false) and `competitor` (the competitor the caller names). A compliance note in the data contract says that transcripts naming no competitor must store NULL, never a guessed or placeholder name. A pilot ran two separate `ai_query` passes, one per column, and the finance review rejected it for doubling the model cost. Malformed replies broke the downstream table load twice during that pilot. The job uses a Databricks-hosted foundation model. Which pipeline output definition meets every constraint?
+A: One `ai_query` call per row with `responseFormat` set to a JSON schema holding a boolean `cancel_intent` and a nullable `competitor` string field
+B: One `ai_query` call per row with `responseFormat` set to `{"type": "json_object"}` and the two field names described only in the prompt text
+C: Two `ai_query` calls per row, one for `cancel_intent` and one for `competitor`, each using a JSON schema response format for its single field
+D: One `ai_query` call per row with `responseFormat` set to a JSON schema holding a boolean `cancel_intent` and a required non-null `competitor` string
+K: A
+G: ## Turning the requirement into an output contract
+The business need becomes a precise output definition: which fields, which types, and what "no value" looks like. In SQL, `ai_query` takes a `responseFormat` argument for chat foundation models:
+- `{"type": "text"}`: free text.
+- `{"type": "json_object"}`: some valid JSON, but no guarantee of field names or types.
+- `{"type": "json_schema", ...}`: JSON that follows the given schema, including types, required fields and nullable fields.
+## The detail that decides
+The compliance note requires NULL when no competitor is named. A schema that forces a non-null string pushes the model to invent a value; a nullable field lets it return null honestly. One call returning both fields keeps the cost at one pass.
+W: One call with a schema and a nullable competitor: both fields come from a single pass, the schema prevents malformed replies, and null is allowed exactly where the contract demands it.
+X: B=json_object with names in the prompt: the reply is valid JSON, but field names and types are not enforced, so the downstream load can still break.
+C=Two calls with schemas: output is well formed, but two passes per row is the doubled cost that finance rejected.
+D=Schema with a required non-null competitor: one pass and valid JSON, but a non-null string forces a value for transcripts that name no competitor, breaking the NULL rule.
+T: Write the output contract as a JSON schema, including nullability, and return all fields from one ai_query pass.
+V: AI Functions, Foundation Model APIs
+
+@ DBX-GAI D1 T1.5 expert troubleshooting
+S: An order-status agent has two tools: `find_customer(email)` returns `{"customer_id": "C-1088"}` and `list_orders(customer_id)` returns recent orders. In 20% of MLflow traces the agent answers "You have no recent orders" although orders exist. In every failing trace, the `list_orders` tool span shows the input `{"customer_id": "ana@example.com"}` and the output `[]`, and no `find_customer` span appears before it. The `list_orders` description reads "Lists orders for a customer." The data team says customer IDs always match `C-` followed by digits. The fix must work without adding a model call. What should the team change?
+A: Document in `list_orders` that `customer_id` looks like `C-1088` and comes from `find_customer`, and return an error message for malformed IDs
+B: State in the `list_orders` description that it lists orders for a customer, and have the tool return an empty list quietly whenever the ID is not found
+C: Add a second model call after each answer that checks whether the agent called `find_customer` first and regenerates the answer when it did not
+D: Document in `list_orders` that `customer_id` looks like `C-1088`, and have the tool return an empty list for malformed IDs without any message
+K: A
+G: ## Tool definitions steer argument values and order
+The model fills tool arguments from the parameter names, types and descriptions. "Lists orders for a customer" lets it pass any customer identifier it has, such as the e-mail. Two improvements work together:
+- **Precise parameter documentation**: the format (`C-` plus digits, with an example) and the source ("comes from `find_customer`") tell the model which value and which order.
+- **Informative errors**: when validation fails, return a message such as "customer_id must look like C-1088; call find_customer with the e-mail first". The error goes back to the model as the tool result, so it can correct itself in the same run, without an extra model call that the team did not want.
+## Reading the trace
+An empty result for an e-mail-shaped ID, with no `find_customer` span before it, is an argument problem, not missing data.
+W: Format, source and error message: the description tells the model which ID and which tool provides it, and a clear error lets it recover in the same run instead of reporting no orders.
+X: B=Silent empty list: the vague description stays, and a quiet empty result is exactly what the model turns into "no recent orders".
+C=Second checking call: it adds the extra model call the team excluded and fixes the symptom after the fact instead of the tool definition.
+D=Format but silent empty list: the format hint helps, but malformed IDs still return an empty list, which the model again reads as no orders.
+T: Document argument formats and sources in tool definitions, and return actionable errors instead of empty results for invalid input.
+V: MLflow
+
+@ DBX-GAI D1 T1.3 expert troubleshooting
+S: A LangChain RAG chain is built as `{"context": retriever, "question": RunnablePassthrough()} | prompt | llm`, where `retriever` wraps the team's search function and casts its input to a string. It is invoked with a dict, `chain.invoke({"question": q, "user_tier": t})`, because the prompt also shows the user's plan tier. Answers are vague, and the retrieval relevance judge fails on 60% of questions. In the MLflow trace, the RETRIEVER span input is the whole dict rendered as text, `{'question': 'How do I reset...', 'user_tier': 'gold'}`, and the prompt shows the `question` slot filled with that same dict. The prompt template has the variables `context`, `question` and `user_tier`. Which change fixes the chain?
+A: Map `context` to `itemgetter("question") | retriever`, `question` to `itemgetter("question")` and `user_tier` to `itemgetter("user_tier")` before the prompt
+B: Map `context` to `retriever`, `question` to `itemgetter("question")` and `user_tier` to `itemgetter("user_tier")` before the prompt step
+C: Map `context` to `itemgetter("question") | retriever`, `question` to `RunnablePassthrough()` and `user_tier` to `itemgetter("user_tier")` before the prompt
+D: Map `context` to `itemgetter("user_tier") | retriever`, `question` to `itemgetter("question")` and `user_tier` to `itemgetter("user_tier")` before the prompt
+K: A
+G: ## What each branch of a runnable map receives
+In LangChain expression language, a dict of runnables runs every branch on the **same input**. If the chain is invoked with a dict, each branch receives the whole dict:
+- `retriever` alone gets the dict; this team's wrapper casts it to a string, so retrieval searches for the dict's text.
+- `RunnablePassthrough()` passes the whole dict through, so the `question` slot shows the dict.
+`itemgetter("question")` (from Python's `operator` module) picks one key. Piping it into the retriever, `itemgetter("question") | retriever`, makes the retriever search only the question.
+## Reading the trace
+The RETRIEVER span input and the filled prompt show exactly which value each component received; here both got the full dict, which explains the low retrieval relevance.
+W: itemgetter for every slot: the retriever searches the question text only, and each prompt variable receives its own value from the input dict.
+X: B=Retriever on the whole dict: the question and tier slots are fixed, but retrieval still searches the dict's text, so relevance stays low.
+C=Passthrough for the question: retrieval is fixed, but the question slot still shows the whole dict, including the tier.
+D=Retriever fed the tier: the retriever searches for the word "gold" instead of the question, so retrieval is even less relevant.
+T: In a runnable map every branch gets the whole input; select the key each branch needs, especially before the retriever.
+V: LangChain, MLflow
+
+@ DBX-GAI D2 T2.8 expert troubleshooting
+S: A parts assistant retrieves 50 candidates with hybrid search and asks the AI Search reranker for the top 5, using `DatabricksReranker(columns_to_rerank=["text", "product_name"])`. The `text` column holds chunks of 2,500 to 4,000 characters, and `product_name` is short, such as "HX-4410 pump". Evaluation shows that for questions naming a product, the right product's chunk is among the 50 candidates 94% of the time but in the reranked top 5 only 61% of the time. The response `debug_info` shows `reranker_time` around 600 ms and no warnings, and the 1-second latency budget is met. Which change addresses the cause?
+A: Reorder to `columns_to_rerank=["product_name", "text"]`, because the reranker reads columns in order and uses only the first 2,000 characters
+B: Remove `columns_to_rerank` and rely on the default reranker input, because metadata columns cannot change the reranker's relevance assessment
+C: Raise `num_results` from 5 to 20, because the reranker then scores more of the 50 candidates and the product's chunk moves into the top results
+D: Keep `columns_to_rerank=["text", "product_name"]` and turn the reranker off, because the latency of about 600 ms shows that its call is degraded
+K: A
+G: ## How the AI Search reranker reads a document
+The reranker re-scores retrieved candidates with a cross-encoder style model that sees the query and each document. You choose which columns it reads with `columns_to_rerank`, separately from the `columns` returned.
+The docs note two details:
+- **Order matters**: the columns are read in the listed order.
+- **Only the first 2,000 characters** found are considered.
+With a 2,500-character `text` column listed first, the budget is used up before `product_name` is reached, so the product name never informs the score.
+## Other knobs
+`num_results` is the final number of results and does not change how many candidates are reranked. `debug_info` shows `reranker_time`, and a failure appears as a `RERANKER_TEMPORARILY_UNAVAILABLE` warning; none is present here.
+W: Product name first: the short, decisive column is read before the long text, so it falls inside the 2,000-character window and the right product's chunk can be ranked up.
+X: B=Drop metadata columns: metadata columns are documented as extra context for relevance, so removing them gives up exactly the signal that is missing.
+C=Raise num_results: it only returns more of the reranked list; it does not change how candidates are scored, so the 61% top-5 rate stays.
+D=Turn off the reranker: about 600 ms is normal reranker time inside the budget, there is no failure warning, and turning it off loses the quality gain.
+T: List short, decisive columns first in columns_to_rerank because the reranker reads only the first 2,000 characters in order.
+V: Databricks AI Search
+
+@ DBX-GAI D2 T2.6 expert comparison
+S: A team compares two retrievers on 300 labeled questions, each with one relevant chunk. Retriever X: recall@3 0.64, recall@10 0.93, MRR 0.58. Retriever Y: recall@3 0.79, recall@10 0.86, MRR 0.71. The prompt can hold only three chunks. Design 1 sends the top 3 straight to the model. Design 2 retrieves the top 10 and reranks them; a pilot found that the reranker puts the relevant chunk into its top 3 for 95% of questions where that chunk is among the 10 candidates. Rerank latency fits the budget in both designs. Which TWO statements are correct? (Select TWO)
+A: In Design 1, retriever Y should be chosen, because only the top three reach the prompt and Y has the higher recall at 3
+B: In Design 2, retriever X gives the evidence to the prompt about 88% of the time versus about 82% for retriever Y
+C: In Design 1, retriever X should be chosen, because its recall at 10 is higher and the model can infer from fewer chunks
+D: In Design 2, retriever Y should be chosen in any case, because its higher MRR carries over unchanged after the reranking step
+E: In both designs the choice is the same, because recall at 10 does not matter when only three chunks can reach the prompt
+K: A,B
+G: ## The metric that matters depends on the pipeline
+What reaches the prompt decides the answer. So the relevant metric is "relevant chunk in the final top 3":
+- **Design 1 (no reranker)**: the final top 3 is the retriever's top 3, so recall@3 decides: Y 0.79 vs X 0.64.
+- **Design 2 (rerank top 10)**: the reranker can only promote chunks that are among its 10 candidates, so the chance is recall@10 x reranker hit rate: X 0.93 x 0.95 = about 0.88; Y 0.86 x 0.95 = about 0.82.
+## Lesson
+A first-stage retriever feeding a reranker should be judged on recall at the candidate depth; a retriever feeding the prompt directly is judged on recall at the prompt depth and on rank quality (MRR).
+W: A=Y for Design 1: with no reranker, recall@3 measures what reaches the prompt, and Y leads 0.79 to 0.64.
+B=X for Design 2: the reranker can only promote what is among the 10 candidates, so 0.93 x 0.95 = about 0.88 beats 0.86 x 0.95 = about 0.82.
+X: C=X for Design 1: chunks at positions 4 to 10 never reach a three-chunk prompt, so X's recall@10 does not help here.
+D=Y for Design 2 by MRR: reranking replaces the first-stage order, so Y's better MRR does not carry over; candidate recall decides.
+E=Same choice in both: recall@10 is exactly what bounds Design 2, so the best retriever differs between the designs.
+T: Judge a first-stage retriever by recall at the depth the next stage sees: prompt depth without a reranker, candidate depth with one.
+V: Databricks AI Search
+
+@ DBX-GAI D2 T2.4 expert troubleshooting
+S: An engineer prepares the chunk table `main.kb.chunks` for a Delta Sync index with Databricks-managed embeddings on a standard endpoint and gets three errors in turn. First, index creation in `main.kb_idx` fails with a missing `CREATE TABLE` privilege on that schema. Second, after that is granted, it fails because the source table does not provide a change data feed. Third, after that is fixed, it fails on a column named `_id`, which an upstream export adds and which the team only uses as a row hash. The index must stay a managed Delta Sync index on this endpoint. Which THREE actions resolve the errors? (Select THREE)
+A: Grant the engineer `CREATE TABLE` on the schema where the index is created, alongside the usual `USE CATALOG` and `USE SCHEMA`
+B: Enable change data feed on the source table, or row tracking, which gives the index a change data feed without manual setup
+C: Rename the `_id` column in the source table before creating the index, because `_id` is a reserved column name for AI Search
+D: Grant the engineer `MODIFY` on the source chunk table, which AI Search requires before it creates any index from that table
+E: Move the index to a storage-optimized endpoint, which needs no change data feed and therefore removes the second error entirely
+F: Switch the index to Direct Vector Access, which reads the chunk table without a change data feed and accepts any column names
+K: A,B,C
+G: ## Requirements for a Delta Sync index
+The AI Search docs list the requirements for creating an index:
+- **Privilege**: `CREATE TABLE` on the catalog schema where the index is created (with `USE CATALOG` and `USE SCHEMA`).
+- **Change data feed** on the source for **standard endpoints**. Tables with **row tracking** enabled provide a change data feed automatically.
+- **Reserved name**: the column name `_id` is reserved; rename such a column before creating the index.
+Other limits worth knowing: struct fields must resolve to primitive values, and row- and column-level permissions on the source are not enforced by the index (use filters for application-level ACLs).
+## Why not change the design
+Storage-optimized endpoints and Direct Vector Access change the index type or endpoint, which the stem rules out; Direct Vector Access is updated through the API, not synced from a table.
+W: A=CREATE TABLE on the index schema: the first error is a missing privilege on the schema that will hold the index.
+B=Change data feed or row tracking: standard endpoints require a change data feed on the source, which row tracking also provides.
+C=Rename _id: the column name is reserved, so the export's row-hash column must be renamed.
+X: D=MODIFY on the source: the documented privilege for creating an index is CREATE TABLE on the target schema, not MODIFY on the source table.
+E=Storage-optimized endpoint: it changes the endpoint, which the stem forbids, and it would not fix the reserved column name.
+F=Direct Vector Access: it is a different index type that is written through the API rather than synced, so it breaks the managed Delta Sync requirement.
+T: A Delta Sync index on a standard endpoint needs CREATE TABLE on the target schema, a change data feed on the source, and no column named _id.
+V: Databricks AI Search, Delta Lake, Unity Catalog
+
+@ DBX-GAI D3 T3.3 expert troubleshooting
+S: A policy assistant uses 300-token chunks with no overlap, split by a fixed-size splitter, and sends the top 5 chunks to the model. On 200 labeled questions, 46 fail Correctness. Among those 46, RetrievalSufficiency fails on 39 and RetrievalGroundedness passes on 43. Reviewers note that 35 of the 39 insufficient cases need a rule and its exception, which sit in adjacent paragraphs of the same section, and that the retrieved chunk usually stops right before the exception. The prompt has room for about 2,000 tokens of context. The team can change only one component in this release. Which change addresses the dominant failure within the budget?
+A: Split along section and paragraph boundaries with about one paragraph of overlap, keeping chunks near 400 tokens so five still fit 2,000 tokens
+B: Keep the 300-token chunks and add an instruction telling the model to state that exceptions may apply whenever a retrieved rule seems to be incomplete
+C: Split along section and paragraph boundaries with no overlap, raising chunks to about 1,000 tokens and keeping the top five results for each question
+D: Keep the 300-token chunks and raise the number of retrieved chunks from five to fifteen, so that the paragraph with the exception is likely to be included
+K: A
+G: ## Reading judge results to locate the failure
+MLflow judges separate the stages of a RAG pipeline:
+- **RetrievalSufficiency** (needs expected facts): does the retrieved context contain everything needed? Failing means retrieval or chunking lost information.
+- **RetrievalGroundedness**: is the answer supported by the retrieved context? Passing means the model used what it got.
+- **Correctness** (needs ground truth): is the answer right?
+Here most failures are insufficient context with grounded answers: the model faithfully answered from incomplete chunks. Reviewers add the mechanism: fixed-size cuts separate a rule from its exception.
+## Chunking fix within budget
+Structure-aware splitting (sections, paragraphs) plus a small overlap keeps the rule and the exception together. Five chunks of about 400 tokens is about 2,000 tokens, inside the budget.
+W: Structure-aware chunks with one-paragraph overlap near 400 tokens: the rule and its exception land in the same chunk, fixing the dominant insufficiency, and five chunks still fit 2,000 tokens.
+X: B=Instruction about exceptions: answers would hedge but still miss the actual exception, because the needed text is not retrieved.
+C=1,000-token chunks without overlap: five chunks would need about 5,000 tokens, far over the budget, and boundaries can still split a rule from its exception.
+D=Fifteen 300-token chunks: about 4,500 tokens exceeds the budget, and adding many loosely related chunks dilutes the context.
+T: When sufficiency fails and groundedness passes, fix chunking or retrieval, and check the token budget of the fix.
+V: MLflow, Databricks AI Search
+
+@ DBX-GAI D3 T3.11 expert troubleshooting
+S: A team develops a `ResponsesAgent` in a notebook stored in a Databricks Git folder, registers it in Unity Catalog and runs `agents.deploy()` on Model Serving. The endpoint answers correctly and its inference table fills, yet the MLflow experiment shows no real-time traces from the endpoint. During development the notebook never called `mlflow.set_experiment()`, so it used its default experiment. Security policy requires that all agent code stays in the Git folder. The team needs real-time traces from the endpoint for debugging a customer issue next week, and the endpoint may be redeployed. What should the team do?
+A: Call `mlflow.set_experiment()` with a workspace experiment that is not associated with Git before running `agents.deploy()`, then deploy again
+B: Call `mlflow.set_experiment()` with a workspace experiment that is not associated with Git after `agents.deploy()` returns, without deploying again
+C: Move the notebook out of the Git folder into a workspace folder, then run `agents.deploy()` again with the notebook's default experiment
+D: Turn on `mlflow.langchain.autolog()` in the agent code, then deploy again from the Git folder notebook with its default Git-associated experiment
+K: A
+G: ## Where deployed agents write traces
+When an agent is deployed with `agents.deploy()`, real-time traces from the endpoint go to the **MLflow experiment that is active at deployment time** (set with `mlflow.set_experiment()`), and all agents on the endpoint share it; traces also go to inference tables for long-term storage.
+The docs add a caveat: when deploying from a notebook in a **Databricks Git folder**, real-time tracing does not work by default. The fix is to set a **non-Git-associated experiment** with `mlflow.set_experiment()` **before** running `agents.deploy()`.
+## Why the order matters
+The experiment is captured when the deployment is created, so changing it afterwards does not affect the running endpoint.
+W: Set a non-Git experiment, then deploy: the deployment records that experiment for real-time traces, which works even though the code stays in the Git folder.
+X: B=Set the experiment after deploying: the running endpoint keeps the experiment captured at deployment, so nothing changes without a redeploy.
+C=Move the notebook out of Git: it would work technically, but it breaks the policy that the agent code stays in the Git folder.
+D=Autologging with the default experiment: autolog produces traces in development, but the deployed endpoint still has the Git-associated experiment, the documented cause.
+T: Before agents.deploy() from a Git folder, set a non-Git-associated experiment so real-time traces are recorded.
+V: Agent Framework, MLflow, Model Serving
+
+@ DBX-GAI D3 T3.4 expert troubleshooting
+S: A device assistant extracts the product model from each question and uses it as a filter on a standard-endpoint AI Search index: `filters={"model_code": extracted}`. For "My X200 Pro keeps rebooting", the RETRIEVER span shows the filter `{"model_code": "X200 Pro"}` and zero results, so the agent answers with its fallback message. The index stores canonical codes such as `X200-PRO`, `X200` and `X200-MAX`, and customers write names in many forms ("x200pro", "X-200 Pro"). A product table maps every known spelling to its canonical code. Answers must never mix manuals of different models. What should the team change?
+A: Resolve the extracted name to its canonical code through the product mapping table before querying, and keep the exact filter on `model_code`
+B: Replace the exact filter with `{"model_code LIKE": "X200"}`, so that the token X200 matches every one of the stored codes that contain it as a substring
+C: Remove the filter and switch to hybrid search, so that the keyword part matches the model name in the question text against each chunk
+D: Lowercase the extracted name before querying and keep the exact-match filter, so that variants such as "x200pro" also match the stored codes
+K: A
+G: ## Turning user wording into a reliable filter
+Metadata filters are exact unless you use an operator. On standard endpoints a plain filter key checks an exact match, and `LIKE` matches **whitespace-separated tokens**: `{"column LIKE": "apple"}` matches "apple pear" but not "pineapple". So a stored code `X200-PRO` does not equal "X200 Pro".
+Augmenting the query with extracted fields therefore needs **normalization**: map the user's spelling to the canonical value used in the index, here with a mapping table (for example, a Unity Catalog function the agent calls), then filter exactly.
+## Why exact matters here
+A looser filter, or none, brings in manuals of `X200` and `X200-MAX`, which the requirement forbids.
+W: Map to the canonical code, then filter exactly: every spelling resolves to `X200-PRO`, the filter finds the right manuals, and other models stay excluded.
+X: B=LIKE with X200: LIKE matches whole whitespace-separated tokens, not substrings, and if it did match broadly it would mix in X200 and X200-MAX manuals.
+C=No filter with hybrid search: keyword matching helps ranking but does not exclude other models, so manuals can be mixed.
+D=Lowercasing: "x200 pro" still differs from `X200-PRO` in case, hyphen and space, so the exact filter still returns nothing.
+T: Normalize extracted entities to the index's canonical values before using them as exact filters.
+V: Databricks AI Search, Unity Catalog
+
+@ DBX-GAI D3 T3.7 expert comparison
+S: A legal team needs contract review answers. Inputs are a contract of up to 45,000 tokens plus 1,000 tokens of instructions, and answers are about 800 tokens. Requirements: correctness of at least 0.85 on the team's evaluation set, p95 latency under 20 seconds, and data must stay on Databricks-hosted models. Results: M1 hosted, 128k context, correctness 0.86, p95 14 s. M2 hosted, 32k context, correctness 0.89, p95 6 s, measured on contracts truncated to 30,000 tokens. M3 external provider, 200k context, correctness 0.91, p95 9 s. M4 hosted, 128k context, correctness 0.80, p95 8 s. All four were run on the same 120 questions with the same prompt. Which model should the team choose?
+A: M1, because it is the only hosted model whose context fits the full inputs and whose correctness and latency both meet the requirements
+B: M2, because it has the highest correctness of the hosted models and the lowest p95 latency, both measured on the team's own evaluation set
+C: M3, because it has the highest correctness and a large context window, and its p95 latency of 9 seconds is well inside the budget
+D: M4, because it is a hosted model with a context window that fits the full contracts and the fastest p95 latency of those that fit
+K: A
+G: ## Filtering candidates by every constraint
+Select an LLM by applying each requirement as a filter, then compare the survivors:
+- **Data residency**: only Databricks-hosted models qualify, which removes M3.
+- **Context**: 45,000 + 1,000 input tokens plus the 800-token answer must fit, which requires the 128k models; M2's 32k window cannot hold a full contract.
+- **Quality**: M4's 0.80 is below the 0.85 floor.
+- **Latency**: M1's 14 s is under 20 s.
+## The detail that matters
+M2's score was measured on truncated contracts, which is not the production input; its number does not show quality on full documents and the full input does not fit its window anyway.
+W: M1: it is hosted, its 128k window fits the full 46,000-token input plus the answer, and it meets both the 0.85 correctness floor and the 20-second p95 limit.
+X: B=M2: its 32k window cannot hold a 46,000-token input, and its score comes from truncated contracts, not the real inputs.
+C=M3: it is the strongest model, but it is external, and data must stay on Databricks-hosted models.
+D=M4: it fits and is fast, but 0.80 correctness fails the 0.85 requirement.
+T: Apply every constraint, including context fit on real inputs, before comparing quality and speed.
+V: Foundation Model APIs
+
+@ DBX-GAI D3 T3.5 expert troubleshooting
+S: A support assistant's system prompt begins with "Answer in the user's language", followed by about 6,000 tokens of retrieved English documentation and then the user's question. A `Guidelines` judge with the rule "The response is in the same language as the request" fails on 38% of Korean requests and on almost no English ones. Correctness and groundedness are high for the failing cases. Traces show that most failing Korean questions mix in English product names and error codes. Every request carries a `locale` field set by the app, such as `ko-KR`. Which prompt change addresses the cause?
+A: Derive the language from the `locale` field and state it by name, such as "Answer in Korean", right after the context and before the question
+B: Keep "Answer in the user's language" at the top, and repeat the same sentence once more right after the context and before the question
+C: Derive the language from the `locale` field and state it by name, such as "Answer in Korean", at the top of the system prompt only
+D: Translate the 6,000 tokens of retrieved documentation into the user's language before building the prompt, keeping the current instruction at the top
+K: A
+G: ## Why the instruction fails
+Two effects combine:
+- **Ambiguity**: "the user's language" asks the model to infer the language. A Korean question full of English product names and error codes, followed by 6,000 tokens of English, makes English look like the user's language.
+- **Position**: an instruction placed before a long block of context has less influence on the output than one placed close to where the answer starts.
+## Fix with what the request already knows
+The app already knows the language (`locale`), so the prompt can name it explicitly ("Answer in Korean") and place it right before the question, after the context. No extra model call or translation is needed.
+## Reading the evidence
+High correctness and groundedness show retrieval and reasoning are fine; the failing judge isolates the language rule.
+W: Explicit language from locale, placed after the context: naming Korean removes the ambiguity from mixed-language questions, and placing it near the question gives it the strongest influence.
+X: B=Repeat the vague sentence: position improves, but "the user's language" stays ambiguous for questions full of English terms.
+C=Explicit language at the top only: the ambiguity is gone, but the instruction still sits before 6,000 tokens of English context, where it has the least influence.
+D=Translate the context: it adds translation cost and latency to every request and leaves the ambiguous instruction unchanged.
+T: Make instructions explicit using request metadata, and place critical ones close to the question after long context.
+V: MLflow
+
+@ DBX-GAI D3 T3.10 expert troubleshooting
+S: A team compares configuration A (prompt v3, logged last month) with configuration B (prompt v4, logged today). Both runs used `mlflow.genai.evaluate()` on evaluation dataset version 7 with the `Correctness` and `RelevanceToQuery` judges. Run A shows correctness 0.78 and run B shows 0.88. Before promoting B, a reviewer opens the run details and finds that run A's judges used a judge model endpoint set explicitly in that notebook, while run B used the default judge model. The prompt change was small, and promotion requires evidence that B is better. What should the team conclude and do?
+A: The runs differ in judge model as well as prompt, so the 0.10 gap cannot be credited to the prompt; re-run A and B with identical judges and data
+B: The runs share the dataset version and judge names, so the 0.10 gap is attributable to the prompt and configuration B can be promoted as it is
+C: The runs differ in judge model as well as prompt, so compare only `RelevanceToQuery`, which is unaffected by the judge model, and promote B if it wins
+D: The runs share the dataset version but differ in date, so the 0.10 gap reflects drift in production traffic; collect new traces before comparing them
+K: A
+G: ## Fair comparisons in GenAI evaluation
+An evaluation result depends on three things: the **application version** (prompt, model, retrieval), the **dataset** (version), and the **scorers**, including the model that powers an LLM judge. To attribute a score difference to one change, everything else must be identical.
+Here two things changed: the prompt and the judge model. A different judge model can score the same answers differently, so the 0.10 gap mixes both effects.
+## The fix
+Re-run both configurations in one evaluation setup with the same judge model and the same dataset version, then compare per-question results.
+W: Judge model differs, so re-run both: the gap mixes prompt and judge effects; running A and B together with identical judges and data isolates the prompt change.
+X: B=Same judge names: the judge name is the same, but the model behind it differs, so the scores are not comparable.
+C=Compare RelevanceToQuery only: it is an LLM judge too, so its scores also depend on the judge model, and it does not measure correctness, which promotion needs.
+D=Production drift: both runs used the same fixed dataset version, so traffic drift cannot explain the difference.
+T: Attribute a score change to one variable only when the dataset version and the judges, including their models, are identical.
+V: MLflow
+
+@ DBX-GAI D4 T4.10 expert use-case
+S: A media company will index 450 million article chunks with 768-dimension embeddings that Databricks computes. The source pipeline writes a wide Delta table of 30 columns, including author contact details that governance forbids from entering any index; only `chunk_id`, `text`, `section` and `published_at` are needed for search and display. The corpus is rebuilt weekly by a scheduled job, so index freshness within one day is enough, query latency may be up to 500 ms, and the cost per vector should be as low as possible. Which configuration meets every one of these requirements?
+A: A storage-optimized endpoint with Triggered sync, indexing a narrow Delta table that the pipeline writes with only the four needed columns
+B: A storage-optimized endpoint with Triggered sync, indexing the wide table with `columns_to_sync` set to the four needed columns
+C: A standard endpoint with Triggered sync, indexing the wide table with `columns_to_sync` set to the four needed columns
+D: A storage-optimized endpoint with Continuous sync, indexing a narrow Delta table that the pipeline writes with only the four needed columns
+K: A
+G: ## Endpoint types in Databricks AI Search
+- **Standard endpoints**: about 320 million vectors at dimension 768 per endpoint, lowest query latency, Continuous or Triggered sync, `columns_to_sync` supported.
+- **Storage-optimized endpoints**: over 1 billion vectors at dimension 768, 10-20x faster indexing, pricing optimized for large vector counts, and query latency about 250 ms higher. Limitations: **Triggered sync only** and **`columns_to_sync` not supported** (all columns of the source are synced).
+## Working through the constraints
+- 450 million vectors exceeds a standard endpoint's capacity, so storage-optimized it is.
+- Storage-optimized syncs every source column, so the forbidden columns must be kept out of the **source**: a narrow table written by the pipeline.
+- Weekly rebuilds and daily freshness fit Triggered sync; 500 ms covers the extra latency.
+W: Storage-optimized, Triggered, narrow source table: it holds 450 million vectors cheaply, meets the latency budget, and the forbidden columns never reach the index because the source does not contain them.
+X: B=columns_to_sync on storage-optimized: column selection is not supported there, so every column, including the forbidden contact details, would be synced.
+C=Standard endpoint: column selection works, but 450 million 768-dimension vectors exceed a standard endpoint's capacity of about 320 million.
+D=Continuous sync on storage-optimized: storage-optimized endpoints support only Triggered sync, so this configuration cannot be created.
+T: For very large indexes use storage-optimized endpoints, and since they sync every column, shape the source table to hold only allowed columns.
+V: Databricks AI Search
+
+@ DBX-GAI D4 T4.6 expert troubleshooting
+S: A multi-tenant support index holds 40 million chunks on a storage-optimized endpoint. Each query uses `filters="tenant_id = 'T-17'"` with `num_results=5`. For tenant T-02, which owns 12 million chunks, results are good. For tenant T-17, which owns 300 chunks, most queries return zero results, even generic ones such as "refund policy" that T-17's own documents clearly cover. A lookup by primary key confirms that T-17's chunks are in the index, the last Triggered sync succeeded after they were added, and the same filter string returns T-17 rows when the query text quotes a T-17 document almost verbatim. Which explanation fits all of the evidence?
+A: Storage-optimized endpoints fetch more than `num_results` candidates by similarity and then apply the filter, so a small tenant's chunks are rarely among them
+B: Storage-optimized endpoints expect a dictionary such as `{"tenant_id": "T-17"}`, so the string filter is ignored and the top five unfiltered rows are discarded
+C: The Triggered sync has not yet indexed the chunks that T-17 added, so the filter finds no matching rows until the next scheduled sync of the source table
+D: Storage-optimized endpoints sync no metadata columns, so `tenant_id` exists only for rows that were present when the index was first created
+K: A
+G: ## How filtering works on storage-optimized endpoints
+On **standard endpoints** filters are dictionaries and narrow the search itself. On **storage-optimized endpoints** filters are SQL-like strings, and the docs note that results are **overfetched**: with `num_results = k`, more than k results are fetched by similarity and the filter is applied to those fetched results. It is therefore possible that no results are returned even though matching rows exist, when their scores are not among the top.
+## Applying it here
+T-02 owns 30% of the corpus, so its chunks are plentiful among any top candidates. T-17 owns under 0.001%, so for a generic question its chunks rarely make the fetched set; only a near-verbatim query scores them high enough.
+## Design responses
+Isolate small tenants (separate indexes) or keep tenant volume in mind when choosing the endpoint type; standard endpoints apply dictionary filters during the search.
+W: Overfetch then filter: the filter runs on a fetched candidate set, which for a generic question is dominated by large tenants, so T-17 often gets zero rows, while near-verbatim queries still find them.
+X: B=Dictionary syntax: dictionaries are the standard-endpoint syntax; storage-optimized endpoints take strings, and the same string works for T-02 and for verbatim T-17 queries.
+C=Sync not yet run: the primary-key lookup and the verbatim query both prove that T-17's chunks are indexed.
+D=Metadata columns not synced: storage-optimized endpoints sync all columns, and the filter matches T-17 rows on verbatim queries, so the column is present.
+T: On storage-optimized endpoints filters apply after an overfetch, so rare filter values can return no results.
+V: Databricks AI Search
+
+@ DBX-GAI D4 T4.2 expert troubleshooting
+S: An agent on Model Serving calls three Unity Catalog functions in `prod.billing` as tools through `UCFunctionToolkit`. Version 4 was logged with a `DatabricksFunction` resource for each of the three and deployed with automatic authentication passthrough. Version 5 adds a fourth tool, `prod.billing.refund_status`; the developer copied version 4's `resources` list when logging it. After version 5 is deployed, every call to the new tool fails with a permission error while the other three work, and in the developer's notebook all four work. The deploying user has `EXECUTE` on all four functions. Security forbids grants to broad groups such as all account users. What fixes the endpoint?
+A: Log version 6 with a `DatabricksFunction` resource for `refund_status` added to the other three, then deploy version 6 to the same endpoint
+B: Grant `EXECUTE` on `refund_status` to the endpoint's system-generated service principal, and keep version 5 deployed without any change
+C: Grant `EXECUTE` on `refund_status` to the account users group, so that the endpoint's credentials can call it without a new model version
+D: Restart the serving endpoint, so that automatic authentication passthrough refreshes its credentials and picks up the fourth function
+K: A
+G: ## Credentials follow the declared resources
+With automatic authentication passthrough, the resources are declared when the agent is **logged** (`resources=[...]` on `log_model`). At deployment:
+- Databricks verifies that the endpoint creator can access every declared resource.
+- It creates a service principal **for that agent model version** and grants it access to the declared resources only.
+- It injects short-lived credentials for that principal and rotates them.
+The system-generated service principal does not appear in API or UI listings, and it is deleted when the version leaves the endpoint. Unity Catalog functions are declared as `DatabricksFunction` and need `EXECUTE` (plus `USE CATALOG` and `USE SCHEMA`) for the deploying user.
+## Reading the evidence
+The notebook runs as the developer, who has `EXECUTE` on all four functions, so the code and grants are fine. On the endpoint, only the new function fails: version 5's resource list, copied from version 4, does not declare it, so its service principal never received access.
+W: New version with the fourth function declared: the new version's service principal is granted `EXECUTE` on all four declared functions, and the deploying user already holds the needed privileges.
+X: B=Grant to the system service principal: that principal is created and managed by Databricks per model version and is not listed for manual grants; the supported path is declaring the resource.
+C=Grant to all account users: it would work around the missing declaration with a broad grant, which security forbids.
+D=Restart the endpoint: rotation refreshes credentials for the same declared resources; the fourth function is still not among them.
+T: With automatic authentication passthrough, a new tool works on the endpoint only after a new model version declares it as a resource.
+V: Agent Framework, Model Serving, Unity Catalog
+@ DBX-GAI D4 T4.4 expert troubleshooting
+S: A workspace uses a restricted egress network policy that allows only approved domains. A new agent version adds `langgraph` to its pip requirements, and `agents.deploy()` now fails while the serving container is built. The build logs show pip timing out while downloading the package files. In `system.access.outbound_network`, rows with `network_source_type` set to `ML Build` show denied requests to `files.pythonhosted.org`, while requests to `pypi.org` are allowed. Security approves only the minimum set of extra domains, and packages must come from public PyPI rather than a private mirror. What should the team do before redeploying?
+A: Add `files.pythonhosted.org` to the allowed domains, because pip reads the index on `pypi.org` and then downloads package files from that host
+B: Add `pypi.org` to the policy's allowed domains, because pip reads the package index from that domain and then downloads every file from the same host
+C: Disable the network policy while the endpoint builds and enable it again afterwards, so that the build can reach every package host it needs
+D: Turn off scale to zero and raise the workload size of the endpoint, so that the container build gets more time and resources before pip times out
+K: A
+G: ## Dependencies are installed at build time
+When an agent or model is deployed on Model Serving, Databricks builds a container and installs the model's pip requirements. Under Private Link or a restricted egress policy, the network policy must allow the package repositories the build needs; the docs name `pypi.org` and `files.pythonhosted.org` as examples. Build failures caused by blocked network access are logged with `network_source_type: ML Build` in `system.access.outbound_network`.
+## How pip uses the two domains
+pip first reads the package index (`pypi.org`), which points to the actual distribution files hosted on `files.pythonhosted.org`. Allowing only the index lets pip find packages but not download them.
+## Other knobs
+Scale to zero and workload size affect serving capacity and cold starts, not the container build's network access.
+W: Allow the file host: the evidence shows the denied domain is `files.pythonhosted.org`; allowing it is the minimum change that lets pip download the files.
+X: B=Allow pypi.org: it is already allowed, and package files are not served from that host, so the build still fails.
+C=Disable the policy during builds: it opens all egress, which violates the minimum-domain rule.
+D=Scale and size: they change serving capacity and cold starts, not the blocked network path during the build.
+T: Diagnose serving build failures from the ML Build rows in outbound network logs and allow exactly the blocked package host.
+V: Model Serving, Agent Framework, system tables
+
+@ DBX-GAI D5 T5.1 expert use-case
+S: A bank builds a RAG assistant over 5 million call transcripts for support agents. Transcripts contain card numbers in four groups of four digits, customer names in free text, and order numbers of the form `ORD-` plus eight digits. Card numbers and names must never reach the index or the model, while agents must still be able to search by order number. Guardrails in the request path have a 150 ms budget; nightly ingestion has no strict time limit. The platform team approves only generally available features for this workload. Which THREE design choices meet every requirement? (Select THREE)
+A: At ingestion, replace card numbers with a fixed token by a deterministic pattern match before the transcripts are chunked and embedded
+B: At ingestion, run a named-entity recognition model over each transcript in the nightly batch and replace person names before chunking
+C: In the request path, apply the same card-number pattern to each user question before retrieval and before the model call is made
+D: In the request path, call an LLM on every user question to find and mask customer names before the retrieval and generation steps
+E: At ingestion, also mask order numbers with a fixed token, so that no customer-related identifier of any kind is stored in the index
+F: At ingestion, call `ai_mask` with the labels person and credit card on every transcript before chunking, so names and cards are removed
+K: A,B,C
+G: ## Masking as a guardrail, placed where the budget allows
+Masking can happen at two points:
+- **Ingestion** (batch, no strict latency): mask before chunking and embedding, so sensitive values never enter the index or any prompt built from it. Slow but accurate methods, such as named-entity recognition for names, fit here.
+- **Request path** (tight latency): user questions can also contain sensitive values. Deterministic patterns (card numbers have a fixed format) run in milliseconds; LLM-based detection costs hundreds of milliseconds or more.
+## Keep what users need
+Order numbers are what agents search for; masking them breaks the use case.
+## Feature status
+`ai_mask` is documented as **Public Preview**, so a GA-only policy excludes it even though it would detect the entities.
+W: A=Pattern masking of cards at ingestion: fixed-format numbers are matched reliably, and masking before chunking keeps them out of the index.
+B=NER for names at ingestion: names have no fixed pattern, and the nightly batch has time for an entity model.
+C=Same pattern on questions: users may paste card numbers, and a pattern check fits easily within 150 ms.
+X: D=LLM masking per question: an extra model call per request exceeds the 150 ms guardrail budget.
+E=Mask order numbers too: agents must search by order number, so masking them breaks the main use case.
+F=ai_mask at ingestion: it is a Public Preview function, which the GA-only policy excludes.
+T: Mask at ingestion with accurate methods, use fast deterministic checks in the request path, and keep identifiers the use case needs.
+V: AI Functions, Databricks AI Search
+
+@ DBX-GAI D5 T5.4 expert troubleshooting
+S: A hardware-troubleshooting assistant answers from 2 million community forum posts. The Safety judge flags 3% of answers, and traces show the flagged answers quote insults from retrieved posts whose technical content is otherwise valuable. Removing every post with offensive language would cut the questions the evaluation set can answer by 18%, which product management rejects. Moderators require an audit trail of every change made to source text. Answers stream to users, and the first token must arrive within one second of the request. Which TWO measures fit these constraints? (Select TWO)
+A: At ingestion, detect abusive sentences with a classifier, replace them with a neutral marker, and record originals and changes in an audit table
+B: In the system prompt, tell the model to paraphrase retrieved content neutrally and never quote offensive language, as a second layer
+C: At ingestion, drop every post that contains any word from the offensive-terms list, so that no abusive language of any kind can ever reach the index
+D: After generation completes, run a full-answer safety check and only then start streaming, so that no flagged text ever reaches the user
+E: Fine-tune the generator on a cleaned set of forum answers so that it learns to stop repeating offensive phrases from retrieved posts
+K: A,B
+G: ## Mitigating problematic text in source data
+When valuable sources contain harmful text, the options form a spectrum:
+- **Remove documents**: simplest, but loses coverage (here 18%).
+- **Clean at the sentence level**: detect abusive sentences with a classifier and replace or remove them, keeping the technical content. Logging originals and changes provides the audit trail moderators need.
+- **Generation-time layer**: instruct the model to paraphrase and avoid quoting offensive language; this catches what the cleaning missed.
+- **Output checks**: effective, but a check over the full answer before streaming delays the first token by the whole generation time.
+## Defense in depth
+Cleaning at ingestion removes most of the problem at its source; the prompt rule is a cheap second layer that adds no latency.
+W: A=Sentence-level cleaning with an audit table: the abusive text leaves the index while the technical content stays, and moderators get the record of every change.
+B=Neutral paraphrasing instruction: a low-cost second layer for anything the classifier missed, with no effect on time to first token.
+X: C=Drop posts with offensive words: it removes the valuable technical posts too, causing the coverage loss product management rejected.
+D=Full-answer check before streaming: waiting for the complete answer pushes the first token well beyond one second.
+E=Fine-tuning: it is costly, gives no guarantee, and leaves the offensive text in the index where it can still be quoted.
+T: Clean harmful sentences at ingestion with an audit trail, and add a prompt-level layer, rather than dropping valuable sources.
+V: MLflow
+
+@ DBX-GAI D6 T6.8 expert use-case
+S: A Unity Gateway model service has these rate limits: a service limit of 2,000 requests per minute (QPM); a User (Default) limit of 60 QPM; custom group limits of 300 QPM for `analysts` and 500 QPM for `data-science`; and a custom limit for the service principal `etl-sp` of 1,000 QPM and 40,000 tokens per minute (TPM). Ana belongs to both groups and has no user-specific limit. Ten analysts often work at the same time, and `etl-sp` sends long prompts in nightly bursts. Which THREE statements describe how the limits apply? (Select THREE)
+A: Ana is not held to the 60 QPM default, because the custom limits of her groups override the User (Default) limit for her requests
+B: Ana is rate limited only when she exceeds the limits of both of her groups, since she is a member of `analysts` and `data-science`
+C: `etl-sp` is held to whichever of its 1,000 QPM and 40,000 TPM limits is more restrictive for the traffic it sends at a given time
+D: The 300 QPM limit of `analysts` applies to each member separately, so ten analysts together may send up to 3,000 QPM to the service
+E: `etl-sp` may push total traffic past 2,000 QPM, because a user-specific custom limit takes priority over the service-level limit
+F: Requests above a limit are queued and served later in arrival order, so clients calling the service need no retry logic of their own
+K: A,B,C
+G: ## Rate limit levels on Unity Gateway services
+- **Service**: a global maximum for all traffic. When it is exceeded, all requests are blocked, regardless of user or group limits.
+- **User (Default)**: applies to every user without a more specific limit; custom limits override it.
+- **Custom limits**: for individual users or service principals (these win over group limits) and for **groups**, where the limit is **shared** by all members.
+## Combination rules from the docs
+- Both a request limit and a token limit on the same principal: the **more restrictive** one is enforced.
+- A user in several groups with different limits is rate limited only when exceeding **all** of those groups' limits.
+- Exceeding a limit returns HTTP 429; clients should retry with exponential backoff.
+W: A=Groups override the default: custom limits take precedence over the User (Default) limit.
+B=Several groups: the docs state a user is limited only after exceeding all of the group limits that apply to them.
+C=More restrictive of QPM and TPM: with both limits set, whichever is hit first applies, which for long prompts is often the token limit.
+X: D=Per-member group limit: a group limit is shared by all members, so ten analysts share 300 QPM.
+E=Custom limit over the service limit: the service limit is a global maximum that blocks all requests once exceeded.
+F=Queued requests: over-limit requests receive HTTP 429, so clients must retry with backoff.
+T: Service limits are global, custom limits override the default, group limits are shared, and the stricter of QPM and TPM applies.
+V: Unity Gateway
+
+@ DBX-GAI D6 T6.6 expert troubleshooting
+S: A Unity Gateway model service logs to the inference table `ops.ai.support_payload`. On October 3 an analyst ran `ALTER TABLE ... ADD COLUMNS (sentiment STRING)` on it to store a nightly sentiment score next to each request. Since then the table has received no new rows, although the service returns HTTP 200 to thousands of requests a day and has not been reconfigured. Table history shows no writes after the ALTER. The team needs the sentiment scores and complete request logs from now on. Which TWO statements are correct? (Select TWO)
+A: Changing an inference table's schema can stop logging or corrupt the table, which matches the missing rows after the ALTER on October 3
+B: Enrichments such as sentiment belong in a separate table keyed by `request_id`, or a view joining the two, never in the inference table
+C: Logging stopped because some payloads exceed 10 MiB, and one oversized request blocks every later request from being written to the table
+D: Rows can take up to an hour to appear, so the missing rows since October 3 are expected and will arrive once the backlog has cleared
+E: Pointing the service at a new table that the team creates in advance with the extra `sentiment` column restores logging with the scores
+K: A,B
+G: ## Inference tables are managed by Databricks
+When inference tables are enabled on a Unity Gateway model service, Databricks creates the table and writes to it. The docs warn that logging can **stop** or the table can become **corrupted** if you:
+- change the table schema,
+- change the table name,
+- delete the table.
+Specifying an existing table as the target is not supported. Requests and responses larger than 10 MiB are not logged (for that request only, flagged in `logging_error_codes`), and rows can take up to an hour to appear.
+## Adding your own data
+Keep derived data (scores, labels, enrichments) in your own table keyed by `request_id`, or build a view that joins it to the inference table. The managed table stays untouched.
+W: A=Schema change stops logging: the documented warning matches the evidence exactly: no writes since the ALTER while the service keeps serving.
+B=Separate enrichment table or view: the sentiment scores can be stored and joined on request_id without altering the managed table.
+X: C=Oversized payloads: requests over 10 MiB are skipped individually; they do not stop every later write.
+D=Normal delay: the delay is up to an hour, not weeks; missing rows since October 3 are not a backlog.
+E=Pre-created target table: specifying an existing table is not supported; Databricks creates the inference table itself.
+T: Never alter a managed inference table; store enrichments in your own table keyed by request_id.
+V: Unity Gateway

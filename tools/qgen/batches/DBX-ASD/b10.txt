@@ -1,0 +1,441 @@
+# DBX-ASD batch 10: expert tier (level expert), D1 4, D2 4, D3 6, D4 2, D5 2, D6 1, D7 1; single answer, evidence-based troubleshooting (guide read 2026-11-08, docs read 2026-11-17)
+# src: https://spark.apache.org/docs/latest/sql-performance-tuning.html
+# src: https://spark.apache.org/docs/latest/configuration.html
+# src: https://spark.apache.org/docs/latest/tuning.html
+# src: https://spark.apache.org/docs/latest/job-scheduling.html
+# src: https://spark.apache.org/docs/latest/rdd-programming-guide.html
+# src: https://spark.apache.org/docs/latest/web-ui.html
+# src: https://spark.apache.org/docs/latest/sql-data-sources-jdbc.html
+# src: https://spark.apache.org/docs/latest/sql-data-sources-parquet.html
+# src: https://spark.apache.org/docs/latest/sql-ref-null-semantics.html
+# src: https://spark.apache.org/docs/latest/sql-ref-ansi-compliance.html
+# src: https://spark.apache.org/docs/latest/sql-migration-guide.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.SparkSession.stop.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.SparkSession.addArtifacts.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.Column.try_cast.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.functions.max_by.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.Window.html
+# src: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.functions.udf.html
+# src: https://spark.apache.org/docs/latest/api/python/tutorial/pandas_on_spark/typehints.html
+# src: https://spark.apache.org/docs/latest/streaming/apis-on-dataframes-and-datasets.html
+# src: https://spark.apache.org/docs/latest/streaming/structured-streaming-kafka-integration.html
+# src: https://spark.apache.org/docs/latest/spark-connect-overview.html
+
+@ DBX-ASD D1 T1.5 expert troubleshooting
+S: A nightly join-and-aggregate job shuffles about 1.6 TB. AQE is enabled with default adaptive settings, and the platform team forbids turning it off. A year ago an engineer put `spark.sql.shuffle.partitions=200` into the job configuration with the comment "AQE will size partitions anyway". The Stages tab for the post-shuffle stage now shows 200 tasks, a median shuffle read of about 8 GB per task, several terabytes of Spill (Disk) in total, and a duration of three hours. The cluster has 400 cores and healthy executors. Input grows about 10% a month, so the fix should keep working as volume grows without daily retuning. Which change addresses the evidence?
+A: Set spark.sql.adaptive.coalescePartitions.initialPartitionNum to about 16000, so the shuffle starts near 100 MB partitions and AQE merges any that end up small
+B: Set spark.sql.adaptive.advisoryPartitionSizeInBytes to 16 MB, so that AQE splits each 8 GB post-shuffle partition into many smaller ones after the shuffle stage
+C: Set spark.sql.adaptive.coalescePartitions.minPartitionSize to 100 MB, so AQE builds the post-shuffle partitions at that size and no task has to read 8 GB
+D: Set spark.sql.adaptive.coalescePartitions.parallelismFirst to false, so that AQE stops coalescing for parallelism and resizes the 200 partitions to its advisory size
+K: A
+G: ## AQE can merge partitions, not create more
+After a shuffle stage, AQE's coalescing merges **contiguous small** partitions toward a target size. It starts from `spark.sql.adaptive.coalescePartitions.initialPartitionNum`; if that is unset, the start is `spark.sql.shuffle.partitions`. So the count you set is a **ceiling**: AQE can reduce it but never raise it. Splitting oversized partitions happens only for skewed partitions in shuffled joins and for `REBALANCE`, where one partition is far above the median, not when every partition is large.
+## The numbers
+1.6 TB / 200 partitions = 8 GB per task: far more than execution memory, hence the spill. 1.6 TB / 16,000 = 100 MB per partition, a healthy size. With a high initial number, AQE coalesces back down on smaller nights, so the setting tolerates growth. The tuning guide says the same in general: when a task's working set is too large, raise parallelism so each task's input is smaller.
+W: initialPartitionNum 16000: AQE gets a high starting count to coalesce from, so tasks read about 100 MB instead of 8 GB and stop spilling.
+X: B=Smaller advisory size: the advisory size guides coalescing and skew splitting; equal 8 GB partitions are not skewed, so AQE has nothing to split and nothing small to merge.
+C=minPartitionSize 100 MB: it is a floor for coalesced partitions; it cannot cut 200 partitions of 8 GB into smaller ones.
+D=parallelismFirst false: it changes how far AQE coalesces toward the advisory size; it still cannot exceed the starting count of 200.
+T: Under AQE the initial shuffle partition count is a ceiling; set it high and let AQE coalesce down.
+V: Spark SQL
+
+@ DBX-ASD D1 T1.4 expert troubleshooting
+S: A four-hour batch job runs on a shared YARN cluster whose high-priority queue often preempts containers of this job; the nodes themselves stay up. When an executor is preempted during stage 7, a reduce stage, several of its tasks fail with `FetchFailedException`, and the Spark UI then shows stage 6, which had completed an hour earlier, as a new attempt that reruns many of its map tasks before stage 7 continues. The YARN administrators already run the Spark shuffle service as a NodeManager auxiliary service on every node, and the team cannot change queue priorities. Which change stops completed map output from being recomputed after a preemption?
+A: Set spark.shuffle.service.enabled to true for the job, so the node's shuffle service keeps serving map output written by a preempted executor
+B: Set spark.stage.maxConsecutiveAttempts to 16 for the job, so stage 6 can be resubmitted many more times before the whole job is aborted
+C: Set spark.task.maxFailures to 16 for the job, so the failed reduce tasks of stage 7 retry the fetch more often before the stage is resubmitted
+D: Call cache() on the DataFrame produced by stage 6, so its map output is kept in executor storage memory and survives a preempted executor
+K: A
+G: ## Where shuffle files live
+A map stage writes its shuffle output as files on the local disk of the executor's node. A reduce stage fetches those blocks from the executors that wrote them. Spark keeps shuffle files so that later stages, or a recomputed lineage, do not need to recreate them.
+## What happens when an executor is lost
+Without an external shuffle service, the executor itself serves its shuffle files. When the executor disappears, its blocks cannot be fetched: reducers raise `FetchFailedException`, and the scheduler resubmits the **parent map stage** to regenerate the missing output. `spark.stage.maxConsecutiveAttempts` (default 4) limits these consecutive attempts.
+## The external shuffle service
+`spark.shuffle.service.enabled=true` makes executors register their shuffle files with a long-running service on the node (on YARN, a NodeManager auxiliary service). The configuration docs say it preserves shuffle files so executors can be removed safely or shuffle fetches can continue when an executor fails. Since the nodes stay up, the files remain readable after a preemption.
+W: External shuffle service: the files outlive the preempted executor because the node's service serves them, so stage 6 does not rerun.
+X: B=More stage attempts: the job survives longer, but every preemption still reruns completed map work, which is what the team wants to stop.
+C=More task failures: the missing files do not come back with retries; a fetch failure leads to a resubmission of the map stage anyway.
+D=cache() the DataFrame: cached blocks also live in the lost executor, and the reduce stage reads shuffle files, not cached DataFrame blocks.
+T: With the external shuffle service, map output survives executor loss on a healthy node; without it, the parent stage is recomputed.
+V: Apache Spark
+
+@ DBX-ASD D1 T1.3 expert troubleshooting
+S: A team packages helper functions in a wheel that many PySpark jobs import. One helper, `write_report(df, path)`, ends with `spark.stop()` "to free resources". In a job that calls the helper and then keeps working with an `orders` DataFrame that was cached before the call, the next action fails with an error that methods cannot be called on a stopped SparkContext. A colleague proposes calling `SparkSession.builder.getOrCreate()` right after the helper. The job runs on a classic cluster without Spark Connect, the cached `orders` data must be reused after the helper returns, and the helper's signature must not change. Which fix is correct?
+A: Remove spark.stop() from the helper and stop the session once at the end of the job's entry point, so the context and cached data live on
+B: Keep spark.stop() in the helper and call SparkSession.builder.getOrCreate() after it, so the job continues on a new context that still holds the cached data
+C: Replace spark.stop() in the helper with spark.catalog.clearCache(), so the helper frees memory but leaves the context and the job's cached data available
+D: Replace spark.stop() in the helper with spark.newSession().stop(), so only a child session is stopped while the job's own session and its cache keep running
+K: A
+G: ## Session, context and their lifecycle
+In classic PySpark, a `SparkSession` wraps one `SparkContext`, the connection to the cluster that owns executors, cached blocks and broadcast variables. `SparkSession.stop()` **stops the underlying SparkContext**. Every session of the application, including those from `newSession()`, shares that context, so stopping any of them stops all of them.
+After a stop:
+- DataFrames built on the old context can no longer run actions.
+- `getOrCreate()` builds a **new** context with new executors; nothing cached before (data, temp views) carries over.
+## Who should stop the session
+The code that creates the application (the job's entry point) owns its lifecycle and stops it once at the end. Library helpers should never stop a session they did not create.
+W: Remove stop from the helper: the context lives until the entry point ends it, so the cached orders data stays usable after the helper returns.
+X: B=getOrCreate after stop: it creates a new context; the old cache and executors are gone, so orders must be recomputed and its DataFrame object still points at the stopped context.
+C=clearCache in the helper: the context survives, but every cached table and DataFrame is removed, so the cached orders data is lost.
+D=Stop a new session: newSession shares the same SparkContext, and stop() stops that context, so the job fails in the same way.
+T: SparkSession.stop() stops the shared SparkContext; only the application's entry point should call it, once.
+V: Apache Spark
+
+@ DBX-ASD D1 T1.6 expert troubleshooting
+S: A validation step adds a column with a deterministic Python UDF that parses a JSON payload: `df2 = df.withColumn("parsed", parse_udf("payload"))`. To fail fast, the developer calls `df2.count()` right after it, which succeeds in two minutes. The following `df2.write.parquet(out)` then fails after 40 minutes with a Python exception raised inside `parse_udf` on a malformed payload, and running `count()` again still succeeds. Nothing is cached, and the input files did not change between the calls. The team wants a pre-check that evaluates the UDF on every row and writes nothing. Which statement explains the evidence and gives a working pre-check?
+A: count() needs no columns, so the optimizer drops the unused UDF column; df2.filter(F.col("parsed").isNull()).count() uses it and runs the UDF
+B: count() reads Parquet footer row counts only; adding option("mergeSchema", "true") to the read makes the next count() run the UDF on every row
+C: count() hides Python exceptions from the UDF; enabling spark.sql.execution.pyspark.udf.faulthandler.enabled makes the next count() raise them
+D: count() reused an earlier job's result through AQE; setting spark.sql.adaptive.enabled to false makes the next count() run the UDF on every row
+K: A
+G: ## Lazy evaluation plus column pruning
+Transformations only build a plan; an action triggers optimization of the whole plan. Catalyst's **column pruning** removes expressions whose results nothing uses. `count()` needs the number of rows, not the `parsed` column, so the projection that calls the UDF is pruned away and the UDF never runs. The write needs `parsed`, so it is the first action that executes the UDF, and it fails there.
+Deterministic UDFs can be pruned like any other expression; the UDF docs also note that, due to optimization, duplicate invocations may be eliminated or the function may be invoked more times than it is present in the query.
+## A pre-check that really runs the UDF
+Reference the column in a way the action needs: `df2.filter(F.col("parsed").isNull()).count()` must compute `parsed` for every row (and also counts parse failures if the UDF returns NULL for them). `df2.select("parsed").write.format("noop").save()` is another option.
+W: Column pruning: count() does not need parsed, so the UDF is pruned; a filter on parsed forces the UDF to run on every row before the write.
+X: B=Footer row counts plus mergeSchema: mergeSchema only merges file schemas; count() over df2 would still not need the parsed column.
+C=Hidden exceptions: count() never called the UDF, so there was nothing to hide; the faulthandler setting only adds tracebacks for crashes of Python workers.
+D=AQE reuse: AQE re-plans around shuffles and does not reuse results across actions; with or without it, count() prunes the UDF column.
+T: Actions compute only what they need; count() can skip a UDF column entirely, so validate by using the column.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.1 expert troubleshooting
+S: A job reads the `payments` table over JDBC with `partitionColumn="payment_id"`, `lowerBound=1`, `upperBound=1000000` and `numPartitions=20`. It was written two years ago, when ids stopped near one million. The table now has 180 million rows with ids from 1 to about 180,000,000, spread roughly evenly. The Stages tab shows 19 read tasks finishing in seconds with about 50,000 rows each and one task running for hours with almost all of the rows. The database allows at most 20 concurrent connections from this job, and every row must still be read. Which change fixes the evidence?
+A: Set upperBound to 180000000 and keep numPartitions at 20, so the stride grows to about 9 million ids and each read task gets a similar share
+B: Raise numPartitions to 200 and keep upperBound at 1000000, so the stride shrinks to about 5,000 ids and the rows spread over more read tasks
+C: Keep the bounds and add the predicate payment_id <= 1000000 to the read, so the last read task no longer receives the rows above the upper bound
+D: Keep the bounds and set fetchsize to 100000, so the last read task fetches its rows in fewer round trips and finishes as quickly as the others
+K: A
+G: ## How a partitioned JDBC read splits rows
+With `partitionColumn`, `lowerBound`, `upperBound` and `numPartitions`, Spark builds one WHERE clause per partition from a **stride** of about `(upperBound - lowerBound) / numPartitions`. The docs stress that the bounds only decide the stride and **do not filter**: all rows are returned. The first partition takes everything below the second boundary (including NULLs), and the **last partition takes everything at or above its start**.
+## The numbers
+Stride = (1,000,000 - 1) / 20, about 50,000. Partitions 1-19 cover ids up to about 950,000 (about 50,000 rows each). The 20th covers ids from about 950,000 to 180,000,000: about 179 million rows in one task.
+With `upperBound=180000000`, the stride is about 9,000,000 ids and each of the 20 tasks reads about 9 million rows. `numPartitions` also caps concurrent connections, so 20 matches the database limit.
+W: upperBound at the real max id: the stride covers the actual id range, so the 20 connections each read a similar share of the 180 million rows.
+X: B=More partitions with old bounds: the last partition still starts near one million and takes about 179 million rows, and 200 partitions exceed the 20-connection limit.
+C=Filter at the upper bound: it removes every row above one million, so about 179 million rows would never be read.
+D=Larger fetchsize: fewer round trips help a little, but one task still reads almost all rows alone.
+T: JDBC bounds set the stride, not a filter; stale bounds put everything outside them into the first or last partition.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.1 expert troubleshooting
+S: A daily backfill rewrites a year of events with `events.write.mode("overwrite").partitionBy("event_date").parquet(out)`. The input has 400 scan partitions of about 256 MB each, and rows from all 365 dates are spread across every input partition. The output has about 146,000 files averaging 0.7 MB, and the downstream engine lists them slowly. Each date holds about 280 MB and no date exceeds 1 GB. The output must stay partitioned by `event_date`, and the team wants one file of a few hundred megabytes per date. AQE is on with default settings. Which change before the write fixes the file count?
+A: Call events.repartition("event_date") before the write, so each date's rows land in one task and every date folder receives one file
+B: Call events.coalesce(365) before the write, so the 400 scan partitions merge into 365 tasks and every date folder receives one file
+C: Call events.repartition(365) before the write, so the rows are spread evenly over 365 tasks and every date folder receives one file
+D: Set spark.sql.files.maxRecordsPerFile to 0 before the write, so each task writes all rows of a date into one file in every date folder
+K: A
+G: ## Files per partitioned write
+With `partitionBy`, each write task writes **one file per partition value it holds**. Total files = sum over tasks of the distinct dates in that task.
+- Here: 400 tasks x 365 dates = 146,000 files; 100 GB / 146,000 = about 0.7 MB each.
+## Aligning tasks with dates
+`repartition("event_date")` hash-partitions by the column, so all rows of one date go to the same shuffle partition. Each date is written by one task: 365 files of about 280 MB. With AQE on, small shuffle partitions may be coalesced (several dates in one task), but a date is never split, so it is still one file per date.
+## Why the others fail
+- `coalesce(365)` merges whole input partitions without moving rows by key: each task still holds all dates, so about 365 x 365 = 133,225 files.
+- `repartition(365)` is round-robin: every partition gets rows of every date.
+- `maxRecordsPerFile` only **caps** rows per file (0 = no cap, the default); it can add files, never merge across tasks.
+W: repartition by event_date: all rows of a date meet in one task, so each date folder gets a single file of about 280 MB.
+X: B=coalesce(365): merged tasks still contain rows of every date, so each writes up to 365 files.
+C=repartition(365) without a column: round-robin spreads every date over all 365 tasks.
+D=maxRecordsPerFile 0: it is already the default, meaning no limit per file; files are still one per task and date.
+T: Partitioned writes create tasks x values files; repartition by the partition column first.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.3 expert troubleshooting
+S: `sales` is stored as Parquet folders partitioned by `year` and `month` (for example `year=2026/month=11`), with an `order_date` DATE column inside the files. Analysts run `SELECT sum(amount) FROM sales WHERE order_date BETWEEN DATE'2026-11-01' AND DATE'2026-11-07'`. In the SQL tab, the scan node reports 96 partitions read, the full eight years, although the matching rows all sit in one month, and the query reads far more files than expected. The layout cannot be rewritten this quarter, and analysts must keep filtering by `order_date`. Which change lets Spark skip the other partition folders?
+A: Add AND year = 2026 AND month = 11 to the WHERE clause, so a predicate on the partition columns lets Spark prune folders before listing files
+B: Add the hint /*+ REPARTITION(year, month) */ to the query, so Spark groups the scan by the partition columns and reads only the matching folders
+C: Write the range with string literals such as '2026-11-01', so the predicate on order_date is pushed into the Parquet reader and prunes the folders
+D: Enable spark.sql.parquet.filterPushdown for the session, so the predicate on order_date reaches the Parquet reader and prunes the partition folders
+K: A
+G: ## Two kinds of skipping
+- **Partition pruning** works on partition columns only (`year`, `month`): their values live in folder names, so Spark knows before listing files which folders can match. A filter on a partition column skips whole folders.
+- **Parquet filter pushdown** (on by default with `spark.sql.parquet.filterPushdown`) applies to data columns such as `order_date`: Spark still opens every file in every folder and uses row-group statistics to skip blocks inside them.
+Spark cannot derive `year = 2026 AND month = 11` from a condition on `order_date`, because it does not know the relationship between the data column and the folder values.
+## The fix
+Keep the analysts' filter and add the matching partition predicate:
+`WHERE order_date BETWEEN DATE'2026-11-01' AND DATE'2026-11-07' AND year = 2026 AND month = 11`
+The SQL tab then shows one partition read.
+W: Partition predicate: filters on year and month are known at planning time, so Spark lists and reads only the one matching folder.
+X: B=REPARTITION hint: it adds a shuffle of the scanned rows after the scan; it does not change which folders are read.
+C=String literals: they change only how the date is written; it is still a data-column predicate, which cannot prune folders.
+D=filterPushdown: it is already on by default and works inside files through row-group statistics; every folder is still listed and opened.
+T: Only predicates on partition columns prune folders; add them alongside data-column filters.
+V: Spark SQL
+
+@ DBX-ASD D2 T2.3 expert troubleshooting
+S: Two tables were saved with `bucketBy` and `sortBy` on `customer_id` through `saveAsTable`: `orders_b` with 64 buckets and `customers_b` with 16 buckets. A daily query `spark.table("orders_b").join(spark.table("customers_b"), "customer_id")` still shows an Exchange above one of the two scans in the physical plan, although the team expected a shuffle-free join. Rewriting the 40 TB `orders_b` with 16 buckets is not possible this quarter, `spark.sql.sources.bucketing.enabled` is at its default, and the join must remain a sort-merge join. All other bucketing settings are at their defaults, and the team wants one configuration change, not a code change. Which single setting change removes the Exchange?
+A: Set spark.sql.bucketing.coalesceBucketsInJoin.enabled to true, so the 64-bucket side is read as 16 coalesced buckets that match the other side
+B: Set spark.sql.bucketing.coalesceBucketsInJoin.maxBucketRatio to 16, so the 64-bucket side is read as 16 coalesced buckets that match the other side
+C: Set spark.sql.shuffle.partitions to 64, so that the 16-bucket side is read as 64 bucket partitions that match the buckets of the other side
+D: Set spark.sql.sources.bucketing.enabled to true, so both tables are read bucket by bucket and the planner stops inserting the Exchange
+K: A
+G: ## When bucketing avoids a shuffle
+A sort-merge join needs both sides hash-partitioned the same way on the join key. Two bucketed tables satisfy this without a shuffle when they are bucketed on the join key with the **same number of buckets**. With 64 and 16 buckets, partition k of one side does not match partition k of the other, so the planner inserts an Exchange on one side.
+## Bucket coalescing
+`spark.sql.bucketing.coalesceBucketsInJoin.enabled` (default **false**): when two bucketed tables with different bucket counts are joined, the side with more buckets is coalesced to the other side's count. The larger count must be divisible by the smaller, and the ratio must be at most `spark.sql.bucketing.coalesceBucketsInJoin.maxBucketRatio` (default **4**). It applies to sort-merge and shuffled hash joins.
+Here 64 / 16 = 4: divisible and within the default ratio, so turning the feature on is enough. The docs warn that coalescing reduces parallelism.
+W: coalesceBucketsInJoin enabled: 64 is divisible by 16 with a ratio of 4, within the default limit, so both sides line up and the Exchange disappears.
+X: B=maxBucketRatio only: it raises the allowed ratio, but coalescing itself stays disabled by default, so nothing changes.
+C=Shuffle partitions 64: the 16-bucket side would still be reshuffled to match; that Exchange is exactly what the team wants to remove.
+D=bucketing.enabled: it is already true by default; bucketed reads are on, and the mismatch in bucket counts is the cause.
+T: Bucketed joins skip the shuffle only with matching bucket counts; coalesceBucketsInJoin can align divisible counts.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.10 expert troubleshooting
+S: A report must list every campaign with its click count, including campaigns with zero clicks. The developer writes `F.broadcast(campaigns).join(clicks, "campaign_id", "left").groupBy("campaign_id").count()`, where `campaigns` is 40 MB and `clicks` is 6 TB. AQE is on. The physical plan shows a SortMergeJoin with Exchanges on both sides, and the 6 TB shuffle dominates the run. The developer notes that a broadcast hint should override `spark.sql.autoBroadcastJoinThreshold`. Executor memory comfortably holds 40 MB, and the report needs one row per campaign with its true click count, 0 for campaigns without clicks. Which rewrite lets Spark avoid shuffling the raw clicks into the join?
+A: Count clicks per campaign_id first, then campaigns.join(F.broadcast(counts), "campaign_id", "left") and fill missing counts with 0
+B: Raise spark.sql.autoBroadcastJoinThreshold to 100 MB and keep the left join with campaigns on the left, so campaigns is broadcast automatically
+C: Rewrite it as clicks.join(F.broadcast(campaigns), "campaign_id", "right"), so the hinted campaigns side becomes the broadcast build side
+D: Keep the left join and replace the hint with F.broadcast(clicks), so Spark broadcasts the right side of the left outer join to every executor
+K: A
+G: ## Which side can be broadcast
+A broadcast hash join builds a hash table from the broadcast (**build**) side on every executor and streams the other side's partitions through it. For an outer join, the **preserved** side must emit rows even when they have no match; a task that only sees part of the streamed side cannot know whether a build-side row matched anywhere else. So the build side must be the **non-preserved** side: the right side of a left outer join, the left side of a right outer join.
+The tuning guide states that Spark does not guarantee the hinted strategy, because a strategy may not support every join type. Here `campaigns` is the preserved side, so the hint cannot be honored and Spark falls back to a sort-merge join.
+## Making the big side small
+Partial aggregation shrinks 6 TB of clicks to one row per campaign before any join:
+`counts = clicks.groupBy("campaign_id").count()`
+`campaigns.join(F.broadcast(counts), "campaign_id", "left").fillna(0, ["count"])`
+Now the small, non-preserved side is broadcast, and campaigns without clicks get 0.
+W: Aggregate then broadcast counts: the raw clicks never enter the join, and the per-campaign counts sit on the non-preserved side, where a broadcast is allowed.
+X: B=Higher threshold: size was never the problem; campaigns is the preserved side of the outer join, so it cannot be the build side.
+C=Right join with hint: campaigns is still the preserved side, now on the right, so the broadcast is not possible and the plan stays a sort-merge join.
+D=Broadcast clicks: 6 TB cannot be collected and broadcast to executors; the job would fail long before the join.
+T: In an outer join only the non-preserved side can be broadcast; shrink the other input first if needed.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.6 expert troubleshooting
+S: The Parquet folder `/lake/orders` receives new files every day. Three weeks ago the producing team added a `discount` column; older files do not have it. A job reads `spark.read.parquet("/lake/orders")`, and `"discount" in df.columns` returns False, so a new revenue metric is silently missing. A hand-written `.schema(...)` was rejected because the producer will add more columns over time. The folder has 30,000 files, other reads in the same session must keep their current behavior, and the new columns must appear automatically, with NULL for older files. The extra planning time of reading many file footers is acceptable. Which change fits?
+A: Add option("mergeSchema", "true") to this read, so Spark merges the schemas of all files and fills new columns with NULL for older files
+B: Set spark.sql.parquet.mergeSchema to true for the session, so Spark merges the schemas of all files and fills new columns with NULL for older files
+C: Add option("inferSchema", "true") to this read, so Spark scans every file to infer the full schema and fills new columns with NULL for older files
+D: Add option("basePath", "/lake/orders") to this read, so Spark discovers the schema of all files and fills new columns with NULL for older files
+K: A
+G: ## Parquet schema evolution
+Parquet files carry their own schema in the footer. When files in one folder have different but compatible schemas (columns added over time), Spark can **merge** them into one schema; files without a column return NULL for it.
+Schema merging is relatively expensive and has been **off by default since Spark 1.5**, so by default Spark takes the schema from a single file, which may be an old one. Two ways to turn it on:
+- the read option `mergeSchema` = `true` (this read only);
+- the SQL setting `spark.sql.parquet.mergeSchema` = `true` (every Parquet read in the session).
+## Cost
+Merging reads the footers of all 30,000 files at read time. That is the price of picking up new columns automatically.
+W: mergeSchema read option: it merges all footers for this read only, so discount and future columns appear, with NULLs for older files.
+X: B=Session setting: it gives the same merged schema, but changes every Parquet read in the session, which the other reads must not see.
+C=inferSchema: it is a CSV and text option; Parquet already has schemas in its files, and the option does not merge them.
+D=basePath: it tells partition discovery where the table root is; it does not merge file schemas.
+T: Parquet schema merging is off by default; enable it per read with mergeSchema.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.1 expert troubleshooting
+S: A nightly report lists customers that are not blocked: `SELECT c.id FROM customers c WHERE c.id NOT IN (SELECT b.customer_id FROM blocklist b)`. For months it returned about 40,000 rows; since Tuesday it returns zero rows, with no error and no change to the query. Investigation shows that a new blocklist feed inserted one row whose `customer_id` is NULL, and the security team requires that row to stay in the table for audit. `customers.id` is never NULL. The report must again list every customer whose id is not on the blocklist. Which query change fixes it?
+A: Replace NOT IN with NOT EXISTS (SELECT 1 FROM blocklist b WHERE b.customer_id = c.id), which simply finds no match in the NULL row
+B: Keep NOT IN and add AND c.id IS NOT NULL to the outer WHERE clause, so that the NULL comparison is removed before NOT IN is evaluated
+C: Keep NOT IN and use SELECT DISTINCT b.customer_id in the subquery, so that the extra NULL row is merged before NOT IN is evaluated
+D: Keep NOT IN and set spark.sql.ansi.enabled to false for the session, so that the NULL comparison inside NOT IN is evaluated as false
+K: A
+G: ## NOT IN and NULL
+`x IN (list)` is a chain of `x = v1 OR x = v2 ...`. With NULL in the list:
+- TRUE when x is found;
+- **UNKNOWN** (NULL) when x is not found and the list contains a NULL.
+`NOT IN` negates that, and NOT UNKNOWN is still UNKNOWN. Spark's null-semantics page states it directly: NOT IN always returns UNKNOWN when the list contains NULL, regardless of the input value. WHERE keeps only TRUE rows, so one NULL in the subquery empties the result.
+## Null-safe alternatives
+- `NOT EXISTS (SELECT 1 FROM blocklist b WHERE b.customer_id = c.id)`: for the NULL row the condition is NULL, so it is not a match; customers with no real match are kept.
+- In the DataFrame API: `customers.join(blocklist, customers.id == blocklist.customer_id, "left_anti")`.
+- Or filter `WHERE b.customer_id IS NOT NULL` inside the subquery.
+W: NOT EXISTS: a NULL key never matches, so it does not poison the whole predicate, and every unblocked customer is returned again.
+X: B=Filter the outer ids: c.id is never NULL anyway; the NULL is in the list, which still makes NOT IN UNKNOWN for every id.
+C=DISTINCT in the subquery: the NULL row survives DISTINCT as one NULL value, so the list still contains NULL.
+D=ANSI mode off: ANSI mode changes error behavior for casts and arithmetic; three-valued NULL logic is the same in both modes.
+T: One NULL in a NOT IN subquery makes the predicate UNKNOWN for every row; use NOT EXISTS or a left anti join.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.5 expert troubleshooting
+S: A job enriches 2 billion `transactions` with `category` from `merchants` (5 million rows) using `transactions.join(merchants, "merchant_id", "left")`. After a vendor refresh, the output has 2.6 billion rows, the join's shuffle write grew sharply, and finance totals are 30% too high. `merchants.groupBy("merchant_id").count().filter("count > 1").count()` returns 900,000: each of those ids has exactly two rows that differ in `updated_at` and sometimes in `category`. Every transaction must appear exactly once, the category from the merchant row with the newest `updated_at` must win, and the result must be the same on every run. Which fix is correct?
+A: Reduce merchants with groupBy("merchant_id").agg(F.max_by("category", "updated_at")) before the left join, so each id keeps its newest category
+B: Reduce merchants with dropDuplicates(["merchant_id"]) before the left join, so that each id keeps exactly one row and the transactions are not repeated
+C: Keep the left join and call dropDuplicates() on the joined result, so the transactions repeated by the extra merchant rows appear only once again
+D: Reduce merchants with groupBy("merchant_id").agg(F.max("category")) before the left join, so each id keeps exactly one category for all its rows
+K: A
+G: ## Why the row count grew
+A join returns one output row for **every matching pair**. When a key appears twice on the lookup side, each transaction of that merchant matches twice and is duplicated. That is why rows, shuffle volume and totals all grew. The fix belongs on the lookup side: make `merchant_id` unique before joining.
+## Picking the right row per key
+`max_by(col, ord)` (Spark 3.3+) returns the value of `col` from the row with the maximum `ord` in each group. With distinct `updated_at` values per merchant, the result is deterministic:
+`latest = merchants.groupBy("merchant_id").agg(F.max_by("category", "updated_at").alias("category"))`
+`transactions.join(latest, "merchant_id", "left")`
+(For many columns, `row_number` over a window ordered by `updated_at` descending does the same.)
+W: max_by per merchant: each id keeps exactly one row, carrying the category of its newest record, so transactions are no longer duplicated.
+X: B=dropDuplicates on merchants: ids become unique, but which of the two rows survives is arbitrary, so the newest category does not reliably win.
+C=dropDuplicates after the join: duplicated transactions differ in category, so they are not identical rows, and real identical transactions would be merged wrongly.
+D=max of category: it picks the alphabetically largest category, not the one from the newest row.
+T: Duplicate keys on the lookup side multiply join output; deduplicate it deterministically (for example with max_by) first.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.2 expert troubleshooting
+S: After a migration from Spark 3.3 to Spark 4, a job fails at `df.withColumn("qty", F.col("qty_raw").cast("int"))` with `[CAST_INVALID_INPUT] The value 'n/a' of the type "STRING" cannot be cast to "INT" because it is malformed. ... Use try_cast to tolerate malformed input and return NULL instead.` On Spark 3.3 the same rows became NULL and a later data-quality step counted them. The platform policy forbids turning ANSI mode off in any job or session, because other steps rely on ANSI errors for overflow and invalid arithmetic, and the data-quality step must keep receiving NULL for malformed values. Which change fits?
+A: Use F.col("qty_raw").try_cast("int"), which returns NULL for malformed strings while ANSI mode stays on for the rest of the job
+B: Use spark.conf.set("spark.sql.ansi.enabled", "false") at the start of the job, so that the cast returns NULL for malformed strings
+C: Use F.col("qty_raw").cast("bigint") instead of int, so that the wider target type accepts the malformed strings and returns NULL
+D: Use F.expr("CAST(qty_raw AS INT)") instead of the Column method, so that the SQL cast returns NULL for malformed strings again
+K: A
+G: ## ANSI mode is the default in Spark 4
+Since Spark 4.0, `spark.sql.ansi.enabled` is **true** by default. Under ANSI mode, Spark throws an exception at runtime instead of returning NULL when inputs to an operator or function are invalid. A string that is not a number, cast to INT, raises `CAST_INVALID_INPUT`; in Spark 3 (ANSI off) the same cast returned NULL.
+## Tolerant casts
+- `Column.try_cast(type)` (PySpark 4.0) or SQL `try_cast(expr AS type)`: same as cast, but returns NULL instead of raising an error.
+- Turning ANSI off (`spark.sql.ansi.enabled=false`) restores the old behavior everywhere, which the policy forbids here.
+## Example
+`df.withColumn("qty", F.col("qty_raw").try_cast("int"))` gives NULL for `'n/a'`, and the data-quality step counts it as before.
+W: try_cast: malformed strings become NULL for this column only, and ANSI errors stay active everywhere else, as the policy requires.
+X: B=ANSI off in the session: it restores NULLs but turns ANSI mode off for the job, which the policy forbids.
+C=Cast to bigint: a wider type does not make 'n/a' a number; ANSI mode still raises CAST_INVALID_INPUT.
+D=SQL CAST expression: SQL CAST follows the same ANSI setting, so it fails with the same error.
+T: Spark 4 runs in ANSI mode by default; use try_cast where malformed input should become NULL.
+V: Spark SQL
+
+@ DBX-ASD D3 T3.7 expert troubleshooting
+S: A daily job keeps the latest address per customer with `row_number().over(Window.partitionBy("customer_id").orderBy(F.desc("updated_at")))` and a filter on `rn = 1`. Auditors rerun yesterday's job on identical input and find 1,200 customers whose kept address differs between the two runs. All of them have two or more rows with exactly the same `updated_at`, because a batch loader stamps rows with its load time. Each row also has `ingest_seq`, a unique number that increases with load order. The result must be reproducible, and among tied rows the one loaded last must win. Which change fixes it?
+A: Order the window by F.desc("updated_at") and then F.desc("ingest_seq"), so tied timestamps are always broken by the latest load order
+B: Order the window by F.desc("updated_at") and then F.asc("ingest_seq"), so tied timestamps are always broken by the load order of the rows
+C: Keep the window and replace row_number() with rank(), so tied rows get the same rank and the filter on 1 keeps a stable row for each customer
+D: Keep the window and sort the DataFrame by ingest_seq before applying it, so the rows reach each window partition in the latest load order
+K: A
+G: ## Ties make row_number nondeterministic
+`row_number()` gives consecutive numbers 1, 2, 3 within a window partition in the window's sort order. When two rows have the **same** sort key, their relative order is not defined: it depends on how rows arrive after the shuffle, which can change between runs. So which tied row gets number 1 can change.
+## A total order
+Add a unique tie-breaker as the last sort key:
+`Window.partitionBy("customer_id").orderBy(F.desc("updated_at"), F.desc("ingest_seq"))`
+Now no two rows of a customer compare equal, and the row with the highest `ingest_seq` among the newest timestamps always wins.
+## Related functions
+- `rank()` gives tied rows the **same** number (1, 1, 3), so a filter on 1 keeps all tied rows.
+- A sort before the window does not survive the window's own shuffle and sort.
+W: Descending ingest_seq tie-breaker: the order inside each customer becomes total, and the last loaded of the tied rows gets number 1 every time.
+X: B=Ascending tie-breaker: the result is reproducible, but the earliest loaded row wins, not the latest.
+C=rank(): tied rows all get rank 1, so the filter keeps several addresses for those customers.
+D=Sort before the window: the window shuffles and sorts by its own keys, so the earlier sort order is not kept for tied rows.
+T: row_number needs a total order; add a unique tie-breaker so reruns pick the same row.
+V: Spark SQL
+
+@ DBX-ASD D4 T4.1 expert troubleshooting
+S: A regulated job must run with `spark.sql.adaptive.enabled=false`, because auditors require the same physical plan on every run. It joins `events` (3 TB) with `devices` (60 GB) on `device_id`; a single test device accounts for 35% of all events. The Stages tab shows 1,999 of 2,000 join tasks finishing within two minutes and one task reading about 1 TB of shuffle data for five hours. `devices` is far too large to broadcast, the test device's events must stay in the output, and the join result must not change. Which change spreads the hot key over many tasks?
+A: Add a random salt from 0 to 19 to each events row, replicate each devices row for salts 0 to 19, and join on device_id plus the salt
+B: Add a random salt from 0 to 19 to each events row and to each devices row, and then join the two tables on device_id plus the salt
+C: Raise spark.sql.shuffle.partitions to 20,000, so the hot key's rows are spread over many more join tasks in the shuffle that the join needs
+D: Repartition events by device_id into 2,000 partitions before the join, so that every join task starts with a partition of the same size
+K: A
+G: ## Why one task gets 1 TB
+A sort-merge join hash-partitions both sides by the join key. All rows with the same key land in the **same partition**, however many partitions exist. With 35% of 3 TB on one device, one task reads about 1 TB. With AQE disabled by policy, Spark's runtime skew-join splitting is unavailable.
+## Salting
+Make the key more varied on the large side and match it on the small side:
+- `events`: add `salt = floor(rand() * 20)`, so the hot device's rows spread over 20 keys.
+- `devices`: replicate every row 20 times, once per salt value (for example with `explode(sequence(0, 19))`).
+- Join on `(device_id, salt)`: every events row finds its device row exactly once, so the result is unchanged, and the hot device is processed by about 20 tasks.
+Replicating `devices` multiplies the small side by 20 (60 GB to 1.2 TB shuffled), so in practice teams often salt only the hot keys.
+W: Salt one side, replicate the other: each event still matches its device exactly once, and the hot key's rows spread over 20 partitions.
+X: B=Random salt on both sides: an event matches only if its device row happened to get the same random salt, so most matches are lost.
+C=More shuffle partitions: all rows of one key still hash to one partition, so the 1 TB task stays.
+D=Repartition by device_id: it hashes on the same key, so the hot device still lands in one partition.
+T: More partitions cannot split one key; salt the large side and replicate the small side to spread it.
+V: Spark SQL
+
+@ DBX-ASD D4 T4.2 expert troubleshooting
+S: A query joins `orders` (2 TB) with `stores`, filtered by a Python UDF that keeps about 30 MB of a 50 GB table. AQE is on. Because a wrong size estimate once led Spark to broadcast a large table and crash the driver, the team keeps `spark.sql.autoBroadcastJoinThreshold` at its 10 MB default and may not raise it. The SQL tab shows that the `stores` shuffle stage finished with only 30 MB of shuffle output, yet the join remains a SortMergeJoin and its reduce stage sorts the full `orders` data. The team wants AQE to switch such joins to broadcast hash joins at runtime, without changing static planning. Which setting change does that?
+A: Set spark.sql.adaptive.autoBroadcastJoinThreshold to 64 MB, which AQE uses for runtime join conversion while static planning keeps 10 MB
+B: Set spark.sql.autoBroadcastJoinThreshold to 64 MB, which AQE uses for runtime join conversion while static planning keeps the 10 MB default
+C: Set spark.sql.adaptive.localShuffleReader.enabled to true, which lets AQE convert the join at runtime while static planning keeps 10 MB
+D: Set spark.sql.adaptive.advisoryPartitionSizeInBytes to 64 MB, which AQE uses for runtime join conversion while static planning keeps 10 MB
+K: A
+G: ## Two broadcast thresholds
+- `spark.sql.autoBroadcastJoinThreshold` (default 10 MB): used when the plan is built, from **estimated** sizes. Raising it changes static planning.
+- `spark.sql.adaptive.autoBroadcastJoinThreshold`: the maximum size for a broadcast decided by **AQE at runtime**, from the actual size of a finished shuffle stage. Its default is the same value as the static threshold, and it is used only in the adaptive framework.
+## The evidence
+The `stores` side was 30 MB after its shuffle, which is above the adaptive threshold's default of 10 MB, so AQE kept the sort-merge join. Setting only the adaptive threshold to 64 MB lets AQE convert the join to a broadcast hash join from real sizes, while the risky static estimates stay limited to 10 MB.
+After the conversion, `spark.sql.adaptive.localShuffleReader.enabled` (default true) lets Spark read the already written shuffle output locally instead of as a normal shuffle read.
+W: Adaptive threshold 64 MB: AQE now converts joins whose measured side is under 64 MB, and the static 10 MB limit for estimates stays untouched.
+X: B=Static threshold: it changes planning-time broadcasts from estimates, which the team must not raise; the adaptive threshold would follow it too.
+C=Local shuffle reader: it is already on by default and only optimizes reading after a conversion; it does not decide whether to convert.
+D=Advisory partition size: it guides coalescing and skew splitting, not the broadcast decision.
+T: spark.sql.adaptive.autoBroadcastJoinThreshold controls AQE's runtime broadcast conversion separately from static planning.
+V: Spark SQL
+
+@ DBX-ASD D5 T5.3 expert troubleshooting
+S: A developer counts sensor events in 5-minute tumbling windows of `event_time` and writes them to a Parquet file sink, which supports append mode only. The code calls `withWatermark("ingest_time", "15 minutes")`, because `ingest_time` is set by the gateway, and then `groupBy(F.window("event_time", "5 minutes"), "sensor_id").count()`. Starting the query fails with an AnalysisException saying that append output mode is not supported for streaming aggregations without a watermark. Events reach the gateway at most 10 minutes after their `event_time`, windows must be grouped by `event_time`, and each window must be written once, when final. Which change fixes the query?
+A: Call withWatermark("event_time", "15 minutes") before the groupBy and keep the window on event_time, so the watermark is on the window's column
+B: Keep withWatermark("ingest_time", "15 minutes") and switch the query to update output mode, so the aggregation on event_time is accepted by the sink
+C: Keep withWatermark("ingest_time", "15 minutes") and change the window to F.window("ingest_time", "5 minutes"), so both use the same time column
+D: Call withWatermark("event_time", "15 minutes") after the groupBy and keep the window on event_time, so the watermark is on the aggregation's time column
+K: A
+G: ## Watermarks must match the aggregation's time column
+In append mode, a streaming aggregation can emit a row only when it is final, which needs a watermark to know when no more late data will come. The guide's conditions include:
+- the aggregation must have the event-time column, or a `window` on it;
+- `withWatermark` must be called on **the same column** as the timestamp column used in the aggregation (a watermark on another column is invalid in append mode);
+- `withWatermark` must be called **before** the aggregation.
+## Here
+The watermark is on `ingest_time` but the window is on `event_time`, so Spark treats the aggregation as unwatermarked and rejects append mode. Moving the watermark to `event_time` with a 15-minute delay covers the 10-minute lateness, and windows are written once when the watermark passes their end.
+W: Watermark on event_time before the aggregation: the windowed count gets a valid watermark, so append mode works and each window is written once, when final.
+X: B=Update mode: the Parquet file sink supports append only, and update mode would rewrite windows, not write them once.
+C=Window on ingest_time: the query would run, but it groups by gateway time instead of event_time, which breaks the requirement.
+D=Watermark after the groupBy: the watermark must be defined before the aggregation; after it, the aggregation still has none.
+T: In append mode, call withWatermark on the same time column as the window, before the aggregation.
+V: Structured Streaming
+
+@ DBX-ASD D5 T5.1 expert troubleshooting
+S: A Structured Streaming query reads a Kafka topic with 8 partitions, parses each record with a CPU-heavy Python UDF, and appends the result to a Parquet sink, with no aggregation and no shuffle. The cluster has 64 cores. `lastProgress` shows `inputRowsPerSecond` around 90,000 and `processedRowsPerSecond` around 30,000, and batch durations keep growing; the Spark UI shows each micro-batch running a single stage of only 8 tasks while most cores stay idle. The topic's partition count is owned by another team and cannot change, and the exactly-once file output must be kept. Which change addresses the evidence?
+A: Set the Kafka source option minPartitions to 64, so Spark splits the offset ranges of the 8 Kafka partitions into about 64 tasks per batch
+B: Set the Kafka source option maxOffsetsPerTrigger to 64, so Spark splits the offset ranges of the 8 Kafka partitions into about 64 tasks per batch
+C: Set spark.sql.shuffle.partitions to 64 for the query, so Spark splits the offset ranges of the 8 Kafka partitions into about 64 tasks per batch
+D: Set the trigger to processingTime="1 second", so Spark starts smaller micro-batches more often and spreads them over about 64 tasks at once
+K: A
+G: ## Read parallelism of the Kafka source
+By default the Kafka source maps each Kafka topic partition to one Spark partition, so 8 topic partitions give 8 tasks per micro-batch. With a map-only query (parse and append), those 8 tasks do all the work: 8 of 64 cores are busy, and processing (30,000 rows/s) falls behind input (90,000 rows/s), so batches grow.
+## minPartitions
+The Kafka option `minPartitions` sets a desired minimum number of Spark partitions; if it is larger than the topic partition count, Spark divides large Kafka partitions into smaller offset ranges. It is a hint: the task count is approximately `minPartitions`. Offsets are still tracked in the checkpoint, so exactly-once output is kept.
+## The other settings
+- `maxOffsetsPerTrigger` caps the number of offsets per micro-batch: it limits volume, not parallelism.
+- `spark.sql.shuffle.partitions` applies after a shuffle; this query has none.
+W: minPartitions 64: each batch is read and parsed by about 64 tasks, so idle cores join in and throughput can catch up with input.
+X: B=maxOffsetsPerTrigger: it limits how many offsets a batch takes; the 8 Kafka partitions still map to 8 tasks.
+C=shuffle partitions: the plan has no shuffle, so the setting does not change the 8 read tasks.
+D=Shorter trigger: smaller batches still run on 8 tasks each, so the per-batch parallelism stays the same.
+T: Kafka partitions map one to one to tasks; minPartitions splits them when the topic has too few partitions.
+V: Structured Streaming, Apache Kafka
+
+@ DBX-ASD D6 T6.1 expert troubleshooting
+S: A team moves a notebook to Spark Connect. A Python UDF in the notebook calls `from geo_utils import normalize`, where `geo_utils.py` is a local module saved next to the notebook on the client machine. Building the DataFrames raises no error, but the first action fails with `ModuleNotFoundError: No module named 'geo_utils'`, raised from a Python worker on the server side. The Spark server is shared by many teams: nobody may install packages on its nodes or restart it, and the module must be visible only to this notebook's session. Which call fixes the error?
+A: spark.addArtifacts("/home/me/geo_utils.py", pyfile=True), which adds the module to this session as a Python dependency on executors
+B: spark.addArtifacts("/home/me/geo_utils.py", file=True), which adds the module to this session as a Python dependency on executors
+C: spark.addArtifacts("/home/me/geo_utils.py", archive=True), which adds the module to this session as a Python dependency on executors
+D: sys.path.append("/home/me") in the notebook before the action, which adds the module to this session as a Python dependency on executors
+K: A
+G: ## Code runs on the server, not on the client
+With Spark Connect, the client sends unresolved plans; the server analyzes and runs them. A Python UDF is pickled on the client but **executed in Python workers on the server's executors**, so every module it imports must exist there. A module that exists only next to the notebook raises `ModuleNotFoundError` at the first action, because nothing runs before an action.
+## Session artifacts
+`SparkSession.addArtifacts(*path, pyfile=False, archive=False, file=False)` (Spark 3.5+) uploads local files to the **client session**:
+- `pyfile=True`: Python dependencies such as `.py`, `.egg`, `.zip` files, inserted directly into the path when Python functions run in executors.
+- `archive=True`: archives (`.zip`, `.tar.gz`, ...), unpacked on the executor side.
+- `file=True`: plain files downloaded to every node, not put on the Python path.
+Artifacts are session-local in Spark Connect, so other teams' sessions are not affected.
+W: pyfile=True: the module is uploaded for this session only and placed on the executors' Python path, so the UDF's import works.
+X: B=file=True: the file is downloaded to the nodes but not added to the Python path, so the import still fails.
+C=archive=True: a single .py file is not an archive to unpack, and archives are not put on the path by themselves.
+D=sys.path on the client: it changes only the notebook's own Python process; the UDF runs in workers on the server.
+T: Ship UDF dependencies to a Spark Connect session with addArtifacts(..., pyfile=True).
+V: Spark Connect
+
+@ DBX-ASD D7 T7.1 expert troubleshooting
+S: A pandas-on-Spark pipeline joins two large frames, groups the result, and then calls `psdf.pandas_on_spark.apply_batch(add_features)`, where `add_features(pdf)` returns a pandas DataFrame with the original columns plus two new float columns. The function has no return type hint. In the Spark UI, every run shows the expensive join and groupBy stages twice: once in a short job that processes only a small number of leading rows, and once in the full job. The team must keep apply_batch, the upstream work should run only once, and caching the 3 TB intermediate result is not allowed. Which change fits?
+A: Add a return type hint with column names and types, such as pd.DataFrame["id": int, "f1": float, "f2": float], so no inference job runs
+B: Add a return type hint with types only, such as pd.Series[float], to the function, so pandas API on Spark skips the schema inference job
+C: Set compute.default_index_type to distributed for the session, so pandas API on Spark no longer needs a job to infer the output schema
+D: Replace apply_batch with transform_batch and keep the function without hints, so pandas API on Spark skips the schema inference job
+K: A
+G: ## Schema inference in pandas API on Spark
+Functions passed to `apply_batch`, `transform_batch`, `DataFrame.apply` and similar APIs return pandas objects. Pandas API on Spark needs the Spark schema of the result. Without a type hint, it **infers** the schema by running the function on some top records of the output. The type-hints guide warns that this is potentially expensive: with costly upstream operations such as a shuffle, the Spark job runs **twice**, once for schema inference and once for the actual data.
+## Return type hints
+A return type hint is converted into the Spark schema, so no inference job runs:
+- `-> pd.DataFrame[int, float]` (types only; columns are named c0, c1, ...);
+- `-> pd.DataFrame["id": int, "f1": float, "f2": float]` (names and types, which keeps the column names).
+The returned frame must match the hint. The guide notes that hints with pandas classes (`pd.DataFrame[...]`) need Python 3.11+; the pandas-on-Spark form `ps.DataFrame[...]` works as well.
+W: Named DataFrame hint: the schema comes from the hint, so the inference job and its second run of the join disappear, and column names are kept.
+X: B=Series hint: apply_batch returns a DataFrame with several columns; a Series hint does not describe that output.
+C=Distributed default index: it changes how a default index is attached, not how the result schema is found.
+D=transform_batch: it is in the same family of APIs and also infers the schema without a hint.
+T: Give apply_batch and similar functions a return type hint to avoid a second, schema-inference job.
+V: Pandas API on Spark
