@@ -19,3 +19,9 @@ evaluators, the agent Monitor tab metrics, AI Red Teaming Agent and Sora 2 are p
 GA in Search REST 2026-04-01 only with minimal extractive retrieval (query planning/answer synthesis preview); model
 router GA (session affinity and routing metadata preview); Translator text API 2026-06-06 GA with NMT or LLM choice;
 LLM Speech GA; Content Understanding pro mode existed only in a retired preview API; capacity units per TPM vary by model.
+
+## Status notes 2026-11-17 (AI-901 hard layers)
+- Language PII for conversations: GA versions exist; only the newest API/model version is Preview. Native-document PII samples use a `-preview` API version: never key.
+- Programmed Training: Preview (distractor only).
+- Fine-tuned model deployments: Data Zone Standard is US-only.
+- Guardrails (Foundry): blocking level High blocks low+medium+high; the classic content-filter page words it as a severity threshold where Low is strictest. Questions must say which wording they use.
