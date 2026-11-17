@@ -24,7 +24,6 @@
 # src: https://docs.databricks.com/aws/en/jobs/repair-job-failures
 # src: https://docs.databricks.com/aws/en/repos/ci-cd-techniques-with-repos
 # src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-create-table-using
-# src: https://docs.databricks.com/aws/en/delta/generated-columns
 
 @ DBX-DEP D1 T1.12 expert troubleshooting
 S: A stream joins `impressions` and `clicks` (both from Kafka) with an inner join on `ad_id` to count clicked impressions. The code calls `impressions.withWatermark("imp_ts", "2 hours")` and joins on `ad_id` only; `clicks` has no watermark. After nine days the driver shows growing micro-batch durations, and `StreamingQueryProgress` reports `stateOperators[0].numRowsTotal` rising every batch while `numRowsDroppedByWatermark` stays 0. A click always happens within 1 hour after its impression. The team must keep the same output, keep the checkpoint if possible, and bound state. The output feeds a billing dashboard that reads the Delta sink every hour. Which change addresses the evidence?
@@ -196,7 +195,7 @@ S: In a serverless pipeline, the materialized view `gold.daily_orders` declares 
 A: Remove the expectation and declare `CHECK (qty > 0)` on the materialized view instead, so bad rows are rejected by the table constraint during each refresh
 B: Change the expectation to `expect_or_fail`, so the view keeps its NOT NULL column and still never contains bad rows, which allows an incremental plan
 C: Keep both and set the refresh policy to incremental strict, so the engine must find an incremental plan for the expectation and the NOT NULL column
-D: Move the drop rule to an upstream table or view-free step and keep `order_id` non-null with an expectation instead of a NOT NULL column in the schema
+D: Apply the drop rule in an upstream streaming table, and on gold replace the NOT NULL column with an `expect_or_fail` rule on `order_id IS NOT NULL`
 K: D
 G: ## When expectations block incremental refresh
 Materialized views with expectations can be refreshed incrementally, but the docs list two exceptions:
@@ -205,7 +204,7 @@ Materialized views with expectations can be refreshed incrementally, but the doc
 ## Reading the evidence
 `FLOW_FULL_RECOMPUTE` (the flow runs as a full recompute) and the planning event agree, and the definition matches the second exception exactly.
 ## Applying it
-Keep dropping bad rows earlier, for example in an upstream streaming table or materialized view with the drop expectation, and replace the schema-level NOT NULL on `gold.daily_orders` with an expectation such as `expect_or_drop("order_id_present", "order_id IS NOT NULL")` placed upstream or a fail rule on gold. Gold then has no drop rule combined with NOT NULL columns.
+Keep dropping bad rows earlier, in an upstream streaming table that carries the drop expectation (a table, not a view: a view with expectations would block incremental refresh again), and replace the schema-level NOT NULL on `gold.daily_orders` with `expect_or_fail("order_id_present", "order_id IS NOT NULL")`. Gold then has no drop rule combined with NOT NULL columns, and a NULL id still cannot reach it.
 W: Separate the drop rule from the NOT NULL column: it removes the documented blocker while still keeping bad rows and NULL ids out of gold.
 X: A=CHECK constraint: a violated CHECK constraint fails the write instead of dropping rows, so the rule would stop the refresh rather than drop bad rows.
 B=expect_or_fail: it changes the action from dropping rows to failing the whole update, which contradicts the requirement to drop bad rows.
@@ -422,7 +421,7 @@ C: Recreate the table once with an explicit schema that declares the identity co
 D: Keep the CTAS and compute `product_sk` as `row_number()` over `product_id` in the query, so that the keys stay stable and are filled for all products
 K: C
 G: ## CTAS and identity columns
-The Delta docs state that you **cannot define schema, identity column constraints or other table specifications in a `CREATE TABLE ... AS SELECT`** statement. To get an identity column you must:
+The `CREATE TABLE [USING]` reference defines identity in the column specification: `GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY`, `BIGINT` only. For `AS query` it states: **when you specify a `query` you must not also specify a `table_specification`; the table schema is derived from the query**. So a CTAS rebuild cannot carry an identity column. To get one you must:
 1. create the table with the correct schema, including `GENERATED ... AS IDENTITY`;
 2. load it with `INSERT` (or `MERGE`).
 Identity values are unique and increase but are not contiguous; with `GENERATED ALWAYS` the writer cannot supply values.
@@ -430,7 +429,7 @@ Identity values are unique and increase but are not contiguous; with `GENERATED 
 The CTAS rebuild replaced the table definition, so the identity disappeared and new rows got NULL keys.
 ## Applying it
 Recreate the table once with the identity column, reload existing keys with `GENERATED BY DEFAULT` if they must be kept (inserted values are used when provided), and then merge new products each night so existing keys never change.
-W: Explicit schema plus INSERT or MERGE: it is the documented way to have an identity column, keeps existing keys, and assigns keys to new products.
+W: Explicit schema plus INSERT or MERGE: an identity column can only be declared in a column specification, which CTAS forbids; loading with INSERT or MERGE keeps existing keys and assigns keys to new products.
 X: A=Identity in the SELECT list: CTAS cannot carry identity specifications, so the clause is rejected.
 B=Table property: identity is part of the column definition, not a table property, and CTAS still cannot declare it.
 D=row_number per rebuild: numbers shift whenever products are added or removed, so keys referenced by facts would change.
