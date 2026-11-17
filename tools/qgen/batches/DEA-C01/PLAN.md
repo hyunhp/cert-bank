@@ -49,3 +49,39 @@ Owns (only b09 writes these):
   and LF-tags (T4.2, T4.5).
 - Macie findings to EventBridge, CloudTrail / CloudTrail Lake for audit (T4.4, T4.5).
 Leave to b08: Kinesis, SQS, Firehose, Glue job monitoring, AppFlow, EventBridge Scheduler, Lambda+EFS, EKS storage.
+
+# DEA-C01 expert tier (b10-b11), 2026-11-17
+
+Owner asked for the hardest fair questions possible ("극상 난이도"). Level `expert` (new; red badge). 20 per batch.
+Hard must still be fair: every fact on docs.aws.amazon.com, one best answer, no trivia for its own sake.
+
+## What makes a question expert-level here (use at least three per question)
+- Long scenario (90-140 words) with 3-4 binding constraints, one of them stated only in the details
+  (an existing configuration, a compliance clause, a team skill limit) that eliminates the "obvious" answer.
+- Numbers that must be worked: records/s and record size vs shard or partition throughput, file counts vs small-file
+  overhead, retention or retrieval windows vs SLA, cost per unit across two designs, concurrency math
+  (shards x parallelization factor), DPU-hours. Use only documented limits and prices that drive the design.
+- Two-service interplay: the failure or the fix is in the seam (Lambda event source mapping + Kinesis, Firehose +
+  Glue table schema, Lake Formation + Glue crawler, Redshift + S3 encryption, Step Functions + Glue job states).
+- Troubleshooting from evidence: a metric pattern, an error message or a log line; the answer is the root cause,
+  not a generic "scale up".
+- Options that differ only in a configuration detail (which parameter, which order of steps, which scope), all of
+  them real settings. No option may be eliminated by a single keyword.
+- Multi-answer ~30% of the batch, half of them "(Select THREE)" with 6 choices.
+
+## Quality gate (reviewer must do this)
+- Blind solve: the reviewer answers every question from the stem and options before reading K:/W:/X:, and flags any
+  where its answer differs; those are rewritten until the key is unambiguous or replaced.
+- Every number in a stem is checked against the docs (quotas, defaults, retrieval times) with `# src:` lines.
+
+## b10: D1 (12) + D3 (8)   streaming, transformation, orchestration, operations
+Kinesis/MSK/Firehose throughput and ordering math, Lambda event source mappings (batching, parallelization,
+partial batch failure, on-failure destinations), Glue Spark tuning (DPUs, shuffle, skew, bookmarks), Step
+Functions + Glue/EMR orchestration and retries, data quality gates, Athena performance (partition projection,
+file sizes, CTAS), CloudWatch evidence.
+## b11: D2 (10) + D4 (10)   stores, catalog, lifecycle, security, governance
+Redshift (distribution/sort keys under a query mix, WLM/concurrency scaling, data sharing, Spectrum, SUPER),
+DynamoDB capacity/partition math and GSIs, S3 lifecycle/storage-class cost math with minimum durations and
+retrieval fees, Iceberg/Glue schema evolution, KMS key policies and grants across accounts, Lake Formation
+cross-account sharing and LF-tags, Macie/CloudTrail evidence, encryption in transit/at rest seams.
+No overlap with b08/b09 or published DEA-C01 questions (check --siblings).
