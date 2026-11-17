@@ -1,0 +1,48 @@
+# DBX-ASD cue fixes (g3): options rewritten so absolutes, stem echo and length no longer point to the key; same concept and key.
+
+@ DBX-ASD D3 T3.6 applied definition
+S: A developer reads Parquet files with `spark.read.option("inferSchema", "true").parquet(path)` because the CSV jobs of the team use that option. What is its effect on the Parquet read?
+A: It makes Spark scan the files a second time to check column types, which roughly doubles the read time
+B: It widens the numeric columns to double, because inferred numeric types are widened before the data is read
+C: It makes Spark disregard the stored schema and read the columns of the files as plain string values
+D: It is ignored for this source, since column names and types come from metadata stored inside the files
+K: D
+G: ## Self-describing versus text formats
+Text formats such as CSV store only characters, so Spark either uses an explicit schema or scans the data to guess types (`inferSchema`, an extra pass over the data). Binary columnar formats are **self-describing**:
+- Parquet (and ORC) keep column names, types and nullability in the file metadata (the footer). Spark reads the schema from there without scanning rows.
+- Delta tables keep the schema in the transaction log.
+- JSON infers a schema by sampling the text (`samplingRatio`), unless one is given.
+- Options that do not belong to a data source are simply ignored.
+## Example
+`spark.read.parquet(path).printSchema()` shows exact types without any option.
+W: Ignored for Parquet: Parquet carries its own schema in the file footers, so `inferSchema` (a CSV/JSON option) has no effect on a Parquet read.
+X: A=Second scan: the extra pass belongs to inferring a CSV schema. For Parquet the schema already exists in the footer.
+B=Widening to double: types come from the file as stored; nothing is widened because of this option.
+C=Plain strings: Spark keeps the stored types; it would only show strings for text formats read without inference.
+T: Parquet is self-describing; `inferSchema` matters only for text formats like CSV.
+I: Q011716
+
+@ DBX-ASD D4 T4.2 applied use-case
+S: A daily job groups about 30 MB of aggregated sales rows by `store_id`. The Spark UI shows that the stage after the shuffle ran far fewer than 200 tasks, although `spark.sql.shuffle.partitions` has the default of 200 and nobody changed any adaptive setting. What explains the small task count?
+```
+daily = (sales.groupBy("store_id")
+         .agg(F.sum("amount").alias("total")))
+daily.write.mode("overwrite").parquet(out)
+```
+A: Spark lowered `spark.sql.shuffle.partitions` at session start, based on the number of input files the query reads
+B: The optimizer pushed the aggregation into the Parquet scan, so each file gave one output partition without a shuffle
+C: Dynamic allocation released most executors, so the 200 post-shuffle partitions were packed into the few remaining tasks
+D: AQE merged adjacent small post-shuffle partitions at runtime, using the sizes it measured in the map output files
+K: D
+G: ## Why 200 partitions are often too many
+A wide transformation such as `groupBy` creates `spark.sql.shuffle.partitions` post-shuffle partitions (default 200). With 30 MB of data that means about 150 KB per task: scheduling cost is larger than the work.
+## What AQE does about it
+When `spark.sql.adaptive.enabled` and `spark.sql.adaptive.coalescePartitions.enabled` are true (both default to true), AQE reads the map output statistics and merges contiguous small partitions. By default `spark.sql.adaptive.coalescePartitions.parallelismFirst` is true, so Spark ignores the advisory size (`spark.sql.adaptive.advisoryPartitionSizeInBytes`, 64 MB) and only respects the minimum partition size (`spark.sql.adaptive.coalescePartitions.minPartitionSize`, 1 MB) to keep parallelism high; with it set to false the advisory size is the target. The starting number of partitions is `spark.sql.adaptive.coalescePartitions.initialPartitionNum`; if unset it equals `spark.sql.shuffle.partitions`.
+The result is that you do not have to tune the shuffle partition count to fit each dataset.
+W: Partition coalescing: the 200 initial shuffle partitions were tiny, so AQE merged contiguous ones after the shuffle and the next stage needed far fewer than 200 tasks.
+X: A=Setting lowered at session start: `spark.sql.shuffle.partitions` is a plain configuration value that Spark does not recompute from the input file count. The reduction happens after the shuffle, per query, by AQE.
+B=Aggregation pushdown: a full aggregation across files cannot be done inside the scan, because rows of one store sit in many files. A shuffle is still required, which is why a post-shuffle stage exists at all.
+C=Dynamic allocation: executors do not decide how many partitions exist. Fewer executors would make tasks queue up, not merge 200 partitions into a few tasks.
+T: With AQE on, a high initial shuffle partition count is safe because small post-shuffle partitions are coalesced at runtime.
+V: Spark SQL
+I: Q011728

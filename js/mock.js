@@ -221,6 +221,8 @@ function injectStyles() {
 .mk .sub{color:var(--muted);font-size:.9rem;margin:0 0 14px}
 .mk .panel{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow);margin-bottom:12px}
 .mk label.row{display:flex;gap:10px;align-items:center;font-size:.92rem;margin:6px 0}
+.mk label.row.off{color:var(--muted)}
+.mk label.row .meta{display:inline;margin:0}
 .mk select{font:inherit;font-size:.95rem;padding:7px 10px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);width:100%}
 .mk .modes{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0}
 .mk .mode{border:1px solid var(--line);border-radius:10px;padding:12px;cursor:pointer;background:var(--surface);text-align:left;font:inherit;color:var(--ink)}
@@ -330,6 +332,10 @@ async function ensureData() {
 }
 let setupTimed = true;    // timer checkbox survives re-renders of the setup screen
 let setupDomain = null;   // null = whole exam by official weights, else one domain code
+let setupHard = false;    // "Exam-level questions only": draw from the exam and expert tiers (qgen tier_of)
+const HARD_TIERS = new Set(["exam", "expert"]);
+export const isHard = q => HARD_TIERS.has(q.tier);
+function hardDocs(docs) { return setupHard ? docs.filter(isHard) : docs; }
 function domainDocs(docs) { return setupDomain ? docs.filter(q => domainOf(q, setupExam, domainMap) === setupDomain) : docs; }
 async function docsFor(exam) { return (await qb.loadExam(exam)) || []; }
 
@@ -344,6 +350,7 @@ export async function open(opts) {
     const active = await validActive(load(KEY_ACTIVE, null));
     setupExam = (opts.exam && specs[opts.exam]) ? opts.exam : (active && active.exam) || "SAA-C03";
     setupDomain = opts.domain && specs[setupExam].domains.some(d => d.code === opts.domain) ? opts.domain : null;
+    setupHard = !!opts.hard;
     if (active) { state = active; view = "exam"; await startTicking(); }
   } catch (err) {
     showError(specs ? err : new Error("Could not load exam settings. Check your connection and reload. (" + (err && err.message) + ")"));
@@ -394,7 +401,7 @@ function persist() { if (state && !state.submitted) save(KEY_ACTIVE, state); }
 
 async function startExam(mode, timed) {
   const spec = specs[setupExam];
-  const docs = await docsFor(setupExam);
+  const docs = hardDocs(await docsFor(setupExam));
   const pool = domainDocs(docs);
   const n = mode === "short" ? Math.min(SHORT_N, pool.length) : Math.min(setupDomain ? SECTION_N : spec.questions, pool.length);
   const seenAll = loadSeen(), recentAll = loadRecent();
@@ -411,7 +418,7 @@ async function startExam(mode, timed) {
   const dur = timeFor(spec, ids.length);
   const seenBefore = new Set(seenAll[setupExam] || []);
   state = {
-    v: 1, exam: setupExam, domain: setupDomain, mode, ids, order, answers: {}, flags: [], times: {}, cur: 0, fresh: ids.filter(id => !seenBefore.has(id)).length,
+    v: 1, exam: setupExam, domain: setupDomain, hard: setupHard, mode, ids, order, answers: {}, flags: [], times: {}, cur: 0, fresh: ids.filter(id => !seenBefore.has(id)).length,
     startedAt: Date.now(), duration: dur, timed: !!timed, deadline: timed ? Date.now() + dur * 1000 : null,
     submitted: false,
   };
@@ -468,7 +475,7 @@ async function submit(auto) {
   state.notSaved = isEmptyAttempt(state.answers, state.ids);
   if (!state.notSaved) {
     const hist = loadHistory();
-    hist.push({ exam: state.exam, domain: state.domain || null, mode: state.mode, at: Date.now(), correct, total: state.ids.length, dom, used, timed: state.timed, auto: state.auto, fresh: state.fresh, avgSec, answered: state.ids.filter(id => (state.answers[id] || []).length).length });
+    hist.push({ exam: state.exam, domain: state.domain || null, hard: !!state.hard, mode: state.mode, at: Date.now(), correct, total: state.ids.length, dom, used, timed: state.timed, auto: state.auto, fresh: state.fresh, avgSec, answered: state.ids.filter(id => (state.answers[id] || []).length).length });
     save(KEY_HISTORY, hist.slice(-HISTORY_MAX));
     const seen = loadSeen();
     seen[state.exam] = Array.from(new Set((seen[state.exam] || []).concat(state.ids)));
@@ -514,15 +521,18 @@ function closeNotice(exam, text) { const m = load(KEY_NOTICE, {}) || {}; m[exam]
 
 async function renderSetup(extra) {
   const spec = specs[setupExam];
-  const docs = await docsFor(setupExam);
+  const allDocs = await docsFor(setupExam);
   if (setupDomain && !spec.domains.some(d => d.code === setupDomain)) setupDomain = null;
+  const hardN = domainDocs(allDocs).filter(isHard).length;
+  if (hardN < SHORT_N) setupHard = false;    // too few exam-level questions here for even a short practice
+  const docs = hardDocs(allDocs);
   const seen = new Set(loadSeen()[setupExam] || []);
   const pool = domainDocs(docs);
   const unseen = pool.filter(q => !seen.has(q.id)).length;
   const fullN = Math.min(setupDomain ? SECTION_N : spec.questions, pool.length);
   const shortN = Math.min(SHORT_N, pool.length);
   const perDomain = {};
-  docs.forEach(q => { const d = domainOf(q, setupExam, domainMap); perDomain[d] = (perDomain[d] || 0) + 1; });
+  allDocs.forEach(q => { const d = domainOf(q, setupExam, domainMap); perDomain[d] = (perDomain[d] || 0) + 1; });
   const wLabel = spec.weightsAssumed ? "equal weights (official weights not published)" : "official weights";
   const domOpts = `<option value="">All sections · ${wLabel}</option>` + spec.domains.filter(d => perDomain[d.code])
     .map(d => `<option value="${d.code}"${d.code === setupDomain ? " selected" : ""}>${d.code} · ${esc(d.name)} (${perDomain[d.code]})</option>`).join("");
@@ -546,8 +556,9 @@ async function renderSetup(extra) {
         <button class="mode${mode === "full" ? " on" : ""}" data-mode="full" type="button"><b>${setupDomain ? "Full section" : "Full exam"}</b><span>${fullN} questions · ${Math.round(timeFor(spec, fullN) / 60)} min</span></button>
         <button class="mode${mode === "short" ? " on" : ""}" data-mode="short" type="button"><b>Short practice</b><span>${shortN} questions · ${Math.round(timeFor(spec, shortN) / 60)} min</span></button>
       </div>
+      <label class="row${hardN < SHORT_N ? " off" : ""}"><input type="checkbox" id="mkHard"${setupHard ? " checked" : ""}${hardN < SHORT_N ? " disabled" : ""}> Exam-level questions only <span class="meta">(${nf(hardN)}${hardN < SHORT_N ? `, fewer than ${SHORT_N}: not available yet` : ": long scenarios, close options, Select THREE"})</span></label>
       <label class="row"><input type="checkbox" id="mkTimed"${setupTimed ? " checked" : ""}> Timer (auto-submits at 0:00)</label>
-      <div class="meta">Pool: ${nf(pool.length)} questions${setupDomain ? " in this section" : ""} · ${nf(unseen)} not yet seen in mock exams · ${passMarkMeta(spec)}${setupDomain ? " (whole exam)" : ""}</div>
+      <div class="meta">Pool: ${nf(pool.length)}${setupHard ? " exam-level" : ""} questions${setupDomain ? " in this section" : ""} · ${nf(unseen)} not yet seen in mock exams · ${passMarkMeta(spec)}${setupDomain ? " (whole exam)" : ""}</div>
       ${unseen < (mode === "short" ? shortN : fullN) ? `<div class="meta" style="color:var(--amber)">Fewer unseen questions than needed, so some repeats will be included.</div>` : ""}
       <div class="btnrow"><button class="btn startbtn" data-act="start">Start exam</button>
       ${seen.size ? `<button class="linkbtn" data-act="resetseen">Reset seen questions for ${setupExam}</button>` : ""}</div>
@@ -556,7 +567,7 @@ async function renderSetup(extra) {
     <div class="panel"><b>Recent attempts · ${setupExam}</b>
       ${hist.length ? `<table><tr><th>Date</th><th>Mode</th><th>Score</th><th>Result</th><th></th></tr>${hist.map(h => {
         const pct = Math.round((h.correct / h.total) * 100); const v = verdictFor(spec, pct);
-        return `<tr><td>${new Date(h.at).toLocaleDateString()}</td><td>${h.mode === "short" ? "Short" : "Full"}${h.domain ? " · " + esc(h.domain) : ""}</td><td>${h.correct}/${h.total} (${pct}%)</td><td class="v-${v.key}">${v.label}</td><td><button class="delhist" data-delhist="${h.at}" type="button" aria-label="Remove this attempt from the history" title="Remove this attempt">×</button></td></tr>`;
+        return `<tr><td>${new Date(h.at).toLocaleDateString()}</td><td>${h.mode === "short" ? "Short" : "Full"}${h.domain ? " · " + esc(h.domain) : ""}${h.hard ? " · Exam-level" : ""}</td><td>${h.correct}/${h.total} (${pct}%)</td><td class="v-${v.key}">${v.label}</td><td><button class="delhist" data-delhist="${h.at}" type="button" aria-label="Remove this attempt from the history" title="Remove this attempt">×</button></td></tr>`;
       }).join("")}</table>` : `<div class="meta">No attempts yet.</div>`}
     </div></div>`;
   root.onclick = async (e) => {
@@ -574,6 +585,7 @@ async function renderSetup(extra) {
     else if (act === "closenotice") { closeNotice(setupExam, spec.update); t.closest(".examnotice").remove(); }
   };
   root.querySelector("#mkTimed").onchange = (e) => { setupTimed = e.target.checked; };
+  root.querySelector("#mkHard").onchange = (e) => { setupHard = e.target.checked; renderSetup(); };
   root.querySelector("#mkExam").onchange = (e) => { setupExam = e.target.value; setupDomain = null; renderSetup(); };
   root.querySelector("#mkDomain").onchange = (e) => { setupDomain = e.target.value || null; renderSetup(); };
 }
