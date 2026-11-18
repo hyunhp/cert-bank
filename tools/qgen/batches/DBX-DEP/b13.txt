@@ -1,0 +1,447 @@
+# DBX-DEP batch 13 (expert tier, level expert): 20 evidence-based questions (D1 5, D2 2, D3 2, D4 2, D5 3, D6 2, D7 1, D8 2, D9 1); single answer; docs read 2026-11-17
+# src: https://spark.apache.org/docs/latest/streaming/apis-on-dataframes-and-datasets.html
+# src: https://docs.databricks.com/aws/en/pandas/pandas-function-apis
+# src: https://docs.databricks.com/aws/en/jobs/for-each
+# src: https://docs.databricks.com/aws/en/ldp/for-each-batch
+# src: https://docs.databricks.com/aws/en/compute/access-mode-limitations
+# src: https://docs.databricks.com/aws/en/delta-sharing/create-share
+# src: https://docs.databricks.com/aws/en/delta-sharing/read-data-databricks
+# src: https://docs.databricks.com/aws/en/delta/selective-overwrite
+# src: https://docs.databricks.com/aws/en/semi-structured/variant
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/try_variant_get
+# src: https://docs.databricks.com/aws/en/optimizations/incremental-refresh
+# src: https://docs.databricks.com/aws/en/ldp/monitor-event-log-schema
+# src: https://docs.databricks.com/aws/en/admin/system-tables/jobs
+# src: https://docs.databricks.com/aws/en/ldp/monitor-event-logs
+# src: https://docs.databricks.com/aws/en/sql/user/queries/query-caching
+# src: https://docs.databricks.com/aws/en/sql/user/queries/performance-insights
+# src: https://docs.databricks.com/aws/en/delta/clustering
+# src: https://docs.databricks.com/aws/en/delta/delta-change-data-feed
+# src: https://docs.databricks.com/aws/en/jobs/privileges
+# src: https://docs.databricks.com/aws/en/security/secrets/
+# src: https://docs.databricks.com/aws/en/sql/language-manual/functions/aes_encrypt
+# src: https://docs.databricks.com/aws/en/data-governance/unity-catalog/access-control/permissions-concepts
+# src: https://docs.databricks.com/aws/en/jobs/repair-job-failures
+# src: https://docs.databricks.com/aws/en/repos/ci-cd-techniques-with-repos
+# src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-create-table-using
+# src: https://docs.databricks.com/aws/en/ldp/developer/ldp-python-ref-apply-changes
+
+@ DBX-DEP D1 T1.12 expert troubleshooting
+S: A stream reads payments from Kafka (seven days of retention), applies `withWatermark("event_ts", "15 minutes")` and runs `groupBy(window("event_ts", "1 hour"), "merchant_id").agg(sum("amount"))` in append mode into the Delta table `gold.merchant_hourly`, which holds two years of results. Product asked for `count("*")` and `max("amount")` per window, and QA asked to drop test merchants. An engineer added both aggregates and `filter(~col("is_test"))`, then restarted from the same checkpoint. The restart fails while restoring state, with an error about an incompatible state schema. The existing output must continue without gaps or duplicates, the new metrics are needed only from now on, and Kafka cannot replay older data. Which plan fits the evidence?
+A: Keep the change and delete only the `state` folder of the checkpoint, keeping offsets and commits, so the query restarts with fresh state for the new aggregates
+B: Revert the new aggregates but keep the filter, restart on the old checkpoint, and compute `count` and `max` in a second query with its own checkpoint and table
+C: Revert both changes, because adding a filter to a query with a streaming aggregation also changes the state schema and is not allowed between restarts
+D: Keep the change, switch the query to complete output mode, and restart on the old checkpoint, so that the restored state is rebuilt with the new aggregate columns
+K: B
+G: ## Recovery semantics after query changes
+Structured Streaming restores state from the checkpoint and assumes that the **state schema stays the same** across restarts. The Spark guide lists which changes are allowed with the same checkpoint:
+- adding or removing **filters**: allowed;
+- **streaming aggregation**: any change in the number or type of grouping keys **or aggregates** is not allowed;
+- streaming deduplication: no change in the deduplication columns; stream-stream joins: no change in schema, equi-join columns or join type; arbitrary stateful operations: no change in the state schema or timeout type.
+## Reading the evidence
+The restart fails while restoring state and names an incompatible state schema: the two new aggregates changed the aggregation's state. The filter is not the problem.
+## Applying it
+Keep the existing query, with the allowed filter, on its checkpoint so `gold.merchant_hourly` continues exactly. Start a separate query with a new checkpoint from the latest offsets for `count` and `max`, writing to its own table, and join the two on window and merchant where one view is needed.
+W: Revert aggregates, add a query: the original aggregation state stays compatible, the filter is an allowed change, and the new metrics start cleanly in their own query.
+X: A=Delete the state folder: offsets would continue, but the partial sums of open windows are lost, so in-flight windows would be written with wrong totals.
+C=Revert the filter too: adding filters is an allowed change; only the change in aggregates breaks state recovery.
+D=Complete mode: the aggregation's state schema still changes, and complete mode would rewrite all results each trigger and keep every window in state.
+T: Changing a streaming aggregation's keys or aggregates breaks checkpoint state; put new stateful logic into a new query with its own checkpoint.
+V: Structured Streaming
+
+@ DBX-DEP D1 T1.3 expert troubleshooting
+S: A grouped map job calls `sales.groupBy("store_id").applyInPandas(fit, schema=...)` on 2,000 stores. Every run fails in one task with a Python worker out-of-memory error, always for the flagship store, which has 180 million transaction rows; the median store has 90,000. An engineer already set `spark.sql.execution.arrow.maxRecordsPerBatch` to 10,000 without effect. The forecast model must see each store's full three-year history, and it uses only daily totals per store and product category. Worker types cannot change this quarter. The job runs on a classic cluster with Arrow enabled. Which change fits the evidence and constraints?
+A: Lower `maxRecordsPerBatch` to 1,000, so that each Arrow batch for the flagship store holds fewer rows and the Python worker stays within its memory
+B: Split the flagship store into ten random sub-groups with a salt column, so that each Python call receives a tenth of its rows and fits a model on that part
+C: Repartition the input by `store_id` into 2,000 partitions before the call, so that each store's rows sit in their own partition and memory is spread
+D: Aggregate to daily totals per store and category before the call, so each group keeps its full history in about a thousand rows per category
+K: D
+G: ## Memory in grouped map
+`groupBy().applyInPandas()` loads **all data of one group into memory** before calling the function. The Databricks docs note that this can cause out-of-memory errors when group sizes are skewed, and that `maxRecordsPerBatch` **is not applied to groups**: you must make sure each group fits.
+## Applying it
+The failing task always belongs to the largest group, and lowering the batch size changed nothing, which matches the documented behavior. Because the model only needs daily totals, pre-aggregating with a normal Spark `groupBy(store_id, category, day)` shrinks the flagship group from 180 million rows to roughly three years x 365 days per category, while keeping its full history.
+## What does not work
+Salting splits the history, which breaks the model requirement; repartitioning changes partitions, not the size of a group handed to Python.
+W: Pre-aggregate to daily totals: the group keeps its whole history but becomes small enough for one Python worker, and the model needs no finer data.
+X: A=Smaller Arrow batches: the docs say this setting is not applied to groups, so the whole group still lands in memory.
+B=Salted sub-groups: each call would see only part of the store's history, violating the requirement that the model sees all of it.
+C=Repartition by store: a group is handed to Python whole regardless of partitioning, so the flagship store's memory need is unchanged.
+T: In `applyInPandas` the largest group must fit in memory; shrink groups with a Spark pre-aggregation when the function allows it.
+V: PySpark, pandas function APIs
+
+@ DBX-DEP D1 T1.9 expert troubleshooting
+S: A job has `list_tables` (notebook) that sets the task value `tables`, and a `For each` task `load_each` whose input is `{{tasks.list_tables.values.tables}}` with concurrency 8. During last week's incident an engineer disabled `list_tables` so that a partner API would not be called. Since then every run fails at `load_each` before any iteration starts, although the API is healthy again and the nested notebook has not changed. The run graph shows `list_tables` as disabled and `load_each` as failed. The operations team wants the job back to normal today, with the same dynamic table list. What is the cause, and the fix?
+A: A `For each` task fails when the upstream task providing its input is disabled; re-enable `list_tables` so it sets the task value again
+B: Task values expire after seven days, so the stored list is gone; rerun `list_tables` once by hand so its value is stored for the scheduled runs
+C: A disabled upstream task is skipped and passes an empty array, which `For each` rejects; set the input to `[]` as a default value in `load_each`
+D: A `For each` task needs its upstream task in the same run only for the first iteration; raise the concurrency so all iterations start together
+K: A
+G: ## For each input and disabled tasks
+A `For each` task runs a nested task once per element of its input, which can be a static JSON array, a job parameter or a **task value** set by an upstream task, as here. The For each docs state a specific limitation: **a For each task fails if the upstream task that provides its input values is disabled**. A disabled task does not run, so no task value exists to iterate over.
+## Applying it
+The failure started exactly when `list_tables` was disabled and recurs on every run, before any iteration. Re-enabling `list_tables` restores the task value and the dynamic list. Task values are produced per run, so nothing stored from earlier runs could have helped.
+W: Re-enable the input task: the documented limitation explains the failure, and a running `list_tables` supplies the dynamic list again.
+X: B=Expired task values: task values belong to a single run and are set by the upstream task in that run; there is no seven-day store to refill by hand.
+C=Empty array default: the documented behavior is a failure of the For each task, and an empty list would load nothing instead of the needed tables.
+D=Concurrency: every iteration reads the same input; concurrency changes parallelism, not where the input comes from.
+T: Disabling the task that feeds a `For each` input makes the `For each` task fail; keep the producer enabled.
+V: Lakeflow Jobs
+
+@ DBX-DEP D1 T1.8 expert troubleshooting
+S: A pipeline flow uses a ForEachBatch sink: each micro-batch of `orders_stream` is appended with plain Delta appends to `ops.orders_export`, a table outside the pipeline read by a partner. On Monday an engineer ran a full refresh of the whole pipeline to fix a bug in a silver table. Since then `ops.orders_export` holds about twice the expected rows, and every duplicated `order_id` appears with two different `_written_at` values, one before Monday and one on Monday. The pipeline itself shows no errors. Future full refreshes must not repeat this, and the partner table must keep its history. Which explanation and change fit?
+A: The sink failed mid-batch and retried; set the sink's checkpoint to a fixed external path so retries resume from the last committed batch
+B: The full refresh reset the sink's checkpoint and replayed all orders, and the pipeline never cleans sink targets; write with an idempotent MERGE on `order_id`
+C: The full refresh dropped and recreated `ops.orders_export`, then replayed the history into it twice; exclude the external table from the pipeline's managed objects
+D: The ForEachBatch sink does not support append writes; switch the batch function to overwrite `ops.orders_export` on every micro-batch of the flow
+K: B
+G: ## ForEachBatch sinks in pipelines
+A pipeline ForEachBatch sink runs custom Python for each micro-batch, for example to write to tables that the pipeline does not manage. The docs point out two responsibilities that stay with you:
+- **Full refresh support**: checkpoints are per flow and **reset automatically on a full refresh**; you are responsible for resetting or protecting the downstream data.
+- **Limited housekeeping**: the pipeline **does not track what a ForEachBatch sink wrote**, so it cannot clean that data.
+## Reading the evidence
+Every order appears twice with a pre-Monday and a Monday timestamp: the full refresh restarted the flow from the beginning and appended everything again. No error occurred because nothing failed.
+## Fix
+Make the batch function idempotent, for example `MERGE INTO ops.orders_export USING batch ON order_id ... WHEN NOT MATCHED THEN INSERT`, and deduplicate the existing table once.
+W: Checkpoint reset plus idempotent merge: the full refresh replayed the source into a table the pipeline does not clean, and a keyed merge absorbs any future replay while keeping history.
+X: A=Mid-batch retry: a retry would duplicate one batch, not every order with Monday's timestamp; the pattern points to a full replay.
+C=Table recreated: the pipeline does not manage or drop sink targets; the pre-Monday rows are still there, which shows the table was not recreated.
+D=Overwrite per batch: append writes are supported, and overwriting per micro-batch would erase the partner's history.
+T: Full refreshes reset ForEachBatch sink checkpoints and the pipeline never cleans sink targets, so sink writes must be idempotent.
+V: Lakeflow Spark Declarative Pipelines, ForEachBatch sink
+
+@ DBX-DEP D1 T1.10 expert troubleshooting
+S: A team migrates a nightly SQL job from a legacy workspace to Unity Catalog. Its first step runs `CREATE TEMPORARY FUNCTION geo_hash AS 'com.acme.udf.GeoHash' USING JAR '/Volumes/libs/jars/geo.jar'`, a Hive UDF, and the job now runs on a standard access mode cluster shared by four teams. The step fails, while the rest of the SQL works. The UDF's logic is about 30 lines of Java, the four teams must keep sharing the cluster for cost reasons, and security requires the function to be governed by Unity Catalog grants. Which change fits the evidence and constraints?
+A: Keep the Hive UDF and move the JAR into a Unity Catalog volume with `READ VOLUME` granted to the teams, so standard access mode can load it
+B: Keep the Hive UDF and switch the shared cluster to dedicated access mode for all four teams, so Hive UDFs load while grants still apply
+C: Rewrite the logic as a Unity Catalog SQL or Python UDF, for example `CREATE FUNCTION main.geo.geo_hash(...)`, and grant `EXECUTE` to the teams
+D: Rewrite the logic as a session-scoped Python UDF registered with `spark.udf.register` in each notebook, so standard access mode runs it per user
+K: C
+G: ## UDFs on standard access mode
+The standard compute limitations list: **Hive UDFs are not supported. Instead, use UDFs in Unity Catalog.** Standard (shared) access mode isolates users and does not load arbitrary JVM UDF classes this way.
+## Unity Catalog functions
+A Unity Catalog SQL or Python function is a securable object: `CREATE FUNCTION catalog.schema.name ...` registers it once, and `GRANT EXECUTE` controls who may call it. It runs on standard access mode compute and on SQL warehouses.
+## Applying it
+Thirty lines of Java can be rewritten as a SQL or Python UDF. The cluster stays shared, and security gets grants on the function.
+W: Unity Catalog UDF: it is the documented replacement for Hive UDFs on standard compute, keeps the cluster shared, and is governed by `EXECUTE` grants.
+X: A=JAR in a volume: the restriction is on Hive UDFs themselves, not on where the JAR is stored.
+B=Dedicated access mode: dedicated compute is assigned to one principal, so four teams could no longer share the cluster.
+D=Session-scoped Python UDF: it would run, but it is not a Unity Catalog object, so no grants govern it, which security requires.
+T: On standard access mode, replace Hive UDFs with Unity Catalog functions governed by `EXECUTE` grants.
+V: Unity Catalog, compute access modes, UDFs
+
+@ DBX-DEP D2 T2.4 expert troubleshooting
+S: A provider enabled deletion vectors on `claims.events` to speed up GDPR deletes. The table had been added to share `partner_share` without history, for a Databricks-to-Databricks recipient. Since the change, the recipient's queries on a SQL warehouse fail with an error about an unsupported table feature, while queries on the provider side work. The provider must keep deletion vectors, the recipient may not receive a copy of the table outside the share, and the recipient wants no code changes. A colleague proposes running `REORG TABLE ... APPLY (PURGE)` nightly. What is the cause, and which change fits?
+A: Recipients cannot read tables with deletion vectors at all; disable deletion vectors on the table and run a nightly `REORG ... APPLY (PURGE)` instead
+B: Recipients need a cluster rather than a SQL warehouse to read deletion vectors; ask the recipient to move the queries to a classic cluster
+C: Tables with deletion vectors must be shared with history; remove the table from the share and add it again `WITH HISTORY`
+D: The recipient lacks `SELECT` on the newly written files; grant `SELECT` on the share again so that the recipient can read files written after the change
+K: C
+G: ## Sharing tables with advanced Delta features
+The OpenSharing docs state: **to share a table with deletion vectors or column mapping, you must share it with history**. Recipients can then query it using a SQL warehouse, a compute running a recent Databricks Runtime, or a recent open source `delta-sharing-spark` client.
+## Reading the evidence
+Queries broke exactly when deletion vectors were enabled, and the table was shared without history. That combination is not supported, so the recipient sees a feature error. The SQL warehouse is a supported client once the table is shared correctly.
+## Why REORG is not the fix
+`REORG ... APPLY (PURGE)` rewrites files to remove soft-deleted data, but the deletion vectors feature stays enabled on the table, so the share remains unsupported.
+W: Share WITH HISTORY: it is the documented requirement for deletion vectors, keeps the feature, and needs no change on the recipient side.
+X: A=Disable deletion vectors: recipients can read such tables when they are shared with history, and the provider must keep the feature.
+B=Move to a cluster: SQL warehouses are listed as supported clients for tables with deletion vectors shared with history.
+D=Re-grant SELECT: share grants cover the table, not individual files; the error is a feature mismatch, not a permission problem.
+T: Tables with deletion vectors or column mapping can only be shared WITH HISTORY.
+V: OpenSharing (Delta Sharing), deletion vectors
+
+@ DBX-DEP D3 T3.1 expert troubleshooting
+S: A nightly job recomputes sales per `(sale_date, store_id, promo_code)` only for store-days whose source rows changed in the last 14 days, and writes them with `INSERT INTO gold.promo_sales REPLACE USING (sale_date, store_id, promo_code) SELECT ...`. Sales without a promotion carry `promo_code = NULL`. After a month, finance sees no-promotion totals far above the source. A check grouped by the three key columns with `HAVING count(*) > 1` returns only keys whose `promo_code` is NULL, with one row per nightly run that covered that date. Keys that the nightly query does not return must stay untouched, the table is liquid clustered, and reruns must stay atomic and idempotent on the serverless SQL warehouse. Which explanation and change fit?
+A: `REPLACE USING` matches rows with equality, so NULL keys never match and each run inserts them again; switch to `REPLACE ON` with `<=>` on the three columns
+B: `REPLACE USING` skips NULL source rows on liquid clustered tables; partition the table by `sale_date`, so that the replacement covers every row of each day
+C: Switch to `REPLACE WHERE sale_date >= date_sub(current_date(), 14)`, which removes the last 14 days and inserts the result again, NULL keys included
+D: Set `spark.sql.sources.partitionOverwriteMode` to dynamic and use `INSERT OVERWRITE`, so that only the keys present in the nightly result are replaced
+K: A
+G: ## Three ways to replace part of a table
+- `REPLACE WHERE <predicate>`: deletes all rows that match the predicate and inserts the query result, so rows the query did not return can disappear.
+- `REPLACE USING (cols)`: replaces rows whose listed columns **compare equal under equality** with a source row; all other rows stay unchanged, and an empty source deletes nothing. It works on SQL warehouses, serverless and classic compute without session settings.
+- `REPLACE ON <condition>`: replaces rows that match a user-defined condition. The docs recommend it when you need matching that `REPLACE USING` does not support, **such as treating NULL values as equal** with `<=>`.
+## Reading the evidence
+Under equality, `NULL = NULL` is not true, so a target row whose `promo_code` is NULL never matches the recomputed source row. It is kept, and the new row is inserted next to it: one extra copy per run, exactly what the check shows.
+## Applying it
+Write the replace condition with the NULL-safe operator `<=>` on all three key columns, then remove the duplicates already written, for example by recomputing the affected days once.
+W: REPLACE ON with <=>: NULL-safe equality matches the NULL-coded keys, so each run replaces them instead of adding a copy, and keys outside the result stay unchanged.
+X: B=Partition the table: equality still never matches NULL, and partitioning instead of liquid clustering does not change how `REPLACE USING` compares keys.
+C=REPLACE WHERE on 14 days: it deletes every row of those days, including keys that the nightly query did not return and that must stay untouched.
+D=Dynamic partition overwrite: it is a Public Preview, classic-compute option for partitioned tables and replaces whole partitions, not individual keys.
+T: `REPLACE USING` compares keys with equality; use `REPLACE ON` with `<=>` when key columns can be NULL.
+V: Delta Lake
+
+@ DBX-DEP D2 T2.2 expert troubleshooting
+S: The SCD type 1 table `silver.subscribers` is built with `create_auto_cdc_flow` from CDC files that Auto Loader reads from a volume, with `sequence_by="change_ts"` and `apply_as_deletes=expr("op = 'D'")`. A regional exporter sometimes uploads its files three to five days late. Last week subscriber 881 was deleted, yet after the late files arrived the subscriber is back in silver with an UPDATE from before the delete. The pipeline shows no errors, the event log reports the late UPDATE as processed normally, and the source's `change_ts` values are correct. The team must keep Auto Loader, cannot hold back late files, and needs deletes to win over older late changes. Which change fits the evidence?
+A: Set the table property `pipelines.cdc.tombstoneGCThresholdInSeconds` above the longest expected delay, so that delete tombstones outlive the late changes
+B: Change `sequence_by` to the Auto Loader file arrival time, so that the late UPDATE gets a newer sequence value than the delete and is applied after it
+C: Switch the target to SCD type 2, because only SCD type 2 compares late changes with earlier deletes, while type 1 applies changes in arrival order
+D: Add `apply_as_truncates` for the delete events, because a truncate is kept permanently in the target, unlike a delete, which expires after each update
+K: A
+G: ## How AUTO CDC handles out-of-order deletes
+AUTO CDC orders the changes of each key by the `sequence_by` column, so a late event with an older sequence value loses against a newer one. After a delete there is no row left to compare with, so the engine keeps the deleted row temporarily as a **tombstone** in the underlying Delta table, and a view hides tombstones from readers. Tombstone retention is set with the table property `pipelines.cdc.tombstoneGCThresholdInSeconds` (default two days).
+The docs add that Auto Loader does not guarantee file processing order, so when it feeds a CDC flow, set this property to a value that **exceeds the maximum expected delay** between event arrival and pipeline execution.
+## Reading the evidence
+The late files arrive after three to five days, longer than the retention. When the stale UPDATE was processed, the tombstone of subscriber 881 had already been removed, so nothing showed that a newer delete existed, and the UPDATE inserted the row again.
+## Applying it
+Set the property above the longest delay (for example seven days, in seconds) and remove the resurrected rows once.
+W: Longer tombstone retention: tombstones then outlive the late files, so an older UPDATE meets the newer delete and is discarded.
+X: B=Sequence by arrival time: the stale UPDATE would then count as newer than the delete and win on purpose, the opposite of the requirement.
+C=SCD type 2: both types order changes by `sequence_by`; the expired tombstone, not the SCD type, caused the resurrection.
+D=apply_as_truncates: a truncate clears the whole target table, so using it for single-subscriber deletes would remove every row.
+T: With late CDC files, raise `pipelines.cdc.tombstoneGCThresholdInSeconds` above the maximum delay so deletes win over older late changes.
+V: Lakeflow Spark Declarative Pipelines, Auto Loader
+
+@ DBX-DEP D3 T3.4 expert troubleshooting
+S: In a serverless pipeline, the materialized view `gold.daily_orders` declares its schema with `order_id STRING NOT NULL` and has `expect_or_drop("valid_qty", "qty > 0")`. Its sources have row tracking enabled and a small share of rows change per hour. Every hourly update runs as a full recompute for about 50 minutes; the query profile of the flow shows a `FLOW_FULL_RECOMPUTE` insight, and the `planning_information` event reports incremental refresh as not possible. The rule must keep dropping bad rows from gold, and `order_id` must never be NULL in gold. Which change makes incremental refresh possible?
+A: Remove the expectation and declare `CHECK (qty > 0)` on the materialized view instead, so bad rows are rejected by the table constraint during each refresh
+B: Change the expectation to `expect_or_fail`, so the view keeps its NOT NULL column and still never contains bad rows, which allows an incremental plan
+C: Keep both and set the refresh policy to incremental strict, so the engine must find an incremental plan for the expectation and the NOT NULL column
+D: Apply the drop rule in an upstream streaming table, and on gold replace the NOT NULL column with an `expect_or_fail` rule on `order_id IS NOT NULL`
+K: D
+G: ## When expectations block incremental refresh
+Materialized views with expectations can be refreshed incrementally, but the docs list two exceptions:
+- the materialized view reads from a **view that contains expectations**;
+- the materialized view has a **DROP expectation and includes NOT NULL columns** in its schema.
+## Reading the evidence
+`FLOW_FULL_RECOMPUTE` (the flow runs as a full recompute) and the planning event agree, and the definition matches the second exception exactly.
+## Applying it
+Keep dropping bad rows earlier, in an upstream streaming table that carries the drop expectation (a table, not a view: a view with expectations would block incremental refresh again), and replace the schema-level NOT NULL on `gold.daily_orders` with `expect_or_fail("order_id_present", "order_id IS NOT NULL")`. Gold then has no drop rule combined with NOT NULL columns, and a NULL id still cannot reach it.
+W: Separate the drop rule from the NOT NULL column: it removes the documented blocker while still keeping bad rows and NULL ids out of gold.
+X: A=CHECK constraint: a violated CHECK constraint fails the write instead of dropping rows, so the rule would stop the refresh rather than drop bad rows.
+B=expect_or_fail: it changes the action from dropping rows to failing the whole update, which contradicts the requirement to drop bad rows.
+C=Incremental strict: the policy makes the refresh fail when no incremental plan exists; it cannot remove the blocker.
+T: A DROP expectation together with NOT NULL columns forces a full recompute of a materialized view; split them.
+V: Lakeflow Spark Declarative Pipelines, materialized views
+
+@ DBX-DEP D4 T4.1 expert troubleshooting
+S: An operations report counts runs per job name for the last 30 days. It reads `system.lakeflow.job_run_timeline`, keeps rows with a non-null `result_state`, and inner-joins the latest row per `job_id` from `system.lakeflow.jobs` to get names. An Airflow deployment triggers about 300 nightly loads through `POST /jobs/runs/submit` with inline task definitions, and none of them appear in the report, although the timeline table holds their rows with `run_type = 'SUBMIT_RUN'`. Runs started from the Jobs UI and by schedules are counted correctly. The report must cover all runs, and the platform team wants named jobs with permissions for recurring loads. Which explanation and change fit?
+A: Submitted runs exist only in the timeline tables, not in `system.lakeflow.jobs`; left-join and label them, and define recurring loads as jobs started by run-now
+B: Submitted runs reach the jobs table only after they have succeeded twice; wait for the next runs, then rerun the report with the same inner join on `job_id`
+C: The latest-row filter on `system.lakeflow.jobs` drops jobs that were never edited; join every row of the jobs table instead of only the latest one per job
+D: Runs submitted through the API are stored in another region's system tables; query the timeline table from a workspace in the region where Airflow runs
+K: A
+G: ## Run types in the timeline tables
+`system.lakeflow.job_run_timeline` has a `run_type` column, and the docs show where each type appears:
+- `JOB_RUN`: standard runs of a defined job; in `jobs`, `job_tasks`, `job_run_timeline` and `job_task_run_timeline`.
+- `SUBMIT_RUN`: one-time runs created with `POST /jobs/runs/submit`; only in the two timeline tables (and in the Job Runs UI).
+- `WORKFLOW_RUN`: runs started from a notebook workflow; only in `job_run_timeline`.
+Submitted runs therefore have no row in `system.lakeflow.jobs`, and an inner join on `job_id` drops them.
+## Other traps in the same report
+- Long runs are sliced into hourly rows, and `result_state` is set only on the last one; the report already handles this.
+- `system.lakeflow.jobs` is a slowly changing dimension: join only the latest row per `workspace_id` and `job_id`.
+## Applying it
+Use a LEFT JOIN and label rows by `run_type`. For recurring loads, define jobs and trigger them with `run-now`, so they get names, permissions and rows in the jobs tables.
+W: Submitted runs are timeline-only: they never get a row in the jobs table, so a left join keeps them, and defined jobs give recurring loads names and permissions.
+X: B=Wait for successes: there is no such rule; one-time submitted runs are never recorded in `system.lakeflow.jobs`.
+C=Join every jobs row: joining all SCD rows multiplies the runs of edited jobs and still finds no row for submitted runs.
+D=Other region: the timeline table of this region already holds the runs; only the jobs table lacks them.
+T: `SUBMIT_RUN` runs exist only in the timeline tables; never inner-join them to `system.lakeflow.jobs`.
+V: system tables, Lakeflow Jobs
+
+@ DBX-DEP D4 T4.3 expert troubleshooting
+S: A pipeline publishes its event log as `ops_logs.pipeline_events_orders`, and its streaming tables ingest files with Auto Loader. A storage clean-up job, written to delete schemas whose tables had no reads in 30 days, dropped the schema `ops_logs` on Sunday. Since then every pipeline update fails early, and engineers also notice that two Auto Loader flows lost track of their inferred schemas. The pipeline's own tables are intact. The team must restore operations, keep monitoring history if possible, and stop this from happening again. The event log was published to that schema months ago, and the run-as identity of the pipeline has not changed. Which explanation fits the evidence best?
+A: The event log location also serves as the Auto Loader schema location, and deleting it can break updates; restore it and exclude it from clean-up
+B: The event log table holds the streaming checkpoints of every flow, so deleting it reset all flows; run a full refresh of the pipeline and exclude the schema from clean-up
+C: Dropping the schema revoked the pipeline's run-as permissions on its own tables; grant the run-as identity again and exclude the schema from clean-up
+D: The clean-up job dropped the pipeline's default schema, so the tables were moved there and became unreadable; republish the tables to a new schema
+K: A
+G: ## What lives in the event log location
+A pipeline writes its **event log** to a Delta table (hidden by default, or published under a chosen name). The docs warn: **do not delete the event log or the parent catalog or schema where it is published**, because deleting it **might make the pipeline fail to update** in future runs. They also note that **the event log location also serves as the schema location for any Auto Loader queries** in the pipeline.
+## Reading the evidence
+Both symptoms, failing updates and Auto Loader flows that lost their inferred schemas, point to the deleted event log location, while the tables themselves are intact.
+## Recovery and prevention
+Restore the dropped objects if they are still recoverable (managed tables can be undropped within the retention window), and exclude event log locations from automated clean-up. A rarely read log is still in use by the pipeline.
+W: Event log as schema location: it explains both symptoms, matches the documented warning, and points to restoring the location and excluding it from clean-up.
+X: B=Checkpoints in the event log: streaming checkpoints are kept per flow by the pipeline, not in the event log table, and a full refresh would discard all streaming state.
+C=Revoked permissions: dropping another schema does not change grants on the pipeline's tables, which remain readable.
+D=Tables moved: the pipeline's tables are intact in their own schema; nothing was moved into the dropped schema.
+T: Never delete a pipeline's event log location: it also holds Auto Loader schema information, and its loss breaks updates.
+V: Lakeflow Spark Declarative Pipelines, event log, Auto Loader
+
+@ DBX-DEP D5 T5.3 expert troubleshooting
+S: Executives open a dashboard served by a serverless SQL warehouse through a BI tool over JDBC. The team expected the remote result cache to answer repeated queries instantly, but query history shows almost every execution recomputed, with no cache hits, even for identical query text run minutes apart by different users. The source table `gold.kpi_live` receives a small streaming append every two minutes. Leadership accepts data up to 30 minutes old, and the table must keep its streaming freshness for another team. The dashboard issues about 40 distinct queries per page view. Which change best raises cache hits while meeting both needs?
+A: Disable the local result cache with `use_cached_result = false`, so that queries skip the local cache and always read from the remote result cache instead
+B: Move the dashboard to a pro SQL warehouse with a longer auto-stop, so that the local result cache keeps results in memory across the two-minute appends
+C: Point the dashboard at a materialized view over `gold.kpi_live` refreshed every 30 minutes, so its results stay cacheable between refreshes
+D: Add `CACHE SELECT * FROM gold.kpi_live` to the dashboard's first query, so the disk cache serves later queries until the table changes again
+K: C
+G: ## When result caches are invalidated
+Serverless SQL warehouses combine a local result cache with a **remote result cache** that persists results for 24 hours and is shared across warehouses in the workspace, for ODBC/JDBC and the SQL Statement API. **Both caches are invalidated when the underlying tables are updated.** The disk cache also detects changed files and invalidates itself.
+## Reading the evidence
+With an append every two minutes, every cached result becomes invalid almost immediately, so identical queries recompute. The cache works; the source changes too often.
+## Applying it
+A materialized view refreshed every 30 minutes changes only at refresh time, so dashboard queries against it hit the result cache between refreshes, within the 30-minute tolerance. The streaming table keeps its freshness for the other team.
+W: Materialized view on a 30-minute schedule: the dashboard's source changes only every 30 minutes, so cached results stay valid, while the live table stays fresh.
+X: A=Disable local cache: the setting turns query result caching off; it does not prevent invalidation by table updates.
+B=Pro warehouse: pro warehouses lack the remote cache, and the local cache is invalidated by the same appends.
+D=CACHE SELECT: the disk cache holds data files, not results, and it also refreshes when the table changes every two minutes.
+T: Result caches are invalidated on every table update; serve dashboards from a less frequently refreshed object to get cache hits.
+V: Databricks SQL, query caching, materialized views
+
+@ DBX-DEP D5 T5.5 expert troubleshooting
+S: A 12 TB managed table `events` is liquid clustered by `(customer_id)` for a support tool that looks up single customers. Most of its cost now comes from finance dashboards that filter only on `event_date` ranges. Their query profiles read most of the table's bytes and show the insight `COVERAGE_FILTER_KEYS_CLUSTERING`. The support tool runs about 200 lookups a day, the dashboards about 20,000 queries, and the dashboards cannot add a customer filter. Predictive optimization is enabled. New data arrives in hourly appends. Which change addresses the evidence with the least ongoing work?
+A: Add `customer_id IS NOT NULL` to every dashboard query, so that the filter covers the clustering key and the scan can skip files that hold no matching rows
+B: Partition the table by `event_date` and keep `customer_id` as the clustering key, so date filters prune partitions while lookups still use clustering
+C: Change the keys to `CLUSTER BY (event_date, customer_id)` or to `CLUSTER BY AUTO`, so the layout serves the dominant date filters and the lookups
+D: Run `OPTIMIZE events ZORDER BY (event_date)` nightly on top of the clustering, so the date column is co-located while customer clustering stays in place
+K: C
+G: ## What the insight says
+`COVERAGE_FILTER_KEYS_CLUSTERING`: the table is clustered by keys **that are not used in filters during the scan**. The recommendation is to filter on the clustering keys; when the workload cannot, the layout does not match the workload.
+## Choosing keys
+- Liquid clustering accepts up to four keys; clustering on `(event_date, customer_id)` lets date ranges and customer lookups both skip files.
+- `CLUSTER BY AUTO` on a managed table with predictive optimization lets Databricks pick and adapt keys from the query history, with no ongoing manual work.
+- Liquid clustering cannot be combined with partitioning or Z-ordering on the same table.
+New keys apply to newly clustered data; existing data is reclustered over time (or at once with `OPTIMIZE ... FULL`).
+W: Re-key the clustering: it matches the dominant date filters while keeping lookups efficient, and automatic clustering keeps it tuned without ongoing work.
+X: A=Add IS NOT NULL: a filter that matches nearly every file does not skip anything; the insight asks for selective filters on the keys.
+B=Partition plus clustering: liquid clustering is not compatible with partitioning on the same table.
+D=Z-order on top: Z-ordering is not compatible with liquid clustering, and a nightly job adds ongoing work.
+T: `COVERAGE_FILTER_KEYS_CLUSTERING` means filters miss the clustering keys; re-key (or use `CLUSTER BY AUTO`) to match the dominant filters.
+V: Liquid clustering, query profile, performance insights
+
+@ DBX-DEP D5 T5.4 expert troubleshooting
+S: A downstream batch job reads `table_changes('silver.accounts', last_version + 1)` every hour and stores `last_version` in a control table. The job was paused for six weeks during a migration. Nobody alerted on the growing lag, and the consumer's last successful run had processed version 48,111. On restart it fails with an error that the requested change data for version 48,112 is not available, although `DESCRIBE HISTORY` still lists newer versions. Silver has default log retention, predictive optimization runs `VACUUM` on it, and the job must not double-apply changes. The downstream table must be correct by tomorrow. Which recovery plan fits the evidence?
+A: Raise `delta.logRetentionDuration` on silver to 60 days and rerun the same query, because the longer retention restores the removed change data versions
+B: Read the change feed from the earliest available version only, because the gap is small and changes from the missing versions are repeated in later commits
+C: Rebuild the downstream table from a current snapshot of silver, record that version in the control table, and resume `table_changes` from the next version
+D: Restore silver to version 48,112 with `RESTORE TABLE`, rerun the job from that version, and then roll silver forward again to its latest version
+K: C
+G: ## Change data feed retention
+Change data feed records are **transient**: the transaction log removes table versions, and their CDF versions, at regular intervals, and `VACUUM` deletes change data files under the table's retention policy. **Once a version is removed, its change data feed can no longer be read.** A consumer paused longer than the retention window loses the ability to continue incrementally.
+## Recovery
+Re-baseline the consumer: rebuild the downstream table from a snapshot of silver at a known version, store that version, and continue with `table_changes` from the next one. This is correct and applies each change once.
+## Prevention
+Alert when a consumer falls behind the retention window, or set longer retention on tables whose consumers can pause for weeks.
+W: Re-baseline from a snapshot: missing CDF versions cannot be recovered, so a snapshot at a known version plus incremental reads afterwards gives a correct table.
+X: A=Longer log retention now: retention changes do not bring back versions and change files that were already removed.
+B=Skip the gap: changes in removed versions are not repeated later, so the downstream table would silently miss them.
+D=RESTORE to 48,112: restoring needs the old data files, which VACUUM removed, and it would roll production silver back for every other reader.
+T: When a CDF consumer falls behind retention, rebuild from a snapshot at a recorded version and resume incrementally.
+V: Delta Lake, Change Data Feed
+
+@ DBX-DEP D6 T6.1 expert troubleshooting
+S: A job reads a partner token with `dbutils.secrets.get("partner", "token")`. It ran for months as its creator, Priya, who has `MANAGE` on the secret scope `partner`. Following an audit, an admin set the job's Run as identity to the service principal `ingest-sp`, granted it `USE CATALOG`, `USE SCHEMA`, `SELECT` and `MODIFY` on all tables the job touches, and gave Priya's group CAN MANAGE RUN on the job. The next run fails in the first cell with a secret permission error. Table access is fine. The audit requires least privilege, and Priya must not be the identity of the job. Which fix fits the evidence?
+A: Set the Run as identity back to Priya, because secrets are always read with the job owner's identity while tables use the Run as identity
+B: Grant Priya's group `READ` on the scope, because members of a group with CAN MANAGE RUN supply secret permissions to the runs they start
+C: Grant `ingest-sp` `MANAGE` on the scope, because a job can read secrets only when its Run as identity is allowed to manage the scope's ACLs
+D: Grant `ingest-sp` `READ` on the scope `partner`, since the job reads secrets as its Run as identity and `READ` suffices to read one
+K: D
+G: ## Which identity reads secrets
+A job runs as its **Run as** identity, and that identity is evaluated against all resources a task uses, including Unity Catalog objects, workspace ACLs and **Databricks secrets**. Who started the run or who owns the job does not matter for data or secret access.
+## Secret ACL levels
+- `READ`: read secrets in the scope;
+- `WRITE`: also create, change and delete secrets;
+- `MANAGE`: also change the scope's ACLs.
+## Reading the evidence
+The job worked while it ran as Priya, who holds `MANAGE`, and failed after the change to `ingest-sp`, which has table grants but no secret ACL. Granting `READ` to `ingest-sp` is the least privilege that fixes it.
+W: READ for the Run as principal: secrets are checked against the job's Run as identity, and `READ` is the lowest level that allows reading a secret.
+X: A=Back to Priya: the audit forbids it, and secrets are read with the Run as identity, not with the owner's identity.
+B=Group of the caller: the user who starts a run does not lend permissions; the run uses its Run as identity.
+C=MANAGE for ingest-sp: reading needs only `READ`; `MANAGE` would also let the job change who can access the scope.
+T: Jobs read secrets as their Run as identity; give that principal `READ` on the scope.
+V: Databricks secrets, Lakeflow Jobs
+
+@ DBX-DEP D6 T6.3 expert troubleshooting
+S: A pipeline pseudonymizes `iban` with `aes_encrypt(iban, key)`, where `key` comes from a secret that a contractor created as a 20-character passphrase. In test the step fails for every row with `INVALID_PARAMETER_VALUE.AES_KEY_LENGTH`. Security requires AES-256, re-identification must stay possible for the fraud team only through `aes_decrypt`, and the key may not appear in code or notebooks. The contractor proposes `sha2(iban, 256)` instead to avoid key handling. The key secret is stored in a scope that only the pipeline's service principal and the fraud team can read, and rotating it is allowed before go-live. Which change fits the error and the requirements?
+A: Pad the 20-character passphrase to 24 characters in the query with `rpad`, because AES-256 needs 24-byte keys and the padded value stays in code only briefly
+B: Replace the secret value with a randomly generated 32-byte key, keep reading it from the secret scope, and leave the `aes_encrypt` call unchanged
+C: Switch the call to `aes_encrypt(iban, key, 'ECB')`, because ECB mode accepts keys of any length while GCM requires exactly 16 bytes
+D: Accept the proposal and hash with `sha2(iban, 256)`, because SHA-256 meets the AES-256 requirement and fraud analysts can reverse the hash with the key
+K: B
+G: ## Key lengths for aes_encrypt
+`aes_encrypt(expr, key [, mode [, padding [, iv [, aad]]]])` requires a `key` of **16, 24 or 32 bytes**; the length selects AES-128, AES-192 or AES-256. Any other length fails with `INVALID_PARAMETER_VALUE.AES_KEY_LENGTH`. The default mode is GCM.
+## Applying it
+A 20-character passphrase is not a valid key length. AES-256 needs a **32-byte** key: generate a random 32-byte key, store it in the secret scope, and keep reading it from there, so it never appears in code. The fraud team decrypts with `aes_decrypt` and the same key.
+## Why hashing does not fit
+`sha2` is one-way: it cannot be reversed with a key, so re-identification would be impossible.
+W: Random 32-byte key in the secret scope: it fixes the length error, meets AES-256, and keeps the key out of code while decryption stays possible.
+X: A=Pad to 24 characters: 24 bytes means AES-192, not AES-256, and padding a short passphrase in the query weakens the key.
+C=ECB with any length: every mode needs a 16, 24 or 32-byte key; ECB is also deterministic, which leaks equal values.
+D=SHA-256 hash: hashing is irreversible, so the fraud team could not recover the IBAN, and it is not AES encryption.
+T: `aes_encrypt` keys must be 16, 24 or 32 bytes; AES-256 needs a 32-byte key stored in a secret.
+V: Databricks SQL functions, secrets
+
+@ DBX-DEP D7 T7.2 expert troubleshooting
+S: The group `fin_platform` owns the catalog `finance`. A pipeline created the schema `finance.ledger` and its tables, all owned by the service principal `ledger-sp`. A member of `fin_platform` runs `SELECT * FROM finance.ledger.entries` and gets a permission error, although the same user can rename the schema, change its grants and drop tables in it. Nobody granted the group any privilege explicitly. The team wants the group to read every current and future table in `finance` without changing table ownership. The catalog is bound to this workspace. What explains the evidence, and what is the fix?
+A: Catalog ownership inherits ownership of all schemas, but tables keep their own owner; transfer each table in `finance.ledger` to `fin_platform`
+B: Catalog owners can manage child objects but have no data privileges on them; the group grants itself `SELECT` and `USE SCHEMA` on the catalog
+C: Catalog ownership only covers metadata in other workspaces; bind the catalog to the current workspace so the owner's read access takes effect
+D: Catalog owners can read child tables only through SQL warehouses; run the query on a SQL warehouse, where ownership grants `SELECT` on all tables
+K: B
+G: ## Ownership in Unity Catalog
+Every securable has one owner. The owner has all capabilities **on that object**, and owners of a container can **manage all child objects** (functionally like `MANAGE` on them): grant and revoke, rename, drop. But **ownership does not inherit downward**: owning a catalog does not make you owner of its schemas or tables, and the docs state that **owners still require explicit grants on child objects** for data access.
+## Reading the evidence
+The user can manage and drop objects in `finance.ledger` (management of children), but `SELECT` fails (no data privilege). That is exactly the documented split.
+## Fix
+Because the owner can manage children, the group can grant itself `USE SCHEMA` and `SELECT` on the catalog `finance`; inheritance covers all current and future schemas and tables. As catalog owner it already has use of the catalog.
+W: Self-granted data privileges: ownership gives management of children but not reading them, and a catalog-level grant covers current and future tables without touching ownership.
+X: A=Ownership inheritance: ownership does not inherit downward, and transferring table ownership is exactly what the team wants to avoid.
+C=Workspace binding: bindings control which workspaces can access a catalog; the user already reaches the catalog, as the management actions show.
+D=SQL warehouse: privileges are the same on every compute type; ownership of a catalog never implies `SELECT` on its tables.
+T: Owners can manage child objects but need explicit data grants on them; grant `SELECT` at catalog level to cover all tables.
+V: Unity Catalog
+
+@ DBX-DEP D8 T8.2 expert troubleshooting
+S: The job `nightly_sales` runs `ingest` -> `transform` -> `publish` with the job parameter `mode` (default `incremental`). Last night `transform` failed. The engineer repaired the run and entered `mode = full` in the Repair job run dialog to force a rebuild; `transform` failed again, this time on a storage quota that is now fixed. The team has since decided that a full rebuild would rewrite three years of data and miss the SLA, so the second repair must use `incremental`. `ingest` must not run again because the source has moved on. In the dialog for the second repair, `mode` still shows `full`. Which action meets the requirements?
+A: Clear the `mode` key and value in the Repair job run dialog, which returns the parameter to its original value, and then start the second repair
+B: Edit the job settings and save `incremental` as the default of `mode` again, because repairs read job parameters only from the saved job definition
+C: Start a new run with Run now and `mode = incremental`, because a parameter entered in an earlier repair cannot be changed in a later repair of that run
+D: Repair with `rerun_tasks` set to `["ingest", "transform", "publish"]`, because only a repair that includes the root task resets parameters to their defaults
+K: A
+G: ## Parameters in repair runs
+A repair reruns the unsuccessful tasks and their dependents with the current job and task settings. In the Repair job run dialog you can add or edit parameters for the tasks to repair; **values entered there override existing values**. The docs add that on **subsequent repair runs** you can **return a parameter to its original value by clearing the key and value** in the dialog.
+Overrides reach only the tasks that are rerun; tasks that already succeeded keep the output they produced.
+## Reading the evidence
+The first repair's override `mode = full` is still shown for the second repair. The job default is already `incremental`, so editing the job does not remove the override; clearing it in the dialog does.
+## Applying it
+Clear `mode` in the dialog and repair: `transform` and `publish` run with `incremental`, and `ingest` keeps its earlier result.
+W: Clear the override: clearing the key and value in a later repair restores the parameter's original value, and only the failed task and its dependents run.
+X: B=Save the default again: the default is already `incremental`; the override entered in the earlier repair is what still applies.
+C=Run now: a new run would also run `ingest`, which must not run again, and a later repair can change parameters.
+D=Rerun the root task: `ingest` would run again against a source that has moved on, and the documented way to reset a parameter is clearing it in the dialog.
+T: In a later repair, clear a parameter's key and value to return it to its original value instead of starting a new run.
+V: Lakeflow Jobs
+
+@ DBX-DEP D8 T8.4 expert troubleshooting
+S: Production notebooks run from an admin-owned Git folder `/Workspace/Prod/etl`. A GitHub Actions workflow authenticates to Databricks as the service principal `deploy-sp` and calls the Repos API to update the folder to the head of `release` after each merge. The folder was originally cloned by an admin using the admin's personal Git credential. Since the admin left and that credential was revoked, every update call fails with an error about missing Git credentials, while `deploy-sp` still has Can Manage on the folder. Users must keep Can Run only, and no person's credential may be used again. Which change fixes the evidence?
+A: Give `deploy-sp` workspace admin rights, because the Repos API uses the folder's original Git credential unless the caller is a workspace admin
+B: Store a GitHub token as a secret in a scope readable by `deploy-sp`, because the Repos API reads Git credentials from the caller's secret scopes
+C: Grant all users Can Edit on the folder for one day, so that any user can pull the release branch with their own credential while the fix is prepared
+D: Configure a Git credential for `deploy-sp` itself, such as a token of a GitHub machine identity, so the principal can reach the repository
+K: D
+G: ## Credentials of production Git folders
+Databricks recommends that production Git folders are updated only by automation after merges, and that the automation runs as a **service principal with a Git credential configured so it can access the repository**. Git operations on a Git folder use the Git credential of the identity that performs them.
+## Reading the evidence
+`deploy-sp` has folder permissions but no Git credential of its own; the folder had worked only while an admin's personal credential was used. Once that credential was revoked, nothing could authenticate to GitHub.
+## Fix
+Create a Git credential for `deploy-sp` (for example a token of a machine account or app identity in GitHub), so updates no longer depend on any person, and keep users at Can Run.
+W: Git credential for the service principal: the documented setup gives the automation identity its own access to the repository, independent of any person.
+X: A=Admin rights: workspace permissions do not authenticate to GitHub; without a Git credential the pull still fails.
+B=Token in a secret scope: Git folder operations use configured Git credentials, not tokens found in secret scopes.
+C=Can Edit for users: it breaks the rule that only automation changes production folders and reintroduces personal credentials.
+T: Automation that updates production Git folders needs its own Git credential on the service principal.
+V: Databricks Git folders, service principals
+
+@ DBX-DEP D9 T9.1 expert troubleshooting
+S: A team declared `dim_product` with `product_sk BIGINT GENERATED ALWAYS AS IDENTITY` and loads it from one serial job. A later refactor changed the nightly job to rebuild the table with `CREATE OR REPLACE TABLE gold.dim_product AS SELECT ... FROM silver.products`. Since then `SHOW CREATE TABLE` shows `product_sk` as a plain column, new rows arrive with NULL keys, and fact loads fail their key lookups. Facts already reference existing keys, so they must not change, and new products must still get keys automatically. About 400 new products arrive each night, and the dimension holds 2 million rows. Which change fits the evidence?
+A: Keep the CTAS and add `GENERATED ALWAYS AS IDENTITY` to the column inside the `SELECT` list, so that the rebuilt table keeps the identity definition
+B: Keep the CTAS and switch the column to `GENERATED BY DEFAULT AS IDENTITY` in a table property, so that CTAS rebuilds generate new keys automatically
+C: Recreate the table once with an explicit schema that declares the identity column, then load it with `INSERT` or `MERGE` instead of CTAS each night
+D: Keep the CTAS and compute `product_sk` as `row_number()` over `product_id` in the query, so that the keys stay stable and are filled for all products
+K: C
+G: ## CTAS and identity columns
+The `CREATE TABLE [USING]` reference defines identity in the column specification: `GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY`, `BIGINT` only. For `AS query` it states: **when you specify a `query` you must not also specify a `table_specification`; the table schema is derived from the query**. So a CTAS rebuild cannot carry an identity column. To get one you must:
+1. create the table with the correct schema, including `GENERATED ... AS IDENTITY`;
+2. load it with `INSERT` (or `MERGE`).
+Identity values are unique and increase but are not contiguous; with `GENERATED ALWAYS` the writer cannot supply values.
+## Reading the evidence
+The CTAS rebuild replaced the table definition, so the identity disappeared and new rows got NULL keys.
+## Applying it
+Recreate the table once with the identity column, reload existing keys with `GENERATED BY DEFAULT` if they must be kept (inserted values are used when provided), and then merge new products each night so existing keys never change.
+W: Explicit schema plus INSERT or MERGE: an identity column can only be declared in a column specification, which CTAS forbids; loading with INSERT or MERGE keeps existing keys and assigns keys to new products.
+X: A=Identity in the SELECT list: CTAS cannot carry identity specifications, so the clause is rejected.
+B=Table property: identity is part of the column definition, not a table property, and CTAS still cannot declare it.
+D=row_number per rebuild: numbers shift whenever products are added or removed, so keys referenced by facts would change.
+T: CTAS cannot declare identity columns; create the table with its schema once and load it with INSERT or MERGE.
+V: Delta Lake, identity columns

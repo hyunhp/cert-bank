@@ -1,0 +1,76 @@
+# GCP-PDE cue fixes (c2-g1): options rewritten so stem echo and length no longer point to the key; same concept and key.
+
+@ GCP-PDE D2 T2.2 applied use-case
+S: A Spark job on Dataproc must read a 4 TB BigQuery fact table, join it with files in Cloud Storage and write the result back to BigQuery. The team wants parallel reads without a manual export step. What should the data engineer use?
+A: The Spark BigQuery connector, which splits each table read into Storage Read API streams for the executors
+B: A JDBC driver for BigQuery, so each Spark executor pages through the fact table with one long SELECT query
+C: A scheduled query that exports the fact table nightly to Cloud Storage files that Spark then joins as input
+D: The jobs.getQueryResults method called from the Spark driver, which collects rows and spreads them to executors
+K: A
+G: ## Reading BigQuery from Spark
+BigQuery is not an HDFS-style store, so Spark needs a connector. The **Spark BigQuery connector** reads through the **BigQuery Storage Read API**, which splits the table into streams that Spark executors read in parallel, applying column projection and filter pushdown. Writing back uses load jobs or the Storage Write API.
+## Why exports and drivers lose
+- A manual or scheduled export adds a copy, a delay and a cleanup job, and the data is stale.
+- A single driver or single result stream becomes a bottleneck at multi-terabyte sizes.
+W: Spark BigQuery connector: it reads in parallel using the Storage Read API, pushes down column and filter selection, and writes results back to BigQuery, with no export step.
+X: B=JDBC with one long SELECT: a single result stream pages the whole table through one connection and cannot use parallel reads from many executors.
+C=Nightly export to Cloud Storage: it adds a stale copy and a pipeline stage, which is the manual export step the team wants to avoid.
+D=jobs.getQueryResults on the driver: collecting results on one driver node bottlenecks at 4 TB and defeats the purpose of distributed processing.
+T: Use the Spark BigQuery connector so Dataproc jobs read and write BigQuery in parallel through the Storage APIs without exports.
+I: Q010522
+
+@ GCP-PDE D2 T2.2 applied use-case
+S: A logistics company runs Apache Kafka in its own data center. Events must land in BigQuery for reporting, the team wants to avoid writing and operating a custom consumer, and the data center is linked to the VPC network by Cloud Interconnect. Which approach fits?
+A: The Dataflow Apache Kafka to BigQuery template, with its workers given a private network path to the brokers
+B: A Storage Transfer Service job over Cloud Interconnect that copies topic data hourly into Cloud Storage for loads
+C: Datastream with the on-premises Kafka brokers as its source, reached over Cloud Interconnect and writing to BigQuery
+D: A small consumer VM in the connected VPC network that polls the brokers and inserts each event with a BigQuery job
+K: A
+G: ## Kafka into Google Cloud
+Kafka clusters outside Google Cloud can feed Google Cloud through **Dataflow**. Beam's `KafkaIO` reads topics, and Google provides a ready-to-run **Apache Kafka to BigQuery template**, so no pipeline code is needed. The Dataflow workers need network reach to the brokers, so private connectivity (Cloud VPN or Cloud Interconnect, with firewall rules and name resolution) is part of the design.
+## What does not apply
+- **Datastream** captures changes from databases (such as MySQL, PostgreSQL, Oracle), not from Kafka.
+- **Storage Transfer Service** moves objects, not message streams.
+- A hand-written consumer works but gives you the operations load you wanted to avoid.
+W: Dataflow Kafka to BigQuery template: it is managed, scalable and needs no code, and its workers reach the on-premises brokers over the existing Cloud Interconnect link.
+X: B=Storage Transfer Service: it copies objects between stores and cannot consume a streaming topic, whatever network path it uses.
+C=Datastream: it reads database change logs, not Kafka topics, so it cannot take brokers as a source.
+D=Consumer VM: it is the custom consumer the team wants to avoid, code you must operate, scale and make fault tolerant, and per-event insert jobs are inefficient.
+T: Use the Dataflow Kafka template over private connectivity to move Kafka topics into BigQuery without custom consumers.
+I: Q010526
+
+@ GCP-PDE D5 T5.1 advanced comparison
+S: One Dataproc cluster runs many short Spark jobs from analysts and also a single eight-hour training-data job. Autoscaling is on, but after a burst of short jobs the cluster stays large for hours, so the bill is high. What is the best fix?
+A: Disable graceful decommissioning so that autoscaling removes nodes right after a burst of short jobs
+B: Pin the short jobs to the HDFS worker nodes so that the eight-hour job can borrow their spare memory
+C: Increase the autoscaling cooldown so that the shared cluster makes scale-down decisions less often
+D: Give the long-running job a dedicated cluster and keep the analysts' similar Spark work on another
+K: D
+G: ## Mixed-size workloads and graceful scale-down
+Autoscaling scale-down uses graceful decommissioning: workers are removed after the work on them finishes. When small and large jobs share a cluster, the scale-down waits for the large job, so one long-running job delays the release of resources that the smaller jobs no longer need.
+Dataproc guidance: group similarly sized smaller jobs together on a cluster, and isolate each long-duration job on a separate cluster.
+W: Separate clusters by job size: the long job no longer holds the shared cluster's capacity, so that cluster can scale down once the short jobs finish, and the long job's cluster is deleted after it ends.
+X: A=No graceful decommissioning: it risks killing running tasks and failing the long job, so it is unsafe.
+B=Pin short jobs to HDFS nodes: it does not remove the dependency on the long job, and autoscaling is not intended to scale around HDFS.
+C=Longer cooldown: it makes scale-down slower, which worsens the problem.
+T: Isolate long-running Dataproc jobs on their own clusters and group similar short jobs so autoscaling can scale down.
+I: Q010430
+
+@ GCP-PDE D1 T1.2 applied tradeoff
+S: A pipeline lands raw clickstream files in a Cloud Storage dual-region bucket. If one of the two regions fails, the business can lose at most about fifteen minutes of newly written objects, and it wants this to hold for all object sizes. What should the team enable?
+A: A multi-region bucket with default replication, which already copies new objects within fifteen minutes
+B: The Nearline storage class on the dual-region bucket, since the class sets how soon the second copy exists
+C: A single-region bucket with Autoclass, which copies objects to a second region as soon as they cool down
+D: Turbo replication, the premium replication option with a short target that does not depend on object size
+K: D
+G: ## Cloud Storage redundancy and RPO
+Dual-region and multi-region buckets store data redundantly in at least two geographic places. **Default replication** is designed to copy 99.9% of newly written objects within one hour and 100% within 12 hours, which is slower than this requirement. **Turbo replication** is an option for dual-region buckets: it is designed to replicate 100% of newly written objects to both regions within a recovery point objective of **15 minutes**, regardless of object size.
+## Planning
+Turbo replication helps business continuity, but administrators should still design a complete BCDR plan for the workload (for example, how the pipeline restarts in the surviving region).
+W: Turbo replication on the dual-region bucket: it carries a 15-minute RPO target for newly written objects of any size, which matches the requirement.
+X: A=Multi-region with default replication: its targets are 99.9% of objects within one hour and 100% within 12 hours, not 15 minutes, and turbo replication is offered only for dual-region buckets.
+B=Nearline class on the dual-region bucket: the storage class only changes storage cost and access fees; replication still follows the default targets.
+C=Single region with Autoclass: Autoclass changes storage classes by access pattern and does not create a second-region copy.
+T: Use dual-region with turbo replication when a short, documented RPO for new objects is required.
+V: Cloud Storage
+I: Q010487
