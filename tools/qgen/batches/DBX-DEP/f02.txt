@@ -1,0 +1,92 @@
+# DBX-DEP cue fixes (c2-g4): remove giveaway cues (length, stem echo) from published questions; same answer and concept
+
+@ DBX-DEP D9 T9.2 advanced tradeoff
+S: Finance dashboards read a 4-billion-row `fact_orders` table. Three dashboards need revenue by (day, region), by (day, product) and by (day, region, product), and one of them needs average order value. The team plans materialized views and wants as few as possible with correct results for any roll-up. Which design fits?
+A: A single materialized view at the finest grain any dashboard uses, holding additive sums and row counts, with means derived after roll-up
+B: A materialized view that stores `COUNT(DISTINCT customer_id)` per group, and dashboards add those counts to get customers per coarser grain
+C: Three standard views with the same queries, since a standard view keeps its result stored in a table and so is faster than a materialized view
+D: One view per dashboard storing `AVG(order_value)` for each grain, because averages can be summed later when a user selects a coarser grain
+K: A
+G: ## Pre-computed aggregation with materialized views
+A materialized view stores the result of a query and refreshes it as sources change, incrementally where the query allows (Delta sources with row tracking), otherwise by full recompute. Dashboards that read the stored result avoid scanning the base table.
+## Grain and additivity
+The stored grain decides which questions can be answered.
+- **Additive** measures (`SUM`, `COUNT`) roll up to coarser grains by summing.
+- **Non-additive** measures (averages, ratios, distinct counts) cannot: the average of group averages is not the overall average, and distinct customers of two groups overlap.
+- Store the **components** (sum and count) and compute the ratio after the roll-up.
+## Trade-off
+One view at the finest needed grain serves all dashboards and has one refresh to maintain, at the price of more rows than the coarsest dashboard needs.
+W: Single view with additive components: `SUM(revenue)` and `COUNT(*)` stored at (day, region, product) roll up correctly to every coarser grain, and the average order value is the ratio of the rolled-up sums, so one materialized view serves all three dashboards.
+X: B=Adding distinct counts: customers appear in several groups, so adding the group counts overstates the number of distinct customers at coarser grains.
+C=Standard view: a standard view stores nothing and recomputes its query on demand, so it saves neither scanning nor compute compared with the base table.
+D=Stored averages: an average is not additive, and summing or averaging group averages gives wrong results whenever groups have different sizes.
+T: Materialize additive components at the finest needed grain and compute ratios and averages after roll-up.
+V: Materialized views
+I: Q011119
+
+@ DBX-DEP D2 T2.2 advanced troubleshooting
+S: A streaming job reads the change data feed of a source table and its checkpoint is lost. The engineer starts a new checkpoint with `startingVersion` set to a version from two months ago. The stream fails to start because that version is not available. How should the target be recovered?
+A: Set `startingVersion` to 0 so that the change feed replays the complete history from the first commit of the table
+B: Run `VACUUM` with a retention of zero hours, which recreates the missing change files from the transaction log
+C: Reload the destination from a full snapshot taken now, then follow later commits from that snapshot's version on a fresh checkpoint
+D: Reuse the lost checkpoint path with `startingVersion` unchanged, since an existing checkpoint path restores the stream offsets from all of the earlier runs
+K: C
+G: ## CDF is transient
+Change data feed is not a permanent record of changes. Its records are kept only for a retention window; transaction log cleanup and `VACUUM` remove old versions and their change files, and once a version is gone its changes can no longer be read. For managed tables, history is cleaned up automatically, so a fixed starting version eventually becomes unavailable. A new stream with an unavailable `startingVersion` fails to start.
+## Recovery pattern
+- Re-establish the baseline: copy or merge a full snapshot of the source into the target (the table at a known version).
+- Start a new stream from that version (or the current one) with a new checkpoint, and write with an idempotent merge.
+- Monitor the lag so streams never fall behind the retention window.
+Also: a corrupted checkpoint cannot be reused; the new stream needs a new checkpoint path.
+W: Snapshot rebuild then a new stream: the target gets the missing state from a full read of the source table itself, and a new change feed stream on a new checkpoint continues from a version that still exists.
+X: A=startingVersion 0: versions older than the retained history are gone, so the stream still fails to start.
+B=VACUUM with zero retention: vacuum deletes files and can never recreate missing change data; it makes the problem worse.
+D=Reusing the lost path: a lost or corrupted checkpoint holds no usable offsets; the databricks guidance is to write the new stream to a new checkpoint location.
+T: Change data feed history expires; recover a lost checkpoint by reloading a snapshot and restarting the feed from a retained version.
+V: Delta Lake, Change data feed
+I: Q010992
+
+@ DBX-DEP D6 T6.1 advanced use-case
+S: An internal auditor must be able to review, across the catalog `prod`, which privileges are granted, which tables have row filters or column masks, and which ABAC policies apply. The auditor must neither read any table data nor be able to change grants. Which Unity Catalog privilege on `prod` fits?
+A: `READ METADATA`, the read-only audit privilege that is a child of `MANAGE` and is inherited by every object in the catalog
+B: `MANAGE`, which allows the auditor to view all metadata, and it is not a risk because the auditor will only use it for reading
+C: `SELECT` together with `USE CATALOG` and `USE SCHEMA`, because reading the tables is needed to see which masks and filters protect them
+D: `BROWSE`, which lets the auditor discover objects below the catalog and also lists the grants, masks and policies applied to them
+K: A
+G: ## Metadata privileges in Unity Catalog
+- `BROWSE` lets a user discover objects, view their metadata and request access, without `USE CATALOG` or `USE SCHEMA`. Grants, row filters, column masks and ABAC policies are what `READ METADATA` adds.
+- `READ METADATA` gives read-only visibility into the same metadata as the owner or a user with `MANAGE`: privilege grants, row filters and column masks, ABAC policies and similar details, without the ability to modify the object or read its data. It is a child of `MANAGE`.
+- `MANAGE` can grant and revoke privileges, transfer ownership, rename and drop. A reviewer should not hold it.
+- `ALL PRIVILEGES` excludes `MANAGE`, `READ METADATA`, `EXTERNAL USE SCHEMA` and `EXTERNAL USE LOCATION`, so even broad data access does not bring audit visibility.
+Granting `READ METADATA` on the catalog is inherited by the schemas and tables in it.
+W: READ METADATA: it gives read-only visibility into grants, row filters, column masks and ABAC policies, the same metadata an owner or `MANAGE` holder sees, without reading data or modifying anything, and a grant on the catalog is inherited by the objects in it.
+X: B=MANAGE: it permits changing grants, ownership and dropping objects, which breaks the requirement that the auditor cannot change grants.
+C=SELECT: it reads table data, which is forbidden, and `SELECT` does not by itself show the grants and policies of tables.
+D=BROWSE: it is meant for discovering objects and requesting access, while viewing grants, masks, filters and policies is what READ METADATA adds.
+T: Use READ METADATA for auditors who need to see grants, masks and policies without data access or change rights.
+V: Unity Catalog privileges
+I: Q011099
+
+@ DBX-DEP D7 T7.2 applied use-case
+S: The group `etl_devs` must read and create tables in every current and future schema of the catalog `dev`, and nowhere else. Admins want the fewest grants to maintain and no ownership transfers. Which grants meet this?
+A: The four privileges on each existing schema of `dev`, repeated by a scheduled job whenever a new schema appears
+B: `ALL PRIVILEGES` on the catalog `dev`, since it is the narrowest grant that covers reading and creating tables
+C: The same four privileges on the metastore, because a metastore grant inherits to every catalog, schema and table that lies below it
+D: `USE CATALOG`, `USE SCHEMA`, `SELECT` and `CREATE TABLE` granted once at the `dev` level, relying on Unity Catalog inheritance
+K: D
+G: ## Grant once at the container
+A privilege granted on a container applies to all current and future children. Reading tables in a schema needs `USE CATALOG`, `USE SCHEMA` and `SELECT`; creating one needs `USE CATALOG`, `USE SCHEMA` and `CREATE TABLE` on the schema. When these are granted on the catalog, they inherit to every schema, including schemas created later.
+```
+GRANT USE CATALOG, USE SCHEMA, SELECT, CREATE TABLE ON CATALOG dev TO `etl_devs`;
+```
+- Metastore-level grants do not inherit to catalogs (except `READ METADATA`); they cover operations such as `CREATE CATALOG`.
+- `ALL PRIVILEGES` implies every privilege applicable to the catalog, such as `CREATE SCHEMA` and `APPLY TAG`, so it grants far more than reading and creating tables.
+- A user who creates a table becomes its owner; ownership of the new tables does not pass to anyone else, and the group is not made owner by the catalog grant.
+Use groups as grantees so membership changes need no new grants.
+W: Catalog-level grants: four privileges granted on `dev` inherit to all current and future schemas and tables of that catalog and nowhere else, so the group has exactly the access needed with one grant to maintain.
+X: A=Per-schema grants: they work today but need constant upkeep, which is exactly what inheritance from the catalog avoids.
+B=ALL PRIVILEGES: it includes every privilege that applies to a catalog (for example creating schemas), which exceeds the requirement.
+C=Metastore grant: privileges granted on the metastore do not inherit to catalogs, and these four are not metastore-level privileges.
+T: Grant reading and creating privileges once on the catalog so they inherit to current and future schemas and tables.
+V: Unity Catalog privilege inheritance
+I: Q011174
