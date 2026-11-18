@@ -1,0 +1,346 @@
+# DEA-C01 cue fixes (c2-g2): remove giveaway cues (correct option much longer or echoing the stem) from published questions; same answer and concept
+
+@ DEA-C01 D2 T2.4 advanced use-case
+S: Producers on Amazon MSK occasionally change event schemas and break downstream consumers. The team wants to block incompatible schema changes at produce time. Which solution fits BEST?
+A: Increase topic retention so consumers can reprocess the affected messages after a broken change is rolled back
+B: Have consumers validate each record against a registry and send records that fail parsing to a dead-letter topic
+C: Store every schema version as a file in S3 and have a nightly AWS Glue crawler compare it with the topic data
+D: Register the schemas in the AWS Glue Schema Registry with BACKWARD compatibility and use its producer serializer
+K: D
+G: ## AWS Glue Schema Registry
+The Glue Schema Registry stores versioned schemas (Apache Avro, JSON Schema or Protobuf) for streaming data and enforces **compatibility rules** between versions. It works with Apache Kafka clients (including Amazon MSK), Kinesis Data Streams and other integrations.
+- Producers use the registry **serializer**. Before sending, it checks the record's schema against the registry; a new version is accepted only if it passes the compatibility mode.
+- Modes include `BACKWARD` (new readers can read old data, such as adding an optional field), `FORWARD`, `FULL`, their `_ALL` variants, and `NONE`.
+- Consumers use the **deserializer**, which fetches the right schema version by the ID embedded in each message.
+## Example
+With `BACKWARD` compatibility, a producer that adds a new field without a default value or changes a type from `int` to `string` gets an error at produce time instead of breaking downstream consumers.
+W: Glue Schema Registry with a compatibility mode: the producer serializer checks each new schema version against the registry, and a version that breaks the compatibility mode is rejected before any record reaches the topic.
+X: A=More retention: longer retention only keeps messages longer for replay; it neither checks nor blocks a schema change, so consumers still break first.
+B=Consumer-side validation with a dead-letter topic: the incompatible records are already on the topic when the consumer finds them, so this detects breakage after the fact instead of blocking it at produce time.
+C=Schema files and a nightly crawler: a crawler infers table schemas for the Data Catalog on a schedule; it enforces nothing on producers and would notice a change hours later at best.
+T: To block breaking changes at produce time, validate with a schema registry serializer and compatibility rules; retention, consumer checks and catalog crawls act too late.
+V: AWS Glue Schema Registry, Amazon MSK
+I: Q002161
+
+@ DEA-C01 D3 T3.2 advanced use-case
+S: Several teams share Athena, and one team's ad hoc queries have scanned tens of terabytes, causing cost overruns. How can the data platform team limit this?
+A: Put each team in its own Athena workgroup with a per-query data usage control that cancels oversized scans
+B: Enable S3 Requester Pays on the data lake buckets so that the querying team's account pays for the S3 reads
+C: Create an AWS Budgets cost budget for Athena that emails the team once monthly spend passes a threshold
+D: Convert the team's tables from Parquet to gzip-compressed JSON so that each query reads fewer bytes from S3
+K: A
+G: ## Athena workgroups
+An Athena **workgroup** separates users, teams or applications that share Athena, and carries its own settings.
+- **Per-query data usage control**: a limit on bytes scanned per query. A query that exceeds it is cancelled, which caps the cost of any one query.
+- **Workgroup-wide data usage controls**: thresholds on total data scanned per period (for example per hour or per day) that trigger CloudWatch alarms and SNS notifications.
+- A separate **query result location** and encryption settings per workgroup, which can be enforced so users cannot override them.
+- CloudWatch metrics per workgroup and tags for cost allocation.
+## Example
+The analytics team is placed in workgroup `adhoc` with a 1 TB per-query limit. A careless `SELECT *` over the whole data lake is cancelled after scanning 1 TB instead of running on to tens of terabytes. IAM policies limit each team to its own workgroup.
+W: Workgroups with data usage controls: the per-query limit cancels any query that scans more than the set amount, workgroup-wide thresholds alert on overall usage, and IAM keeps each team in its own workgroup so costs stay capped and attributable.
+X: B=Requester Pays: it shifts S3 request and transfer charges to the requester's account. It does not limit how much data an Athena query scans, and Athena still bills per byte scanned.
+C=Budget alert email: a budget notifies people after spend has already accumulated; an email does not stop a runaway query, and a monthly view reacts far too late for single queries of tens of terabytes.
+D=Gzip-compressed JSON: JSON is a row format without column pruning, so queries read whole rows and usually scan more data than with Parquet, raising cost instead of limiting it.
+T: Athena costs are controlled per team with workgroups and data usage limits, not by billing alerts, S3 billing settings or changing data formats.
+V: Amazon Athena
+I: Q002162
+
+@ DEA-C01 D3 T3.3 advanced troubleshooting
+S: A Spark join on EMR fails with out-of-memory errors on a few executors while most executors finish quickly. One join key value accounts for 30% of the rows. Which technique addresses this?
+A: Raise spark.sql.shuffle.partitions from 200 to 2,000 so each shuffle partition of the join holds fewer rows
+B: Repartition both inputs by the join key before the join so each executor receives an equal share of the keys
+C: Salt the hot key or turn on adaptive query execution skew-join handling so its rows are split across tasks
+D: Add more executors of the same instance size through EMR managed scaling so the join has more parallel tasks
+K: C
+G: ## Data skew in Spark joins
+During a shuffle join, Spark sends all rows with the same join key to the same task. If one key holds 30% of the rows, one task receives 30% of the data while hundreds of others get almost nothing. That task runs slowly and its executor may run out of memory.
+## Ways to fix skew
+- **Salting**: add a random suffix (for example 0-19) to the hot key on the large side and replicate the matching rows on the other side 20 times, so the hot key is split over 20 tasks.
+- **Adaptive query execution (AQE)** in Spark 3: with `spark.sql.adaptive.skewJoin.enabled` (on by default together with `spark.sql.adaptive.enabled` since Spark 3.2, and enabled on current Amazon EMR releases), Spark detects oversized shuffle partitions at run time and splits them.
+- **Broadcast join**: if one side is small enough, `broadcast(dim_df)` sends a full copy to every executor, so the large side is never shuffled and the skew disappears.
+W: Salting or AQE skew-join handling: both split the rows of the dominant key over many tasks (salting by adding a random suffix, AQE by splitting the oversized shuffle partition at run time), so no single task has to hold 30% of the data.
+X: A=More shuffle partitions: rows are assigned to partitions by hashing the key, so every row of the hot key still lands in one partition no matter how many partitions exist; only the other keys get spread thinner.
+B=Repartition by the join key: hashing by the same key reproduces the same skew, sending all rows of the hot key to one partition before the join even starts.
+D=More executors of the same size: all rows of the hot key still go to one task on one executor; extra executors stay idle while that one still runs out of memory.
+T: A few failing tasks and one dominant key mean data skew: salt the key, let AQE split skewed partitions, or broadcast the small side; more partitions, key repartitioning or more executors do not help.
+V: Amazon EMR, Apache Spark
+I: Q002165
+
+@ DEA-C01 D2 T2.2 advanced troubleshooting
+S: A crawler over s3://logs/app/ creates hundreds of separate tables instead of one table, because some files have slightly different column sets. What should the engineer configure?
+A: Enable the crawler option that creates a single schema for each S3 include path, combining compatible schemas
+B: Add an exclude pattern for files with extra columns so the crawler reads only files with the original schema
+C: Set the schema change policy to update the table definition in the Data Catalog whenever new columns appear
+D: Schedule the crawler hourly with incremental crawls so that it only processes newly added folders each run
+K: A
+G: ## How a Glue crawler decides on tables
+A crawler scans files under an S3 path, infers a schema for each group of files and writes tables to the Data Catalog. By default, when files in sibling folders have schemas that look different enough, it can decide they are different datasets and create a separate table per folder, sometimes hundreds of them.
+## Combining compatible schemas
+The crawler setting **Create a single schema for each S3 path** (in the API, the configuration `{"Version":1.0,"Grouping":{"TableGroupingPolicy":"CombineCompatibleSchemas"}}`) tells it to merge compatible schemas into one table for the include path.
+- Columns that exist only in some files are added to the combined schema; files without them return `NULL` for those columns.
+- Folder levels under the path become partitions of that one table instead of separate tables.
+## Example
+Files in `s3://logs/app/2026/09/28/` have 12 columns and some in `.../29/` have 13. With grouping enabled the crawler creates one table `app` with 13 columns and date partitions.
+W: Single schema per S3 path: the table grouping setting merges the slightly different column sets into one table with partitions, which is how the log dataset should be modeled.
+X: B=Exclude pattern for files with extra columns: it hides real log data from the catalog just to satisfy the crawler, and the problem returns the next time a new column appears.
+C=Schema change policy: it controls how detected changes are applied to tables the crawler already created (update, log or ignore); it does not decide whether differing folders are grouped into one table, so the separate tables remain.
+D=Hourly incremental crawls: crawling only new folders more often applies the same grouping logic, so new folders keep producing separate tables.
+T: When a crawler splits one dataset into many tables because of small schema differences, enable schema grouping for the path instead of excluding data, changing the update policy or changing the schedule.
+V: AWS Glue crawler
+I: Q002159
+
+@ DEA-C01 D1 T1.2 advanced troubleshooting
+S: Athena queries on a streaming data lake are slow. The table contains millions of files averaging 20 KB. What is the MOST effective improvement?
+A: Add more partition levels, such as hour and minute, so that each query prunes down to fewer S3 prefixes
+B: Convert the files to uncompressed JSON so that Athena spends less CPU time decompressing each object
+C: Raise the Athena query timeout quota so that long-running queries over the full lake can complete
+D: Compact the data into Parquet files of roughly 128 MB or more and raise buffering at ingestion
+K: D
+G: ## Why small files slow down Athena
+Athena reads data from S3 in parallel, and every file adds fixed overhead: listing it, opening it, reading its footer or metadata, and issuing S3 `GET` requests. With millions of 20 KB files, the engine spends most of its time on that overhead rather than on reading data.
+## The fix: fewer, larger, columnar files
+- **Compact** small files into larger files, commonly in the range of about 128 MB to 1 GB each, using a Glue or EMR job, an Athena `CTAS` or `INSERT INTO` query, or `OPTIMIZE` on Apache Iceberg tables.
+- Use **Parquet** with compression, so queries read only the needed columns and skip row groups using min/max statistics.
+- Fix the source: raise **buffering** in the ingestion layer (for example Firehose buffer size and interval) so fewer, larger files are written from the start.
+## Example
+Compacting a day of 50,000 small JSON files into 20 Parquet files cuts per-file overhead by thousands of times and lets Athena skip most of the bytes.
+W: Compaction plus upstream buffering: larger Parquet files remove the per-file overhead and let Athena prune columns, and larger ingestion buffers stop the small-file problem from coming back.
+X: A=More partition levels: hour and minute partitions split the data into even more prefixes and smaller files, which adds planning and per-file overhead instead of removing it.
+B=Uncompressed JSON: JSON is a row format with no column pruning, and removing compression increases the bytes scanned; the number of tiny files stays the same, so queries get slower and more expensive.
+C=Longer timeout: a longer timeout only lets slow queries run longer. It does not make them faster or cheaper.
+T: Millions of tiny files are an Athena anti-pattern: compact into large, compressed Parquet files and buffer more at ingestion, rather than adding partitions, tuning timeouts or using formats that scan more.
+V: Amazon Athena, Amazon S3
+I: Q002154
+
+@ DEA-C01 D1 T1.3 applied use-case
+S: A Step Functions state machine invokes a Lambda function that occasionally fails due to a transient downstream service error. The team wants automatic retries a limited number of times with increasing wait intervals, then a fallback error-handling branch. Which Step Functions constructs should be used together?
+A: A Wait state before the task with a fixed Seconds value, followed by a Choice state that inspects the output
+B: A Retry field with a BackoffRate on the Task state, plus a Catch field that routes to a fallback state
+C: A Parallel state running three copies of the Lambda task, plus a Pass state that keeps the first result
+D: Lambda's asynchronous retry setting of two attempts, plus an on-failure destination to an SQS queue
+K: B
+G: ## Error handling in Step Functions
+Each Task state can declare how it reacts to errors:
+- **Retry** lists rules matched by error name, with `IntervalSeconds` (first wait), `MaxAttempts` (how many retries) and `BackoffRate` (multiplier for each next wait). For example `IntervalSeconds: 2`, `BackoffRate: 2`, `MaxAttempts: 3` waits 2, 4 and 8 seconds. `MaxDelaySeconds` and `JitterStrategy` can cap and spread waits.
+- **Catch** runs after retries are exhausted (or for errors with no retry): it routes the execution to another state, such as one that logs the failure and notifies a team, and can put the error details into the state's output with `ResultPath`.
+## Example
+The Lambda task retries `Lambda.ServiceException` and custom transient errors three times with backoff, then `Catch` on `States.ALL` goes to a `HandleFailure` state.
+W: Retry with backoff plus Catch: Retry repeats the failed task a limited number of times with waits that grow by the backoff rate, and Catch sends the execution to a fallback state only once those attempts are exhausted.
+X: A=Wait then Choice: a fixed wait does not increase between attempts, and when the Task fails with no Catch the execution fails before the Choice state ever runs, so there is no retry or fallback.
+C=Parallel copies plus Pass: running three copies at once is not a retry with growing intervals, and without error handling one failed branch fails the whole Parallel state.
+D=Lambda asynchronous retries and destination: Step Functions invokes the function synchronously in a Task state, so the asynchronous retry and destination settings do not apply, and they are not Step Functions constructs anyway.
+T: Declare Retry with a backoff rate for transient errors and Catch for the fallback path; the two together give bounded retries followed by graceful failure.
+V: AWS Step Functions, AWS Lambda
+I: Q000292
+
+@ DEA-C01 D3 T3.2 advanced use-case
+S: A dashboard runs the same complex aggregation over large Redshift tables every few minutes, and queries take 40 seconds. Underlying data changes hourly. What is the MOST effective improvement?
+A: Create a materialized view of the aggregation with AUTO REFRESH and point the dashboard at it
+B: Enable concurrency scaling so the repeated dashboard queries run on additional transient clusters
+C: Change the large fact table to DISTSTYLE ALL so every node holds a full copy for the aggregation
+D: Create a regular view of the aggregation so the dashboard SQL is defined once and reused by all
+K: A
+G: ## Materialized views in Redshift
+A **materialized view** stores the precomputed result of a query. Dashboards read the stored result instead of rerunning expensive joins and aggregations over large tables.
+- `CREATE MATERIALIZED VIEW sales_summary AUTO REFRESH YES AS SELECT ...` asks Redshift to refresh it automatically when base tables change. Where possible the refresh is **incremental**, processing only changed rows.
+- Redshift can also use **automatic query rewrite** to answer matching queries from a materialized view.
+## Why it fits here
+The aggregation runs every few minutes but the data changes only hourly, so the same work is repeated about a dozen times per hour. With a materialized view, the heavy work happens once per data change, and each dashboard query becomes a fast read of a small stored result, typically in well under a second instead of 40.
+W: Auto-refreshed materialized view: the expensive aggregation is computed once per data change and stored, so each dashboard query becomes a fast read of the precomputed result.
+X: B=Concurrency scaling: it adds capacity when queries queue up, but each dashboard query still recomputes the full aggregation and still takes about 40 seconds.
+C=DISTSTYLE ALL on the fact table: copying a large fact table to every node wastes storage and slows loads, and it does not avoid recomputing the aggregation.
+D=Regular view: a view stores only the query text, so every dashboard refresh still runs the full aggregation over the large tables.
+T: Repeated heavy aggregations over data that changes rarely should be precomputed with a materialized view, not rerun through plain views, extra clusters or distribution changes.
+V: Amazon Redshift
+I: Q002164
+
+@ DEA-C01 D2 T2.4 advanced use-case
+S: Two large Redshift tables, orders and order_items, are frequently joined on order_id. Queries show heavy data redistribution across nodes. Which change reduces this?
+A: Set a compound SORTKEY(order_id) on both tables so that the join can run as a merge join
+B: Set DISTKEY(order_id) on both tables so that matching rows are stored on the same slice
+C: Set DISTSTYLE ALL on both tables so that every node stores a full copy of each table
+D: Set DISTSTYLE EVEN on both tables so that their rows are spread evenly over all slices
+K: B
+G: ## How Redshift distributes rows
+Amazon Redshift spreads each table's rows across node slices according to its **distribution style**:
+- **KEY**: rows are placed by a hash of one column, so equal values of that column always land on the same slice.
+- **EVEN**: rows are spread round-robin, ignoring values.
+- **ALL**: a full copy of the table is stored on every node; good for small dimension tables only.
+- **AUTO**: Redshift chooses and adjusts the style.
+## Why joins redistribute
+To join two tables, matching rows must sit on the same slice. If they do not, Redshift moves data during the query, shown in `EXPLAIN` as steps like `DS_DIST_BOTH` or `DS_BCAST_INNER`. When both tables use `DISTKEY(order_id)`, every order and its items share a slice, and the plan shows `DS_DIST_NONE`: no data movement.
+W: KEY distribution on order_id for both tables: rows with the same `order_id` are colocated, so the frequent join runs locally on each slice without redistributing data across nodes.
+X: A=Compound sort key on order_id: sort keys order rows within each slice to help range filters and merge joins. They do not change which slice a row lives on, so the rows still have to be redistributed for the join.
+C=DISTSTYLE ALL on both: copying two large tables to every node multiplies storage and slows loads; ALL is meant for small dimension tables.
+D=EVEN on both: round-robin placement ignores `order_id`, so matching rows are scattered and every join still has to move data.
+T: For two large tables joined on the same column, give both a KEY distribution on that column; sort keys, EVEN or ALL do not colocate large joins.
+V: Amazon Redshift
+I: Q002157
+
+@ DEA-C01 D3 T3.2 applied use-case
+S: A data scientist wants to visually explore feature distributions, detect target leakage, and generate a bias report for a dataset intended for ML model training, all within a low-code visual interface, then export the resulting transforms as a reusable pipeline step. Which service is designed specifically for this?
+A: AWS Glue DataBrew projects
+B: Amazon SageMaker Model Monitor
+C: Amazon QuickSight dashboards
+D: Amazon SageMaker Data Wrangler
+K: D
+G: ## SageMaker Data Wrangler for ML data preparation
+Amazon SageMaker Data Wrangler, now available inside SageMaker Canvas, is a low-code tool for preparing data specifically for machine learning.
+- The **Data Quality and Insights report** shows feature distributions, missing values, outliers and **target leakage** (features that predict the label suspiciously well because they contain information about it).
+- **Bias analysis** uses SageMaker Clarify metrics to check whether classes or groups, such as age bands, are imbalanced.
+- Hundreds of built-in transforms (encoding, scaling, handling missing values) build a **data flow**.
+- The flow can be exported, for example as a processing step in SageMaker Pipelines or to SageMaker Feature Store, so the same transforms run again in production.
+## Example
+A churn dataset shows that `cancellation_date` perfectly predicts the label; the leakage check flags it, the column is dropped, and the flow is exported as a pipeline step.
+W: SageMaker Data Wrangler: it is the tool built for ML-focused visual exploration, with target-leakage and bias analysis, and it exports the transforms into repeatable ML pipelines.
+X: A=AWS Glue DataBrew projects: DataBrew profiles and cleans data visually for general analytics, but it has no target-leakage or ML bias reports and does not export steps into SageMaker pipelines.
+B=SageMaker Model Monitor: it watches models that are already deployed for data and quality drift; it is not a visual tool for exploring and transforming a dataset before training.
+C=QuickSight dashboards: QuickSight builds BI dashboards for business users; it is not designed to detect leakage, produce ML bias reports or export transforms.
+T: For ML-specific data preparation with leakage and bias checks and reusable pipeline export, choose Data Wrangler; DataBrew is general-purpose data cleaning and Model Monitor watches deployed models.
+V: Amazon SageMaker, AWS Glue DataBrew
+I: Q000373
+
+@ DEA-C01 D2 T2.3 applied use-case
+S: A company retains log files that are accessed frequently for 30 days, occasionally for the following 60 days, and must be kept for 7 years for compliance but is almost never accessed after 90 days. Which S3 feature should be configured to automatically move objects between storage classes over time and minimize cost?
+A: S3 Object Lock with a 7-year retention period
+B: S3 Transfer Acceleration on the bucket
+C: S3 Cross-Region Replication rules
+D: S3 Lifecycle rules with transition actions
+K: D
+G: ## S3 Lifecycle transitions
+An S3 Lifecycle configuration is a set of rules that act on objects by age (and optionally by prefix, tag or size):
+- **transition** actions move objects to cheaper storage classes
+- **expiration** actions delete them after a set time
+Storage classes trade storage price against retrieval cost and speed, and colder classes have minimum storage durations.
+## Example for these logs
+- day 0 to 30: S3 Standard for frequent access
+- day 30: transition to S3 Standard-IA for occasional access
+- day 90: transition to S3 Glacier Flexible Retrieval or S3 Glacier Deep Archive for rare, compliance-only access
+- about 7 years (`2555` days): expire the objects
+All of this runs automatically once the rule is in place.
+W: Lifecycle rules with transition actions: they move each log to a cheaper class as its access pattern cools and can expire it after the retention period, with no manual work.
+X: A=Object Lock with 7-year retention: it prevents objects from being deleted or overwritten during the retention period, which can support compliance, but it never moves data between storage classes, so it does not reduce cost.
+B=Transfer Acceleration: it speeds up long-distance uploads and downloads through edge locations and adds a per-GB charge; it has nothing to do with storage classes.
+C=Cross-Region Replication rules: CRR copies objects to another Region, which adds storage and transfer cost instead of lowering it.
+T: Access that declines with age calls for Lifecycle transitions (and expiration), not features for locking, speed or replication.
+V: Amazon S3
+I: Q000341
+
+@ DEA-C01 D2 T2.3 applied use-case
+S: To protect a Redshift cluster's data against accidental table corruption and enable point-in-time restoration to a new cluster, which native Redshift capability should be relied upon?
+A: Materialized views on key tables
+B: Automated and manual snapshots
+C: Concurrency scaling clusters
+D: Redshift Spectrum external tables
+K: B
+G: ## Redshift snapshots
+Snapshots are point-in-time backups of a Redshift cluster stored in S3.
+- **Automated snapshots**: incremental, taken roughly every 8 hours or after a set amount of data change, kept for a retention period you set (1 to 35 days).
+- **Manual snapshots**: taken whenever you choose, for example before a risky change, and kept until you delete them.
+- Snapshots can be copied to another Region for disaster recovery.
+## Restoring
+- restore a whole snapshot to a **new cluster**
+- or restore a single table from a snapshot into the existing cluster (table-level restore)
+Redshift Serverless offers the same idea through recovery points and snapshots.
+Example: a bad `UPDATE` corrupts the `orders` table at 14:00. Restore `orders` from the 10:00 snapshot as `orders_restored` and compare.
+W: Automated and manual snapshots: they are Redshift's native backup mechanism and let you restore a cluster or an individual table to the state at a snapshot time.
+X: A=Materialized views on key tables: they store precomputed query results to speed up queries. They are derived from the same tables, so corruption flows into them and they cannot restore anything.
+C=Concurrency scaling clusters: they add temporary capacity for bursts of queries; they keep no copies of data.
+D=Spectrum external tables: Spectrum queries external data in S3. It does not back up or restore the cluster's own tables.
+T: Recovering Redshift data means restoring from snapshots; views, scaling and Spectrum are performance or query features.
+V: Amazon Redshift, Amazon S3
+I: Q000347
+
+@ DEA-C01 D4 T4.2 advanced use-case
+S: A new analyst needs SELECT on two schemas in Redshift and nothing else, and future tables in those schemas should be readable too. Which approach fits?
+A: An IAM policy granting redshift:* on the cluster
+B: Superuser status on the analyst's database user
+C: A role with USAGE, SELECT, and default privileges
+D: USAGE plus SELECT ON ALL TABLES in both schemas
+K: C
+G: ## Two layers of Redshift permissions
+- **IAM** controls the AWS API: creating clusters or workgroups, getting temporary credentials, calling the Data API.
+- **Database privileges** control what a database user can do with schemas and tables. They are managed in SQL with `GRANT`, and Redshift supports **roles** (role-based access control) inside the database.
+## Granting read access to two schemas
+- `GRANT USAGE ON SCHEMA sales TO ROLE analyst_ro;` lets the role see objects in the schema.
+- `GRANT SELECT ON ALL TABLES IN SCHEMA sales TO ROLE analyst_ro;` covers tables that exist today.
+- `ALTER DEFAULT PRIVILEGES IN SCHEMA sales GRANT SELECT ON TABLES TO ROLE analyst_ro;` covers tables created later (by the user who runs it, or by the user named with `FOR USER`).
+Repeat for the second schema, then `GRANT ROLE analyst_ro TO alice;`. The analyst can read those schemas and nothing else.
+W: Role with USAGE, SELECT and default privileges: USAGE and SELECT give read access to the tables that exist today, and default privileges extend SELECT to tables created later, with no write or admin rights.
+X: A=IAM policy with `redshift:*`: IAM actions control the Redshift API such as modifying or deleting clusters, not SELECT on tables; this grants far too much control-plane access, and IAM permissions by themselves are not SQL table privileges.
+B=Superuser status: a superuser bypasses all permission checks and can read, change or drop anything in the database, which violates least privilege.
+D=USAGE plus SELECT ON ALL TABLES only: this covers the tables that exist when the grant runs, but tables created later are not included, so the analyst loses access to new tables until someone grants again.
+T: Table access in Redshift is granted in SQL: USAGE and SELECT for today's tables plus ALTER DEFAULT PRIVILEGES for tomorrow's, never IAM wildcards or superuser access.
+V: Amazon Redshift
+I: Q000408
+
+@ DEA-C01 D1 T1.1 applied use-case
+S: Partners must upload files to the company using SFTP, and the files must land directly in S3. Which service fits?
+A: Amazon AppFlow
+B: Amazon Data Firehose
+C: AWS Database Migration Service
+D: AWS Transfer Family
+K: D
+G: ## AWS Transfer Family
+AWS Transfer Family is a managed file transfer service. It gives you a server endpoint that speaks **SFTP**, **FTPS**, **FTP** or **AS2**, and it stores the files directly in **Amazon S3** or **Amazon EFS**.
+- You do not run any file transfer servers; AWS scales and patches the endpoint.
+- Users authenticate with SSH keys in the service-managed user store, through AWS Directory Service for Microsoft Active Directory, or through a custom identity provider backed by an AWS Lambda function or Amazon API Gateway (which also allows password sign-in).
+- Each user is mapped to an IAM role and a home directory, such as `/partner-uploads/acme/`, so partners see only their own folder.
+- Managed workflows can run post-upload steps such as copy, tag, decrypt or a Lambda function.
+## Example
+A partner runs `sftp acme@s-1234abcd.server.transfer.us-east-1.amazonaws.com` and uploads `orders.csv`. The file appears at `s3://partner-inbound/acme/orders.csv`, where an S3 event can start processing.
+W: AWS Transfer Family: it provides a managed SFTP endpoint whose storage backend is S3, so partner uploads land directly in the bucket without any servers to manage.
+X: A=Amazon AppFlow: AppFlow pulls data from SaaS application APIs; it does not host an SFTP endpoint that external partners can connect to.
+B=Amazon Data Firehose: Firehose accepts streaming records through its API or a Kinesis data stream and delivers them to S3, but it offers no SFTP endpoint for partners to upload files.
+C=AWS Database Migration Service: DMS replicates databases between engines and into S3; it does not accept files uploaded by partners over SFTP.
+T: SFTP, FTPS or AS2 uploads that must land in S3 or EFS call for Transfer Family; AppFlow, Firehose and DMS serve SaaS, streaming and database needs.
+V: AWS Transfer Family
+I: Q003691
+
+@ DEA-C01 D3 T3.3 applied troubleshooting
+S: An AWS Glue 4.0 Spark job fails a few times a week with different exceptions buried in thousands of log lines. The on-call engineer wants each failed run to automatically report the likely root cause, the line number in the script where it occurred and a recommended action. Which feature should be enabled?
+A: AWS CloudTrail data events for AWS Glue, so that every API call made while the job runs is recorded for later analysis
+B: Glue observability metrics, so that CloudWatch receives the job's skew, throughput and resource utilization metrics
+C: The Spark UI with event logs written to S3, so that the engineer can inspect the stages, tasks and executors of each run
+D: Glue job run insights, so that Glue analyzes each failed run and writes its findings to a CloudWatch Logs stream
+K: D
+G: ## Where Glue job information lives
+- **Driver and executor logs** go to CloudWatch Logs; with continuous logging they stream during the run.
+- **Spark UI** event logs, when enabled, can be stored in S3 and viewed to inspect stages, tasks and executors.
+- **Observability metrics** publish job metrics such as data skew, throughput and worker utilization to CloudWatch.
+## Job run insights
+**Job run insights** (the `--enable-job-insights` parameter, "Generate job insights" in Glue Studio) analyzes a failed run and writes a summary to CloudWatch Logs:
+- the exception and the **line number** of the script where the failing operation was called,
+- the Spark stage that failed and its most relevant log lines,
+- a **recommendation**, such as increasing workers or fixing a schema mismatch.
+The results appear in the `/aws-glue/jobs/logs-v2` log group under a job insights log stream for the run.
+Example: an insight naming an executor out-of-memory error at line 87 of `etl_orders.py` and suggesting more workers or repartitioning.
+W: Job run insights: for each failed run Glue writes an analysis to CloudWatch Logs that names the exception, the script line where the failing operation was called and a recommendation, so the engineer no longer searches thousands of log lines.
+X: A=CloudTrail data events: they record API calls, not Spark exceptions inside the job, so they cannot explain why a run failed.
+B=Observability metrics: they show trends such as skew or memory pressure over time, but do not map a failure to a script line with a recommendation.
+C=Spark UI: it shows detailed stage and task execution, but the engineer must still dig for the cause; it does not produce a root cause and recommendation.
+T: Automatic root cause and script line for failed Glue runs comes from job run insights; Spark UI and metrics need manual analysis.
+V: AWS Glue, Amazon CloudWatch
+I: Q004269
+
+@ DEA-C01 D3 T3.4 advanced use-case
+S: A team wants to be alerted when statistics of a dataset, such as its row count or the share of empty values in a column, move outside their usual pattern from run to run, without writing a fixed threshold for every column. Which feature fits?
+A: AWS Glue Data Quality rules in DQDL with a minimum completeness for each column
+B: Amazon CloudWatch alarms with static thresholds on the Glue job's run metrics
+C: AWS Glue DataBrew profile jobs that run on a schedule against the dataset
+D: AWS Glue Data Quality analyzers with anomaly detection on the collected statistics
+K: D
+G: ## Anomaly detection in Glue Data Quality
+Fixed rules need a known threshold for every column, which is hard when data changes with seasons or growth. **AWS Glue Data Quality anomaly detection** takes another approach.
+- In a Glue ETL job you define **analyzers**, for example `Analyzers = [ RowCount, Completeness "email", DistinctValuesCount "country" ]`, which collect statistics on every run without passing or failing.
+- Over successive runs, Glue Data Quality learns the normal pattern of each statistic, including trends and seasonality, and flags values that fall outside it.
+- Detected anomalies can be reviewed, and Glue can suggest rules based on them to turn a recurring pattern into an enforced check.
+## Example
+The completeness of `email` is normally 97 to 99%. One run shows 71%. No one wrote a threshold for that column, but the anomaly is flagged and reported to CloudWatch and EventBridge for alerting.
+W: Glue Data Quality analyzers with anomaly detection: the analyzers collect statistics on every run, and Glue Data Quality learns their normal pattern and flags unusual values, so no threshold has to be written per column.
+X: A=DQDL rules with a minimum completeness per column: rules pass or fail against values you choose, which is exactly the per-column threshold work the team wants to avoid, and they do not learn trends.
+B=CloudWatch alarms with static thresholds: they compare job metrics such as duration or failures with fixed values; they neither look at the statistics inside the data nor learn a normal pattern.
+C=Scheduled DataBrew profile jobs: a profile reports column statistics for each run, but someone still has to read and compare the profiles or define rules with thresholds; it does not learn and flag anomalies by itself.
+T: To catch unusual data statistics without writing a threshold for every column, collect them with Glue Data Quality analyzers and use its anomaly detection.
+V: AWS Glue Data Quality
+I: Q003784
