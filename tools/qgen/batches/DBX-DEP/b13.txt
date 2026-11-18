@@ -24,29 +24,30 @@
 # src: https://docs.databricks.com/aws/en/jobs/repair-job-failures
 # src: https://docs.databricks.com/aws/en/repos/ci-cd-techniques-with-repos
 # src: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-create-table-using
+# src: https://docs.databricks.com/aws/en/ldp/developer/ldp-python-ref-apply-changes
 
 @ DBX-DEP D1 T1.12 expert troubleshooting
-S: A stream joins `impressions` and `clicks` (both from Kafka) with an inner join on `ad_id` to count clicked impressions. The code calls `impressions.withWatermark("imp_ts", "2 hours")` and joins on `ad_id` only; `clicks` has no watermark. After nine days the driver shows growing micro-batch durations, and `StreamingQueryProgress` reports `stateOperators[0].numRowsTotal` rising every batch while `numRowsDroppedByWatermark` stays 0. A click always happens within 1 hour after its impression. The team must keep the same output, keep the checkpoint if possible, and bound state. The output feeds a billing dashboard that reads the Delta sink every hour. Which change addresses the evidence?
-A: Add a watermark on `clicks` only and keep the join condition on `ad_id`, so the engine can evict rows from both buffered sides once both watermarks pass
-B: Add a watermark on `clicks` and a time-range condition `click_ts BETWEEN imp_ts AND imp_ts + INTERVAL 1 HOUR`, so old rows on both sides can be evicted
-C: Keep the single watermark and add the time-range condition `click_ts BETWEEN imp_ts AND imp_ts + INTERVAL 1 HOUR`, so the impressions side alone bounds all state
-D: Replace the inner join with a left outer join that keeps the single watermark, so unmatched impressions are emitted and removed from the join state
+S: A stream reads payments from Kafka (seven days of retention), applies `withWatermark("event_ts", "15 minutes")` and runs `groupBy(window("event_ts", "1 hour"), "merchant_id").agg(sum("amount"))` in append mode into the Delta table `gold.merchant_hourly`, which holds two years of results. Product asked for `count("*")` and `max("amount")` per window, and QA asked to drop test merchants. An engineer added both aggregates and `filter(~col("is_test"))`, then restarted from the same checkpoint. The restart fails while restoring state, with an error about an incompatible state schema. The existing output must continue without gaps or duplicates, the new metrics are needed only from now on, and Kafka cannot replay older data. Which plan fits the evidence?
+A: Keep the change and delete only the `state` folder of the checkpoint, keeping offsets and commits, so the query restarts with fresh state for the new aggregates
+B: Revert the new aggregates but keep the filter, restart on the old checkpoint, and compute `count` and `max` in a second query with its own checkpoint and table
+C: Revert both changes, because adding a filter to a query with a streaming aggregation also changes the state schema and is not allowed between restarts
+D: Keep the change, switch the query to complete output mode, and restart on the old checkpoint, so that the restored state is rebuilt with the new aggregate columns
 K: B
-G: ## State in stream-stream joins
-In a stream-stream join, each side buffers past rows as **state**, because any future row from the other side might match. For an inner join, the Spark guide warns that state **keeps growing indefinitely** unless you add both:
-- **watermark delays on both inputs**, so the engine knows how late each side can be;
-- an **event-time constraint** in the join condition, either a time-range condition (`click_ts BETWEEN imp_ts AND imp_ts + INTERVAL 1 HOUR`) or a join on event-time windows.
-Only with both can the engine work out when an old row can no longer match and drop it.
+G: ## Recovery semantics after query changes
+Structured Streaming restores state from the checkpoint and assumes that the **state schema stays the same** across restarts. The Spark guide lists which changes are allowed with the same checkpoint:
+- adding or removing **filters**: allowed;
+- **streaming aggregation**: any change in the number or type of grouping keys **or aggregates** is not allowed;
+- streaming deduplication: no change in the deduplication columns; stream-stream joins: no change in schema, equi-join columns or join type; arbitrary stateful operations: no change in the state schema or timeout type.
 ## Reading the evidence
-`numRowsTotal` climbs every batch and nothing is dropped by watermark: no row is ever evicted. One watermark without a time constraint cannot limit state for either side.
-## Checkpoint note
-Changing a stateful query's join can be incompatible with the existing checkpoint; plan a controlled restart if the engine rejects it.
-W: Second watermark plus time range: the guide requires watermarks on both inputs and an event-time constraint, and the business rule supplies the 1-hour range.
-X: A=Watermark without time range: the engine still cannot tell when a row can no longer match, because the condition joins on `ad_id` alone.
-C=Time range with one watermark: without a watermark on `clicks`, the engine cannot bound how late clicks arrive, so state is not reliably cleared.
-D=Left outer join: outer joins need watermarks and time constraints even more strictly, and it changes the output to include unclicked impressions.
-T: A stream-stream join bounds state only with watermarks on both sides and an event-time constraint in the join condition.
-V: Structured Streaming, stream-stream joins
+The restart fails while restoring state and names an incompatible state schema: the two new aggregates changed the aggregation's state. The filter is not the problem.
+## Applying it
+Keep the existing query, with the allowed filter, on its checkpoint so `gold.merchant_hourly` continues exactly. Start a separate query with a new checkpoint from the latest offsets for `count` and `max`, writing to its own table, and join the two on window and merchant where one view is needed.
+W: Revert aggregates, add a query: the original aggregation state stays compatible, the filter is an allowed change, and the new metrics start cleanly in their own query.
+X: A=Delete the state folder: offsets would continue, but the partial sums of open windows are lost, so in-flight windows would be written with wrong totals.
+C=Revert the filter too: adding filters is an allowed change; only the change in aggregates breaks state recovery.
+D=Complete mode: the aggregation's state schema still changes, and complete mode would rewrite all results each trigger and keep every window in state.
+T: Changing a streaming aggregation's keys or aggregates breaks checkpoint state; put new stateful logic into a new query with its own checkpoint.
+V: Structured Streaming
 
 @ DBX-DEP D1 T1.3 expert troubleshooting
 S: A grouped map job calls `sales.groupBy("store_id").applyInPandas(fit, schema=...)` on 2,000 stores. Every run fails in one task with a Python worker out-of-memory error, always for the flagship store, which has 180 million transaction rows; the median store has 90,000. An engineer already set `spark.sql.execution.arrow.maxRecordsPerBatch` to 10,000 without effect. The forecast model must see each store's full three-year history, and it uses only daily totals per store and product category. Worker types cannot change this quarter. The job runs on a classic cluster with Arrow enabled. Which change fits the evidence and constraints?
@@ -148,47 +149,48 @@ D=Re-grant SELECT: share grants cover the table, not individual files; the error
 T: Tables with deletion vectors or column mapping can only be shared WITH HISTORY.
 V: OpenSharing (Delta Sharing), deletion vectors
 
-@ DBX-DEP D2 T2.2 expert troubleshooting
-S: A nightly job reloads partner invoices for the previous day: `INSERT INTO finance.invoices REPLACE WHERE invoice_date = date_sub(current_date(), 1) SELECT * FROM staging.partner_invoices`. On 3 November the partner's export failed silently, so staging was empty. The next morning finance found no invoices for 2 November, although they had been loaded correctly by an earlier ad hoc run. `DESCRIBE HISTORY` shows the nightly commit with `numOutputRows = 0` and a non-zero `numRemovedFiles`. The table is liquid clustered, the job runs on serverless, and an empty export must never remove data again. Which explanation and change fit?
-A: REPLACE WHERE removes every matching row even when the source is empty; switch to `REPLACE USING (invoice_date)`, which deletes nothing for an empty source
-B: REPLACE WHERE removed the rows because the table is clustered, not partitioned; partition the table by `invoice_date` so that replacement only affects written partitions
-C: REPLACE WHERE treats an empty source as an error and rolled back an earlier commit; enable the constraint check so that empty sources are rejected up front
-D: REPLACE WHERE replaced the day with all rows of staging; set `partitionOverwriteMode` to dynamic on the serverless job so that only days present in staging are replaced
+@ DBX-DEP D3 T3.1 expert troubleshooting
+S: A nightly job recomputes sales per `(sale_date, store_id, promo_code)` only for store-days whose source rows changed in the last 14 days, and writes them with `INSERT INTO gold.promo_sales REPLACE USING (sale_date, store_id, promo_code) SELECT ...`. Sales without a promotion carry `promo_code = NULL`. After a month, finance sees no-promotion totals far above the source. A check grouped by the three key columns with `HAVING count(*) > 1` returns only keys whose `promo_code` is NULL, with one row per nightly run that covered that date. Keys that the nightly query does not return must stay untouched, the table is liquid clustered, and reruns must stay atomic and idempotent on the serverless SQL warehouse. Which explanation and change fit?
+A: `REPLACE USING` matches rows with equality, so NULL keys never match and each run inserts them again; switch to `REPLACE ON` with `<=>` on the three columns
+B: `REPLACE USING` skips NULL source rows on liquid clustered tables; partition the table by `sale_date`, so that the replacement covers every row of each day
+C: Switch to `REPLACE WHERE sale_date >= date_sub(current_date(), 14)`, which removes the last 14 days and inserts the result again, NULL keys included
+D: Set `spark.sql.sources.partitionOverwriteMode` to dynamic and use `INSERT OVERWRITE`, so that only the keys present in the nightly result are replaced
 K: A
-G: ## REPLACE WHERE vs REPLACE USING on empty input
-- `REPLACE WHERE <predicate>` atomically **replaces all rows that match the predicate** with the query result. The docs warn that **for empty source queries, REPLACE WHERE might delete table rows**: with no new rows, the matching day is simply removed.
-- `REPLACE USING (cols)` performs a **dynamic data overwrite**: it replaces only rows whose key values appear in the new data, and **for empty source queries it does not delete any rows**. It works on clustered and unpartitioned tables and on all compute types.
-- `partitionOverwriteMode` is the legacy dynamic partition overwrite: only for partitioned tables, SQL only on classic compute.
+G: ## Three ways to replace part of a table
+- `REPLACE WHERE <predicate>`: deletes all rows that match the predicate and inserts the query result, so rows the query did not return can disappear.
+- `REPLACE USING (cols)`: replaces rows whose listed columns **compare equal under equality** with a source row; all other rows stay unchanged, and an empty source deletes nothing. It works on SQL warehouses, serverless and classic compute without session settings.
+- `REPLACE ON <condition>`: replaces rows that match a user-defined condition. The docs recommend it when you need matching that `REPLACE USING` does not support, **such as treating NULL values as equal** with `<=>`.
 ## Reading the evidence
-`numOutputRows = 0` with removed files is exactly a replace with an empty source.
-W: REPLACE USING: it replaces only dates present in the new data, so an empty export leaves 2 November untouched, and it works on a clustered table on serverless.
-X: B=Partition the table: REPLACE WHERE with an empty source deletes matching rows on partitioned tables too, and liquid clustering would be lost.
-C=Rollback of an earlier commit: Delta did not roll anything back; the history shows a new commit that removed files.
-D=Dynamic partition overwrite: it needs a partitioned table and its SQL form is limited to classic compute, so it does not fit this serverless job on a clustered table.
-T: REPLACE WHERE can delete data when the source is empty; REPLACE USING never deletes on empty input.
-V: Delta Lake, selective overwrite
-
-@ DBX-DEP D3 T3.2 expert troubleshooting
-S: Webhook bodies from 30 partners land in `bronze.hooks` as VARIANT `v`. A silver job runs `SELECT v:order_id::string AS order_id, v:total::decimal(12,2) AS total FROM bronze.hooks` and fails every night since a new partner joined. `SELECT schema_of_variant_agg(v) FROM bronze.hooks` now reports `total` as VARIANT instead of a decimal type, and a sample shows the new partner sends values like `"12,50 EUR"`. The silver table must keep loading every night, rows with unparseable totals must be kept for review rather than dropped, and the bronze data must stay unchanged. Which change fits the evidence?
-A: Replace the cast with `variant_get(v, '$.total', 'decimal(12,2)')`, which returns NULL for values it cannot cast, and keep rows where the result is NULL
-B: Use `try_variant_get(v, '$.total', 'decimal(12,2)')` for `total`, keep `v` or the raw text in silver, and flag rows where the result is NULL
-C: Cast `v` to STRING first and then to `decimal(12,2)`, because a string cast of the whole object returns NULL for fields that are not numeric
-D: Use `schema_of_variant_agg` inside the silver query to cast `total` to the inferred type, so the new partner's values follow the common schema
-K: B
-G: ## Typed extraction from VARIANT
-- `v:path::type` casts strictly: a value that cannot be cast raises an error and fails the query.
-- `variant_get(v, path, type)` also **raises an error** when the cast fails.
-- `try_variant_get(v, path, type)` returns **NULL** when the path is missing or the value cannot be cast.
-## Reading the evidence
-`schema_of_variant_agg` falls back to `VARIANT` when it finds conflicting types it cannot reconcile, here numbers from most partners and strings such as `"12,50 EUR"` from one. That signals mixed types in `total`, which breaks the strict cast.
+Under equality, `NULL = NULL` is not true, so a target row whose `promo_code` is NULL never matches the recomputed source row. It is kept, and the new row is inserted next to it: one extra copy per run, exactly what the check shows.
 ## Applying it
-`try_variant_get` keeps the job running; carrying the raw value and a flag such as `total IS NULL AND v:total IS NOT NULL` lets reviewers find and fix the rows later.
-W: try_variant_get plus raw value: unparseable totals become NULL instead of failing the job, and keeping the raw value with a flag preserves them for review.
-X: A=variant_get: the docs say `variant_get` raises an error when the cast fails; only `try_variant_get` returns NULL.
-C=Cast whole object to string: casting the object produces its JSON text, not the `total` field, so the decimal cast of that text fails for every row.
-D=Cast to inferred type: the inferred type is VARIANT because of the conflict, so casting to it does not produce decimals at all.
-T: Use `try_variant_get` for fields with mixed types, and keep the raw value to review rows that fail the cast.
-V: VARIANT, Databricks SQL
+Write the replace condition with the NULL-safe operator `<=>` on all three key columns, then remove the duplicates already written, for example by recomputing the affected days once.
+W: REPLACE ON with <=>: NULL-safe equality matches the NULL-coded keys, so each run replaces them instead of adding a copy, and keys outside the result stay unchanged.
+X: B=Partition the table: equality still never matches NULL, and partitioning instead of liquid clustering does not change how `REPLACE USING` compares keys.
+C=REPLACE WHERE on 14 days: it deletes every row of those days, including keys that the nightly query did not return and that must stay untouched.
+D=Dynamic partition overwrite: it is a Public Preview, classic-compute option for partitioned tables and replaces whole partitions, not individual keys.
+T: `REPLACE USING` compares keys with equality; use `REPLACE ON` with `<=>` when key columns can be NULL.
+V: Delta Lake
+
+@ DBX-DEP D2 T2.2 expert troubleshooting
+S: The SCD type 1 table `silver.subscribers` is built with `create_auto_cdc_flow` from CDC files that Auto Loader reads from a volume, with `sequence_by="change_ts"` and `apply_as_deletes=expr("op = 'D'")`. A regional exporter sometimes uploads its files three to five days late. Last week subscriber 881 was deleted, yet after the late files arrived the subscriber is back in silver with an UPDATE from before the delete. The pipeline shows no errors, the event log reports the late UPDATE as processed normally, and the source's `change_ts` values are correct. The team must keep Auto Loader, cannot hold back late files, and needs deletes to win over older late changes. Which change fits the evidence?
+A: Set the table property `pipelines.cdc.tombstoneGCThresholdInSeconds` above the longest expected delay, so that delete tombstones outlive the late changes
+B: Change `sequence_by` to the Auto Loader file arrival time, so that the late UPDATE gets a newer sequence value than the delete and is applied after it
+C: Switch the target to SCD type 2, because only SCD type 2 compares late changes with earlier deletes, while type 1 applies changes in arrival order
+D: Add `apply_as_truncates` for the delete events, because a truncate is kept permanently in the target, unlike a delete, which expires after each update
+K: A
+G: ## How AUTO CDC handles out-of-order deletes
+AUTO CDC orders the changes of each key by the `sequence_by` column, so a late event with an older sequence value loses against a newer one. After a delete there is no row left to compare with, so the engine keeps the deleted row temporarily as a **tombstone** in the underlying Delta table, and a view hides tombstones from readers. Tombstone retention is set with the table property `pipelines.cdc.tombstoneGCThresholdInSeconds` (default two days).
+The docs add that Auto Loader does not guarantee file processing order, so when it feeds a CDC flow, set this property to a value that **exceeds the maximum expected delay** between event arrival and pipeline execution.
+## Reading the evidence
+The late files arrive after three to five days, longer than the retention. When the stale UPDATE was processed, the tombstone of subscriber 881 had already been removed, so nothing showed that a newer delete existed, and the UPDATE inserted the row again.
+## Applying it
+Set the property above the longest delay (for example seven days, in seconds) and remove the resurrected rows once.
+W: Longer tombstone retention: tombstones then outlive the late files, so an older UPDATE meets the newer delete and is discarded.
+X: B=Sequence by arrival time: the stale UPDATE would then count as newer than the delete and win on purpose, the opposite of the requirement.
+C=SCD type 2: both types order changes by `sequence_by`; the expired tombstone, not the SCD type, caused the resurrection.
+D=apply_as_truncates: a truncate clears the whole target table, so using it for single-subscriber deletes would remove every row.
+T: With late CDC files, raise `pipelines.cdc.tombstoneGCThresholdInSeconds` above the maximum delay so deletes win over older late changes.
+V: Lakeflow Spark Declarative Pipelines, Auto Loader
 
 @ DBX-DEP D3 T3.4 expert troubleshooting
 S: In a serverless pipeline, the materialized view `gold.daily_orders` declares its schema with `order_id STRING NOT NULL` and has `expect_or_drop("valid_qty", "qty > 0")`. Its sources have row tracking enabled and a small share of rows change per hour. Every hourly update runs as a full recompute for about 50 minutes; the query profile of the flow shows a `FLOW_FULL_RECOMPUTE` insight, and the `planning_information` event reports incremental refresh as not possible. The rule must keep dropping bad rows from gold, and `order_id` must never be NULL in gold. Which change makes incremental refresh possible?
@@ -213,24 +215,29 @@ T: A DROP expectation together with NOT NULL columns forces a full recompute of 
 V: Lakeflow Spark Declarative Pipelines, materialized views
 
 @ DBX-DEP D4 T4.1 expert troubleshooting
-S: A reliability report counts runs and failures per job from `system.lakeflow.job_run_timeline` with `COUNT(*) AS runs` and `SUM(CASE WHEN result_state = 'FAILED' THEN 1 ELSE 0 END) AS failures`, grouped by `job_id`. For short jobs the numbers match the Jobs UI. For the nightly `warehouse_rebuild`, which runs about five hours, the report shows roughly five times more runs than the UI, while the failure count matches. Average duration computed as `AVG(period_end_time - period_start_time)` also looks like one hour instead of five. The report must stay on system tables. Which fix fits the evidence?
-A: Filter on `result_state IS NOT NULL` before counting, because long runs write a preliminary row each hour that is replaced when the run ends
-B: Group by `run_id`: count runs with `COUNT(DISTINCT run_id)` and take duration from `MIN(period_start_time)` to `MAX(period_end_time)` of each run
-C: Join `system.lakeflow.jobs` on `job_id` and keep the latest row, because duplicate job definitions multiply each run of jobs that have been edited
-D: Read `system.lakeflow.job_task_run_timeline` instead, because the job-level table records one row per task and so multiplies the runs of every multi-task job
-K: B
-G: ## Timeline slicing in jobs system tables
-`system.lakeflow.job_run_timeline` tracks run start and end times. Databricks **slices long runs into hourly intervals**: a run longer than one hour appears as **several rows**, each with its own `period_start_time` and `period_end_time`. Columns such as `result_state` and `termination_code` are **populated only in the row that represents the end of the run**.
-## Reading the evidence
-A five-hour run gives about five rows: `COUNT(*)` counts slices, not runs, and the per-row duration is about one hour. Failures match because only the final row has a `result_state`.
-## Fix
-Group by `job_id, run_id`: `MIN(period_start_time)` and `MAX(period_end_time)` give the real duration, and `COUNT(DISTINCT run_id)` gives the run count.
-W: Aggregate per run_id: it collapses the hourly slices into one run with its true duration, matching the Jobs UI.
-X: A=Filter non-null result_state: it would fix the count, but the duration of the final slice is still only its last hour, so averages stay wrong.
-C=Latest job definition: editing a job does not multiply run rows; and short jobs, which match, would be affected too.
-D=Task timeline: the task-level table also slices long runs and adds task rows, so counting there makes the error larger.
-T: `job_run_timeline` splits runs longer than an hour into hourly rows; aggregate by `run_id` for counts and durations.
-V: System tables, Lakeflow Jobs
+S: An operations report counts runs per job name for the last 30 days. It reads `system.lakeflow.job_run_timeline`, keeps rows with a non-null `result_state`, and inner-joins the latest row per `job_id` from `system.lakeflow.jobs` to get names. An Airflow deployment triggers about 300 nightly loads through `POST /jobs/runs/submit` with inline task definitions, and none of them appear in the report, although the timeline table holds their rows with `run_type = 'SUBMIT_RUN'`. Runs started from the Jobs UI and by schedules are counted correctly. The report must cover all runs, and the platform team wants named jobs with permissions for recurring loads. Which explanation and change fit?
+A: Submitted runs exist only in the timeline tables, not in `system.lakeflow.jobs`; left-join and label them, and define recurring loads as jobs started by run-now
+B: Submitted runs reach the jobs table only after they have succeeded twice; wait for the next runs, then rerun the report with the same inner join on `job_id`
+C: The latest-row filter on `system.lakeflow.jobs` drops jobs that were never edited; join every row of the jobs table instead of only the latest one per job
+D: Runs submitted through the API are stored in another region's system tables; query the timeline table from a workspace in the region where Airflow runs
+K: A
+G: ## Run types in the timeline tables
+`system.lakeflow.job_run_timeline` has a `run_type` column, and the docs show where each type appears:
+- `JOB_RUN`: standard runs of a defined job; in `jobs`, `job_tasks`, `job_run_timeline` and `job_task_run_timeline`.
+- `SUBMIT_RUN`: one-time runs created with `POST /jobs/runs/submit`; only in the two timeline tables (and in the Job Runs UI).
+- `WORKFLOW_RUN`: runs started from a notebook workflow; only in `job_run_timeline`.
+Submitted runs therefore have no row in `system.lakeflow.jobs`, and an inner join on `job_id` drops them.
+## Other traps in the same report
+- Long runs are sliced into hourly rows, and `result_state` is set only on the last one; the report already handles this.
+- `system.lakeflow.jobs` is a slowly changing dimension: join only the latest row per `workspace_id` and `job_id`.
+## Applying it
+Use a LEFT JOIN and label rows by `run_type`. For recurring loads, define jobs and trigger them with `run-now`, so they get names, permissions and rows in the jobs tables.
+W: Submitted runs are timeline-only: they never get a row in the jobs table, so a left join keeps them, and defined jobs give recurring loads names and permissions.
+X: B=Wait for successes: there is no such rule; one-time submitted runs are never recorded in `system.lakeflow.jobs`.
+C=Join every jobs row: joining all SCD rows multiplies the runs of edited jobs and still finds no row for submitted runs.
+D=Other region: the timeline table of this region already holds the runs; only the jobs table lacks them.
+T: `SUBMIT_RUN` runs exist only in the timeline tables; never inner-join them to `system.lakeflow.jobs`.
+V: system tables, Lakeflow Jobs
 
 @ DBX-DEP D4 T4.3 expert troubleshooting
 S: A pipeline publishes its event log as `ops_logs.pipeline_events_orders`, and its streaming tables ingest files with Auto Loader. A storage clean-up job, written to delete schemas whose tables had no reads in 30 days, dropped the schema `ops_logs` on Sunday. Since then every pipeline update fails early, and engineers also notice that two Auto Loader flows lost track of their inferred schemas. The pipeline's own tables are intact. The team must restore operations, keep monitoring history if possible, and stop this from happening again. The event log was published to that schema months ago, and the run-as identity of the pipeline has not changed. Which explanation fits the evidence best?
@@ -376,21 +383,24 @@ T: Owners can manage child objects but need explicit data grants on them; grant 
 V: Unity Catalog
 
 @ DBX-DEP D8 T8.2 expert troubleshooting
-S: The job `load_dim` has `extract` -> `quality_gate` -> `load`. During an incident an engineer disabled `quality_gate`, and last night's run shows `extract` succeeded, `quality_gate` disabled and `load` failed on a schema mismatch. The schema was fixed this morning, and the engineer re-enabled `quality_gate` in the job settings. Compliance requires that the gate runs before `load` for last night's data, and `extract` must not run again because the source has already moved on. A repair run of failed tasks started `load` but skipped `quality_gate`. The repair request is sent through the Jobs API. Which repair request meets the requirements?
-A: Repair with `rerun_all_failed_tasks` again, because re-enabling the task in the job settings takes effect only from the second repair run onward
-B: Start a new run with Run now and skip `extract` with a job parameter, because repairs never run tasks that were disabled in the original run
-C: Repair with `rerun_tasks` set to `["quality_gate", "load"]`, because repairs decide by each task's run state and a disabled task must be named to run
-D: Repair with `rerun_tasks` set to `["extract", "quality_gate", "load"]`, because dependent tasks can only be repaired together with their upstream tasks
-K: C
-G: ## How repair chooses tasks
-A repair run reruns failed tasks and their dependents, or the tasks you list. The repair docs note: **repairs use each task's run state to decide what to repair, not its disabled state**. In last night's run `quality_gate` has no failed state, it was disabled, so "rerun failed tasks" does not include it even after it is re-enabled. **To force a disabled task to run during a repair, include it in `rerun_tasks`** in the repair request.
+S: The job `nightly_sales` runs `ingest` -> `transform` -> `publish` with the job parameter `mode` (default `incremental`). Last night `transform` failed. The engineer repaired the run and entered `mode = full` in the Repair job run dialog to force a rebuild; `transform` failed again, this time on a storage quota that is now fixed. The team has since decided that a full rebuild would rewrite three years of data and miss the SLA, so the second repair must use `incremental`. `ingest` must not run again because the source has moved on. In the dialog for the second repair, `mode` still shows `full`. Which action meets the requirements?
+A: Clear the `mode` key and value in the Repair job run dialog, which returns the parameter to its original value, and then start the second repair
+B: Edit the job settings and save `incremental` as the default of `mode` again, because repairs read job parameters only from the saved job definition
+C: Start a new run with Run now and `mode = incremental`, because a parameter entered in an earlier repair cannot be changed in a later repair of that run
+D: Repair with `rerun_tasks` set to `["ingest", "transform", "publish"]`, because only a repair that includes the root task resets parameters to their defaults
+K: A
+G: ## Parameters in repair runs
+A repair reruns the unsuccessful tasks and their dependents with the current job and task settings. In the Repair job run dialog you can add or edit parameters for the tasks to repair; **values entered there override existing values**. The docs add that on **subsequent repair runs** you can **return a parameter to its original value by clearing the key and value** in the dialog.
+Overrides reach only the tasks that are rerun; tasks that already succeeded keep the output they produced.
+## Reading the evidence
+The first repair's override `mode = full` is still shown for the second repair. The job default is already `incremental`, so editing the job does not remove the override; clearing it in the dialog does.
 ## Applying it
-`rerun_tasks: ["quality_gate", "load"]` runs the gate and then `load` within last night's run, while `extract` keeps its successful result and is not rerun.
-W: Name the disabled task in rerun_tasks: it is the documented way to run a task that was disabled in the original run, and it leaves `extract` untouched.
-X: A=Repeat the failed-tasks repair: the selection is based on run state, which does not change between repairs, so the gate stays skipped.
-B=New run: a new run would not be a repair of last night's run and would need to rerun or emulate `extract`, which must not run again.
-D=Include extract: listing `extract` reruns it against a source that has moved on, which the requirements forbid.
-T: Repairs ignore a task's current enabled state; list a formerly disabled task in `rerun_tasks` to run it.
+Clear `mode` in the dialog and repair: `transform` and `publish` run with `incremental`, and `ingest` keeps its earlier result.
+W: Clear the override: clearing the key and value in a later repair restores the parameter's original value, and only the failed task and its dependents run.
+X: B=Save the default again: the default is already `incremental`; the override entered in the earlier repair is what still applies.
+C=Run now: a new run would also run `ingest`, which must not run again, and a later repair can change parameters.
+D=Rerun the root task: `ingest` would run again against a source that has moved on, and the documented way to reset a parameter is clearing it in the dialog.
+T: In a later repair, clear a parameter's key and value to return it to its original value instead of starting a new run.
 V: Lakeflow Jobs
 
 @ DBX-DEP D8 T8.4 expert troubleshooting

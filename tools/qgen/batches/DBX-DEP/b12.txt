@@ -39,6 +39,10 @@
 # src: https://docs.databricks.com/aws/en/structured-streaming/delta-lake
 # src: https://docs.databricks.com/aws/en/admin/system-tables/compute
 # src: https://docs.databricks.com/aws/en/delta/delta-change-data-feed
+# src: https://docs.databricks.com/aws/en/ldp/sinks
+# src: https://docs.databricks.com/aws/en/ldp/for-each-batch
+# src: https://docs.databricks.com/aws/en/delta/clone
+# src: https://docs.databricks.com/aws/en/admin/system-tables/jobs
 
 @ DBX-DEP D1 T1.3 advanced use-case
 S: A retailer must fit one small demand-forecast model per store with a pandas-based library and write one row of forecasts per store and day. There are 2,000 stores, each with about 50,000 history rows, and the library needs all rows of one store at once in a single pandas DataFrame. The team wants Spark to run the stores in parallel with the least custom plumbing. Which API fits this requirement best?
@@ -61,27 +65,28 @@ D=Row-at-a-time UDF with a buffer: a module-level dictionary is per Python worke
 T: When a function needs all rows of a key at once, use `groupBy().applyInPandas()` and keep group sizes within memory.
 V: PySpark, pandas function APIs
 
-@ DBX-DEP D1 T1.4 advanced use-case
-S: A pipeline's streaming table `bronze_registrations` has ingested JSON files with Auto Loader since 2025-01-01. Finance now wants three earlier years, stored as JSON under `/Volumes/raw/archive/2022/` to `/2024/`, added to the same table. The current flow must keep its checkpoint, the archive must be read only once, and the team wants no separate job outside the pipeline. Which change fits these constraints?
-A: Add three append flows with the `ONCE` option that read the archive folders into `bronze_registrations`, so each runs a single time next to the existing flow
-B: Change the existing flow's path to the parent folder and run a full refresh of `bronze_registrations`, so Auto Loader lists the archive along with the new files
-C: Add a second streaming table over the archive folders and union it with `bronze_registrations` in a view, so the archive keeps flowing in continuously
-D: Set `cloudFiles.includeExistingFiles` to true on the existing flow and restart the pipeline, so the archive folders are discovered on the next update
+@ DBX-DEP D1 T1.8 advanced use-case
+S: A Python pipeline builds `silver_orders` as a streaming table. A partner-facing Delta table `ops.order_status`, which a support tool also writes, must receive every changed order as an upsert on `order_id`, not as an extra row. The team wants this step inside the same pipeline, with its lineage and update monitoring, rather than in a separate job. Full refreshes of the pipeline are rare. Which design fits these needs?
+A: A ForEachBatch sink whose function runs `MERGE INTO ops.order_status` on `order_id` for each micro-batch, used as the target of an append flow over `silver_orders`
+B: A Delta sink created with `create_sink` for `ops.order_status` and an append flow over `silver_orders`, so each changed order reaches the partner table in the same update
+C: An AUTO CDC flow with `keys=["order_id"]` and `ops.order_status` as its target, so the pipeline applies the changed orders to that table as SCD type 1 upserts
+D: A separate Structured Streaming job that reads `silver_orders` and merges into `ops.order_status` in `foreachBatch`, scheduled after the pipeline in a Lakeflow Jobs job
 K: A
-G: ## Backfilling a streaming table in a pipeline
-A streaming table can be the target of several **append flows**. For a historical backfill, Databricks documents a special append flow with the `ONCE` option: it performs a one-time read of the given source into the target and does not keep running afterwards. The code stays in the pipeline; if the pipeline is ever fully refreshed, the backfill runs again.
-## Why the other designs hurt
-- Changing the source path of a running flow and doing a full refresh resets the checkpoint and reprocesses every file, including those already loaded.
-- A separate table plus a view adds an object that keeps reading the archive and changes what consumers query.
-- `includeExistingFiles` matters only when a stream starts for the first time; an existing checkpoint ignores it.
-## Example
-In Python, one parameterized `@dp.append_flow(target="bronze_registrations", once=True)` per year reads `/Volumes/raw/archive/<year>/`.
-W: Append flows with ONCE: each archive year is read one time into the same target, the existing flow and its checkpoint stay untouched, and everything stays inside the pipeline.
-X: B=Parent path plus full refresh: a full refresh clears the table's checkpoints and reprocesses all files, which breaks the requirement to keep the current flow's checkpoint.
-C=Separate table and union view: the archive would be read by a permanent extra flow and land in another table, not in `bronze_registrations` as Finance asked.
-D=includeExistingFiles: the option is evaluated only when a stream starts without a checkpoint, and the archive is outside the flow's path anyway.
-T: Backfill historical data into a pipeline streaming table with a one-time append flow (`ONCE`), not by resetting the live flow.
-V: Lakeflow Spark Declarative Pipelines, Auto Loader
+G: ## Sinks in Lakeflow pipelines
+By default a pipeline flow writes to a streaming table or materialized view that the pipeline manages. A **sink** is an output outside those datasets, used as the `target` of an append flow (sinks exist in Python only). Sink types:
+- **Delta sink** (`create_sink`): writes the flow's rows to a Unity Catalog managed or external Delta table.
+- **Kafka and Event Hubs sinks**: write to a message bus.
+- **ForEachBatch sink** (`@dp.foreach_batch_sink`): your Python function receives each micro-batch and can **merge, upsert or write to several targets**.
+Limitations from the docs: only append flows and update flows can write to sinks, `create_auto_cdc_flow` cannot; expectations do not apply to sinks; a full refresh does not clean up data already written to a sink.
+## Applying it
+The partner table lies outside the pipeline and needs upserts, so a ForEachBatch sink that runs `MERGE` per micro-batch keeps the step in the pipeline. Keep the merge idempotent: after a full refresh the flow's checkpoint restarts and earlier data is sent again.
+Before the ForEachBatch sink existed, the usual answer was a separate Structured Streaming job with `foreachBatch`; it still works but leaves the pipeline.
+W: ForEachBatch sink with MERGE: the function upserts each micro-batch into the external table on `order_id`, and the flow stays in the pipeline with its lineage and event log.
+X: B=Delta sink: a Delta sink appends the flow's rows, so every change of an order would add another row instead of updating the existing one.
+C=AUTO CDC flow: AUTO CDC flows write into a streaming table of the pipeline and cannot use sinks, so they cannot target the shared partner table.
+D=Separate job: it works technically, but it moves the step out of the pipeline, which the team explicitly wants to avoid.
+T: To upsert from a pipeline into a table outside it, use a ForEachBatch sink with an idempotent MERGE.
+V: Lakeflow Spark Declarative Pipelines, Delta Lake
 
 @ DBX-DEP D1 T1.7 advanced use-case
 S: A logistics system publishes CDC events with `op` values `INSERT`, `UPDATE`, `DELETE` and, after its monthly purge, a single `TRUNCATE` event that has no key. The target `depot_status` must always mirror the current source state; nobody needs history. An engineer drafts `create_auto_cdc_flow` with `stored_as_scd_type="2"` and `apply_as_truncates=expr("op = 'TRUNCATE'")`. Topic retention is seven days, so the target cannot be rebuilt from the topic later. Which configuration should the team use instead?
@@ -210,22 +215,23 @@ T: On serverless, manage library versions through the task environment and its b
 V: Serverless compute, Lakeflow Jobs
 
 @ DBX-DEP D8 T8.2 advanced troubleshooting
-S: A job has the tasks `extract` (shared job cluster `etl_cluster`) and `transform` (same cluster). `transform` failed with executor out-of-memory errors. The engineer edits the job to give `etl_cluster` a larger worker type and then starts a repair run of the failed task. A colleague claims the repair will reuse the old cluster settings recorded with the original run. Which statement describes the repair run?
-A: The repair reuses the cluster of the original run, which must still be running, so the edit only applies to the next scheduled run of the job
-B: The repair creates a new job cluster, such as `etl_cluster_v1`, with the current settings of `etl_cluster`, so the larger worker type is used
-C: The repair is rejected because the job definition changed after the original run, so a new run of the whole job must be started with Run now instead
-D: The repair runs on serverless compute by default when a job cluster definition changed, so the worker type setting is ignored for repairs
-K: B
-G: ## Repair runs and job clusters
-A repair run re-executes failed or selected tasks of an existing run. The repair docs note that **if tasks share a job cluster, a repair run creates a new job cluster**: for `my_job_cluster`, the first repair uses `my_job_cluster_v1`, whose settings are **the same as the current settings** of `my_job_cluster`. That lets you fix a cluster configuration and repair without rerunning succeeded tasks.
-Other rules: repair works only for jobs with two or more tasks; the run's duration covers the original run and all repairs.
-## Applying it
-After the edit, the repair cluster gets the larger worker type, and `extract` is not rerun.
-W: New repair cluster with current settings: the documented behavior creates `etl_cluster_v1` from the job's current definition, so the fix to the worker type takes effect.
-X: A=Reuse original cluster: job clusters end with the run; the repair gets a new cluster built from current settings.
-C=Rejected after edit: repair is designed for fixing a job and rerunning failed tasks; changed settings do not block it.
-D=Serverless fallback: the compute type is not switched; the repair uses a new instance of the task's job cluster.
-T: Repairs of tasks on a shared job cluster start a new cluster from the job's current settings, so config fixes apply.
+S: A nightly job has a single notebook task, `load_kpis`, which replaces the rows of `gold.kpis` for its `run_date` job parameter. Last night it failed on a short source timeout that has since cleared. The on-call engineer wants to rerun the failed work with the same `run_date` and calls the Jobs API repair endpoint for that run, which returns an error. The job's structure must not change tonight. What explains the error, and what fits?
+A: Repair is supported only for jobs with two or more tasks; start a new run with Run now and the same `run_date`, which is safe because the task replaces that date
+B: Repair of a single-task job requires `rerun_all_failed_tasks` set to true; send the repair request again with that flag and the original `run_date` value
+C: A run can be repaired only within one hour after it failed; ask an administrator to extend the repair window and then repeat the same repair request
+D: A failed run must be cancelled before it can be repaired; cancel the run, then call the repair endpoint again with `load_kpis` listed in `rerun_tasks`
+K: A
+G: ## What a repair does
+A repair reruns the **unsuccessful tasks of a multi-task run and their dependents** with the current job and task settings; successful tasks are not rerun. Each repair adds a column to the run's matrix view.
+## The single-task case
+The docs state that repair is supported only with jobs that orchestrate **two or more tasks**. To rerun a failed single-task job, trigger it again with **Run now**, passing the same job parameters.
+## Is a new run safe?
+Both a repair and a new run start the task from the beginning; Lakeflow Jobs does not make tasks idempotent. This task replaces the rows of one date, so a rerun with the same `run_date` gives the same result without duplicates.
+W: Run now for a single-task job: repair is documented only for jobs with two or more tasks, and this idempotent task can simply run again with the same parameter.
+X: B=rerun_all_failed_tasks: the flag selects which tasks a repair reruns; it does not lift the rule that repair needs a multi-task job.
+C=Repair window: the docs set no such time limit; the error comes from the single-task job, not from the age of the run.
+D=Cancel first: a failed run has already ended, so there is nothing to cancel, and naming the task in `rerun_tasks` does not make a single-task job repairable.
+T: Repair is for multi-task jobs; rerun a failed single-task job with Run now and the same parameters, and keep the task idempotent.
 V: Lakeflow Jobs
 
 @ DBX-DEP D2 T2.4 advanced use-case
@@ -353,24 +359,26 @@ T: Use higher-order functions such as `aggregate` to compute over arrays per row
 V: Spark SQL, higher-order functions
 
 @ DBX-DEP D3 T3.2 advanced troubleshooting
-S: A bronze table stores device events in a VARIANT column `v`. Analysts filter almost every query on the device model inside `v`, and an engineer runs `ALTER TABLE bronze.events CLUSTER BY (v)` to speed this up; it fails. Dashboards also group by the model and sort by it. The table must keep the raw VARIANT for audits. The model is a string field in every event. Which change fits these needs?
-A: Cast `v` to STRING and cluster by the string column, because a JSON string of the full payload can serve as a clustering key and a sort key
-B: Add a typed column such as `device_model STRING` extracted with `v:device.model::string`, and cluster and group by that column
-C: Keep `v` as the key but use `ZORDER BY (v)` instead of liquid clustering, because Z-ordering accepts VARIANT columns while liquid clustering keys do not
-D: Partition the table by `v` and rely on dynamic file pruning, because partitions on semi-structured columns are pruned by path expressions
-K: B
-G: ## VARIANT limits
-VARIANT stores semi-structured data efficiently and supports path extraction (`v:device.model`) with casts (`::string`). The docs list limits:
-- VARIANT columns **cannot be clustering keys, partition columns or Z-order keys**;
-- the VARIANT type **cannot be used for comparisons, grouping, ordering or set operations**.
-## Applying it
-Promote frequently used fields to typed columns, for example `device_model STRING` filled with `v:device.model::string` during ingestion, cluster by it (`CLUSTER BY (device_model)`) and use it for `GROUP BY` and `ORDER BY`. The raw `v` stays for audits.
-W: Typed extracted column: typed columns can be clustering keys and can be grouped and sorted, while `v` keeps the full payload.
-X: A=Clustering on a full JSON string: the column would hold the whole payload, so clustering and data skipping on it cannot target the model field.
-C=Z-order on VARIANT: VARIANT cannot be a Z-order key either, so the command fails as well.
-D=Partition by VARIANT: the docs list partition columns among the uses VARIANT does not support, so the table cannot be partitioned by `v` at all.
-T: VARIANT cannot be clustered, partitioned, compared, grouped or sorted; extract hot fields into typed columns.
-V: VARIANT, liquid clustering
+S: The bronze table `events` keeps device payloads in the VARIANT column `v`. An analyst's query `SELECT v:region AS region, count(*) FROM events GROUP BY v:region ORDER BY region` fails with a data type error. The counts must join to `dim_region.region_code`, a STRING column, events without a region must form their own NULL group, and the bronze table must not change. Which rewrite fits these needs?
+A: Use `v:region::string` in the select list and in `GROUP BY`, which casts the extracted value to STRING, a type that supports grouping, ordering and joins
+B: Use `variant_get(v, '$.region', 'variant')` in `GROUP BY`, which returns the region as a typed variant value that grouping and ordering accept
+C: Group by `is_variant_null(v:region)` and keep `v:region` in the select list, so that the query separates missing regions from present ones in one pass
+D: Group by `schema_of_variant(v:region)` and select `v:region` next to it, so that each region forms its own group whatever its JSON type is
+K: A
+G: ## VARIANT values cannot be compared
+A `VARIANT` column, and any path extracted from it with `:` such as `v:region`, is itself `VARIANT`. The docs state that the `VARIANT` type **cannot be used for comparisons, grouping, ordering and set operations**, and not as a clustering, partition or Z-order key either.
+## Cast before you group
+Casting the extracted value to a SQL type gives a normal column:
+- `v:region::string` returns `STRING` (the `::` shorthand casts the extracted value, like `variant_get(v, '$.region', 'string')`);
+- a path that cannot be found returns NULL, so events without a region form a NULL group;
+- the STRING result joins directly to `dim_region.region_code`.
+Use `try_variant_get` instead when some values might not be castable and the query must not fail.
+W: Cast to STRING: the cast turns the VARIANT path into a STRING that can be grouped, ordered and joined, and missing regions become NULL.
+X: B=variant_get to variant: the result is still `VARIANT`, so grouping and ordering fail with the same error.
+C=Group by is_variant_null: it groups only into true and false, and `v:region` in the select list is neither grouped nor aggregated.
+D=Group by schema_of_variant: it groups by the type description of each value, not by the region, so all string regions fall into one group.
+T: Extract and cast VARIANT fields (`v:field::type`) before grouping, ordering or joining on them.
+V: Delta Lake, VARIANT
 
 @ DBX-DEP D3 T3.4 advanced troubleshooting
 S: In a serverless pipeline, a temporary view `orders_checked` applies `expect_or_drop("valid_amount", "amount > 0")`, and the materialized view `daily_sales` aggregates from that view. Since the expectations were added, every update fully recomputes `daily_sales` instead of refreshing it incrementally. The rule must stay and its metrics must stay in the event log. The pipeline is triggered hourly and its source tables have row tracking enabled. Which change restores incremental refresh?
@@ -453,23 +461,29 @@ D=user_action: it records actions such as starting or canceling updates and pipe
 T: Compare `create_update` events to see exactly which configuration each pipeline update used.
 V: Lakeflow Spark Declarative Pipelines, event log
 
-@ DBX-DEP D4 T4.3 advanced troubleshooting
-S: A pipeline was created with default event log settings. An SRE group that is not the run-as identity must build a monitoring dashboard on its event log, and a governance rule forbids granting the group anything on the pipeline's schema beyond what it needs. The SRE queries of `event_log()` currently fail with a permission error. Monitoring must stay read-only. Which setup fits the constraints?
-A: Grant the SRE group `SELECT` on every streaming table and materialized view of the pipeline, because the event log inherits the grants of its datasets
-B: Make the SRE group the pipeline owner, because only the owner and the run-as identity can query the hidden event log table of a pipeline
-C: Add the SRE group to the pipeline's CAN VIEW permission, because it allows querying `event_log()` without any Unity Catalog grant
-D: Publish the event log as a named table, create a view over it, and grant the SRE group `SELECT` on that view only
-K: D
-G: ## Default event log access
-By default a pipeline writes its event log to a **hidden Delta table** in its default catalog and schema, readable through `event_log(<pipelineId>)`. By default, **only the pipeline's run-as user can query** it.
-## Sharing it safely
-You can **publish** the event log under a chosen name (pipeline advanced settings). Databricks recommends **creating a view over the event log table before changing privileges**, because some compute settings could expose schema metadata if the table were shared directly. Grant consumers `SELECT` on the view. Do not delete the published event log or its catalog or schema; the location also serves as schema location for Auto Loader queries in the pipeline.
-W: Published log plus view: the group gets read access to the event log through a single view, as Databricks recommends, without broader schema grants.
-X: A=Grants on datasets: the event log is a separate table; grants on the pipeline's tables do not grant access to it.
-B=Ownership transfer: changing the owner hands over control of the pipeline, which far exceeds read access for monitoring.
-C=CAN VIEW: pipeline permissions control the pipeline object; reading the event log table is governed by Unity Catalog privileges.
-T: Expose a pipeline event log by publishing it and granting `SELECT` on a view over it.
-V: Lakeflow Spark Declarative Pipelines, Unity Catalog
+@ DBX-DEP D4 T4.3 advanced use-case
+S: A platform team runs 40 Lakeflow pipelines, each with its event log published to the schema `ops.pipeline_logs`. Before a platform upgrade it must list every pipeline that uses a feature or setting Databricks marks as deprecated or soon to be deprecated, such as a pinned runtime instead of a channel. The list must also catch flagged items the team does not know about yet, so nobody maintains a list of settings. Which event log query fits?
+A: Select `deprecation` events, whose `message` field names each flagged item, such as `PINNED_DBR_VERSION` or `PREVIOUS_CHANNEL_USED`, for every pipeline
+B: Select `create_update` events and compare each captured configuration with a list of settings that the team marks as deprecated before every upgrade
+C: Select `runtime_details` events and flag the pipelines whose runtime version is older than the version used by the newest pipeline in the workspace
+D: Select `user_action` events and flag pipelines whose settings users edited, because edited settings are the ones that Databricks may deprecate
+K: A
+G: ## Event types worth knowing
+Each row of a pipeline event log has an `event_type`. Some that help operations:
+- `create_update`: the complete configuration used to start an update, including values set by Databricks.
+- `user_action`: user actions on the pipeline, such as creating it or starting and cancelling an update.
+- `runtime_details`: the runtime used for the update, such as `dbr_version`.
+- `deprecation`: features that are **soon to be or currently deprecated** and that this pipeline uses.
+## The deprecation event
+Its `message` field holds a value such as `PINNED_DBR_VERSION` (using `dbr_version` instead of `channel`), `PREVIOUS_CHANNEL_USED`, `TABLE_MANAGED_BY_MULTIPLE_PIPELINES` or `STREAMING_READER_OPTIONS_DROPPED`. The docs call this a partial list that grows over time, so a query on the event type picks up new values without code changes.
+## Example
+Filter the published event logs on `event_type = 'deprecation'` and group by `origin.pipeline_name` and the message.
+W: deprecation events: Databricks writes them for each flagged feature a pipeline uses, so the query needs no hand-kept list and covers new flags automatically.
+X: B=create_update with own list: it shows the full configuration, but judging what is deprecated depends on a list the team must maintain, which the requirement rules out.
+C=runtime_details by age: an older runtime is not a deprecation flag, and the comparison misses deprecated settings that have nothing to do with the runtime.
+D=user_action edits: these events record actions such as creating a pipeline or starting an update, not whether a setting is deprecated.
+T: To find deprecated features across pipelines, query the event log's `deprecation` events instead of maintaining your own list.
+V: Lakeflow Spark Declarative Pipelines
 
 @ DBX-DEP D5 T5.3 advanced use-case
 S: A BI tool connects through JDBC to a pro SQL warehouse that auto-stops after 30 minutes. The same 40 dashboard queries run every morning, but the first runs after each restart are slow because cached results are gone, although the tables change only nightly. A second warehouse serves another team with the same queries. Which change lets results survive restarts and be shared across warehouses?
@@ -535,23 +549,23 @@ T: Liquid clustering allows up to four keys, and every key needs collected stati
 V: Liquid clustering, Delta Lake
 
 @ DBX-DEP D5 T5.5 advanced troubleshooting
-S: A report joins `orders` (200 million rows) to `customer_segments` on `customer_id` and runs far longer than expected. In the query profile, the join operator outputs 1.4 billion rows while both inputs are modest, and the following aggregation spills. The segment table was recently reloaded by a new job. Revenue totals in the report also look about seven times too high. No code changed in the report itself. What is the most likely root cause?
-A: The segment table now holds several rows per `customer_id`, so the join multiplies order rows; deduplicate or fix the segment table's grain
-B: The join used a broadcast of `customer_segments`, which duplicates its rows on every executor; disable broadcast so a sort merge join is used
-C: The orders table lacks statistics, so the optimizer chose a wrong join order; run `ANALYZE TABLE orders` and rerun the report query
-D: Adaptive query execution split skewed partitions, which replicates rows of the skewed keys; turn off skew handling for the query
+S: An SRE engineer with CAN MONITOR on a pro SQL warehouse investigates a dashboard query that an analyst owns. Query history lists two executions with identical text: one at 08:00 that ran six minutes and one at 08:05 that finished in 150 ms. The engineer opens the 08:05 execution, and the panel shows "Query profile is not available". The engineer needs the operator-level profile of the slow work. What explains this, and what fits?
+A: The 08:05 execution was answered from the query cache, which produces no profile; open the 08:00 execution, or rerun with a trivial change such as a different `LIMIT`
+B: Query profiles are visible only to the query owner; ask the analyst to share the dashboard with CAN MANAGE, so that the profile of every execution becomes visible
+C: CAN MONITOR shows only the query summary; the engineer needs CAN MANAGE on the warehouse before the profile of either execution can be opened at all
+D: Profiles are written only after the warehouse stops; wait for the warehouse's auto-stop and then open the profile of the 08:05 execution again
 K: A
-G: ## Reading row counts in a query profile
-The query profile shows each operator with metrics such as rows output, time and spill. A join whose **output rows far exceed both inputs** signals a fan-out: keys that are unique on one side are repeated on the other.
-## Applying it
-1.4 billion rows from 200 million orders means about seven matches per order, which matches the sevenfold revenue. The new reload produced several segment rows per customer, so every order is multiplied. The fix is data, not tuning: restore one row per `customer_id` (or pick the current segment) before joining.
-## Why tuning answers fail
-Join strategies, statistics and skew handling change how rows are processed, not how many rows a join returns.
-W: Duplicate join keys: a fan-out in the join explains both the row explosion and the inflated totals, and the fix is the segment table's grain.
-X: B=Broadcast duplicates rows: broadcasting copies a table to executors for lookup but does not change the join result.
-C=Missing statistics: join order affects speed, never the number of result rows, so it cannot explain wrong totals.
-D=Skew splitting: AQE skew handling splits partitions and replicates the matching side internally while producing the same result.
-T: A join that outputs far more rows than its inputs, plus inflated totals, points to duplicate keys, not to a tuning problem.
+G: ## Who can see a query profile
+The docs require that you are the **owner of the query** or have at least **CAN MONITOR** on the SQL warehouse that ran it. CAN MONITOR is therefore enough for an SRE.
+## When there is no profile
+A query answered from the **query cache** did not execute, so it has no profile and the panel shows "Query profile is not available". The docs suggest a trivial change to the query, such as changing or removing the `LIMIT`, to get past the cache. An earlier execution that really ran keeps its own profile in query history.
+## Reading the profile
+The profile shows each operator with time spent, rows and peak memory, and the Top operators panel lists the slowest ones.
+W: Cached execution: a result served from the cache has no profile, so the engineer opens the execution that actually ran or reruns the query with a trivial change.
+X: B=Owner only: owners can see profiles, but so can users with CAN MONITOR on the warehouse, and sharing does not create a profile for a cached result.
+C=Need CAN MANAGE: CAN MONITOR on the warehouse is the documented minimum for viewing the profiles of its queries.
+D=Wait for auto-stop: profiles are available during and after execution; a cached result never gets one, whether or not the warehouse stops.
+T: A cache-served query has no profile; profile the execution that ran, or bypass the cache with a trivial query change.
 V: Databricks SQL, query profile
 
 @ DBX-DEP D5 T5.2 advanced tradeoff
@@ -594,25 +608,27 @@ D=OPTIMIZE FULL: OPTIMIZE compacts or reclusters data; purging soft-deleted data
 T: A column-mapped DROP COLUMN leaves data in files; purge with `REORG TABLE ... APPLY (PURGE)` and then `VACUUM`.
 V: Delta Lake, column mapping
 
-@ DBX-DEP D6 T6.3 advanced use-case
-S: A fraud team must restore original card holder emails in rare investigations of disputed payments, while analysts work only with a pseudonym. Analysts must never be able to reverse it, and the method must not need a mapping table. The team stores a 32-byte key in a secret scope that only the fraud service principal can read. Which design meets these needs?
-A: Replace the email with `sha2(concat(email, key), 256)` and let the fraud team recompute the hash for each suspect address when an investigation starts
-B: Replace the email with `uuid()` at ingestion and keep the key in the secret scope, so the fraud team can derive the original email from the UUID and that key
-C: Encrypt the email with `aes_encrypt(email, key)` at ingestion, and let only the fraud principal decrypt it with `aes_decrypt` and the scope's key
-D: Mask the email with a column mask that returns `'***'` for analysts and the full value for the fraud group, keeping raw values stored
-K: C
-G: ## Reversible vs irreversible pseudonyms
-- **Hashing** (even with a secret salt) is one-way: you can test a guess, but you cannot recover the original from the hash alone.
-- **Encryption** is reversible for whoever holds the key. `aes_encrypt(expr, key [, mode ...])` accepts 16, 24 or 32-byte keys (AES-128/192/256; default mode GCM), and `aes_decrypt` restores the value.
-- **Tokenization** with random tokens needs a mapping table.
-## Applying it
-The ingestion job reads the key from the secret scope (secret ACLs limit `READ` to the fraud principal) and stores `aes_encrypt(email, key)`. Analysts see only ciphertext; the fraud principal decrypts with the same key. No mapping table is needed.
-W: AES encryption with a secret key: the fraud principal alone can reverse the pseudonym, analysts cannot, and no mapping table is required.
-X: A=Keyed hash: it is one-way; investigators could only confirm guessed addresses, not restore unknown originals.
-B=Random UUID: a random value has no mathematical link to the email, so nothing can be derived from it without a mapping table.
-D=Column mask: the raw value stays in the table, which is masking, not pseudonymization of the stored data.
-T: Use key-based encryption (`aes_encrypt`/`aes_decrypt`) when a pseudonym must be reversible by one party only.
-V: Databricks SQL functions, secrets
+@ DBX-DEP D6 T6.5 advanced troubleshooting
+S: To meet an erasure request, the team ran `DELETE` for one customer on `prod.crm.customers`, then `REORG TABLE ... APPLY (PURGE)`, and later `VACUUM` once the retention period had passed. A monthly job maintains `archive.crm.customers` with `CREATE OR REPLACE TABLE ... CLONE prod.crm.customers`. An audit still finds the customer's values in the archive's files. The archive must stay readable without depending on the source's files. Which statement explains the finding and the fix?
+A: A deep clone is an independent copy with its own files and history; run the same delete and purge on the archive, then `VACUUM` it after its retention period
+B: The next monthly `CREATE OR REPLACE ... CLONE` removes the customer's values from the archive files at once, because the clone copies the purged source state
+C: `VACUUM` on the source also cleans the files of its deep clones, so the archive is clean as soon as the next scheduled `VACUUM` of the source has run
+D: Convert the archive to a shallow clone, so that it reads the source's files and the purge of the source removes the customer from the archive as well
+K: A
+G: ## Deep and shallow clones
+`CLONE` (deep clone, also written `DEEP CLONE`) copies **data files and metadata** to the target at a specific version. A shallow clone copies only metadata and references the source's files. The docs list:
+- changes to deep or shallow clones do not affect the source table;
+- a cloned table has an **independent history**;
+- if `VACUUM` removes source files that a shallow clone references, reading the clone fails with `FileNotFoundException`.
+Deep clones are a documented way to archive tables.
+## Purging copies
+An erasure on the source does not reach a deep clone: the archive keeps its own files, and its older versions keep them too. Apply the same steps to the archive: `DELETE`, `REORG ... APPLY (PURGE)` where deletion vectors are used, and `VACUUM` once its retention has passed. Every copy of personal data needs its own purge step.
+W: Purge the archive too: a deep clone owns its files and history, so only a delete and purge on the archive, followed by VACUUM, removes the customer there.
+X: B=Next CLONE replace: the replace writes a new version, but earlier archive versions still reference the old files until VACUUM removes them.
+C=Source VACUUM: VACUUM removes unreferenced files of the table it runs on; it never touches the files of a deep clone.
+D=Shallow clone: the archive would depend on source files and fail with `FileNotFoundException` after source VACUUMs, which breaks the readability requirement.
+T: Deep clones are independent copies: apply every erasure to clones and archives as well, then vacuum them.
+V: Delta Lake, CLONE
 
 @ DBX-DEP D6 T6.1 advanced use-case
 S: A job runs as the service principal `ingest-sp` and reads a partner API token with `dbutils.secrets.get("partner", "token")`. A data engineer group maintains the job and must be able to add or rotate secrets in the scope `partner`, but must not change who can access the scope. `ingest-sp` must only read. An auditor reviews the scope's ACLs every quarter. Which secret scope ACLs follow least privilege?
@@ -812,23 +828,30 @@ D=Standard view: a view runs the full query on every read and stores nothing, so
 T: Foreign Iceberg tables can feed materialized views only through full recompute; land them in managed tables for incremental refresh.
 V: Materialized views, Apache Iceberg, Unity Catalog
 
-@ DBX-DEP D4 T4.1 advanced troubleshooting
-S: A FinOps query joins `system.billing.usage` to `system.compute.clusters` on `cluster_id` to report cost per cluster owner and node type. The totals are higher than the invoice for clusters whose settings were edited several times, while untouched clusters match. The report must show each cluster's latest configuration. Finance compares the report with the invoice every month. What explains the gap, and what is the fix?
-A: Usage rows are recorded once per node, so the join must divide `usage_quantity` by the number of workers in the clusters table
-B: The usage table includes `RETRACTION` records only for edited clusters; filter usage to `record_type = 'ORIGINAL'` before the join
-C: The clusters table is a slow-changing dimension with one row per configuration change; join only the latest row per `cluster_id`
-D: The clusters table holds a row per driver and per worker node; filter it to the driver row before joining it to the usage records
-K: C
-G: ## system.compute.clusters is an SCD table
-The clusters system table is a **slow-changing dimension** that keeps the full history of compute configurations: every edit adds a row with a new `change_time`. Joining usage to it on `cluster_id` alone matches each usage record to every historical row of that cluster, multiplying the cost of edited clusters.
-## Fix
-Pick one row per cluster before joining, for example the latest: `QUALIFY row_number() OVER (PARTITION BY cluster_id ORDER BY change_time DESC) = 1`. (To attribute cost to the configuration in force at the time, join on the most recent `change_time` before the usage time, as the documented sample query does.)
-W: SCD fan-out: edited clusters have several rows, so the join duplicates their usage; keeping the latest row per cluster gives correct totals with current settings.
-X: A=Per-node usage: usage records are not duplicated per node in a way that dividing by workers would fix; the excess appears only for edited clusters.
-B=ORIGINAL filter: retractions and restatements are corrections that should be kept so totals net out; they do not depend on cluster edits.
-D=Node rows: node-level data lives in `system.compute.node_timeline`; the clusters table has one row per configuration version, not per node.
-T: Join `system.compute.clusters` on its latest (or time-valid) row per cluster, because it is a slowly changing dimension.
-V: System tables, billing
+@ DBX-DEP D4 T4.1 advanced use-case
+S: A platform lead suspects that full refreshes drive pipeline costs. For the last 60 days and all pipelines in the region's workspaces, the lead wants one SQL query that lists each full refresh with the tables it covered and whether a job task or a user started it. Most pipelines do not publish their event logs, and the query must use generally available system tables. Which source fits this need?
+A: `system.lakeflow.pipeline_update_timeline`, using `update_type`, `full_refresh_selection`, `trigger_type` and `trigger_details` of each pipeline update
+B: `system.lakeflow.pipelines`, whose rows record every change to a pipeline's settings, including each time a user requested a full refresh of it
+C: `system.billing.usage` for pipeline workloads, where an hourly cost spike identifies a full refresh and the job run that requested it
+D: `system.access.audit` filtered on pipeline actions, which records each full refresh request with its list of tables and the job that started it
+K: A
+G: ## Pipeline system tables
+- `system.lakeflow.pipelines`: a slowly changing dimension of pipeline settings (a new row per change).
+- `system.lakeflow.pipeline_update_timeline`: start and end times and compute of each **pipeline update**; long updates are sliced into hourly rows, and `result_state` is set only on the last one.
+Useful columns of the update timeline:
+- `update_type`: `FULL_REFRESH`, `REFRESH` or `VALIDATE`;
+- `full_refresh_selection` and `refresh_selection`: tables updated with or without a full refresh; `reset_checkpoint_selection`: flows whose checkpoints were cleared;
+- `trigger_type`, such as `JOB_TASK`, `USER_ACTION`, `API_CALL` or `RETRY_ON_FAILURE`, and `trigger_details.job_task.job_id` when a job task started the update;
+- `run_as_user_name`.
+The table is regional, supports streaming and keeps 395 days.
+## Applying it
+Filter on `update_type = 'FULL_REFRESH'` or a non-empty `full_refresh_selection`, keep one row per `workspace_id` and `update_id`, and read `trigger_type` and `trigger_details`.
+W: Pipeline update timeline: it records every update with its type, the tables refreshed in full and what triggered it, across pipelines and without published event logs.
+X: B=pipelines table: it tracks pipeline settings over time, not the updates that ran or the tables they refreshed.
+C=Billing spikes: usage shows cost per period, not the update type or the table list, so a spike cannot prove a full refresh or who started it.
+D=Audit table: the audit log system table is in Public Preview, which the requirement for generally available tables excludes.
+T: Audit pipeline updates, their full-refresh selections and triggers with `system.lakeflow.pipeline_update_timeline`.
+V: system tables, Lakeflow Spark Declarative Pipelines
 
 @ DBX-DEP D5 T5.4 advanced troubleshooting
 S: A downstream job sums `amount` from `table_changes('silver.orders', start_version)` to update a running revenue total. Silver receives `MERGE` updates that change `amount` on existing orders. After a week, the total is clearly too high, and the excess grows with the number of updated orders. Inserts and deletes are handled correctly. The job must keep reading the change feed incrementally. What causes the error, and what is the fix?
