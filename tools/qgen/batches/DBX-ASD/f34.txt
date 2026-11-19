@@ -1,0 +1,263 @@
+# DBX-ASD giveaway-cue fixes, cue pass 3 group 04 (full blocks pinned with I:; answers unchanged)
+# Distractor flaws reuse the facts already explained in the published explanations; no new technical claims.
+
+@ DBX-ASD D1 T1.6 advanced troubleshooting
+S: A UDF turns a text column into an integer, and one input row contains the text `"abc"`. The code runs as follows. When does the error appear? `@udf("int")` `def parse(s): return int(s)` `df2 = df.withColumn("n", parse("txt"))` `print("built")` `rows = df2.collect()`
+A: At the `collect()` call, inside a task, as a Python exception in the failed job. The `print` still runs.
+B: At no point, because a Python UDF returns NULL for a value that it cannot convert and moves on.
+C: At the `withColumn` call, because Spark checks the column's values while it defines the new column.
+D: At the `print` call, because Spark flushes the pending transformations before Python writes output.
+K: A
+G: ## Errors in data surface at action time
+`withColumn` only records a projection with the UDF in the plan, so no row is passed to Python yet. The UDF runs inside executor tasks when an action evaluates the column.
+- Problems found while resolving the plan (a missing column, a wrong function name) can be raised when the transformation is called, in classic PySpark.
+- Problems in the data (a bad value, a failing UDF, a failed cast under ANSI mode) show up only when the affected rows are processed, as a failed task and a failed job.
+- An exception inside a UDF is not turned into NULL. Wrap the conversion in `try`/`except` if NULL is wanted.
+W: Failure at collect: building `df2` runs nothing, so `built` is printed. The failure occurs when `collect()` evaluates the UDF on the bad row and the task raises `ValueError`, which fails the job.
+X: B=Returns NULL: a UDF that raises fails the task. Only code that catches the error and returns `None` produces NULL.
+C=At withColumn: defining the column adds a node to the plan; no row values are evaluated until an action runs.
+D=At print: `print` is plain Python and does not trigger a Spark job, so nothing is flushed or evaluated there.
+T: Data errors appear when an action processes the rows, not when the transformation is defined.
+I: Q011818
+
+@ DBX-ASD D6 T6.1 applied troubleshooting
+S: A team moves a PySpark job from a classic driver to a Spark Connect session. Exactly one of the lines below fails, and the others run. Which line fails?
+A: `rdd = spark.sparkContext.parallelize(range(10))`, because the protocol describes plans and does not support RDD execution APIs
+B: `df = spark.range(10).filter("id > 3")`, because string filter conditions are not encoded in the logical plans sent to the server
+C: `spark.sql("SELECT 1 AS x").collect()`, because SQL text is not carried by the gRPC protocol between client and server
+D: `df.groupBy("id").count().show()`, because aggregations must run inside a classic driver process attached to the cluster
+K: A
+G: ## What Spark Connect does not carry
+The Spark Connect protocol describes work declaratively as logical plans. That covers the DataFrame and SQL APIs, but not everything in classic Spark.
+- RDDs are not supported, because they are low-level objects tied to the driver JVM and cannot be described as a logical plan.
+- The client has no access to `SparkContext` or to the static Spark configuration.
+- Private JVM fields such as `df._jdf` are not reachable.
+## Migration rule
+Code that uses the DataFrame, Spark SQL and Column APIs moves without change. Code that calls `sparkContext`, RDDs or Py4J has to be rewritten with DataFrame operations.
+W: RDD API: `spark.sparkContext.parallelize` needs a SparkContext and RDDs, and the Spark Connect protocol supports neither, because it carries logical plans only.
+X: B=Filter: filter conditions, including SQL expression strings, are core DataFrame operations and are translated into plan nodes like every other transformation, so the line runs.
+C=SQL: `spark.sql` is supported. The client wraps the text into a relation of the plan, and the collected rows come back as Arrow batches.
+D=Aggregation: a `groupBy().count()` is sent as a plan and executed on the server with the usual optimizer; only the result is streamed to the client.
+T: Spark Connect clients use DataFrame and SQL APIs but cannot use RDDs or the SparkContext.
+V: Spark Connect
+I: Q011790
+
+@ DBX-ASD D3 T3.2 applied definition
+S: `df` has the columns `id` (int) and `v` (string) and the rows `(1, NULL)`, `(1, NULL)` and `(2, 'x')`. What does `df.dropDuplicates().count()` return?
+A: 1, because rows that hold NULL are dropped and a single non-null row remains
+B: 2, because for duplicate detection two NULLs count as equal, so the first two rows collapse
+C: An error, because dropDuplicates needs a non-null subset and the call passes no subset
+D: 3, because NULL is not equal to NULL, so rows that hold a NULL value are not treated as duplicates
+K: B
+G: ## NULL in comparisons and in grouping
+In a filter, `NULL = NULL` is unknown, so such a row does not pass. Grouping, `distinct` and `dropDuplicates` follow another rule: NULLs belong to the same group.
+## The example
+Rows 1 and 2 are the same row `(1, NULL)`, so one is kept. With row 3 the result has 2 rows. If NULL should mean "unknown, keep both", fill the column with a distinguishing value first.
+W: NULL equality in dedup: grouping and distinct operations treat NULLs as the same value, unlike the `=` operator, so the two `(1, NULL)` rows collapse into one and 2 rows remain.
+X: A=Null removal: dropDuplicates does not drop rows with nulls. Removing them is the job of `dropna`.
+C=No subset error: without arguments all columns are compared, and null values are allowed in them.
+D=SQL comparison logic: `NULL = NULL` is not true in a filter, but deduplication uses grouping semantics, which put NULLs together.
+T: dropDuplicates treats NULLs as equal, unlike a filter with =.
+V: Spark SQL
+I: Q011772
+
+@ DBX-ASD D2 T2.4 applied troubleshooting
+S: A notebook cell registers a DataFrame three times in the same session, in this order: ``` df.createTempView("v") df.createOrReplaceTempView("v") df.createTempView("v") ``` What happens when the cell runs?
+A: The second line raises the AnalysisException, because a name that already has a temporary view is locked for the rest of the session
+B: The first line succeeds; the later lines are skipped with a warning and the view keeps the first registration
+C: The first two lines succeed and the third raises an AnalysisException, because createTempView refuses an existing name
+D: The three lines succeed, because a temporary view with the same name is overwritten by either of the registration methods
+K: C
+G: ## Two ways to register a temporary view
+A local temporary view is a name in the session catalog that points to a logical plan. PySpark offers two calls:
+- `df.createTempView("v")` creates the view and fails with an `AnalysisException` if a temporary view called `v` already exists in the session.
+- `df.createOrReplaceTempView("v")` creates it, or replaces the existing plan under that name.
+## Why the difference matters
+Notebook cells are re-run all the time. The OrReplace form is idempotent, so a cell can be run again. The strict form is useful when a second registration under a name would be a bug you want to catch.
+W: createTempView on a taken name: the first line creates `v`, the second replaces it silently, and the third asks for a plain create on a name that is already registered, so the analyzer rejects it.
+X: A=Second line fails: this is the OrReplace form, which exists exactly to swap the plan under a taken name, so it succeeds.
+B=Silent skip: Spark does not skip duplicate registrations quietly. The strict call fails loudly and the OrReplace call really replaces the plan.
+D=Overwrite by both: only the OrReplace form overwrites. The plain create form is strict by design, so it cannot be treated as an alias.
+T: Use createOrReplaceTempView for re-runnable code; plain createTempView fails if the name is taken.
+V: Spark SQL
+I: Q011757
+
+@ DBX-ASD D2 T2.3 applied use-case
+S: The dataset from the previous write, with `country` and `year` partition columns, is read with `spark.read.parquet("/out/s").printSchema()`. The Parquet files themselves do not contain `country` or `year` values. What does the schema show?
+A: country and year appear as the first columns, both typed as string, because directory names are read as text
+B: country (string) and year (integer) appear after the data columns, rebuilt from the directory names
+C: Just the data columns appear, because partitionBy removes the partition columns from the stored dataset for good
+D: country and year appear just when the reader sets `mergeSchema` to true, since partition columns count as a schema change
+K: B
+G: ## Partition discovery
+When Spark reads the root of a partitioned dataset it parses the `column=value` directory names, adds those columns to the schema (after the columns stored in the files) and uses them for pruning.
+- Numeric, date, timestamp and string partition values get their types inferred automatically. For example `year=2025` becomes an integer.
+- `spark.sql.sources.partitionColumnTypeInference.enabled` (default `true`) can be turned off, and then all partition columns are strings.
+So no information is lost by `partitionBy`: the values are stored in the folder names instead of in the files.
+W: Discovered columns: Spark reads `country=KR/year=2025` names, adds country as a string and year as an integer at the end of the schema, and the files stay smaller.
+X: A=First and all strings: partition columns are appended after the data columns, and numeric values are inferred as numeric types by default.
+C=Dropped for good: the values live in the directory names and come back on a read of the root path.
+D=mergeSchema: `mergeSchema` merges differing Parquet file schemas. Partition discovery is a separate feature that works without it.
+T: Read the root path of a partitioned dataset and `name=value` folders come back as extra columns, with inferred types.
+V: Spark SQL
+I: Q011688
+
+@ DBX-ASD D2 T2.3 advanced tradeoff
+S: A table of 50 million devices is queried by `device_id`, and the team also joins it on `device_id`. A developer proposes `partitionBy("device_id")` when saving it as a table. Which assessment is correct?
+A: It creates millions of tiny directories and files; `bucketBy` on `device_id` gives a fixed layout for a high-cardinality key
+B: It is the best choice, because one directory per device makes a device lookup read exactly one small file
+C: It hashes devices into 200 partitions on write, so the number of directories stays bounded by `spark.sql.shuffle.partitions`
+D: It fails at write time, because partitionBy requires a string column and `device_id` is numeric
+K: A
+G: ## Partitioning versus bucketing
+- `partitionBy(col)` writes one directory per distinct value (`device_id=123/`). It gives partition pruning for filters on that column, but the directory count equals the number of distinct values. The guide notes it "has limited applicability to columns with high cardinality".
+- `bucketBy(n, col)` hashes the column into a fixed number `n` of buckets. It "can be used when the number of unique values is unbounded", and helps joins and aggregations on that column.
+## Rule of thumb
+Partition on low-cardinality columns that queries filter on (date, country). Bucket on high-cardinality keys used for joins or lookups (user id, device id).
+W: Too many directories: partitionBy on 50 million values makes millions of small directories and files, which overloads listing and the metastore; bucketBy gives a fixed layout for a column with unbounded values.
+X: B=One file per device: each directory holds at least one small file, but the cost of listing and tracking millions of them outweighs the pruning benefit.
+C=200 partitions: the shuffle partition setting concerns shuffles, not the output directory layout. partitionBy writes a directory per value.
+D=String columns required: numeric, date and timestamp columns can be partition columns, and automatic type inference exists for them on read.
+T: Partition by low-cardinality filter columns; bucket by high-cardinality key columns.
+V: Spark SQL
+I: Q011686
+
+@ DBX-ASD D2 T2.3 advanced use-case
+S: `orders` and `customers` were both written with `bucketBy(16, "cust_id").sortBy("cust_id").saveAsTable(...)`. A job joins them on `cust_id` with `spark.sql.autoBroadcastJoinThreshold` set to -1 and bucketing left at its defaults. What does the physical plan show?
+A: A broadcast hash join of customers, because the broadcast threshold is ignored for tables that are stored bucketed
+B: A shuffled hash join where the larger table is shuffled, because bucketing replaces the shuffle for the smaller table
+C: A sort-merge join with no Exchange on either input, because both tables are bucketed on the join key into the same number of buckets
+D: A sort-merge join with an Exchange (shuffle) on both inputs, because bucket metadata is used for filter pruning and not for planning joins
+K: C
+G: ## Bucketing and joins
+A bucketed table stores rows in a fixed number of files chosen by a hash of the bucket column. If two tables use the same bucket column (the join key) and the same bucket count, then rows with equal keys are already in matching buckets. Spark can join bucket i with bucket i and skip the shuffle that would otherwise be inserted as an `Exchange` before a sort-merge join.
+- The setting `spark.sql.sources.bucketing.enabled` is `true` by default; when it is `false`, bucketed tables are treated as normal tables.
+- Sorting within buckets (`sortBy`) can also save the local sort.
+- Check the result with `df.explain()`: no `Exchange hashpartitioning(cust_id)` below the join.
+## Why mention the broadcast threshold
+Setting it to -1 turns off automatic broadcast joins, so the plan shows a sort-merge join and the benefit of bucketing is visible.
+W: Co-bucketed join: both tables share the join key and the bucket count 16, so Spark reads matching buckets together and the plan has a sort-merge join with no shuffle for either side.
+X: A=Broadcast: the threshold is -1, so no automatic broadcast happens, and the threshold has nothing to do with bucketing.
+B=Half shuffle: when both sides are compatibly bucketed no side needs a shuffle; a one-sided shuffle occurs only if just one table is bucketed.
+D=Shuffle on both sides: that is the unbucketed behavior. Bucket metadata is used for joins and aggregations on the bucket columns precisely to avoid the shuffle.
+T: The same bucket column and count on both tables give a shuffle-free sort-merge join.
+V: Spark SQL
+I: Q011685
+
+@ DBX-ASD D1 T1.4 applied use-case
+S: A developer reads a Parquet table and chains `filter`, `withColumn`, `coalesce(4)` and `groupBy("k").count()` before writing. Which of these transformations forces Spark to create a new stage because it needs a shuffle?
+A: `filter`, since it must inspect each row of the table and so needs the rows redistributed between executors first.
+B: `withColumn`, since adding a column requires the existing rows to be moved so that each partition holds the new values.
+C: `groupBy("k").count()`, since rows with the same key must be brought together in one partition.
+D: `coalesce(4)`, since reducing the partition count to four requires a full shuffle of the rows.
+K: C
+G: ## Stages are cut at shuffles
+Spark divides a job into **stages** at shuffle boundaries. Within a stage, narrow transformations are pipelined: each task runs `filter`, `withColumn` and similar operations on its partition in a single pass without moving data.
+- Narrow: `filter`, `select`, `withColumn`, `union`, and `coalesce` (it merges existing partitions on the same executor where possible, with no full shuffle by default).
+- Wide: `groupBy` aggregations, most joins, `distinct`, `orderBy`, `repartition`.
+## In this pipeline
+Before the `groupBy`, one stage reads, filters, adds the column and coalesces. The `groupBy` introduces the shuffle: a second stage reads shuffle output and counts per key.
+W: groupBy aggregation: `groupBy("k").count()` needs all rows of a key together, so a shuffle (and a stage boundary) is required; the earlier steps are narrow and pipelined into the first stage.
+X: A=filter: it works on each row independently inside its partition, so no data moves.
+B=withColumn: computing a column is a per-row, per-partition operation; other partitions do not need the value.
+D=coalesce(4): it narrows partitions by combining existing ones without a full shuffle (unlike `repartition`), so it does not create a stage boundary by default.
+T: A shuffle (wide dependency) such as `groupBy` ends a stage; narrow steps are pipelined inside one.
+I: Q011667
+
+@ DBX-ASD D1 T1.1 advanced comparison
+S: Two engineers implement the same aggregation in PySpark. One uses `df.groupBy("k").agg(F.sum("v"))`; the other uses a Python lambda on an RDD from `df.rdd.map(...).reduceByKey(...)`. The DataFrame version runs noticeably faster on the same cluster. Which advantage of Spark's structured APIs explains it?
+A: The RDD version runs serially, because Python lambdas hold the global interpreter lock across the whole cluster at once.
+B: DataFrame operations are planned by the Catalyst optimizer and executed by the JVM engine, so Python code does not touch each row.
+C: DataFrames keep their data on disk in a compressed format, so they avoid the memory that RDD lambdas consume.
+D: DataFrame code runs on the driver alone, so it avoids the cost of shipping work to executors that the lambda version pays.
+K: B
+G: ## Structured APIs versus Python lambdas
+A DataFrame or SQL query describes what you want. Spark parses it into a logical plan, the Catalyst optimizer improves it (column pruning, predicate pushdown, join strategy), and the JVM executes the optimized plan on executors. In PySpark the Python code only builds the plan, so a built-in expression such as `F.sum` runs at JVM speed for every language.
+## What the lambda version pays
+`df.rdd.map(lambda ...)` hands rows to Python worker processes: each row is serialized from the JVM to Python and back, and Catalyst cannot see inside the lambda to optimize it. This is the main reason structured APIs and built-in functions are preferred.
+W: Catalyst and JVM execution: the DataFrame version is planned by Catalyst and executed inside the JVM, so no Python call is made per row; the RDD lambda version serializes rows to Python workers and gets no optimization.
+X: A=Global interpreter lock across the cluster: the lock applies per Python process, not to the whole cluster. The RDD job still runs in parallel across workers, just with per-row serialization cost.
+C=Data on disk: DataFrames use memory and spill to disk when needed. Being on disk is not the reason, and it would normally be slower.
+D=Runs on the driver: DataFrame work is distributed across executors like any other Spark job; the driver builds the plan and coordinates.
+T: Structured APIs let Catalyst optimize and run the work in the JVM, so they beat Python lambdas that serialize each row.
+I: Q011651
+
+@ DBX-ASD D1 T1.2 applied comparison
+S: Two data scientists each run a notebook that is its own Spark application on the same cluster. The first reads a large table and calls `cache()` followed by `count()`. The second then reads the same table and runs a query. What does the second application see?
+A: It reads the table from storage again, because each application has its own executors and their cached blocks are private to it.
+B: The second application can attach to the cached DataFrame once the first application's driver is told to broadcast it to the cluster.
+C: The second application reads the cached blocks if it is started with the same `appName` as the first one on that cluster.
+D: Both applications share one block store on the cluster, so the second notebook reads the first notebook's cached partitions.
+K: A
+G: ## Isolation between applications
+Each Spark application (one `SparkContext`) gets its own executor processes for the application's whole lifetime. Executors of different applications run in different JVMs, so one application cannot read another's cached blocks, broadcast variables or temporary views.
+- Benefits: scheduling and executor isolation between applications.
+- Cost: sharing data across applications requires writing it to an external storage system (for example Parquet or Delta files) or a table.
+## Within one application
+A second `SparkSession` created with `newSession()` shares the `SparkContext` and the table cache, but separate applications do not.
+W: Private executors: executors belong to a single application, so cached blocks are private to it; the second notebook reads the table from storage again.
+X: B=Broadcast to attach: a broadcast variable is a read-only value shipped to one application's executors; it does not expose cached DataFrames to other applications.
+C=Same appName: names are labels for the UI and have no effect on data sharing.
+D=Shared block store: there is no cluster-wide block store across applications; each executor's block manager serves only its own application.
+T: Cached data lives in an application's own executors; separate applications share data only through external storage.
+I: Q011657
+
+@ DBX-ASD D3 T3.2 applied troubleshooting
+S: A cleanup step runs `df.dropDuplicates(["id", "typo_col"])` on a DataFrame whose columns are `id`, `amount` and `ts`. A colleague expects it to ignore the unknown name the way `drop("typo_col")` does. What happens?
+A: It raises an AnalysisException, because each name in the subset must resolve against the schema, unlike names given to drop
+B: It runs and treats `typo_col` as a column of NULL values in each row, so rows that repeat the same `id` are removed as duplicates
+C: It returns the DataFrame unchanged, because a subset that contains an unknown column switches the deduplication off with a warning
+D: It runs and compares rows on `id` alone, because names missing from the schema are skipped as they are in `drop`
+K: A
+G: ## Subset names are checked
+`dropDuplicates(subset)` groups the rows by the listed columns, so each name has to resolve to a column of the DataFrame. An unknown name fails analysis with an error that lists the available columns.
+## Compare with drop
+`drop("typo_col")` is a no-op for a missing name, which hides typos. `dropDuplicates`, `select`, `filter` and `withColumn` expressions all fail loudly instead. Prefer a loud failure in validation code: a deduplication that silently used only `id` would delete rows that differ in the other key column.
+W: Name resolution: the subset becomes the grouping key of the deduplication, so a name that is not in the schema is an analysis error and the job stops before any data is read.
+X: B=NULL column: a column that does not exist is never substituted by NULL values. The name must match the schema (case rules follow `spark.sql.caseSensitive`).
+C=Deduplication off: Spark has no rule that disables deduplication for a bad subset, with or without a warning. It rejects the call instead.
+D=Skipped name: that is the drop behavior. For dropDuplicates a name that is missing from the schema is an error, so the key never silently shrinks to `id`.
+T: dropDuplicates validates its subset names and fails on an unknown column; drop silently ignores them.
+V: Spark SQL
+I: Q011770
+
+@ DBX-ASD D7 T7.1 applied comparison
+S: A team has a Spark DataFrame `sdf` and wants pandas-style APIs on it while the data stays distributed. Which call does that, and how does it differ from `toPandas()`?
+A: `sdf.toPandas()` returns a distributed DataFrame, while `sdf.pandas_api()` collects every row to the driver node and converts it there
+B: Both calls return the same distributed DataFrame type, and they differ just in how the index column is named
+C: `sdf.pandas_api()` gives a pandas-on-Spark frame whose rows remain on the executors, while `toPandas()` collects every row to the driver
+D: `sdf.pandas_api()` writes the DataFrame to a local file on the driver and reads it back as plain pandas
+K: C
+G: ## Moving between APIs
+- `DataFrame.pandas_api()` converts a Spark DataFrame to a pandas-on-Spark DataFrame. The data remains distributed across the cluster.
+- `DataFrame.toPandas()` collects all rows to the driver as a regular pandas DataFrame, which can fail with out-of-memory errors for large data.
+- `psdf.to_spark()` converts back to a Spark DataFrame.
+## Index note
+A Spark DataFrame has no index, so a default index is attached on conversion. Naming an index column explicitly is more efficient than relying on the default.
+W: pandas_api: the result is a pandas-on-Spark DataFrame whose data stays spread over the cluster, in contrast to the driver-side collect of `toPandas()`.
+X: A=Reversed roles: the description swaps the two calls; `toPandas()` is the one that gathers all data in the driver.
+B=Same object: they return different types, a pandas-on-Spark DataFrame in one case and a regular pandas DataFrame in the other.
+D=Local file: neither call writes a file; `pandas_api()` wraps the same distributed plan in another API.
+T: pandas_api keeps data distributed; toPandas collects it on the driver.
+V: Pandas API on Spark
+I: Q011803
+
+@ DBX-ASD D3 T3.2 applied troubleshooting
+S: A customer table has emails such as `Ana@x.com`, `ana@x.com ` (with a trailing blank) and `ana@x.com`. A job calls `df.dropDuplicates(["email"])` and still finds the same customer three times. What fixes it?
+A: Set `spark.sql.caseSensitive` to false, which makes string values in the subset compare without regard to letter case
+B: Add `sort("email")` before the call, so that near-equal strings sit side by side in a partition and are merged
+C: Use `distinct()` instead, which ignores differences in letter case and in surrounding blanks for string columns
+D: Normalize first, e.g. `withColumn("email", F.lower(F.trim("email")))`, since values compare by exact characters
+K: D
+G: ## Deduplication is exact equality
+`dropDuplicates` and `distinct` compare values exactly. `Ana@x.com`, `ana@x.com` and `ana@x.com ` are different strings.
+## Clean first, then deduplicate
+Put a normalization step in front: `F.lower`, `F.trim`, `F.regexp_replace` for other patterns. Do it in a new or replaced column, then deduplicate on that column.
+The setting `spark.sql.caseSensitive` concerns identifiers (column names), not data.
+W: Normalize, then deduplicate: dedup compares strings character for character, so case and whitespace differences keep the values distinct until `lower` and `trim` make them equal.
+X: A=caseSensitive: this setting controls how column names resolve. It does not change how string values compare.
+B=Sorting: ordering does not merge values. Deduplication works on equality, not on neighbors.
+C=distinct: it compares exactly as dropDuplicates does, so the three values stay different.
+T: Normalize case and whitespace first; dedup compares exact values.
+V: Spark SQL
+I: Q011775
