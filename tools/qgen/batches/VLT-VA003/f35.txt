@@ -1,0 +1,477 @@
+# VLT-VA003 fixes: remove giveaway cues (absolute words in every distractor, longest answer); pinned with I:
+# src: https://developer.hashicorp.com/vault/docs/secrets/transit
+# src: https://developer.hashicorp.com/vault/api-docs/secret/transit
+# src: https://developer.hashicorp.com/vault/docs/commands/operator/raft
+# src: https://developer.hashicorp.com/vault/docs/platform/k8s/vso/sources/vault
+
+@ VLT-VA003 D9 T9.2 advanced comparison
+S: A VaultDynamicSecret syncs a database static role that Vault rotates every 24 hours. Which setting is needed so VSO treats it correctly, and how does it differ from leased dynamic credentials?
+A: allowStaticCreds: false; VSO requests new credentials on each sync, while leased credentials keep one value for their lifetime
+B: revoke: true; VSO revokes the static role's password each day, while leased credentials are left for Vault to expire
+C: allowStaticCreds: true; VSO reads each rotation, while leased credentials are renewed or re-issued
+D: renewalPercent: 0; VSO renews the static role at once, while leased credentials are renewed at the default 67%
+K: C
+G: ## Two credential patterns in VaultDynamicSecret
+- Static roles (database, LDAP and similar) are rotated by Vault on a schedule, with a request path containing `static-creds`. Set `spec.allowStaticCreds: true`; VSO reads the updated value on each rotation.
+- Leased dynamic credentials leave `allowStaticCreds: false` (default). Vault issues a new set on every request and gives it a TTL; VSO renews the lease at `renewalPercent` (default 67% plus jitter) or requests new credentials when the lease expires or is revoked.
+`revoke: true` is separate: it revokes the lease when the VaultDynamicSecret resource is deleted.
+W: allowStaticCreds true: it tells VSO the credentials are rotated by Vault, so VSO tracks the rotation instead of managing a lease.
+X: A=allowStaticCreds false: that is the default leased-credential mode, where each request creates new credentials with a TTL; it does not describe a static role that Vault rotates.
+B=revoke true: that setting revokes the existing lease when the VaultDynamicSecret resource is deleted. It is not a daily schedule and does not mark the role as static.
+D=renewalPercent 0: it only changes when VSO renews a lease and does not turn on static role handling, so the static role is still treated like a lease.
+T: Use allowStaticCreds: true for rotated static roles; leave it false for leased dynamic credentials.
+V: Vault Secrets Operator, Database
+I: Q009944
+
+@ VLT-VA003 D9 T9.1 applied comparison
+S: Which TWO statements about Vault Agent caching are accurate? (Select TWO)
+A: Agent caching stores KV v1 and KV v2 reads that carry no lease, so repeated reads are answered from the cache
+B: Agent writes its renewal state to Vault, so a restarted Agent resumes the renewals where the old process stopped
+C: Responses are matched by request path alone, so a repeated request with a different header returns the same entry
+D: Agent renews cached tokens and leases in memory, and these renewals stop immediately when Agent shuts down
+E: Agent caches a token from a login request when Agent already manages the parent token or the new token is an orphan
+K: D,E
+G: ## What Agent caching does
+Caching holds responses that contain newly created tokens and leased secrets generated from those tokens. Agent also renews the cached tokens and leases.
+- Tokens: cached only when the token creation request goes through Agent and the parent token is already managed by Agent, or the new token is an orphan.
+- Leased secrets: cached when the request uses a token that Agent manages.
+- Not cached: static KV secrets. The docs recommend Vault Proxy for static secret caching.
+- Uniqueness: a hash of the request, including headers and body, is the cache index.
+- Shutdown: renewals run in memory only, so they end when Agent stops. Shutdown does not revoke anything, but renewal responsibility returns to the client.
+W: D=In-memory renewals: Agent keeps no renewal state outside memory, so renewals end when the process stops (unless persistent caching restores them).
+E=Managed parents and orphans: those are the cases in which Agent keeps a new token and its leases and renews them.
+X: A=Static KV caching: Vault Agent does not cache static secrets such as KV reads; Vault Proxy is recommended for that purpose.
+B=State in Vault: Agent performs its renewals in memory and persists nothing to Vault. Only the optional persistent cache file can bring state back after a restart.
+C=Path-only matching: the request is serialized and hashed together with its headers and body, so a different header creates a different cache entry.
+T: Agent caches tokens and leased secrets of tokens it manages and renews them in memory, but it does not cache static KV reads.
+V: Vault Agent
+I: Q009930
+
+@ VLT-VA003 D7 T7.2 applied troubleshooting
+S: An on-call engineer holds a token whose only policy is `path "sys/seal" { capabilities = ["update"] }`. During an incident they run `vault operator seal` against the active node. What happens?
+A: The command succeeds, because update on the seal path is the capability that the seal endpoint checks for
+B: The command succeeds, but the engineer is first prompted to supply the threshold of unseal key shares
+C: The command is refused with permission denied, because sealing requires the root policy or sudo on the path
+D: The command is refused, because a seal must be authorized by unseal key holders rather than by a token
+K: C
+G: ## Who can seal
+`/sys/seal` is a root-protected endpoint: the request needs a token with the `root` policy or the `sudo` capability on the path. A policy that grants only `update` is not enough.
+- A least-privilege incident-response policy needs `capabilities = ["update", "sudo"]` on `sys/seal`.
+- Sealing never asks for unseal shares; they are required only to unseal again.
+- In an HA cluster only the active node can be sealed; standbys are restarted to get the same effect.
+W: Sudo required: the seal endpoint demands the root policy or sudo on its path, so a token with update alone is refused.
+X: A=Update is enough: the endpoint is root-protected, so update without sudo is rejected.
+B=Shares at a prompt: sealing does not request shares; they only rebuild the unseal key during an unseal.
+D=Shares authorize: sealing is authorized by a token (root or sudo on the path), not by unseal key holders.
+T: Sealing needs the root policy or sudo on `sys/seal`; unsealing needs the share threshold.
+I: Q009906
+
+@ VLT-VA003 D8 T8.1 applied use-case
+S: A team runs a self-managed Vault cluster with Integrated Storage on five nodes. Two nodes fail at the same time because of a rack power loss. What is the state of the cluster?
+A: The remaining three nodes lose quorum, because a five-node Raft cluster needs four voters to commit writes
+B: The remaining three nodes stay available if the failed pair held fewer than the threshold of unseal key shares
+C: The remaining three nodes turn read-only until the failed peers are removed with a raft remove-peer command
+D: The remaining three nodes still form a quorum, so the cluster keeps electing a leader and committing writes
+K: D
+G: ## Quorum in Integrated Storage
+Integrated Storage uses the Raft consensus protocol. A log entry is committed only when a majority of the peer set has stored it. Quorum is the smallest majority: for a peer set of `N` voters it is `ceil((N + 1) / 2)`.
+- 3 servers: quorum 2, failure tolerance 1
+- 5 servers: quorum 3, failure tolerance 2
+- 7 servers: quorum 4, failure tolerance 3
+If quorum is lost the cluster cannot elect a leader, commit writes or change membership, and recovery is manual.
+## Why five nodes is a common production size
+Losing two of five leaves three, which is still a majority, so the cluster rides through two simultaneous failures without operator action.
+W: Quorum survives: three of five is a majority, so the remaining peers keep a leader and commit new writes. A five-node cluster is designed to tolerate two failures.
+X: A=Four voters needed: quorum for five voters is a majority of three, not four. Requiring four would let the cluster tolerate only one failure.
+B=Depends on unseal key shares: unseal key shares are held by operators and are used to unseal a node. They play no role in Raft quorum, which counts running voting peers.
+C=Read-only until remove-peer: `vault operator raft remove-peer` removes a node from the peer set, but it is not needed here. Quorum is not lost, so the cluster keeps accepting writes without manual removal.
+T: Quorum is a majority of voters, so a five-node Raft cluster tolerates two failed nodes.
+V: Vault
+I: Q009869
+
+@ VLT-VA003 D6 T6.2 applied comparison
+S: Which statement about the transit engine's other cryptographic functions is accurate?
+A: Transit can hash data and generate random bytes, but signing and verification need the PKI engine instead.
+B: Transit random bytes are returned after the caller names an existing encryption key in the request path.
+C: Transit can sign data with an `aes256-gcm96` key, since signing uses the same key material as encryption.
+D: Transit can generate random bytes, hash data and compute HMACs, and keys such as `ecdsa-p256` can sign data.
+K: D
+G: ## More than encryption
+Besides encrypt, decrypt and rewrap, the engine offers:
+- **Signing and verification** with `ed25519`, `ecdsa-*` and `rsa-*` keys.
+- **Hashing** (`transit/hash`), **HMAC** (`transit/hmac/<key>`) and **random bytes** (`transit/random`).
+- **Data keys** for envelope-style use.
+What an endpoint can do depends on the key type: for example, an ECDSA key signs but cannot encrypt, and an AES-GCM key encrypts but cannot sign.
+W: Wide function set: random bytes, hashing and HMAC are available, and signing is available on signing-capable key types like ECDSA.
+X: A=Signing needs PKI: transit itself signs and verifies data with ed25519, ECDSA and RSA keys; the PKI engine issues certificates.
+B=Named key for random: the random endpoint does not use a named key; it needs only a policy that allows the path.
+C=AES key signs: each key type supports a specific set of operations, and an AES-GCM key supports encryption and decryption but not signing.
+T: Transit also signs, verifies, hashes, computes HMACs and creates random bytes; the key type limits which operations work.
+I: Q009864
+
+@ VLT-VA003 D6 T6.1 applied troubleshooting
+S: A service's token has only the `update` capability on `transit/encrypt/*`. It calls `transit/encrypt/newkey`, and no key named `newkey` exists. What happens?
+A: The call succeeds and creates `newkey` with default settings, since `update` covers writes to the path.
+B: The call fails, because creating a missing key through the encrypt path needs `create`, not `update`.
+C: The call succeeds if the request also passes `type=aes256-gcm96`, which tells transit which key to create.
+D: The call fails, because transit keys must be created at `transit/keys/newkey` before encrypt is called.
+K: B
+G: ## Upsert on encrypt
+The encrypt endpoint supports `create` and `update`. If the key does not exist and the caller has `create`, transit creates it with default values (derivation depends on whether a `context` is passed) and then encrypts. If the key exists, the call needs `update`. A caller with only `update` gets an error when the key is missing.
+## Turning it off
+Operators who do not want applications creating keys can set `disable_upsert=true` through `transit/config/keys`. Then `create` requests behave like `update` requests.
+W: Capability check: creating a missing object needs `create`, so an update-only token is denied; a token with `create` could trigger the automatic key creation.
+X: A=Update covers writes: capabilities are checked per action, and `update` does not allow creating something that does not exist yet.
+C=Pass the type: the `type` parameter only chooses the key type when an upsert is allowed. It does not grant the missing `create` capability.
+D=Keys path first: creating keys at `transit/keys/<name>` is one way, but the encrypt endpoint can also create a missing key (upsert) for a token with `create`, unless `disable_upsert` is set. The failure here comes from the missing capability.
+T: Auto-creating a key on encrypt needs the create capability; update alone is denied (unless upsert is disabled for all).
+I: Q009861
+
+@ VLT-VA003 D6 T6.2 applied use-case
+S: A team wants developers to stop writing their own cryptographic code in each service while data stays in the existing PostgreSQL database. Which approach matches the stated primary use case of transit?
+A: Developers fetch the key from Vault and run their own AES code locally on each sensitive field.
+B: Developers request a short-lived dynamic database credential from Vault for each row they protect.
+C: Developers call Vault to encrypt a field and store the ciphertext in PostgreSQL; operators manage keys.
+D: Developers store each field in the KV engine and keep a reference to its path in PostgreSQL.
+K: C
+G: ## Encryption as a service
+The transit engine's main purpose is to let applications encrypt data and still keep it in their normal primary datastore. Application developers do not need to choose algorithms, handle key storage or write rotation logic; operators of Vault own that part.
+## What the app does
+1. Base64-encode the value and call `transit/encrypt/<key>`.
+2. Store the returned `vault:vN:...` string in the database column.
+3. When reading, send the string to `transit/decrypt/<key>` and decode the result.
+W: Encrypt through Vault, store ciphertext locally: the app keeps its database, and key handling and cryptography move to Vault operators.
+X: A=Local AES with a fetched key: developers would still write and maintain cryptographic code and handle plaintext key material, which is exactly what transit removes.
+B=Dynamic credentials per row: the database engine issues short-lived database logins, not encryption of stored fields.
+D=KV references: this moves the data itself into Vault and changes the storage design, which is not what transit does.
+T: Transit lets apps encrypt via API and keep ciphertext in their own datastore; operators own keys and rotation.
+I: Q009857
+
+@ VLT-VA003 D2 T2.4 applied comparison
+S: A token holds two policies. The first has `path "secret/data/app/*" { capabilities = ["read"] }` and the second has the identical path with `capabilities = ["create", "update"]`. What can the token do on `secret/data/app/x`?
+A: Read, create and update, because the same pattern in several policies is combined as a union
+B: Read, because the policy that was attached to the token first takes precedence over the other
+C: No access, because two policies that disagree on one path cancel each other out
+D: Create and update, because the most recently written policy replaces the earlier one
+K: A
+G: ## Same pattern in several policies
+A token's ACL is built from all attached policies. When the same path pattern appears more than once, Vault takes the union of the capabilities.
+- Policy one gives `read`; policy two gives `create` and `update`; for `secret/data/app/*` the token holds all three.
+- Attachment order and write time do not matter.
+- The exception is `deny`: if any policy lists `deny` on that same pattern, the result is no access.
+This makes policies additive, so splitting duties across several small policies is safe.
+W: Union: identical patterns merge their capabilities, giving read, create and update.
+X: B=First wins: a token's policies have no ordering, so the one attached first has no priority over the second one.
+C=Cancel out: disagreement does not subtract; only an explicit `deny` removes access.
+D=Latest wins: policies are not replaced by each other; the token carries both of them.
+T: The same path pattern in multiple policies results in the union of capabilities, unless one policy denies.
+I: Q009800
+
+@ VLT-VA003 D1 T1.4 applied comparison
+S: Group a has subgroup b, and entity e is a direct member of b only. Which policies does e receive from groups?
+A: The policies of a, because the parent group's policies override those of its subgroups
+B: The policies of b, because group policies do not flow from a parent group to subgroup members
+C: The policies of b and of a, since subgroup members are indirect members of the parent
+D: No group policies, because entities get them through direct membership in external groups
+K: C
+G: ## Group hierarchy
+Groups can contain entities and other groups. Policies set on a group are granted to all its members. If group a has group b as a subgroup, members of b are indirect members of a, so they receive the policies on both b and a. The policies are combined at request time with the entity's own policies and the token's policies.
+- Direct member: entity listed in the group.
+- Indirect member: entity of a subgroup.
+Use nesting to model org structure, for example `engineering` containing `sre`.
+W: Both groups: indirect membership through the subgroup includes the parent group's policies as well as the subgroup's.
+X: A=Parent overrides: policies do not override or replace one another; the subgroup's own policies accumulate with the parent's.
+B=Subgroup alone: that would ignore inheritance, because group policies are granted to indirect members through every parent group above them.
+D=External groups required: internal groups also grant policies to their members, directly or indirectly.
+T: Members of a subgroup inherit the policies of the groups above them.
+V: Vault
+I: Q009776
+
+@ VLT-VA003 D1 T1.4 applied definition
+S: A group in the identity store is configured as an external group with an alias that maps to the LDAP group sre. What does that provide?
+A: Each entity created by the LDAP mount joins the group, because an external alias applies to the whole mount
+B: Operators add and remove each member by hand, as they do for internal groups in the identity store
+C: LDAP users who belong to sre are added to the Vault group at login and renewal
+D: Membership in Vault changes as soon as the LDAP group changes, through a sync from the directory
+K: C
+G: ## Internal and external groups
+- **Internal groups** are the default. Membership is managed manually (by operators or automation). Groups can also be nested: members of a subgroup inherit policies of the parent group.
+- **External groups** map to a group that lives outside the identity store, such as an LDAP group or a GitHub team. They can have one, and only one, alias, which maps to the outside group.
+## Timing
+With an external group, a user's entity is added as a member automatically during login and token renewal. If the user is removed from the LDAP group, Vault drops the membership only on the next login or renewal, not immediately.
+W: Automatic membership at login or renewal: the alias links the Vault group to the directory group, so policies on the Vault group follow directory membership.
+X: A=Whole mount joins: the alias names one outside group, so only entities whose login reports membership in sre are added, not every entity of the LDAP mount.
+B=Manual membership: manual membership is the behavior of internal groups; an external group is filled from the directory at login and renewal.
+D=Immediate sync: Vault learns about changes only at login and renewal, so a removal from the LDAP group can lag.
+T: External groups mirror outside groups, updated when members log in or renew.
+V: Vault
+I: Q009774
+
+@ VLT-VA003 D3 T3.5 applied troubleshooting
+S: A team rotates the token of a deployment service every day by revoking the old token. Each time, tokens created earlier by that service for other apps stop working and the apps fail. Which change fixes this without changing what the apps are allowed to do?
+A: Change the app tokens to batch tokens, so that revoking the parent service token leaves them valid.
+B: Give the app tokens a longer TTL than the service token, so they outlive its daily revocation.
+C: Attach the `root` policy to the app tokens so that they no longer depend on the service token.
+D: Have the service create the app tokens as orphans, via `create-orphan` or a role with `orphan` set.
+K: D
+G: ## Break the tree on purpose
+The apps' tokens are children of the service token, so they are revoked with it. If the apps need to outlive the service's token, give them no parent. An orphan can be created via `auth/token/create-orphan`, a token store role with `orphan` true, or `no_parent` with `sudo`.
+Batch tokens that are not orphans stop working when their parent is revoked, so changing the type does not help unless they are also orphans.
+W: Orphans: they have no parent, so later revocation of the service token does not cascade to the apps.
+X: A=Batch tokens: a non-orphan batch token stops working when its parent is revoked.
+B=Longer TTL: revocation of a parent revokes its children whatever their remaining TTL, so a longer TTL does not stop the cascade.
+C=Root policy: this widens access dangerously and still leaves the tokens as children, so they are revoked with the parent.
+T: To outlive a parent's revocation, create tokens as orphans.
+I: Q009721
+
+@ VLT-VA003 D5 T5.6 advanced tradeoff
+S: A platform team argues about certificate TTLs for service-to-service TLS issued by the PKI engine. Which approach matches the engine's documented design?
+A: Issue certificates with the longest TTL the role allows, so clients rarely have to request new ones
+B: Share one certificate among all instances of a service, so the CRL keeps a single entry per service
+C: Keep TTLs short so revocation is rarely needed, CRLs stay small and each instance gets its own certificate
+D: Write issued certificates and private keys to disk, so that instances reuse them after a restart
+K: C
+G: ## Short TTLs and PKI
+PKI documentation recommends short TTLs. Revocation is then less needed, so CRLs stay short and the engine scales to large workloads. Each running instance can have its own certificate, avoiding sharing and rollover pain. Certificates can be fetched into memory at start and discarded at shutdown.
+W: Short TTLs and unique certificates: this cuts the need for revocation and keeps lists small, and every instance can be traced.
+X: A=Longest TTL: a long validity increases exposure and makes revocation lists grow if certificates are revoked.
+B=One shared certificate: sharing is what the design avoids, because revoking it affects all instances at once.
+D=Write to disk: ephemeral certificates can be held in memory and discarded at shutdown, and a restarted instance simply requests a new one.
+T: With PKI, short-lived unique certificates reduce the need for revocation.
+V: Vault
+I: Q009833
+
+@ VLT-VA003 D8 T8.5 applied comparison
+S: A Vault Enterprise customer needs a warm standby cluster in another region. After a regional outage, applications should keep their existing tokens and leases with no new logins. Which replication type fits?
+A: Performance replication, since secondaries keep their own tokens and leases for the clients they serve
+B: Disaster recovery replication, since the secondary mirrors tokens and leases and is promoted on failure
+C: Performance replication, since secondaries mirror local mounts, tokens and leases from the primary
+D: Disaster recovery replication, since the secondary serves client reads while the primary stays healthy
+K: B
+G: ## DR vs performance replication (Enterprise)
+Both copy configuration from a primary, but they target different goals.
+- Disaster recovery (DR): a warm standby that mirrors the primary, including tokens, leases and local mounts. It does not serve client requests until it is promoted. Designed against the loss of a whole cluster.
+- Performance: secondaries serve client requests locally (scaling reads, cutting latency) and keep their own tokens and leases. Local mounts are not visible to the other side.
+## Failover consequence
+After a DR promotion, clients can continue with existing tokens and leases. With performance secondaries, applications must re-authenticate and obtain new leases when a secondary is promoted.
+W: DR replication: it mirrors tokens and leases and serves no clients until promotion, matching the warm-standby requirement.
+X: A=Performance with own tokens: performance secondaries do keep their own tokens and leases, which means clients need new logins after promotion, the opposite of the requirement.
+C=Performance mirrors tokens: performance replication does not mirror tokens, leases or local mounts from the primary.
+D=DR serves reads: DR secondaries do not forward or serve requests until elected primary, so they cannot give clients local reads.
+T: DR replication is a warm standby that keeps tokens and leases; performance replication serves local clients.
+V: Vault
+I: Q009889
+
+@ VLT-VA003 D5 T5.3 applied use-case
+S: An application encrypts customer records before writing them to its own MySQL database, but the team does not want developers to handle encryption keys. Which approach uses the transit secrets engine as intended?
+A: The app sends records to Vault, which stores them encrypted under the key and returns them on request
+B: The app sends plaintext to Vault and stores the returned ciphertext in MySQL; the key stays in Vault
+C: The app receives the transit key from Vault, encrypts locally, and discards the key after each insert
+D: The app asks transit for a lease on the key, and the database engine uses it to encrypt the table
+K: B
+G: ## Encryption as a service
+The transit secrets engine handles cryptographic functions on data in transit. Vault does not store the data sent to it. Applications keep the ciphertext in their own primary data store, and the burden of correct encryption moves from developers to Vault operators.
+Besides encrypt and decrypt, transit can sign and verify data, generate hashes and HMACs, and return random bytes. Details of rotation and rewrap are a separate topic.
+W: Send plaintext, store ciphertext: Vault performs the cryptography with a key that does not leave it, and the data itself remains in MySQL.
+X: A=Vault stores records: transit does not store the data sent to it; storing is the job of the application's database or a KV engine.
+C=Key returned to the app: the main benefit of transit is that the named key stays inside Vault, so developers do not handle it.
+D=Lease on the key for the database engine: transit has no such lease and the database engine produces credentials, not encryption of table contents.
+T: Transit encrypts data for applications while the ciphertext stays in their own store and the key stays in Vault.
+V: Vault
+I: Q009818
+
+@ VLT-VA003 D6 T6.1 applied use-case
+S: An operator enables automatic rotation of a transit key with `vault write transit/keys/orders/config auto_rotate_period=720h`. Which statement is accurate?
+A: Vault rejects 720h, because the config endpoint refuses rotation periods shorter than 90 days.
+B: Vault deletes and recreates the key each 720 hours, so existing ciphertext has to be rewrapped first.
+C: Vault adds a key version about every 720 hours; new data uses it while older ciphertext still decrypts.
+D: Vault re-encrypts the stored ciphertext on that schedule and updates its `vault:vN:` version prefix.
+K: C
+G: ## Scheduled rotation
+`auto_rotate_period` tells Vault to rotate a key at that interval. The default of `0` turns it off, and the value cannot be shorter than one hour. It can be given when creating a key or on its config endpoint.
+## Why rotate
+Periodic rotation limits how much data one key version protects. For AES-GCM keys, NIST SP 800-38D guidance is to rotate before about 2^32 encryptions with one key version, so operators estimate the encryption rate to choose an interval.
+## After a rotation
+A rotation, manual or automatic, only adds a version. Applications still need rewrap to upgrade stored ciphertext.
+W: Automatic rotation: 720 hours is a valid period, Vault adds versions on schedule, and the key ring keeps old versions for decryption.
+X: A=90-day minimum: the documented minimum is one hour, so 720 hours (30 days) is accepted.
+B=Delete and recreate: rotation adds a version to the same key ring; the key and its history stay, so old ciphertext still decrypts without a rewrap.
+D=Automatic re-encryption: Vault does not hold the ciphertext, so no scheduled job can rewrite it; rewrap is a call the application makes.
+T: auto_rotate_period (at least 1h) adds key versions on a schedule; rewrap is still how old ciphertext is upgraded.
+I: Q009860
+
+@ VLT-VA003 D5 T5.4 applied definition
+S: An administrator runs vault secrets move database/ db-prod/ for an engine that has issued credentials. What is the effect?
+A: The engine moves with its active leases, which keep working under the new path until their normal expiry
+B: The engine stays mounted at the old path, and the new path becomes an alias that routes requests to it
+C: The engine is disabled at the old path and an empty engine with no configuration is enabled at the new path
+D: The configuration moves to the new path, but issued secrets are revoked because leases are tied to the old path
+K: D
+G: ## Secrets engine lifecycle
+An engine can be enabled, disabled, moved and tuned.
+- Move: changes the path of an existing engine. All secrets are revoked, since leases are tied to the path where they were created, but the stored configuration persists.
+- Tune: changes global settings such as TTLs.
+Plan moves in a maintenance window because clients holding credentials lose them.
+W: Configuration kept, secrets revoked: leases belong to the original path, so the move revokes them while connection settings and roles stay.
+X: A=Leases carried over: they cannot survive, because they are tied to the old path.
+B=Alias to old path: Vault has no alias for mounts; the engine is relocated.
+C=Disable and re-enable: the configuration persists through a move, which is the point of the command.
+T: Moving an engine keeps its configuration but revokes its secrets.
+V: Vault
+I: Q009825
+
+@ VLT-VA003 D8 T8.5 applied troubleshooting
+S: A Vault Enterprise team enabled a KV mount on a performance primary with the `-local` flag. Engineers in the secondary region cannot see this mount. Which statement explains it?
+A: Local mounts need a paths filter on the secondary before their data can be read in that region
+B: Local mounts reach performance secondaries, but only after the next scheduled snapshot is restored
+C: Local mounts are removed from a performance secondary each time the primary is restarted
+D: Local mounts replicate to disaster recovery secondaries but not to performance secondaries
+K: D
+G: ## Shared and local mounts
+Each mount is either shared (the default) or local (`-local`, for example `vault secrets enable -local -path=us_west_data kv-v2`).
+- Shared mounts replicate their data to performance secondaries.
+- Local mounts replicate only to disaster recovery secondaries. A local mount created on a performance primary is not visible to its performance secondaries; a local mount created on a performance secondary is not visible to the primary.
+Tokens and leases are local storage entries, and some paths on a shared mount (for example PKI certificates) can also be local.
+W: DR only: a local mount stays out of performance replication, so the secondary region cannot see it, by design.
+X: A=Needs a paths filter: the paths filter allows or denies shared mounts and namespaces; local is a mount property that already excludes it from performance replication.
+B=Replicated after a snapshot: replication is not snapshot-driven for this purpose; local mounts are excluded from performance replication.
+C=Removed on restart: a restart removes nothing; the mount was never present on the performance secondary.
+T: Local mounts replicate to DR secondaries only, not to performance secondaries.
+V: Vault
+I: Q009891
+
+@ VLT-VA003 D2 T2.4 applied troubleshooting
+S: A policy uses `path "secret/data/{{identity.entity.metadata.team}}/app"` and a user's entity metadata has `team` set to `*`. What happens when the user requests `secret/data/anything/app`?
+A: Access is denied, because a rendered template value may not contain wildcards such as `*`
+B: Access is granted for list requests, because wildcards in templates expand during listing
+C: Access is granted, because the rendered `*` matches any team folder under secret/data
+D: Vault logs a warning and falls back to the same policy path with the template removed
+K: A
+G: ## Rendering rules for templates
+Vault substitutes identity values before matching the path. Substituted values are treated as literal text and cannot introduce wildcards.
+- Using `+` or `*` in the rendered output results in permission denied.
+- A server setting, `deny_slash_in_templated_paths`, controls whether a rendered value that contains `/` is also denied.
+This prevents a user who controls a piece of metadata from widening their own access.
+W: Wildcard in output: rendered wildcards are rejected, so the request returns permission denied.
+X: B=List requests: there is no special wildcard handling for list requests in template output.
+C=Wildcard expansion: that would let metadata values widen access, which Vault explicitly prevents.
+D=Fallback: Vault does not fall back to a policy without the template; the request is simply denied.
+T: Wildcards (`+` or `*`) in a rendered template value cause permission denied.
+I: Q009807
+
+@ VLT-VA003 D5 T5.8 advanced troubleshooting
+S: A developer deleted the latest version of a KV v2 secret with vault kv delete -mount=secret creds by mistake. What should the operator do to bring it back?
+A: Run vault kv destroy for the version, which re-creates the version data from storage
+B: Run vault kv undelete for that version, since delete marks the version as deleted
+C: Run vault kv metadata delete, which restores the deleted versions of the key
+D: Nothing, because a KV v2 delete removes the underlying data of the version
+K: B
+G: ## Delete, undelete, destroy
+KV v2 keeps versions and uses soft deletes.
+- `vault kv delete`: marks versions as deleted; the data is not removed.
+- `vault kv undelete -versions=N`: restores them.
+- `vault kv destroy -versions=N`: permanently removes the version data.
+- `vault kv metadata delete`: removes all versions and metadata of the key.
+Policies can restrict who may soft delete, undelete or destroy.
+W: Undelete: a soft delete marks the version, so undelete reverses it. The recovery needs the `-versions` option.
+X: A=Destroy: it permanently removes version data and cannot be reversed.
+C=Metadata delete: it permanently removes every version and the metadata, which is the opposite of recovery.
+D=Data removed: soft deletes keep the data so that recovery is possible.
+T: KV v2 delete is soft and undelete reverses it; destroy and metadata delete are permanent.
+V: Vault
+I: Q009838
+
+@ VLT-VA003 D6 T6.1 applied comparison
+S: Which TWO transit key types support convergent encryption? (Select TWO)
+A: `aes128-gcm96`, AES-GCM with a 128-bit key and a 96-bit nonce
+B: `ecdsa-p384`, an ECDSA key that uses the NIST curve P-384
+C: `rsa-4096`, a 4096-bit RSA key that can encrypt and sign data
+D: `ed25519`, a signing key type that supports key derivation
+E: `chacha20-poly1305`, a ChaCha20-Poly1305 key of 256 bits
+K: A,E
+G: ## What convergent encryption needs
+Convergent encryption makes the same plaintext and context always produce the same ciphertext. It works by deriving a key from a context and deterministically deriving the nonce, so it is available only for symmetric AEAD key types that support derivation: `aes128-gcm96`, `aes256-gcm96` and `chacha20-poly1305`.
+## Why the others fail
+`ed25519` supports derivation, but as a signing analogue (the same context gives the same signature), not for encrypting. RSA keys use OAEP padding and ECDSA keys only sign, so neither has a key-derivation mode.
+W: A=AES-128-GCM: a symmetric AEAD key with derivation, so convergent encryption can be switched on.
+E=ChaCha20-Poly1305: a symmetric AEAD key listed as supporting derivation and convergent encryption.
+X: B=ECDSA P-384: it supports signing and verification only, with no encryption and no derivation mode.
+C=RSA-4096: it does encrypt, decrypt and sign, but it has no derivation or convergent mode.
+D=Ed25519: it supports derivation, but for signing only; it cannot encrypt, so convergent encryption does not apply.
+T: Convergent encryption is for the symmetric AEAD types (AES-GCM and ChaCha20-Poly1305) with derivation enabled.
+I: Q009852
+
+@ VLT-VA003 D5 T5.4 advanced definition
+S: Why can an enabled secrets engine not read the data stored for another engine, even if the engine contains a bug?
+A: Each engine runs on its own Vault node and exchanges data with the others through replicated tokens
+B: Each engine sees storage through a barrier view under a random UUID, with no relative access like ../
+C: Each engine is limited by the policies of the token that enabled it, so other paths return denied
+D: Each engine's data is encrypted with a separate unseal key that the operator supplies at mount time
+K: B
+G: ## Barrier view
+When a secrets engine is enabled, Vault generates a random UUID that becomes the data root of that engine. Everything it writes is prefixed with it, and since storage has no relative access like `../`, an engine cannot reach beyond its folder. This works like a chroot, so even a malicious engine cannot read the data of other engines.
+This is separate from policy checks that apply to API callers.
+W: Barrier view with UUID prefix: the engine can only address its own folder in storage, which isolates engines from one another.
+X: A=Separate nodes: engines run inside the same Vault process and do not need separate nodes.
+C=Enabling token's policy: policies govern API callers, but internal storage access by engine code is limited by the barrier view.
+D=Separate unseal keys: Vault has one seal and unseal process for the whole barrier, not one per engine.
+T: Engines see storage through a UUID-prefixed barrier view, like a chroot.
+V: Vault
+I: Q009826
+
+@ VLT-VA003 D7 T7.2 applied troubleshooting
+S: A cluster uses a Shamir seal. An application logged in earlier today. After an unplanned restart of a node, `vault kv get secret/app` returns an error that Vault is sealed. Which action restores service?
+A: Wait until the application token's TTL is renewed, after which the node unseals itself
+B: Provide the threshold of unseal key shares with `vault operator unseal` on that node
+C: Run `vault operator init` on the node so that it generates a new root key and shares
+D: Run `vault login` again with the application credentials, which unseals the node
+K: B
+G: ## Restart means sealed
+When the Vault process stops, the plaintext root key in memory is lost. A restarted node with a Shamir seal begins sealed and needs the threshold of shares. With auto-unseal, the node asks the configured KMS instead.
+- Stored data, policies and tokens survive in the storage backend; unsealing does not lose them.
+- Authentication cannot unseal Vault, since no client credential can decrypt the root key.
+- Re-running init is refused for an initialized cluster and would never recreate old keys.
+W: Unseal with shares: providing the threshold of shares rebuilds the unseal key and decrypts the root key, after which stored data and existing tokens work again.
+X: A=Wait for renewal: TTLs and renewals are processed by an unsealed Vault, and nothing unseals a node on a timer.
+C=Init again: init is refused on an initialized storage backend.
+D=Log in again: client authentication does not decrypt anything; logins fail while sealed.
+T: After a restart a sealed node needs the unseal shares; storage and tokens persist.
+I: Q009909
+
+@ VLT-VA003 D3 T3.2 applied tradeoff
+S: Which practice best matches HashiCorp's guidance for root tokens in a production cluster?
+A: Use a root token for setup or emergencies, revoke it after use, and generate a new one when needed.
+B: Give the root token a short TTL and renew it from a scheduled job so that it stays usable for admins.
+C: Keep a separate root token for each administrator so that audit logs can tell the users apart.
+D: Store the initial root token in a shared secret store so any on-call engineer can use it daily.
+K: A
+G: ## Guidance
+Root tokens can do anything, and they can be non-expiring, so a leaked one is a worst-case incident. The guidance in the tokens documentation:
+- use a root token only for just enough initial setup (auth methods and policies that let administrators get limited tokens) or in emergencies;
+- revoke it immediately afterward; use `generate-root` when a new one is needed;
+- have several people watch the terminal while a root token is live so the actions and the revocation can be verified.
+Daily administration should use named identities with narrow policies.
+W: Setup or emergency, then revoke: that limits exposure, and `generate-root` provides a root token again when one is really needed.
+X: B=Renewed root: automation that keeps root alive defeats the goal of short exposure; a root token should be revoked after use, not kept live.
+C=One root per admin: more root tokens means more standing full-access credentials; audit identity should come from named auth methods with limited policies instead.
+D=Shared daily root: a widely shared, always-available root token is the exposure the guidance warns about.
+T: Root tokens are for bootstrap and emergencies, then revoke; `generate-root` makes a new one when required.
+I: Q009709
+
+@ VLT-VA003 D7 T7.1 advanced use-case
+S: An attacker copies a full snapshot of the storage backend files from a stopped Vault node. The attacker has no unseal keys and no Vault token. What can the attacker read?
+A: Plaintext secrets, after the attacker replays stored token records against the restarted sealed server
+B: The names of auth methods and mounts, which are kept unencrypted so a sealed node can start up
+C: Encrypted data only, because the keys in storage are themselves encrypted and the unseal key is not stored
+D: Plaintext secrets, because the storage files of a stopped node are readable with filesystem access
+K: C
+G: ## Untrusted storage
+The security model assumes an attacker may read the storage backend. Everything Vault stores is encrypted by the barrier, including the encryption key (encrypted by the root key) and the root key (encrypted by the unseal key). The unseal key is never stored in the clear; with Shamir seals only the operators hold its shares.
+## What the model does not promise
+Per the threat model, an attacker who reads storage may still learn that secret material exists. Vault also does not defend against memory analysis of a running, unsealed Vault or arbitrary control of the backend (deleting or rolling back data).
+W: Ciphertext only: without the unseal key the root key stays encrypted, so the encryption key and all data are unreadable.
+X: A=Replaying tokens: client tokens are stored inside the same encrypted data, and a sealed server answers no login requests anyway.
+B=Plaintext mount names: nothing is stored unencrypted for unseal use; Vault holds the data it needs encrypted and requires the keys from operators.
+D=Plaintext files: file access does not help because everything is encrypted before it is written.
+T: A stolen storage snapshot reveals only ciphertext; confidentiality depends on the unseal key staying out of the attacker's hands.
+I: Q009899

@@ -1,0 +1,288 @@
+# DBX-MLA f37: remove giveaway cues (absolute words in every distractor, longest correct option); full blocks pinned with I:
+# src: https://docs.databricks.com/aws/en/ldp/streaming-tables
+# src: https://docs.databricks.com/aws/en/machine-learning/model-serving/
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/online-feature-store
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/concepts
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/train-models-with-feature-store
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/uc/feature-tables-uc
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/time-series
+# src: https://docs.databricks.com/aws/en/machine-learning/feature-store/lineage
+# src: https://docs.databricks.com/aws/en/mlflow/models
+# src: https://docs.databricks.com/aws/en/mlflow/experiments
+# src: https://docs.databricks.com/aws/en/machine-learning/automl/
+# src: https://docs.databricks.com/aws/en/machine-learning/automl/classification
+
+@ DBX-MLA D4 T4.4 advanced troubleshooting
+S: A pipeline's streaming table adds a `score` column by applying model version 1 to each new event. The team swaps the query to use version 2 and runs a normal (non-full) update. What does the table contain afterwards?
+A: The update fails, since a streaming table's query is locked after its first run
+B: Old rows are dropped, and the table holds just the rows that arrive after the change
+C: Old rows keep version 1 scores and new rows get version 2 scores, until a full refresh
+D: Version 2 scores on old and new rows, since each update re-reads the source with the new query
+K: C
+G: ## Streaming tables process each row once
+In a pipeline, a **streaming table** processes each record exactly once, assuming an append-only source. A row already appended is not re-read on later updates. The Databricks streaming table docs give an example: changing `SELECT LOWER(name)` to `SELECT UPPER(name)` leaves old rows lowercase while new rows are uppercase, and a **full refresh** requeries all earlier data from the source to update every row.
+## Consequence for scoring
+Applying the same reasoning to a model-scoring column, changing the model changes only rows processed after the change. To make every row use the new model, run a full refresh. Teams must also remember that different query versions have processed different rows.
+W: C=Mixed versions until full refresh: a streaming table sees each row once, so earlier rows keep the old logic and a full refresh is what reprocesses them.
+X: A=Query locked: the docs say you can change the query without recomputing the entire dataset, so the update runs.
+B=Old rows dropped: a changed query does not remove rows already appended; they stay unless a full refresh rebuilds the table.
+D=Re-read everything: a normal update does not re-query rows already appended to a streaming table; recomputing results as needed describes a materialized view, and here only a full refresh re-reads the source.
+T: Streaming table = each row processed once; changing the logic needs a full refresh to rescore old rows.
+I: Q011632
+
+@ DBX-MLA D4 T4.1 applied use-case
+S: A checkout service must return a fraud score to the payment page while the customer waits, using the values in that single request. Which approach meets the requirement?
+A: A nightly batch job that scores the previous day's transactions and writes the results to a Delta table
+B: A weekly retraining job that recomputes fraud scores for the known customers before its next scheduled run
+C: A triggered pipeline that rescores the transactions table on an hourly schedule and refreshes a materialized view
+D: A model serving endpoint that the application calls over REST, returning the prediction in the HTTP response body
+K: D
+G: ## Per-request predictions need an online endpoint
+Real-time inference means a caller sends input and waits for the prediction. On Databricks, Mosaic AI Model Serving exposes a registered model as a REST API. The service is described as highly available and low-latency, with automatic scale-up and scale-down as demand changes, so the application only needs an HTTP client.
+## Why stored scores do not work here
+A table of precomputed scores can only contain customers and transactions that existed at the last run. A brand-new transaction has no row yet, so the page would have nothing to read. Per-request input that only exists at checkout time forces online scoring.
+W: D=Model serving endpoint: it scores the new transaction at the moment it is sent, returns the prediction in the HTTP response, and scales with checkout traffic.
+X: A=Nightly batch: the new transaction does not exist when the job runs, so the page would show yesterday's data or nothing, with up to a day of delay.
+B=Weekly retraining: retraining changes the model, not when predictions are produced, and weekly recomputation is far too slow for a checkout.
+C=Hourly triggered pipeline: triggered mode refreshes the available data and stops, so the score would arrive up to an hour late and never inside the customer's request.
+T: When the input exists only at request time and a person waits, use a real-time serving endpoint.
+I: Q011617
+
+@ DBX-MLA D1 T1.10 applied tradeoff
+S: A marketing team scores 40 million customers once every night to produce next-day campaign lists. They ask for an online feature store "to be safe". What is the best recommendation?
+A: Create the online store and read the 40 million feature rows through its Postgres interface during each nightly scoring run
+B: Skip the online store and run `score_batch` on the offline tables, since an online store adds a billed service with no latency need
+C: Export the features to CSV files on cloud storage first, because `score_batch` is meant to read plain files rather than Delta tables
+D: Create a large-capacity online store and publish continuously, because online stores serve big nightly scans faster than Delta
+K: B
+G: ## Choosing offline or online
+Choose by the access pattern:
+- **Batch** (nightly or hourly, large volumes, no per-request deadline): read the offline Delta tables. `score_batch` joins the features by key and scores in Spark, scaling with the cluster.
+- **Real-time** (per request in milliseconds): publish to the online store and serve the model or features through an endpoint.
+An online store is a provisioned Lakebase instance that is billed while it exists; Databricks advises deleting stores not in use and sharing one among projects in development. Publishing features that nobody reads online adds cost and a sync pipeline to maintain, with no benefit to a nightly job.
+Bulk-reading millions of rows through a point-lookup database is the wrong tool compared with a distributed Spark scan of Delta.
+W: B=Offline tables with `score_batch`: batch scoring reads the offline Delta tables at scale; with no latency requirement the online store is just extra cost and operations.
+X: A=Read everything through Postgres: pulling 40 million rows through a point-lookup interface is slow compared with a Spark scan of the offline table.
+C=CSV export: `score_batch` looks up features from the feature tables directly, so converting them to unmanaged files adds a copy with no benefit.
+D=Large online store: online stores are built for point reads by key, not large scans, and a larger capacity only raises the running cost.
+T: Batch workloads use the offline tables with `score_batch`; add an online store only for real-time latency needs.
+V: Feature Store, Lakebase
+I: Q011559
+
+@ DBX-MLA D1 T1.10 applied definition
+S: Which statement correctly contrasts the offline and the online feature store in Databricks?
+A: The offline store is where models are served from, and the online store holds the model artifacts and their versions
+B: The offline store keeps history for batch scoring on object storage, and the online store is a separate dataset with its own schema and keys
+C: The offline store holds the Delta feature tables for discovery, training and batch scoring; the Lakebase-based online store serves real-time apps
+D: The offline store is meant for notebook exploration, and the online store is any Delta table that has a primary key declared
+K: C
+G: ## Offline versus online
+Feature tables in Unity Catalog are Delta tables: this is the **offline store**. It is used for feature discovery, model training and batch inference, where throughput matters more than latency.
+The **online feature store** is a low-latency, high-scale store for real-time applications and for automatic feature lookup in model serving endpoints. It is powered by Databricks Lakebase and you populate it by publishing offline tables (`publish_table`). Lineage and governance stay tied to the source table, and Databricks keeps the online table in sync according to the publish mode.
+Feature tables and Feature Views can both publish to the Online Feature Store; feature tables can also use a third-party online store. The legacy Workspace Feature Store (the older name in the exam guide) is not the current path.
+W: C=Delta tables offline, Lakebase online: the offline tables are the Delta tables for discovery, training and batch scoring; the Lakebase-powered online store gives the millisecond lookups real-time applications need.
+X: A=Serving and model artifacts: the offline store is not where models are served; models live in Unity Catalog and serve from endpoints, while the online store holds feature values.
+B=Separate dataset with its own schema: the online table mirrors the published offline table and the entity key; it is populated from the offline table and is not a separate dataset.
+D=Notebook-only offline store: the offline store is the main source for training and batch jobs, and an ordinary keyed Delta table is a feature table, not an online store.
+T: Offline = Delta tables for training and batch; online = low-latency Lakebase-backed store for real-time lookups, filled by publishing.
+V: Feature Store, Lakebase
+I: Q011555
+
+@ DBX-MLA D1 T1.9 applied use-case
+S: A model was trained on feature table columns plus a `browser` column from a separate events table, passed in the DataFrame to `create_training_set` (not excluded). It was logged with the feature client. What must the batch DataFrame passed to `score_batch` contain?
+A: The lookup keys and the label column, so that the client can compute accuracy while it scores
+B: The lookup keys and a `browser` column, because that input does not come from a feature table
+C: The lookup keys alone, because the logged model keeps the `browser` values from training
+D: Each feature column plus `browser`, because feature lookups are applied at training time
+K: B
+G: ## Mixing feature-store and external inputs
+A training DataFrame can hold columns that are not in any feature table. Whatever is not excluded becomes a training input. The model remembers only the feature lookups, not the external column values. At inference, `score_batch` can fetch features by key but cannot fetch `browser`, so the caller must supply it in the scoring DataFrame next to the keys.
+If an input should be available automatically at inference, add it to a feature table (or compute it with a feature function) so the lookup can find it. Scoring data should not contain the label.
+W: B=Keys plus the external column: the keys let the client look up the table features, and the externally sourced `browser` column has to be provided because no lookup can recreate it.
+X: A=Keys and label: labels are not model inputs, and `score_batch` does not compute accuracy.
+C=Keys alone: neither the model nor the feature store retains the external column; only the feature tables referenced by lookups are read.
+D=Everything supplied: lookups work at inference too, so only the non-feature input must be provided.
+T: Features come from lookups at scoring; any non-feature input in the training DataFrame must be in the scoring DataFrame.
+V: Feature Store
+I: Q011553
+
+@ DBX-MLA D1 T1.7 applied troubleshooting
+S: A churn model reads `customer_features`, but its predictions drift because the table is refreshed by a notebook that someone runs by hand when they remember. What should the team do?
+A: Schedule a job that runs a notebook calling `write_table(..., mode="merge")` on a regular cadence such as daily
+B: Switch the manual notebook to `mode="overwrite"` so that each run replaces stale rows left in the table
+C: Drop and recreate the table weekly and have users recompute the features in their own notebooks
+D: Convert the table into a view over the raw data so that values are recomputed at query time for each consumer
+K: A
+G: ## Keeping feature values fresh
+Feature tables are only as good as their latest write. Databricks recommends a **scheduled job** (Lakeflow Jobs) that runs a notebook which computes the features and writes them with `mode="merge"`, for example daily. An existing manual job can be converted to a scheduled one. For features that must be fresher than a batch cadence allows, pass a streaming DataFrame to `write_table` instead.
+Also keep the same feature computation function for the scheduled job and for backfills so that old and new rows agree. Merging by key keeps unchanged keys, so a failed run does not wipe the table.
+W: A=Scheduled merge job: a scheduled job with a merge write keeps values current without manual work and without risking the rows the run did not touch.
+X: B=Manual overwrite: it is still manual, and overwrite replaces all rows, so a partial run leaves the table incomplete.
+C=Weekly drop and recreate: deleting a feature table drops the underlying Delta table and breaks models, endpoints and jobs that depend on it.
+D=View over raw data: feature values are then recomputed by every consumer at query time, and a view with joins or aggregations is not a simple SELECT view, so it cannot be a feature table.
+T: Refresh feature tables with a scheduled job that writes with `mode="merge"`.
+V: Lakeflow Jobs, Feature Store
+I: Q011544
+
+@ DBX-MLA D1 T1.6 applied use-case
+S: A churn team must retrain monthly on what each customer's features looked like on every past day, for audit. The feature job runs daily, and overwriting yesterday's rows with today's values would lose that history. How should the feature table be designed?
+A: Keep `customer_id` as the primary key and write each day's DataFrame in append mode so that the daily rows accumulate in the table
+B: Use a composite primary key of `date` and `customer_id`, with liquid clustering (or partitioning on `date`) for window reads
+C: Keep `customer_id` as the primary key and read older Delta versions with time travel whenever training needs past values
+D: Create a new feature table each day with the date in its name, and add a `FeatureLookup` for each daily table
+K: B
+G: ## Storing past values of daily features
+A feature table has one row per primary key value. If the key is only `customer_id`, a daily job that merges new values replaces the old row, and the table shows only the latest state. To keep history, put the date in a **composite primary key**, for example `PRIMARY KEY (date, customer_id)`. Each day then adds one row per customer.
+For efficient reads of a window, Databricks recommends liquid clustering on the table; without it, partition by the date column. A training job filters `date` to the period of interest.
+If lookups must also return the latest value as of the label time, declare the time column with `TIMESERIES` so `create_training_set` can do a point-in-time join.
+W: B=Composite key with the date: one row per customer per day keeps the history, and clustering or partitioning on the date makes window reads cheap.
+X: A=Append with a single-column key: a primary key is not enforced as a duplicate check, but lookups require exactly one row per key; duplicate customers make joins ambiguous and break the feature table contract.
+C=Time travel: Delta versions are kept only for the retention period and are not addressable by `FeatureLookup`, so they are not a dependable history for audits.
+D=A table per day: it explodes the number of tables, and each `FeatureLookup` names one table; a model cannot reference an open-ended, growing list of daily tables.
+T: To keep history in a feature table, put the date (or a `TIMESERIES` timestamp) into a composite primary key instead of overwriting rows.
+V: Unity Catalog, Delta Lake
+I: Q011538
+
+@ DBX-MLA D1 T1.12 applied comparison
+S: A training script finishes with `mlflow.log_artifact("model.pkl")` for a pickled scikit-learn estimator. A colleague asks why the team should use `mlflow.sklearn.log_model(model, name="model", input_example=X.head(5))` instead. Which is the best reason?
+A: `log_artifact` is limited to small files of a few megabytes, while `log_model` accepts large serialized models of any common size
+B: `log_artifact` registers the file in Unity Catalog as a model version, while `log_model` keeps the file unversioned in the run
+C: `log_model` saves the MLflow Model format with flavors, dependency files and a signature, so it can be loaded, registered and served
+D: `log_model` keeps the model inside the Databricks control plane, while `log_artifact` writes the file to the customer's cloud storage
+K: C
+G: ## A file versus an MLflow Model
+`mlflow.log_artifact` copies any local file into the run's artifact location. MLflow treats it as an opaque file: it does not know what is inside.
+`mlflow.<flavor>.log_model` writes a directory in the MLflow Model format:
+- an `MLmodel` file that lists the flavors (for example `sklearn` and the generic `python_function`) and the model signature
+- the serialized model
+- `requirements.txt` and `conda.yaml` so the environment can be rebuilt
+- an input example when you pass one
+With this structure, `mlflow.pyfunc.load_model`, batch inference with a Spark UDF, registration with `mlflow.register_model` and Model Serving all work without custom code. A bare pickle supports none of them.
+In MLflow 3 the call uses `name=` for the logged model (MLflow 2 called this argument `artifact_path`).
+W: C=MLflow Model format: logging the model with its flavor, signature and dependency files is what makes it loadable with one call, registrable in Unity Catalog and deployable on Model Serving.
+X: A=Size limit: there is no small size cap on `log_artifact` that `log_model` avoids; both write to the same artifact storage for the run.
+B=Unity Catalog registration: `log_artifact` does not register anything in Unity Catalog. Registration requires `register_model` or `registered_model_name` for a logged model.
+D=Storage location: both use the experiment's artifact location (MLflow-managed storage by default, or a Unity Catalog volume you choose). Neither writes to a different place by default.
+T: Use `log_model` (flavor, signature, requirements) for models; use `log_artifact` for plain files such as reports and CSVs.
+I: Q011488
+
+@ DBX-MLA D1 T1.3 applied use-case
+S: A risk team wants to know which input features most influence the model AutoML selects, using Shapley values. What do they need to know about AutoML-generated notebooks?
+A: Shapley values are produced for forecasting models, while the classification and regression notebooks leave them out
+B: Shapley values are computed during training and saved in the data exploration notebook for the best trial
+C: The notebooks include SHAP code, off by default because it is memory-intensive; set shap_enabled = True and re-run
+D: Shapley values need a separate paid explainability add-on that has to be enabled in the workspace first
+K: C
+G: ## Explainability in AutoML notebooks
+Shapley values come from game theory and estimate how much each feature contributes to individual predictions, which makes them a common way to rank feature importance. The notebooks AutoML writes for regression and classification include SHAP code in a **Feature importance** section. The calculation is highly memory-intensive, so it does not run by default. To use it, set `shap_enabled = True` in that section and re-run the notebook, with enough memory on the compute.
+This is an example of AutoML's glass-box style: model selection and importance analysis are visible code you can run and change.
+W: C=SHAP code, off by default: the generated classification and regression notebooks contain SHAP code that is disabled by default for memory reasons, and turning it on is a one-line change.
+X: A=Forecasting only: the notebooks for regression and classification are the ones that include Shapley code.
+B=Computed during training: the opposite is true, because the calculation is costly and off by default.
+D=Paid add-on: SHAP is an open-source package used inside the notebook, not a separate product.
+T: AutoML notebooks include SHAP, disabled by default; set shap_enabled = True to compute feature importance.
+I: Q011470
+
+@ DBX-MLA D3 T3.9 advanced use-case
+S: A pipeline chains `StandardScaler` and `LogisticRegression`. A data scientist first fits the scaler on the full training DataFrame, transforms it, then runs `CrossValidator` on the scaled data. Validation scores are slightly optimistic. What is the better design?
+A: Fit the scaler on each validation fold, so that the scaling reflects the data being scored in that fold
+B: Pass a `Pipeline` of scaler and classifier as the estimator, so the scaler is refit on each fold's training part
+C: Fit the scaler on the full dataset including the test set, so the folds share identical scaling statistics
+D: Remove the scaler from the pipeline, since logistic regression gives the same model on unscaled features
+K: B
+G: ## Leakage through preprocessing
+If the scaler is fit on all training rows, the mean and standard deviation of each validation fold have influenced the scaling that the model receives. The effect is usually small, but with imputers, target encoders, feature selection or PCA the leak can be large.
+## The fix
+An `Estimator` handed to `CrossValidator` can be a `Pipeline`. The tuner then fits the whole pipeline on the training folds of each split, so every fitted stage (scaler, imputer, indexer) learns only from training rows and is applied to the held-out fold. The same idea in scikit-learn is passing a `Pipeline` to `GridSearchCV` or `cross_val_score`.
+W: B=Pipeline as the estimator: all stages are refit inside each fold using only that fold's training rows, which removes preprocessing leakage and also lets pipeline stage parameters join the grid.
+X: A=Fit on validation fold: a transformer must learn only from training data, otherwise the held-out rows influence the transformation they are evaluated with.
+C=Fit on everything: including the test set leaks even more information and makes the final estimate unreliable.
+D=Drop the scaler: scaling affects how regularized logistic regression penalizes features and speeds up convergence, so the model changes; removing it is not a fix for leakage.
+T: Put preprocessing and model in one Pipeline and give it to the CrossValidator so each fold fits its own transformers.
+I: Q011450
+
+@ DBX-MLA D1 T1.3 applied use-case
+S: An analyst gives AutoML a labeled customer table and asks for a classification experiment with the label column as target. How does AutoML find a good model?
+A: It runs tuned trials across several algorithms such as trees, logistic regression, XGBoost and LightGBM, then ranks them
+B: It fits one logistic regression on the prepared data and reports its coefficients as the final model
+C: It copies the architecture of the last model registered in Unity Catalog and retrains that one with the new data
+D: It asks the user to pick one algorithm up front and then tunes the learning rate of that single algorithm
+K: A
+G: ## What AutoML does
+AutoML is still a documented, supported feature (not deprecated). What changed: from Databricks Runtime 18.0 ML, AutoML is no longer a built-in library of the ML runtime, so the questions here assume a runtime version that includes it.
+AutoML automates the search for the best algorithm and hyperparameter configuration. You supply the dataset and the problem type (classification, regression or forecasting). AutoML then:
+- cleans and prepares the data,
+- orchestrates distributed model training and hyperparameter tuning across multiple algorithms,
+- finds the best model with open-source evaluation algorithms from scikit-learn, xgboost, LightGBM, Prophet and ARIMA,
+- presents the results, with the source code notebook for each trial.
+For classification the algorithms are decision trees, random forests, logistic regression, XGBoost and LightGBM. Because each trial is a run with metrics, you compare models on your chosen metric.
+W: A=Tuned trials across algorithms: AutoML searches several algorithms with hyperparameter tuning and ranks the trials, so model selection is automated, not a single predefined choice.
+X: B=Single logistic regression: logistic regression is just one of the candidate algorithms, and there is no coefficient-only report.
+C=Copy the last model: AutoML starts from your dataset and problem type, not from a previously registered model.
+D=User picks one: AutoML's value is that it also explores which algorithm fits, not only one algorithm's hyperparameters.
+T: AutoML runs many algorithm and hyperparameter trials, evaluates them and surfaces the best one.
+V: AutoML, MLflow
+I: Q011466
+
+@ DBX-MLA D1 T1.13 applied use-case
+S: Three data scientists each train in their own notebook and call `mlflow.start_run()` without setting an experiment. The team lead wants all their runs to land in one experiment so the runs can be compared side by side. What is the best approach?
+A: Merge the three notebooks into one notebook, because only runs started in the same notebook can be compared
+B: Export each notebook experiment's runs as CSV files and re-import them into one experiment as new runs
+C: Keep the defaults, because Databricks groups the runs of notebooks stored in the same folder into one experiment
+D: Call `mlflow.set_experiment("/Shared/churn-model")` in each notebook so runs log to one workspace experiment
+K: D
+G: ## Notebook and workspace experiments
+An experiment is the collection of runs that you compare. Databricks has two kinds.
+- A **notebook experiment** exists for one notebook. If no experiment is active when `mlflow.start_run()` is called in a notebook, Databricks creates it automatically (it shares the notebook's name and ID), and runs from that notebook go there.
+- A **workspace experiment** is not tied to a notebook. Any notebook, job or API call can log to it by name or ID, for example with `mlflow.set_experiment("/Shared/name_of_experiment")`.
+So, to share one experiment between several authors, use a workspace experiment in a shared location and set it explicitly. The permissions on the experiment decide who can see and edit runs.
+W: D=Shared workspace experiment: it is the supported way to collect runs from several notebooks; each notebook only needs `set_experiment` with the same path.
+X: A=Merging notebooks: any notebook can log to a workspace experiment, so merging only removes the independence of the three scientists.
+B=Exporting and re-importing: this is manual, creates duplicate runs without the original lineage and is unnecessary because runs can be logged to the shared experiment directly.
+C=Default grouping: each notebook's default is its own notebook experiment. Databricks does not merge notebooks by folder.
+T: One notebook -> notebook experiment by default; a team that wants one comparison view -> a workspace experiment set with `mlflow.set_experiment`.
+I: Q011493
+
+@ DBX-MLA D1 T1.5 applied use-case
+S: Which TWO benefits do feature tables in Unity Catalog have over workspace-level feature tables? (Select TWO)
+A: Feature values are recomputed on each query from the source data, so no pipeline or schedule has to maintain them
+B: Feature tables are stored in a Unity Catalog binary format that reads faster than Delta tables during model training
+C: Access to feature tables is governed with Unity Catalog privileges, like other data assets, instead of a workspace-only control
+D: A primary key is no longer required, because Unity Catalog generates a surrogate key for each feature table as needed
+E: Lineage between feature tables, functions and the models trained from them is tracked and visible in Catalog Explorer
+K: C,E
+G: ## Why move to Unity Catalog
+Workspace-level feature tables (legacy Workspace Feature Store, deprecated and only available for workspaces created before August 19, 2024) have their own governance. Unity Catalog feature tables use the same governance layer as all other data:
+- **Access control** with Unity Catalog privileges and the three-level namespace; tags for categorizing tables and features.
+- **Lineage**: when you train and log a model using Feature Engineering in Unity Catalog, the tables and functions used are tracked and shown in Catalog Explorer.
+- **Sharing** across workspaces on the same metastore.
+Feature tables are still Delta tables with a primary key, and you own the pipeline that populates them.
+W: C=Unity Catalog privileges: feature tables are securable objects, so the same grants and audit as other tables apply.
+E=Lineage: models log which feature tables and functions built them, and Catalog Explorer displays it.
+X: A=Recompute per query: you write and refresh the data with your own pipeline; feature tables are not recomputed per query.
+B=Special binary format: feature tables are standard Delta tables.
+D=No key needed: the primary key is required and is the join key for lookups.
+T: UC feature tables bring UC governance, lineage and metastore-wide sharing.
+I: Q011478
+
+@ DBX-MLA D3 T3.8 applied use-case
+S: Which TWO statements correctly compare k-fold cross-validation with a single train-validation split? (Select TWO)
+A: k-fold cannot be combined with a hyperparameter grid, which is why a single split is used whenever tuning is needed
+B: k-fold fits each hyperparameter setting k times, so it costs about k times the training of one split
+C: A single split tends to select a better model than k-fold, because it keeps more of the rows for training the model
+D: A single split gives a lower-variance estimate than k-fold, because its validation rows stay the same across settings
+E: k-fold evaluates every row as validation data exactly once, so its averaged metric depends less on one lucky split
+K: B,E
+G: ## Comparing the two
+- **Fits per setting**: split 1, k-fold k.
+- **Validation data**: split one fixed subset, k-fold each row once across k subsets.
+- **Estimate**: split depends on the split, k-fold is averaged and steadier.
+- **Best for**: split big data and tight budgets, k-fold small or medium data.
+Both can be combined with a grid or a search, and both usually refit the best settings on the full training data.
+W: B=k times the cost: each setting is fit once per fold (the Spark docs call cross-validation over a grid "very expensive"; k of 3 or 10 are common).
+E=Every row validates once: averaging k metrics reduces the dependence on a single validation subset.
+X: A=Cannot combine with a grid: `CrossValidator` takes `estimatorParamMaps`, the grid, as a core argument.
+C=Better model from a split: more training rows in the single split do not change which hyperparameters are best; the noisier estimate may even pick a worse one.
+D=Lower variance: a single fixed subset gives a noisier estimate, not a steadier one.
+T: k-fold = k times the cost for a steadier estimate; single split = cheap but noisier.
+I: Q011447

@@ -1,0 +1,429 @@
+# SOA-C03 cue fixes (c3-g13): remove giveaway cues (absolute words, length, stem echo) from published questions; same answer and concept
+# src: https://docs.aws.amazon.com/config/latest/developerguide/aggregate-data.html
+# src: https://docs.aws.amazon.com/config/latest/developerguide/root-account-mfa-enabled.html
+
+@ SOA-C03 D4 T4.1 advanced comparison
+S: A team reviews how service control policies apply in an organization. Which TWO statements about SCPs are correct? (Select TWO)
+A: An SCP attached to the root of the organization also restricts the management account, so administrators there are limited by it
+B: An SCP attached to an OU affects the accounts placed directly in that OU but is not inherited by accounts in its child OUs
+C: A deny in an SCP attached to an OU applies to member accounts in it, including the account root user, but not to service-linked roles
+D: An SCP with an Allow statement for s3:* on an OU gives the IAM users in those accounts access to S3 without a separate IAM policy
+E: An SCP does not grant permissions by itself; a principal also needs an identity-based or resource-based policy that allows the action
+K: C,E
+G: ## How SCPs are evaluated
+SCPs form a filter above IAM: the effective permissions of a principal are the intersection of what the SCPs allow and what IAM policies grant. An explicit Deny in an SCP always wins.
+## Exceptions
+The management account is not affected by SCPs, and service-linked roles are not restricted by them. Everything else in member accounts, including the root user of each account, is.
+W: C=Root user and service-linked roles: SCPs affect every principal in member accounts, including the account root user, but they do not affect service-linked roles, which AWS services need to keep working.
+E=No grants: SCPs define the maximum available permissions. A request succeeds only when the SCPs allow it and an identity-based or resource-based policy also grants it.
+X: A=Management account restricted: SCPs do not restrict the management account, whichever level of the hierarchy they are attached to, so its administrators are not limited by a root-level SCP.
+B=No inheritance to child OUs: SCPs can be attached to the root, OUs or accounts, and a policy attached to an OU is inherited by every account below it, including accounts in child OUs.
+D=Allow gives access: an SCP Allow only permits actions to be granted by other policies; IAM users still need an identity-based policy (or a resource-based policy) before they can reach S3.
+T: SCPs limit but never grant; they apply to member accounts below the attachment point (including root users) but not to the management account or service-linked roles.
+V: AWS Organizations
+I: Q004484
+
+@ SOA-C03 D4 T4.2 advanced use-case
+S: After a penetration test showed that a server-side request forgery flaw could read instance role credentials through IMDSv1, security requires that no new EC2 instance in the organization can be launched with IMDSv1 enabled and that the existing instances are switched to IMDSv2. Which TWO actions meet these requirements? (Select TWO)
+A: Enable Amazon GuardDuty in each account so that instance credentials used from outside AWS raise findings for the security team to investigate
+B: Set HttpTokens to required in the shared launch templates that the teams use, so instances launched from those templates accept IMDSv2 requests
+C: Attach an SCP that denies ec2:RunInstances unless the ec2:MetadataHttpTokens condition key equals required for the instance being launched
+D: Add an outbound security group rule on the instances that denies traffic to 169.254.169.254 unless the request carries a session token
+E: Run modify-instance-metadata-options with http-tokens set to required on the running instances once the MetadataNoTokenRequests metric stays at zero
+K: C,E
+G: ## IMDSv1 versus IMDSv2
+The instance metadata service at `169.254.169.254` hands out role credentials.
+- **IMDSv1**: a simple GET returns data. An SSRF bug that makes the server fetch a URL can leak credentials.
+- **IMDSv2**: the caller must first `PUT /latest/api/token`, then send the token in a header. Most SSRF bugs cannot do a PUT with custom headers.
+The setting `HttpTokens=required` means IMDSv2 only.
+## Enforcing it
+- New launches: an SCP or IAM policy denying `ec2:RunInstances` when `ec2:MetadataHttpTokens` is not `required`.
+- Existing instances: `aws ec2 modify-instance-metadata-options --instance-id i-0abc --http-tokens required`.
+- Launch templates, AMI settings (`ImdsSupport=v2.0`) and account-level defaults make IMDSv2 the default for new launches; the SCP is what makes it mandatory across the organization.
+## Before switching
+Check the CloudWatch metric `MetadataNoTokenRequests` per instance and update old SDKs or agents that still use IMDSv1.
+W: C=SCP on MetadataHttpTokens: the SCP denies `ec2:RunInstances` whenever `ec2:MetadataHttpTokens` is not `required`, so nobody in the member accounts can launch an instance that accepts IMDSv1, whatever template or API call they use.
+E=modify-instance-metadata-options: for running instances, `--http-tokens required` switches them to IMDSv2 without a restart, once the `MetadataNoTokenRequests` metric shows no remaining IMDSv1 callers.
+X: A=GuardDuty findings: GuardDuty detects credential exfiltration after it happens. It neither prevents IMDSv1 launches nor converts existing instances, so the requirement is not met.
+B=Shared launch templates: a launch template only affects launches that use it. Anyone can call RunInstances without the template or override the metadata options, so it sets a default, not an enforcement.
+D=Security group rule: security groups only have allow rules and do not filter traffic to the link-local metadata service, so they cannot enforce tokens.
+T: Enforce IMDSv2 with an SCP on the MetadataHttpTokens condition key for new launches and modify-instance-metadata-options for running instances; templates and detection do not enforce.
+V: Amazon EC2, AWS Organizations, AWS IAM
+I: Q004363
+
+@ SOA-C03 D2 T2.2 advanced use-case
+S: Private subnets in three AZs route to a single NAT gateway in one AZ. What is the reliability concern?
+A: Cross-AZ routing to a NAT gateway is not supported, so instances in the other two AZs have no outbound path today
+B: A NAT gateway serves one subnet at a time, so traffic from the three subnets is queued and handled in turns
+C: An outage of that one AZ removes outbound internet access for the instances in the other two AZs as well
+D: The NAT gateway has to be recreated periodically, and each recreation interrupts egress for the three AZs
+K: C
+G: ## NAT gateways and Availability Zones
+A standard (zonal) **NAT gateway** is created in one subnet and therefore lives in one Availability Zone. It is highly available inside that AZ, but if the AZ has an outage, the NAT gateway is unavailable too.
+- If private subnets in `a`, `b` and `c` all have `0.0.0.0/0` pointing to a NAT gateway in `a`, an outage of AZ `a` cuts internet access for instances in `b` and `c` even though those AZs are healthy.
+- Cross-AZ traffic to the shared gateway also incurs data transfer charges.
+## Designs that remove the dependency
+- Create one zonal NAT gateway per AZ, and give each AZ's private subnets their own route table pointing to the local gateway.
+- Or use a NAT gateway in **regional availability mode**, which AWS operates across the AZs of the VPC.
+W: Outage of the gateway's AZ: all three AZs depend on one zonal gateway, so a failure of that one AZ breaks internet egress for workloads in the healthy AZs too, even though their own subnets are fine.
+X: A=Cross-AZ routing not supported: routing to a NAT gateway in another AZ does work, which is exactly how this setup functions today. It is allowed but creates a cross-AZ dependency and cross-AZ data charges.
+B=One subnet at a time: a NAT gateway can serve any number of subnets that route to it, concurrently. Sharing is allowed; the problem is that it lives in a single AZ.
+D=Periodic recreation: NAT gateways are a managed service and do not need to be recreated to keep working, so there is no scheduled interruption.
+T: Every AZ's private subnets should use a NAT gateway in their own AZ (or a regional NAT gateway), so one AZ failure cannot remove egress for the others.
+V: Amazon VPC
+I: Q002765
+
+@ SOA-C03 D4 T4.2 advanced use-case
+S: An audit found that a developer made an S3 bucket public by mistake. Management wants to prevent any bucket in the account from becoming public through ACLs or bucket policies, including future buckets. What should be done?
+A: Turn on default encryption so objects in a public bucket stay encrypted at rest
+B: Turn on S3 Versioning for each bucket in the account to keep earlier versions
+C: Turn on MFA Delete for the buckets so deleting versions requires an MFA code
+D: Turn on the S3 Block Public Access settings at the level of the account
+K: D
+G: ## S3 Block Public Access
+S3 Block Public Access (BPA) is a set of four settings that override public grants:
+- `BlockPublicAcls` and `IgnorePublicAcls`: reject new public ACLs and ignore existing ones.
+- `BlockPublicPolicy` and `RestrictPublicBuckets`: reject bucket policies that grant public access and restrict access under existing public policies.
+BPA can be set per bucket or for the **whole account**. Account-level settings apply to every current and future bucket in that account, and a bucket-level setting cannot loosen them. New buckets already have BPA enabled by default, but a user with permissions can turn bucket-level settings off, which is how accidental exposure usually happens.
+Protect the account-level setting itself with IAM or an SCP that denies `s3:PutAccountPublicAccessBlock`.
+W: Account-level Block Public Access: it blocks public ACLs and public bucket policies for every bucket in the account, including buckets created later, and bucket-level settings cannot loosen it.
+X: A=Default encryption: it encrypts objects at rest, but S3 decrypts them transparently for any authorized request, so objects in a public bucket can still be read by anyone. It does not stop a bucket from becoming public.
+B=Versioning: it keeps previous object versions for recovery. It has no effect on who can access the bucket through ACLs or policies.
+C=MFA Delete: it requires MFA to delete versions or change versioning state. It does not prevent public ACLs or public bucket policies.
+T: Encryption, versioning and MFA Delete protect data in other ways; account-level Block Public Access is what stops any bucket from becoming public.
+V: Amazon S3, S3 Block Public Access
+I: Q002124
+
+@ SOA-C03 D2 T2.2 applied tradeoff
+S: An operations team is deciding whether to deploy their Auto Scaling group's EC2 instances across a single Availability Zone or across three Availability Zones within a Region. What is the primary tradeoff of choosing three Availability Zones for fault tolerance?
+A: Lower cross-AZ data charges, at the cost of less tolerance to an AZ outage
+B: Survives AZ outages, at the cost of cross-AZ transfer and latency
+C: Survives AZ outages, and traffic between instances in different AZs is free
+D: Survives AZ and Regional outages, at the cost of slightly higher latency
+K: B
+G: ## Availability Zones and fault isolation
+An Availability Zone is one or more data centers with independent power, cooling and networking, connected to the other AZs in the Region by high-bandwidth, low-latency links.
+- An Auto Scaling group spread across **three AZs** keeps running if one AZ has a problem; the ASG launches replacements in the remaining AZs.
+- A **single-AZ** group is simpler, but one AZ outage takes the whole application down.
+## The costs of going multi-AZ
+- **Data transfer**: traffic between instances in different AZs of the same Region is charged per GB in each direction, while traffic within one AZ over private IPs is not.
+- **Latency**: cross-AZ calls add a small amount of network latency (typically low single-digit milliseconds), which matters for chatty tiers.
+Most production designs accept these costs for resilience.
+W: Survives AZ outages, at a cost: that is the real tradeoff, higher availability because the group keeps running in the remaining AZs, against extra cross-AZ data transfer charges and slightly higher inter-instance latency.
+X: A=Lower charges, less tolerance: this reverses the tradeoff. Three AZs add cross-AZ data charges and raise tolerance to an AZ outage; a single AZ is the single point of failure.
+C=Free cross-AZ traffic: data that crosses AZ boundaries within a Region is charged per GB in each direction, so multi-AZ adds transfer costs rather than removing them.
+D=Survives Regional outages: all three AZs are in the same Region, so a Regional event still affects the group; multi-AZ protects against the loss of one AZ, not a whole Region.
+T: Spreading across AZs buys resilience against an AZ failure in exchange for cross-AZ data charges and a little latency; it does not protect against a Regional outage.
+V: Amazon EC2 Auto Scaling, Amazon EC2
+I: Q000784
+
+@ SOA-C03 D1 T1.2 advanced troubleshooting
+S: An EventBridge rule is intended to trigger a remediation Lambda function whenever any CloudWatch alarm in the account transitions into the ALARM state, but the Lambda function is never invoked even though alarms are actively breaching. The rule shows as ENABLED in the console and no delivery errors appear. What is the MOST likely cause?
+A: The rule's event pattern does not match the alarm event's source or detail-type
+B: The Lambda function's timeout is shorter than the remediation script needs
+C: The rule needs an SQS queue between EventBridge and the Lambda function target
+D: Alarm state changes are written to CloudWatch Logs instead of the default bus
+K: A
+G: ## How a rule decides to fire
+An EventBridge rule compares each event on its bus with its **event pattern**. Every field in the pattern must match the event (field names and values are case-sensitive). Alarm state changes arrive on the default bus looking like this:
+- `"source": "aws.cloudwatch"`
+- `"detail-type": "CloudWatch Alarm State Change"`
+- `"detail": { "state": { "value": "ALARM" } }`
+A pattern such as `{"source":["aws.cloudwatch"],"detail-type":["CloudWatch Alarm State Change"],"detail":{"state":{"value":["ALARM"]}}}` matches every alarm entering ALARM. A typo, wrong case, a different bus or a value like `"Alarm"` means nothing ever matches.
+## Tell the failure modes apart
+- Rule metric `MatchedEvents` stays at 0 when the pattern is wrong.
+- `FailedInvocations` rises when the rule matches but cannot invoke the target (for example, a missing Lambda resource policy).
+No delivery errors plus no invocations points to the pattern.
+W: Event pattern mismatch: an enabled rule with no errors and no invocations is simply not matching the events, so the pattern values (`source`, `detail-type`, state value) must be corrected to what alarms actually emit.
+X: B=Timeout too short: a short timeout makes invocations fail partway, but the function would still be invoked and show logs and invocation metrics.
+C=SQS queue needed: Lambda is one of the most common EventBridge targets and is supported directly; no queue is required between the rule and the function.
+D=Events go to CloudWatch Logs: CloudWatch sends a `CloudWatch Alarm State Change` event to the default event bus on every alarm state change, so the events are there to match.
+T: When an enabled rule never triggers and shows no errors, compare its event pattern with a real sample event before looking at the target.
+V: Amazon EventBridge, Amazon CloudWatch, AWS Lambda
+I: Q000762
+
+@ SOA-C03 D5 T5.2 advanced use-case
+S: A company wants S3 content served only through CloudFront, blocking direct access to the bucket. Which configuration fits?
+A: Origin access control with a bucket policy that allows the distribution's ARN
+B: Public read on the bucket with CloudFront standard logging turned on for audits
+C: S3 Transfer Acceleration so that requests reach the bucket through edge locations
+D: A security group attached to the bucket that allows the CloudFront IP ranges
+K: A
+G: ## Keeping the S3 origin private
+If a bucket is public, users can bypass CloudFront and download objects directly, skipping CloudFront caching, WAF rules, signed URLs and logging.
+**Origin access control (OAC)** fixes this. CloudFront signs its requests to S3 with SigV4 as the CloudFront service principal, and the bucket accepts only those requests.
+## Setting it up
+- Create an OAC and assign it to the S3 origin of the distribution.
+- Keep S3 Block Public Access on.
+- Add a bucket policy that allows `s3:GetObject` to principal `cloudfront.amazonaws.com` with a condition `AWS:SourceArn` equal to the distribution's ARN, for example `arn:aws:cloudfront::111122223333:distribution/EDFDVBD6EXAMPLE`.
+A direct request to the bucket URL now gets `403 Access Denied`, while requests through the distribution succeed. OAC replaces the older origin access identity (OAI) and supports SSE-KMS encrypted objects.
+W: OAC with a bucket policy for the distribution: only requests signed by CloudFront on behalf of that specific distribution are allowed, so content is served through CloudFront and direct bucket access gets `403 Access Denied`.
+X: B=Public read with logging: public read lets anyone fetch objects straight from S3; logging records requests but blocks nothing.
+C=Transfer Acceleration: it speeds up transfers to the bucket through edge locations but does not restrict who can access the bucket.
+D=Security group on the bucket: S3 buckets do not have security groups, and CloudFront IP ranges are shared by all customers, so an IP-based allow would not tie access to one distribution.
+T: Serve S3 only through CloudFront with origin access control and a bucket policy scoped to the distribution ARN.
+V: Amazon CloudFront, Amazon S3
+I: Q002721
+
+@ SOA-C03 D4 T4.1 advanced use-case
+S: A company must keep AWS Config recording enabled in every account and Region of its organization. Which approach fits?
+A: Deploy Config with StackSets and deny StopConfigurationRecorder with an SCP
+B: Ask each account owner to enable Config and review the settings once per year
+C: Turn on Config in the management account's home Region and add an aggregator
+D: Store Config data in a public S3 bucket so each account can confirm recording
+K: A
+G: ## Deploying and locking a baseline across an organization
+AWS Config needs a **configuration recorder** and a **delivery channel** in every account and every Region you want to track; it is a Regional service.
+- **CloudFormation StackSets** with service-managed permissions deploy one template to all accounts in an organization or OU and every chosen Region. With automatic deployment enabled, new accounts receive the stack when they join.
+- **Service control policies (SCPs)** set the maximum permissions in member accounts. An SCP that denies `config:StopConfigurationRecorder`, `config:DeleteConfigurationRecorder` and `config:DeleteDeliveryChannel` stops even account administrators from turning recording off. An exception can be made for the deployment role.
+- Config data is delivered to a central, private S3 bucket, often in a log archive account.
+Example: a stack set targets the root OU in all enabled Regions; the SCP is attached to the root OU so it applies to every member account (SCPs do not affect the management account).
+W: StackSets plus an SCP: StackSets ensure recording is turned on in every account and Region, including new accounts, and the SCP prevents anyone in member accounts from stopping or deleting the recorder.
+X: B=Owners enable and check yearly: a manual annual check is not enforcement; recording could be off for months before anyone notices, and owners can still stop it.
+C=Home Region plus aggregator: Config records resources only in the account and Region where a recorder runs. An aggregator collects configuration and compliance data from source accounts and Regions; it does not turn recording on in them.
+D=Public S3 bucket: this exposes detailed configuration data of the whole organization and does nothing to keep the recorder running.
+T: "Enabled everywhere and can't be turned off" means deploy with StackSets and block the stop and delete actions with an SCP.
+V: AWS Config, AWS Organizations
+I: Q002803
+
+@ SOA-C03 D2 T2.1 advanced use-case
+S: An application's load is predictable each week, and the team wants Auto Scaling to learn this pattern and provision ahead of time. Which feature fits?
+A: Predictive scaling policy
+B: Target tracking scaling policy
+C: Lifecycle hooks on instance launch
+D: Step scaling policy with alarms
+K: A
+G: ## Scaling policy types
+EC2 Auto Scaling offers several ways to change capacity:
+- **Target tracking** and **step scaling**: react to CloudWatch metrics after load has already changed.
+- **Scheduled actions**: change capacity at times you set by hand.
+- **Predictive scaling**: analyzes the history of a load metric (such as CPU or request count), detects daily and weekly patterns, forecasts the next 48 hours, and schedules capacity so instances are running before the load arrives.
+Predictive scaling needs at least a day of history and forecasts better with more; it can run in forecast-only mode first so you can review its predictions. It is often combined with target tracking to handle unexpected changes.
+## Example
+Traffic rises every weekday at 08:00. Predictive scaling learns this and launches instances shortly before 08:00, so they are warmed up when users arrive.
+W: Predictive scaling: it learns the recurring weekly pattern from the load metric's history, forecasts the coming hours and provisions capacity ahead of time, which is exactly what the team wants.
+X: B=Target tracking: it keeps a metric near a target value by adding or removing capacity after the metric moves. It reacts to load and does not learn or forecast patterns.
+C=Lifecycle hooks: they pause instances during launch or termination to run custom actions. They do not decide when or how much to scale.
+D=Step scaling: it adds or removes capacity when a CloudWatch alarm fires, after the load has already risen, and does not learn patterns.
+T: Recurring, predictable load is handled ahead of time by predictive scaling; step and target tracking policies only react after the metric changes.
+V: Amazon EC2 Auto Scaling
+I: Q002767
+
+@ SOA-C03 D1 T1.2 applied troubleshooting
+S: An Auto Scaling group keeps terminating and replacing instances right after launch. Instances need three minutes to start the application. What should be adjusted?
+A: The maximum capacity setting of the Auto Scaling group
+B: The instance type selected in the group's launch template
+C: The number of subnets attached to the Auto Scaling group
+D: The health check grace period of the Auto Scaling group
+K: D
+G: ## Health check grace period
+Auto Scaling replaces instances that fail health checks. With ELB health checks turned on, an instance whose application is not yet listening fails them and is marked unhealthy.
+The **health check grace period** tells Auto Scaling how long to wait after an instance enters `InService` before acting on its health check results.
+- If it is shorter than the startup time, new instances are judged unhealthy while still booting and are terminated, which repeats in a loop.
+- Set it slightly longer than the real startup time; lifecycle hooks can also hold an instance in `Pending:Wait` until bootstrapping finishes.
+Example: the app needs 3 minutes to start, but the grace period is 60 seconds. Setting it to 240 seconds lets instances finish starting before they are checked.
+W: Health check grace period: extending it past the three-minute startup time stops Auto Scaling from judging and replacing instances before the application is ready.
+X: A=Maximum capacity: it only caps how many instances can exist; it does not change when health checks start counting.
+B=Instance type: a larger type might start slightly faster but does not fix checks that begin before startup completes.
+C=Number of subnets: subnets decide where instances launch, not when their health is evaluated.
+T: New instances replaced right after launch means the grace period is shorter than startup time; lengthen it rather than resizing the group.
+V: Amazon EC2 Auto Scaling
+I: Q002746
+
+@ SOA-C03 D5 T5.3 advanced troubleshooting
+S: An engineer must determine whether a network path exists between two ENIs across complex routing without sending traffic. Which tool fits?
+A: AWS Trusted Advisor checks
+B: VPC Reachability Analyzer
+C: VPC Flow Logs queries in Athena
+D: CloudWatch Synthetics canaries
+K: B
+G: ## Checking a path without sending packets
+**VPC Reachability Analyzer** is a configuration analysis tool. You choose a source and a destination (for example two network interfaces, an instance and an internet gateway, or an endpoint behind a transit gateway), plus optional protocol and port, and it builds a model of the network from your settings.
+- It walks every hop: route tables, security groups, network ACLs, peering or transit gateway attachments, load balancers and gateways.
+- If a path exists, it shows each hop. If not, it names the blocking component, such as a missing route or a security group without a matching rule.
+- No traffic is sent, so it works for paths that are not live yet and does not depend on the application.
+Example: source `eni-aaa` in `10.1.0.0/16`, destination `eni-bbb` in `10.2.0.0/16` on TCP 5432. The analysis reports "not reachable" and points to the transit gateway route table that lacks `10.2.0.0/16`.
+W: Reachability Analyzer: it reasons over the actual configuration hop by hop and reports whether a path exists and which component blocks it, all without sending a single packet.
+X: A=Trusted Advisor checks: they run best-practice checks (cost, security, limits) and do not trace a path between two specific network interfaces.
+C=Flow Logs queries in Athena: flow logs only record traffic that was actually attempted, so querying them needs packets to flow and cannot say why a path is missing.
+D=CloudWatch Synthetics canaries: canaries send real requests to an endpoint on a schedule; that is active testing with traffic, the opposite of what is asked.
+T: To prove a path exists (or find what blocks it) from configuration alone, use Reachability Analyzer; flow logs and canaries depend on real traffic.
+V: Amazon VPC
+I: Q002723
+
+@ SOA-C03 D4 T4.1 advanced use-case
+S: The team wants an automated weekly check across all accounts for root MFA, security groups open to the world, and exposed access keys, with Business Support. Which service fits?
+A: Amazon Inspector network reachability scans
+B: AWS Trusted Advisor with organizational view
+C: Amazon Detective behavior graphs across accounts
+D: AWS Config custom rules built by hand in each account
+K: B
+G: ## Trusted Advisor security checks
+**AWS Trusted Advisor** inspects your account against best-practice checks in categories such as security, cost, fault tolerance, performance and service limits. Security checks include:
+- **MFA on root account**: warns if the root user has no MFA device.
+- **Security groups - specific ports unrestricted**: flags rules that allow `0.0.0.0/0` to sensitive ports such as 22 or 3389.
+- **Exposed access keys**: flags access keys found in public code repositories.
+A small core set of checks is available to all accounts; the full set depends on the account's support plan. Trusted Advisor refreshes results automatically and can send weekly notification emails.
+**Organizational view** lets the management account build a report that aggregates check results from all member accounts, so one place shows every account's findings.
+W: Trusted Advisor with organizational view: its built-in security checks cover root MFA, world-open security groups and exposed keys, and organizational view rolls up the results of all accounts on a recurring basis.
+X: A=Inspector network reachability: finds network exposure of EC2 instances and software vulnerabilities; it does not check root MFA or exposed access keys.
+C=Detective behavior graphs: help investigate the root cause of existing security findings using graphs of activity; they do not run baseline checks.
+D=Config custom rules built by hand: each check would have to be written, deployed to every account and scheduled by hand, while Trusted Advisor already ships these checks.
+T: Ready-made account hygiene checks (root MFA, open ports, leaked keys) across accounts come from Trusted Advisor, not from vulnerability scanners or investigation tools.
+V: AWS Trusted Advisor
+I: Q000826
+
+@ SOA-C03 D2 T2.3 advanced comparison
+S: A company is comparing warm standby and active-active (multi-site) disaster recovery strategies for their application. Which statement correctly contrasts the two in terms of recovery time and normal-operation cost?
+A: Warm standby: no compute kept running, slower than pilot light, cheaper than backup and restore
+B: Warm standby: full-size copy serving traffic, faster than active-active, at the same running cost
+C: Warm standby: scaled-down copy, faster than pilot light, cheaper than active-active
+D: Warm standby: scaled-down copy, same recovery time and running cost as active-active
+K: C
+G: ## The four common DR strategies
+Ordered from cheapest and slowest to most expensive and fastest recovery:
+- **Backup and restore**: only backups exist in the recovery Region; recovery takes hours because everything is rebuilt.
+- **Pilot light**: data is replicated and core infrastructure is defined, but compute is off or minimal; servers are started and scaled at failover.
+- **Warm standby**: a **fully working but scaled-down** copy runs all the time; at failover it is scaled up and traffic is shifted, so recovery is typically minutes.
+- **Multi-site active-active**: full capacity runs in more than one Region and all serve traffic; recovery is close to immediate, and cost is highest because everything runs twice.
+Example: warm standby may run 2 small instances against production's 20, ready to scale out.
+W: Scaled-down running copy: warm standby recovers faster than pilot light because a working environment already runs, and costs less than active-active because it is not at full size, although it recovers more slowly than active-active.
+X: A=No compute running: that describes backup and restore or pilot light; warm standby's defining feature is a small working environment that is always running, and it is not cheaper than backup and restore.
+B=Full-size copy, faster than active-active: a full-size copy that serves traffic is active-active itself; warm standby is smaller, needs a scale-up at failover and so recovers more slowly than active-active.
+D=Same time and cost: warm standby needs a scale-up at failover, while active-active runs full capacity everywhere, so both recovery time and running cost differ.
+T: DR strategies trade cost for recovery speed: warm standby is a running scaled-down copy, cheaper but slower to recover than active-active.
+I: Q000791
+
+@ SOA-C03 D4 T4.1 advanced use-case
+S: The team wants continuous findings for any S3 bucket, KMS key, or IAM role that grants access to principals outside its AWS Organization. Which service fits?
+A: GuardDuty findings for unusual S3 API calls by IAM principals of external accounts
+B: Amazon Macie findings for publicly accessible S3 buckets in each account
+C: IAM Access Analyzer with the organization as the zone of trust
+D: Trusted Advisor checks for S3 bucket access permissions across the organization
+K: C
+G: ## What IAM Access Analyzer checks
+Many AWS resources carry a **resource-based policy**: an S3 bucket policy, a KMS key policy, an IAM role trust policy, and others such as SQS queues, Lambda functions and Secrets Manager secrets. Such a policy can grant access to another account, even one outside your company.
+**IAM Access Analyzer** (external access analyzer) uses automated reasoning to read these policies and work out who can reach each resource. You choose a **zone of trust**: your account or your whole AWS Organization.
+- Any access granted to a principal outside the zone of trust becomes a finding, for example a role trust policy that lets `arn:aws:iam::999999999999:root` assume it.
+- Analysis is continuous: when a policy changes, the resource is re-analyzed and findings are created or resolved.
+- Findings you expect can be archived with archive rules; findings also flow to EventBridge for automation.
+W: IAM Access Analyzer with the organization as the zone of trust: it analyzes S3 bucket, KMS key and IAM role policies (and more) and continuously reports every resource shared with principals outside the organization.
+X: A=GuardDuty unusual S3 API findings: GuardDuty watches activity such as anomalous data access; it does not read policies, and it has no view of who a KMS key policy or role trust policy allows.
+B=Macie public-bucket findings: Macie discovers sensitive data in S3 and summarizes bucket posture, but it covers S3 only and does not evaluate KMS keys or IAM role trust policies against an organization boundary.
+D=Trusted Advisor S3 permissions check: flags buckets with open (public) access; it does not cover KMS keys or IAM roles and does not distinguish access by specific external accounts from access inside the organization.
+T: "Who outside my organization can access this resource?" is answered from policies by Access Analyzer, not from activity by GuardDuty or from data scans by Macie.
+V: IAM Access Analyzer
+I: Q000822
+
+@ SOA-C03 D4 T4.1 advanced use-case
+S: Security must detect and alert whenever the root user signs in to any account. Which approach fits?
+A: A CloudWatch dashboard showing the number of IAM users and roles in each account
+B: A monthly review of the IAM credential report for root password last-used dates
+C: An EventBridge rule on root sign-in events from CloudTrail with an SNS target
+D: An AWS Config rule that checks each account periodically for MFA on the root user
+K: C
+G: ## How a root sign-in becomes an alert
+AWS CloudTrail records every AWS Management Console sign-in as a `ConsoleLogin` event. For the root user the event carries `userIdentity.type` = `Root`.
+CloudTrail management events are also delivered to Amazon EventBridge, where the sign-in shows up with the detail type `AWS Console Sign In via CloudTrail`. An EventBridge rule can match only root sign-ins and send them to a target such as an Amazon SNS topic that emails or pages the security team.
+- Example event pattern: `source` = `aws.signin`, `detail.userIdentity.type` = `Root`.
+- Console sign-in events are commonly recorded in `us-east-1`, so the rule is usually created in that Region (or events are forwarded there).
+- To cover every account, deploy the rule to each account (for example with StackSets) or forward events to a central security account.
+The alert fires within minutes of the sign-in, which is what "detect and alert" requires.
+W: EventBridge rule on root sign-ins with SNS: CloudTrail captures the root `ConsoleLogin` event, the rule filters on `userIdentity.type` = `Root`, and SNS notifies people in near real time.
+X: A=Dashboard of IAM user and role counts: a count of IAM identities says nothing about who signed in, and the root user is not an IAM user at all. A dashboard also needs someone watching it; it raises no alert.
+B=Monthly credential report review: the credential report shows when the root password was last used, but only after the fact. A monthly look can miss a compromise by weeks, which is not detection or alerting.
+D=Config rule for root MFA: the managed rule `root-account-mfa-enabled` is periodic and checks whether the root user has MFA. It evaluates configuration, not sign-in activity, so a root login would not raise an alert.
+T: Real-time detection of an API or console event means CloudTrail event → EventBridge rule → SNS, not periodic reviews or configuration checks.
+V: AWS CloudTrail, Amazon EventBridge
+I: Q002798
+
+@ SOA-C03 D5 T5.2 applied use-case
+S: A company wants to route users to the AWS Region that gives them the lowest latency. Which Route 53 routing policy fits?
+A: Latency-based routing
+B: Multivalue answer routing
+C: Simple routing
+D: Weighted routing
+K: A
+G: ## Route 53 routing policies
+Route 53 decides which answer to return for a DNS query based on the record's routing policy:
+- **Simple**: one record, no health-based choice.
+- **Weighted**: split traffic by assigned weights, such as 90/10 for a canary.
+- **Latency-based**: return the record for the AWS Region with the lowest measured latency to the user.
+- **Geolocation / geoproximity**: choose by the user's location or distance.
+- **Failover**: primary and secondary based on health checks.
+- **Multivalue answer**: return up to eight healthy records at random.
+## How latency-based routing works
+You create records with the same name, each tagged with a Region, for example one pointing to an ALB in `eu-west-1` and one in `ap-northeast-2`. Route 53 uses latency measurements between user networks and AWS Regions to pick the best one. With health checks, an unhealthy Region is skipped.
+W: Latency-based routing: it answers each query with the Region that has the lowest measured latency for that user's network, which is exactly the requirement.
+X: B=Multivalue answer routing: it returns up to eight healthy records at random for simple client-side load spreading, without considering latency.
+C=Simple routing: it returns the same record for everyone, so all users go to one place regardless of latency.
+D=Weighted routing: it splits traffic by fixed percentages, such as for a gradual rollout, and ignores where users are or how fast each Region responds.
+T: "Lowest latency Region" means Route 53 latency-based routing; weighted and multivalue spread traffic without measuring latency.
+V: Amazon Route 53
+I: Q002719
+
+@ SOA-C03 D3 T3.2 advanced use-case
+S: A team wants to automate a multi-step operational procedure, such as creating an AMI, testing it, and updating a launch template. Which feature fits?
+A: Systems Manager Automation runbooks
+B: CloudWatch Logs metric filters
+C: Amazon S3 Event Notifications to SNS
+D: IAM Access Analyzer policy findings
+K: A
+G: ## Systems Manager Automation runbooks
+An Automation **runbook** is a document that defines a sequence of steps, each performed by an action such as:
+- `aws:executeAwsApi`: call any AWS API
+- `aws:runCommand`: run a command on instances
+- `aws:createImage`, `aws:runInstances`, `aws:changeInstanceState`
+- `aws:approve`: pause for a human approval
+- `aws:branch` and `aws:executeScript` for logic and custom Python or PowerShell
+Runbooks can run on demand, on a schedule, from an EventBridge rule or from a maintenance window, across multiple accounts and Regions, with each step's output recorded. AWS provides many ready-made runbooks, such as `AWS-UpdateLinuxAmi`.
+## Example
+A custom runbook launches an instance from the current AMI, patches it with Run Command, creates a new AMI, runs a test script, waits for approval and then creates a new launch template version that uses the new image.
+W: Automation runbooks: they chain AMI creation, testing and launch template updates into one repeatable, logged workflow that can include approvals and error handling.
+X: B=CloudWatch Logs metric filters: they count patterns in log events and turn them into metrics; they cannot run steps or change resources.
+C=S3 Event Notifications to SNS: they signal object creation or deletion in a bucket; they do not orchestrate AMI builds or launch template updates.
+D=Access Analyzer policy findings: they report external or unused access in policies; they perform no operational actions.
+T: Multi-step operational procedures belong in Systems Manager Automation runbooks; metric filters and event notifications only signal events.
+V: AWS Systems Manager
+I: Q002692
+
+@ SOA-C03 D2 T2.2 applied use-case
+S: An Auto Scaling group uses EC2 health checks. Instances that stop responding to HTTP requests are not replaced. What should change?
+A: Add a second ALB listener on a different port for the group's targets
+B: Turn on scale-in protection for the instances in the group
+C: Add Elastic Load Balancing health checks to the group's settings
+D: Lower the health check grace period of the group to zero seconds
+K: C
+G: ## Auto Scaling health check types
+An Auto Scaling group decides whether to replace an instance based on its **health check type**:
+- **EC2** (default): only the EC2 status checks count. An instance whose OS is up but whose application hangs is still "healthy" and is never replaced.
+- **ELB**: the group also uses the target group's health checks, for example `GET /health` expecting HTTP `200`. If the load balancer marks the instance unhealthy, Auto Scaling terminates and replaces it.
+When turning on ELB health checks, set a **health check grace period** long enough for new instances to boot and start the application, so they are not replaced before they are ready.
+Example: a Java service deadlocks. EC2 checks pass because the VM runs; the ALB check on `/health` times out; with ELB checks enabled, the group replaces the instance automatically.
+W: ELB health checks for the group: application-level failures seen by the load balancer's target group checks then mark the instance unhealthy, and Auto Scaling replaces it.
+X: A=Second ALB listener: listeners define how clients connect to the ALB; they do not change which health signal Auto Scaling uses.
+B=Scale-in protection: it only stops the instance from being chosen during scale-in; it does not make application failures visible to Auto Scaling, so hung instances stay in service.
+D=Zero grace period: the grace period only sets when Auto Scaling starts acting on health check results. With EC2 checks alone the hung application still passes, so nothing gets replaced; it would also risk replacing new instances that are still booting.
+T: EC2 health checks only see the host and OS; turn on ELB health checks so Auto Scaling replaces instances whose application stops responding.
+V: Amazon EC2 Auto Scaling
+I: Q002672
+
+@ SOA-C03 D1 T1.3 applied use-case
+S: An EBS-backed database on EC2 shows high I/O wait. CloudWatch shows the volume at its provisioned IOPS limit. What should the engineer do?
+A: Enable EBS encryption on the volume to reduce the number of I/O operations
+B: Raise the provisioned IOPS or change to a higher-performance volume type
+C: Detach and reattach the volume to reset its provisioned IOPS counter
+D: Take EBS snapshots more often to free up I/O capacity on the volume
+K: B
+G: ## When an EBS volume is the bottleneck
+Each EBS volume has a performance ceiling: provisioned IOPS for `io1`/`io2`, configurable IOPS and throughput for `gp3`, and a size-based baseline for `gp2`. When `VolumeReadOps` plus `VolumeWriteOps` per second sit at that ceiling, extra requests queue: `VolumeQueueLength` rises and the OS shows high I/O wait.
+- **Elastic Volumes** let you raise IOPS, raise throughput, or change type (for example `gp2` to `gp3`, or to `io2`) while the volume stays in use. After a change you must wait before modifying the same volume again.
+- Also check the instance's EBS bandwidth limit, which can cap performance even when the volume could do more.
+Example: an `io1` volume provisioned at 10,000 IOPS runs flat at 10,000 with a long queue; raising it to 16,000 IOPS or moving to `io2` removes the wait.
+W: More IOPS or a faster volume type: the volume is pinned at its provisioned limit, so raising that limit or moving to a higher-performance type with Elastic Volumes directly relieves the queue.
+X: A=Enable encryption: encryption does not reduce the number of I/O operations, and existing volumes cannot simply be switched to encrypted in place.
+C=Detach and reattach: there is no IOPS counter to reset; the limit is a property of the volume, and detaching only causes an outage.
+D=More frequent snapshots: snapshots do not free I/O capacity; they copy changed blocks to S3 and do nothing to raise the IOPS limit.
+T: At the provisioned IOPS limit, raise IOPS or change the volume type with Elastic Volumes; encryption, reattaching and snapshots do not add capacity.
+V: Amazon EBS
+I: Q002745
