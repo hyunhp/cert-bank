@@ -1,0 +1,391 @@
+# TF-IEP002 fixes for giveaway cues (absolute words, length) in published questions (full blocks, pinned with I:)
+# Distractor flaws reuse reasons already given in the published explanations; new claims are checked on the pages below.
+# src: https://developer.hashicorp.com/terraform/cloud-docs/workspaces/dynamic-provider-credentials/aws-configuration
+# src: https://developer.hashicorp.com/terraform/language/block/check
+
+@ TF-IEP002 D4 T4.3 advanced troubleshooting
+S: A platform team creates the AWS role trust policy for HCP Terraform with one condition on the token's aud claim and nothing on sub. A reviewer says the setup is unsafe. Why?
+A: The condition covers plan-phase tokens alone, so apply-phase runs fall outside it and need a second role with its own trust policy
+B: The aud claim is a secret value, so writing it into the trust policy discloses the audience to each user who can read the role
+C: Matching aud with StringEquals rejects tokens that carry extra audience values, so StringLike with a wildcard is required instead
+D: Any workspace in any HCP Terraform organization presenting a token with that audience could assume the role, so sub must be checked
+K: D
+G: ## Trust policy conditions
+The OIDC identity provider in AWS trusts tokens from HCP Terraform's issuer. The **role trust policy** then decides which tokens may assume the role. HCP Terraform tokens carry:
+- `aud`: the audience, default `aws.workload.identity` (or the value of `TFC_AWS_WORKLOAD_IDENTITY_AUDIENCE`).
+- `sub`: a subject of the form `organization:ORG:project:PROJECT:workspace:WORKSPACE:run_phase:PHASE`.
+The docs warn that you should always check, at minimum, the audience and the organization name, to prevent unauthorized access from other HCP Terraform organizations. The default audience is public knowledge, so it is not a secret that protects the role.
+## Narrowing further
+Match the project and workspace too, and use separate roles for plan and apply when permissions differ.
+W: Other organizations can assume the role: the default audience `aws.workload.identity` is public knowledge and every HCP Terraform organization's tokens come from the same issuer, so a condition on aud alone admits runs from other organizations. The documentation warns to check, at minimum, the audience and the organization name in sub.
+X: A=Plan phase alone: a condition without sub does not select a run phase at all; it matches plan and apply tokens alike, which is part of why it is too broad.
+B=Secret audience: aud is not a secret and does not have to be; it names the intended consumer of the token, and its default value is published in the documentation.
+C=StringLike required for aud: the documented trust policy matches aud with `StringEquals` against the single audience value; `StringLike` with a wildcard is used only on sub when one role should serve both run phases. A wildcard on aud would loosen the check further, not fix it.
+T: Always restrict sub (at least the organization) in the trust policy; the audience alone does not identify your organization.
+V: HCP Terraform, AWS IAM
+I: Q010137
+
+@ TF-IEP002 D5 T5.5 advanced tradeoff
+S: Which TWO controls help stop accidental destruction of a production database? (Select TWO)
+A: `lifecycle { ignore_changes = all }` on the database resource, so Terraform stops proposing destructive changes to it
+B: A mandatory policy that inspects the plan's `resource_changes` for delete actions on database types and fails the run
+C: Marking the database identifier variable `sensitive`, so plans that touch the database wait for a separate approval
+D: `lifecycle { create_before_destroy = true }` on the database resource, so a replacement keeps the old instance in place
+E: `lifecycle { prevent_destroy = true }` on the database resource, so plans that would destroy it fail with an error
+K: B,E
+G: ## Layers of protection
+- **In configuration**: `prevent_destroy` makes Terraform reject plans that destroy the object, whether it is a destroy, a replacement, or a plan for `terraform destroy`. It does not cover removal of the whole resource block.
+- **In the platform**: a mandatory-level Sentinel or OPA policy reads the plan (`tfplan.resource_changes` or `input.plan.resource_changes`) and fails when a protected type has a delete action. It also covers the block-removal case that `prevent_destroy` misses.
+## What does not help
+- `create_before_destroy` only changes the order of a replacement.
+- `ignore_changes = all` stops update proposals; the docs state Terraform can still create and destroy the object.
+- `sensitive` hides values, and has no approval role.
+W: B=Mandatory policy on the plan: a Sentinel or OPA policy at a mandatory level reads `resource_changes`, finds delete actions on protected database types and fails the run in the platform, so the control remains even if someone removes the block or its lifecycle rule.
+E=prevent_destroy: Terraform rejects any plan that would destroy the object, whether by destroy, replacement or `terraform destroy`, giving an immediate guardrail close to the code.
+X: A=ignore_changes all: Terraform stops proposing updates for the arguments, but the docs state it can still create and destroy the object, so deletion is not prevented.
+C=Sensitive identifier: `sensitive` only redacts the value in output; it adds no approval step and prevents no action, and it leaves reviewers with less information.
+D=create_before_destroy: it only changes the order of a replacement; the old object is still destroyed after the new one exists.
+T: Combine prevent_destroy in code with a mandatory plan-inspecting policy; ordering, ignore and sensitive settings do not prevent deletion.
+V: Terraform
+I: Q010120
+
+@ TF-IEP002 D5 T5.1 applied troubleshooting
+S: A CI job runs `terraform plan -out=tfplan`, then uploads `tfplan` as a build artifact so another job can apply it after approval. A reviewer worries about secrets. Which statement is accurate?
+A: The saved plan holds the configuration, planned values and input variables, and sensitive data is stored in cleartext
+B: The saved plan stores a hash of each input variable, so the apply job must receive the secret values again
+C: The saved plan encrypts sensitive values with a key bound to the runner that created it, so a copied file is unreadable
+D: Terraform strips sensitive and ephemeral values from the file, so the artifact holds just the non-secret planned changes
+K: A
+G: ## What a saved plan contains
+`terraform plan -out` writes an opaque file with the full configuration, all values associated with planned changes, and the plan options including **input variables**. The documentation states that sensitive data, even if obscured in terminal output, is saved in **cleartext** in the plan file.
+## Consequences for pipelines
+- Treat the plan artifact exactly like state: restrict who can download it, set a short retention and keep it in an access-controlled artifact store.
+- Do not publish it to a place broader than the people allowed to see the secrets it might hold.
+- Ephemeral values are the exception: Terraform omits them from state **and** plan files, which is another reason to prefer them for credentials.
+W: Cleartext saved plan: `terraform plan -out` writes the configuration, all values of the planned changes and the plan options including input variables, and the documentation states that sensitive data is saved in cleartext even when it is hidden in terminal output. The artifact must be guarded like state, with tight access and short retention.
+X: B=Hashed variables: the file keeps the values, not hashes of them, and a saved plan is applied as is; hashes could not be applied without the values.
+C=Runner-bound encryption: Terraform does not encrypt plan files with any key tied to a runner, so anyone who can read the file can extract the values.
+D=Stripped values: only ephemeral values are left out of plan files. Sensitive values and the input variables still appear, and the apply needs them.
+T: A saved plan file holds sensitive values in cleartext, so guard the artifact like state.
+V: Terraform
+I: Q010095
+
+@ TF-IEP002 D1 T1.2 applied use-case
+S: A module has variables `min_size` and `max_size`. The author wants a plan to fail whenever max_size is smaller than min_size, on Terraform 1.15. Which implementation works?
+A: A default on max_size equal to the default of min_size, so callers who omit max_size get a valid pair
+B: A check block asserting var.max_size >= var.min_size, which fails the plan when the assertion is false
+C: A local value size_ok = var.max_size >= var.min_size, which halts the plan when it evaluates to false
+D: A validation block on max_size with condition = var.max_size >= var.min_size and a descriptive error_message
+K: D
+G: ## Validation can look at other values
+Early Terraform versions let a variable's validation reference only that variable. In current Terraform versions a `validation` condition may refer to other input variables, locals and data sources, so cross-field rules can live next to the variable that is wrong.
+- `condition = var.max_size >= var.min_size` on `max_size` rejects the bad pair during plan.
+- A `precondition` on a resource also works, but it reports the problem where the value is consumed instead of where it was supplied.
+A local is just a named value; it never fails a plan. A default only applies when the caller omits the variable.
+A `check` block is different: when its assertion fails, Terraform reports a warning and continues the plan or apply, so it cannot stop a bad pair of inputs.
+W: Cross-variable validation: on the tested version a `validation` condition may read other input variables, so `condition = var.max_size >= var.min_size` on `max_size` rejects the bad pair during plan with a clear error message next to the input that is wrong.
+X: A=Matching default: a default applies only when the caller omits the variable; it does not stop a caller from passing a max_size smaller than min_size.
+B=check block assertion: a failing `check` assertion makes Terraform report a warning and continue the operation; the check block is the one validation that does not block plan or apply.
+C=Local as a guard: a local is just a named value; when it evaluates to false nothing happens, because only validations, preconditions and postconditions stop a plan.
+T: In current Terraform versions, variable validation can reference other variables; check blocks only warn and locals never fail a plan.
+V: Terraform
+I: Q010047
+
+@ TF-IEP002 D2 T2.1 applied comparison
+S: A root module declares `cloud { organization = "acme" workspaces { tags = ["app:web"] } }`. Three HCP Terraform workspaces carry that tag. An engineer runs `terraform init` then `terraform plan`. What is the expected behavior?
+A: Plan fails, because a tags list must be paired with a workspace `name` that picks one of the matches
+B: Terraform creates a new workspace per tag value at plan time and runs there, leaving the matches unchanged
+C: Terraform works in one matching workspace at a time, chosen with `terraform workspace select` or `TF_WORKSPACE`
+D: Terraform plans the three tagged workspaces in one run and merges their changes into a single plan
+K: C
+G: ## Name versus tags in the cloud block
+The `cloud` block links a working directory to HCP Terraform workspaces.
+- `workspaces { name = "..." }` ties the directory to one workspace.
+- `workspaces { tags = [...] }` ties it to every workspace in the organization with those tags (optionally limited with `project`). The CLI then maps its own workspace commands onto them: `terraform workspace list` shows the matches and `terraform workspace select` picks one. If no workspace has the tags, init offers to create one.
+`name` and `tags` cannot be combined. Each run still targets exactly one workspace, with its own state and variables.
+W: One workspace at a time: a tags-based `cloud` block exposes every matching workspace to the CLI, `terraform workspace list` shows them, and `terraform workspace select` or `TF_WORKSPACE` picks the one each run uses, with that workspace's own state and variables.
+X: A=Tags paired with a name: `name` and `tags` are alternatives in the `workspaces` block, and combining them is what Terraform rejects.
+B=New workspace per tag value: init may offer to create a workspace when none match, but plan does not create workspaces on its own, and here three already match.
+D=Merged plan: a run belongs to a single workspace and a single state, so there is no cross-workspace plan.
+T: A tags-based cloud block exposes many workspaces to the CLI; you work in one selected workspace per run.
+V: HCP Terraform
+I: Q009984
+
+@ TF-IEP002 D3 T3.1 applied comparison
+S: A network configuration exposes its VPC ID as a root output, and an application configuration in another state reads it with a terraform_remote_state data source. A security reviewer objects. Which concern is accurate?
+A: The data source copies the network outputs into the application state, so later output changes are not seen by the consumer
+B: The data source reads outputs from a local state file, so the setup breaks once the network state moves to a remote backend
+C: The data source takes a lock on the network state during the read, so application plans block network changes
+D: The consumer must be able to read the whole network state snapshot, which may hold sensitive values beyond the output
+K: D
+G: ## What terraform_remote_state exposes
+The data source reads the latest state snapshot from a backend and returns only the root module **output values**. But to read it, the caller's credentials need access to the whole state file, and state often contains secrets such as generated passwords or connection strings.
+## Alternatives
+- Publish the value to a dedicated store (a parameter store, DNS record, key/value store) with its own access controls, then read it with a matching data source.
+- Look the object up by tags with the provider's data source.
+- In HCP Terraform, the `tfe_outputs` data source is recommended because it does not require full access to workspace state.
+W: Full state access: the data source returns just the root module outputs, but the consumer's credentials must be able to read the whole state snapshot, and that snapshot may contain secrets such as generated passwords. Publishing the value to a dedicated store or using `tfe_outputs` in HCP Terraform avoids granting that access.
+X: A=Copied outputs: the data source reads the latest snapshot each time it is evaluated, so a changed output appears at the consumer's next plan; nothing is stored permanently in its state.
+B=Local state file: the data source is designed for remote backends such as S3, azurerm or HCP Terraform and takes the backend type in its configuration.
+C=Locking: reading a snapshot does not hold the producing configuration's lock, so consumer plans do not block producer changes.
+T: terraform_remote_state returns only outputs but needs access to the whole state; prefer published data or tfe_outputs for sensitive setups.
+V: Terraform
+I: Q009954
+
+@ TF-IEP002 D1 T1.5 advanced comparison
+S: Which TWO statements about `try` and `can` are accurate? (Select TWO)
+A: `try` can be used only inside a variable `validation` block, not in locals
+B: `can(expr)` returns the value of the expression when it succeeds, else null
+C: `try` also catches provider API failures during apply and returns the fallback
+D: `try(a, b)` returns the first argument that evaluates without an error
+E: `can(expr)` returns true if the expression evaluates without error, otherwise false
+K: D,E
+G: ## Two error-handling helpers
+- `try(expr, fallback...)` evaluates arguments in order and returns the first that does not raise an error. It suits optional attributes of a loosely typed object.
+- `can(expr)` returns a boolean: does this expression evaluate without error? It is mainly used in a variable `validation` condition, such as `can(regex("^[a-z]+$", var.name))`.
+Both only deal with errors while evaluating the expression. They do not intercept provider failures, which happen later, during plan or apply operations on resources. Heavy use of `try` hides typos, so use it for genuinely optional data.
+W: D=try returns the first working argument: `try` evaluates its arguments in order and returns the first one that does not raise an error, so later arguments act as fallbacks.
+E=can returns a boolean: `can` turns "this expression errors" into true or false, which is why it pairs with validation conditions such as `can(regex(...))`.
+X: A=Validation only: `try` is usable anywhere an expression is allowed, such as locals and resource arguments; it is `can` that is mainly used in validation.
+B=can returning a value: `can` returns only true or false; use `try` when you need the value itself.
+C=Provider failures: they occur when the provider calls the remote API, long after expression evaluation, and are not caught by `try`.
+T: try returns the first working value; can returns true or false; neither handles provider API errors.
+V: Terraform
+I: Q010020
+
+@ TF-IEP002 D6 T6.2 applied troubleshooting
+S: After a shared module adds `provider "aws" { region = "us-east-1" }`, a caller that sets `count = 2` on the module call gets "Module does not support count". What is the correct fix?
+A: Remove the `provider` block, declare the provider in the module's `required_providers`, and pass configurations with `providers`
+B: Keep the provider block and add `configuration_aliases` to it so Terraform builds one provider configuration per counted instance
+C: Replace `count = 2` with `for_each = toset(["a", "b"])`, since modules with provider blocks reject `count` but accept `for_each`
+D: Add `depends_on = [provider.aws]` to the module call so the nested provider is configured before Terraform expands the instances
+K: A
+G: ## Where provider configurations belong
+Provider configurations are global to a configuration and can be defined only in the root module. A module intended to be called by others must not contain `provider` blocks. It declares which providers it needs (and, if it needs several configurations, their aliases) in `required_providers`, and the caller supplies the configurations.
+- A module containing its own provider blocks cannot be used with `count`, `for_each` or `depends_on`. Terraform reports an error such as "Module does not support count".
+- The legacy pattern also forces the provider configuration to disappear together with the resources when the module is removed, which prevents Terraform from destroying those resources.
+- Child modules inherit default (unaliased) provider configurations from the parent automatically; aliased ones must be passed explicitly in a `providers` map.
+W: Remove the block and pass providers: a module with its own `provider` block cannot be used with `count`, `for_each` or `depends_on`. Declaring the requirement in `required_providers` and letting the caller pass configurations makes the module expandable and lets the caller control region and credentials.
+X: B=configuration_aliases on a provider block: `configuration_aliases` belongs in `required_providers` to declare names the caller must pass; it does not make a nested provider block compatible with expansion.
+C=Switch to for_each: `for_each` and `depends_on` are blocked in the same way as `count` for a module that has its own provider block.
+D=depends_on on the module: this is also not allowed on a module with a nested provider configuration, and there is no `provider.aws` object to reference in `depends_on`.
+T: Reusable modules contain no provider blocks; they declare requirements and receive configurations from the caller.
+I: Q010156
+
+@ TF-IEP002 D3 T3.9 applied definition
+S: A team runs `terraform init -upgrade` to move a provider forward within its constraint. What else does the flag change?
+A: It ignores the provider selections in the lock file and also updates installed modules to the newest matching code
+B: It migrates the state file to the newest state format so that the newly selected provider versions can write to it
+C: It upgrades the Terraform CLI binary itself to the newest release that the `required_version` constraint permits
+D: It rewrites the provider version constraints in the configuration files to match the newest release it installed
+K: A
+G: ## Normal init versus -upgrade
+Plain `terraform init` reuses lock file selections for providers and leaves installed modules as they are, installing only newly added ones. `terraform init -upgrade` changes both:
+- Providers: the newest version matching the constraints is selected, ignoring the lock file, and the lock file is updated.
+- Modules: installed modules are updated to the latest source code that matches their version constraints or refs.
+## What it never does
+It does not edit your `.tf` files, change the CLI version, or migrate state. Review the lock file diff and the plan after upgrading, in a lower environment first.
+W: Lock file and modules: `-upgrade` selects the newest provider versions that match the constraints, ignoring and then updating the lock file, and it also updates installed modules to the latest source code that matches their version constraints or refs.
+X: B=State migration: the flag has no effect on the state format; backend migration uses `-migrate-state`.
+C=Upgrading the CLI: `-upgrade` concerns providers and modules; the CLI is installed separately and only checked against `required_version`.
+D=Edits to constraints: init writes only the lock file and the `.terraform` directory; the constraints remain whatever the team wrote.
+T: init -upgrade re-resolves providers (ignoring the lock file) and updates modules within their constraints.
+V: Terraform
+I: Q010088
+
+@ TF-IEP002 D5 T5.4 applied troubleshooting
+S: An OPA policy is registered with query `data.terraform.allow`, where the Rego rule is `allow = true { ... }`. HCP Terraform cannot interpret the result. What change fixes it?
+A: Lower the policy's enforcement level to advisory, since advisory policies accept a rule returning a boolean
+B: Move the logic into a Sentinel `main` rule, since an OPA query in HCP Terraform must return a numeric score
+C: Replace it with a `deny[msg]` rule collecting violation messages and query that; an empty result passes
+D: Make the rule return the string `pass` when compliant, since HCP Terraform matches that literal in the result
+K: C
+G: ## How HCP Terraform evaluates OPA
+You register each OPA policy with a **query** that names a rule, typically package plus rule, such as `data.terraform.policies.public_ingress.deny`. The result must be an **array**. If the array is empty, the policy passes; messages in it describe violations.
+## Input data
+HCP Terraform combines the plan and the run into one JSON document. Use `input.plan` for plan data (for example `resource_changes`) and `input.run` for run data such as workspace and organization.
+## Pattern
+A `deny[msg]` rule loops over `input.plan.resource_changes` and builds a message with the resource address for each violation.
+W: deny-style rule: HCP Terraform expects the registered OPA query to return an array. A `deny[msg]` rule over `input.plan.resource_changes` collects one message per violation, and an empty result reports a pass; a boolean result cannot be interpreted.
+X: A=Advisory level: the enforcement level decides what happens after a failure; it does not change the result format the query must produce.
+B=Sentinel rule: a Sentinel main rule belongs to the other policy framework, and OPA queries are not scored numerically.
+D=Literal string: no magic string is matched; the pass signal is an empty array.
+T: OPA policies for HCP Terraform must return an array of violations; empty means the plan complies.
+V: Terraform
+I: Q010113
+
+@ TF-IEP002 D2 T2.3 advanced use-case
+S: Which TWO things create a dependency edge, so Terraform orders operations accordingly? (Select TWO)
+A: The order in which the two resource blocks appear within the same `.tf` file
+B: The alphabetical order of the `.tf` file names that hold the two resources
+C: A `depends_on = [aws_iam_role_policy.p]` meta-argument listing another resource
+D: A shared `tags = local.common_tags` value that both resources read from a local
+E: An argument that reads another resource's attribute: `subnet_id = aws_subnet.a.id`
+K: C,E
+G: ## Implicit and explicit dependencies
+- **Implicit**: referencing `aws_subnet.a.id` tells Terraform the instance needs the subnet first, so it creates the subnet first and destroys it last.
+- **Explicit**: `depends_on` is for hidden dependencies, where one resource needs another to exist but no attribute is referenced, such as an instance whose boot script needs an IAM policy to be attached.
+Position in files does not matter: Terraform loads all `.tf` files in a directory as one module. A shared local value creates a reference to the local, not an ordering between the two resources.
+W: C=depends_on: it creates an explicit edge for hidden dependencies that Terraform cannot see in the arguments, such as an instance whose boot script needs an IAM policy to be attached first.
+E=Attribute reference: referencing `aws_subnet.a.id` creates an implicit edge, so Terraform creates the subnet first and destroys it last.
+X: A=Block order in a file: configuration is declarative, so the layout of blocks in a file has no effect on ordering.
+B=File names: Terraform loads all `.tf` files in the directory as one module, and name order is not an ordering signal.
+D=Shared local: both resources depend on the local value, but that does not make one resource wait for the other.
+T: Edges come from references and depends_on; file order, file names and shared locals do not order resources.
+V: Terraform
+I: Q009994
+
+@ TF-IEP002 D3 T3.2 advanced comparison
+S: Which TWO statements about Terraform planning modes are accurate? (Select TWO)
+A: terraform plan -target=ADDRESS is the planning mode that updates state to match the remote objects found in the cloud account
+B: terraform plan -destroy proposes to destroy all remote objects managed by the configuration and can be saved and reviewed before use
+C: terraform plan -refresh=false is a planning mode that creates a plan to remove drifted objects from state without touching them
+D: terraform plan -replace=ADDRESS can be combined with -destroy in one plan to rebuild one resource and remove the rest of them
+E: terraform plan -refresh-only proposes to update state and root module outputs to match reality without changing infrastructure
+K: B,E
+G: ## Modes and options
+Terraform plan has three modes: the normal mode (reconcile infrastructure with configuration), `-destroy` (plan to destroy all remote objects) and `-refresh-only` (plan to update state and root module outputs). Options such as `-replace`, `-target` and `-refresh=false` adjust how a plan is produced and can combine with the normal mode.
+- `-replace` cannot be used with `-destroy`.
+- `-target` narrows scope, it is for exceptional use.
+- `-refresh=false` skips the refresh step.
+W: B=-destroy mode: it plans the removal of every managed object, and the plan can be written with `-out` and reviewed before it is applied.
+E=-refresh-only mode: it records the real values in state and root module outputs and leaves the infrastructure untouched.
+X: A=-target as state sync: `-target` is an option that restricts which resource instances and dependencies are planned; it is not a mode and does not sync state.
+C=-refresh=false as a mode: it is an option that skips reading the real objects; it does not remove anything from state.
+D=-replace with -destroy: the documentation states that `-replace` cannot be used with `-destroy`.
+T: Plan modes are normal, -destroy and -refresh-only; -replace, -target and -refresh=false are options.
+V: Terraform
+I: Q009980
+
+@ TF-IEP002 D7 T7.4 applied troubleshooting
+S: A pull request adds `required_version = ">= 1.14.0"` to the root module. The VCS-driven workspace is still set to Terraform 1.12, and every run now fails at the start with an unsupported Terraform version error. What is the correct resolution?
+A: Set a `TF_VERSION` environment variable in the workspace so each run downloads a binary matching the new constraint
+B: Switch the workspace to Local execution mode, where the `required_version` constraint is not checked during runs
+C: Remove the constraint from the configuration, since the workspace's version setting overrides `required_version`
+D: Raise the workspace's Terraform version to one that satisfies the constraint, after testing it with a speculative plan
+K: D
+G: ## Two places hold a version
+- The **workspace setting** picks the Terraform binary that HCP Terraform runs.
+- The `required_version` constraint in the `terraform` block says which versions the configuration supports. Terraform checks it at the start of every run and stops with an error if the running version does not satisfy it.
+## Rolling out a new minimum
+Merging a higher `required_version` before the workspace is upgraded breaks the workspace. Upgrade first, or upgrade together with the change:
+- Test the target version with a speculative plan.
+- Update the workspace to that version.
+- Merge the constraint.
+Removing the constraint hides the incompatibility instead of fixing it, and Local mode only moves the failure to someone's laptop.
+W: Upgrade the workspace version: the workspace setting picks the binary HCP Terraform runs, and the constraint is a legitimate requirement checked at the start of each run. Testing the target version with a speculative plan and then raising the workspace version fixes the runs safely.
+X: A=TF_VERSION variable: this is not an HCP Terraform setting; the binary comes from the workspace's Terraform version field.
+B=Local mode: Terraform enforces `required_version` in every execution mode, so the same error would appear on the engineer's machine.
+C=Deleting the constraint: the workspace setting does not override the check, and removing the constraint lets the configuration run on a version the team decided it does not support.
+T: When required_version rises, upgrade the workspace's Terraform version (tested first) instead of removing the constraint.
+V: HCP Terraform
+I: Q010197
+
+@ TF-IEP002 D6 T6.2 applied troubleshooting
+S: A root module declares the `datadog` provider with source `DataDog/datadog` in its `required_providers` and configures `provider "datadog"`. A child module creates `datadog_monitor` resources but has no `required_providers` block. Which statement matches the Terraform documentation?
+A: The child inherits the root's source address and version constraints along with the configuration, so it needs no declaration
+B: The root's module call needs `providers = { datadog = datadog }` so the child inherits the source address with the configuration
+C: The dependency lock file maps the local name `datadog` to its source across modules, so the child needs no declaration of its own
+D: The child inherits only the provider configuration; it must declare its own `required_providers` entry naming `DataDog/datadog`
+K: D
+G: ## Configurations are inherited, requirements are not
+Two separate things connect a module to a provider:
+- The provider configuration (region, credentials, endpoints) is global and may be inherited by child modules implicitly, or passed explicitly with `providers`.
+- The provider requirement (source address and version constraints) must be declared by each module in its own `required_providers` block. Terraform combines the requirements of all modules to find a single compatible version.
+The documentation states that only provider configurations are inherited by child modules, not provider source or version requirements, and that this is especially important for non-HashiCorp providers. Without its own declaration the child leaves Terraform to guess the source from the local name, which is not what the root declared.
+```
+terraform {
+required_providers {
+datadog = { source = "DataDog/datadog", version = ">= 3.0" }
+}
+}
+```
+W: Requirements are per module: the documentation states that only provider configurations are inherited by child modules, not source or version requirements, which matters most for non-HashiCorp providers. Without its own entry the child leaves Terraform to guess the source from the local name.
+X: A=Inherited requirements: the documentation states explicitly that only provider configurations are inherited, not source or version requirements.
+B=providers argument: the `providers` map passes or overrides configurations only; it carries no source address, so the child's requirement must still be declared.
+C=Lock file as mapping: the dependency lock file records selected versions and checksums for providers already resolved; it does not supply sources to modules that omit a requirement.
+T: Provider configurations flow down to child modules, but every module must declare its own provider source and version requirements.
+I: Q010157
+
+@ TF-IEP002 D1 T1.5 applied use-case
+S: A module places five instances round-robin over `local.azs = ["a", "b", "c"]` with `element(local.azs, count.index)`. What does the expression return for `count.index` 4?
+A: `"c"`, because `element` clamps an index past the end to the last element
+B: `"b"`, because `element` wraps the index around the length of the list
+C: An error, because index 4 is outside the bounds of a three-element list
+D: `null`, because `element` returns null for positions beyond the list end
+K: B
+G: ## element wraps, indexing does not
+`element(list, index)` takes the index modulo the list length, so it cycles through the list. That makes it the tool for spreading numbered instances over a short list of zones.
+- Index 4 modulo 3 is 1, giving the second element, `"b"`.
+- The square-bracket form `local.azs[4]` is an error ("Invalid index") for the same list.
+- Be careful: new zones added in the middle shift the cycle for existing instances.
+W: "b" by wrapping: `element` takes the index modulo the list length, and 4 mod 3 = 1, so the cycle `a`, `b`, `c`, `a` continues at the second zone.
+X: A=Clamps to the last: no collection function clamps indexes; `element` cycles through the list instead.
+C=Out of range error: that is how `local.azs[4]` behaves; `element` is defined to wrap.
+D=Null result: neither `element` nor bracket indexing produces null for an index out of range.
+T: element(list, i) is i modulo length (round-robin); list[i] errors when out of range.
+V: Terraform
+I: Q010018
+
+@ TF-IEP002 D1 T1.5 advanced troubleshooting
+S: A module has `local.cfg = { db = { port = null } }` and the expression `try(local.cfg.db.port, 5432)`. A teammate expects 5432. What value does the expression produce?
+A: `5432`, because `try` treats a null result as a failure and uses the fallback
+B: `"5432"`, because the fallback is converted to a string to match the null type
+C: An error, because reading an attribute whose value is null is an invalid access
+D: `null`, because the attribute exists and evaluating it raised no error
+K: D
+G: ## try catches errors, not nulls
+`try(expr1, expr2, ...)` evaluates its arguments in order and returns the first one that does not produce an error. The docs recommend using it sparingly, because it also hides typos in attribute names.
+- If `local.cfg.db.port` were missing, evaluating it would raise "Unsupported attribute", and `try` would return the fallback.
+- Here the attribute exists and its value is `null`. Reading it is not an error, so `try` returns `null` as is.
+- To treat null as "unset", use `coalesce(local.cfg.db.port, 5432)`, or combine them: `coalesce(try(local.cfg.db.port, null), 5432)`.
+W: null: `try` returns the first argument that evaluates without an error. The attribute is present and holds null, so reading it is not an error and `try` hands back null unchanged; `coalesce` is the function that treats null as unset.
+X: A=Null as failure: `try` has no null handling; that is the job of `coalesce` or a conditional expression.
+B=String conversion: no conversion happens; the result is the first argument as evaluated, and the number fallback is not used at all.
+C=Error on null: reading an attribute whose value is null is valid, and `try` would hide an error anyway.
+T: try falls back on errors only; a present attribute holding null is returned as null (use coalesce for that).
+V: Terraform
+I: Q010012
+
+@ TF-IEP002 D1 T1.5 advanced use-case
+S: Which value does `coalesce("", null, "eu-west-1", "us-east-1")` return?
+A: `""`, because it is the first argument and an empty string is a value
+B: `"us-east-1"`, because `coalesce` returns the last non-null argument
+C: `"eu-west-1"`, the first argument that is neither null nor empty
+D: An error, because null and string arguments cannot be mixed in a call
+K: C
+G: ## coalesce skips null and empty strings
+`coalesce` accepts any number of arguments and returns the first one that is not `null` and not an empty string. It is the usual tool for "use the override, else the default".
+- Empty strings are skipped, which is useful for variables that default to `""`.
+- `null` is a valid value of every type, so mixing it in is allowed.
+- If every argument is null or empty, the call is an error.
+- For lists, `coalescelist` skips empty lists, and `try` falls back on errors instead.
+W: "eu-west-1": `coalesce` returns the first argument that is not null and not an empty string, so `""` and `null` are skipped and the next usable value wins.
+X: A=Empty string: `coalesce` specifically treats `""` as missing and skips it.
+B=Last non-null argument: it returns the first usable argument, not the last one.
+D=Type mixing error: null is a valid value of every type, so it combines with strings; the call errors only when every argument is null or empty.
+T: coalesce returns the first value that is neither null nor "", and errors if there is none.
+V: Terraform
+I: Q010019
+
+@ TF-IEP002 D1 T1.7 advanced use-case
+S: A disaster-recovery module creates a bucket in the primary region and a replica in another region, so it needs two AWS configurations. What must its author and caller do?
+A: Author adds a `provider "aws"` block with `alias = "replica"` and a fixed region; the caller passes no providers
+B: Author declares `configuration_aliases = [aws.replica]`; caller maps it with `providers = { aws.replica = aws.west }`
+C: Author lists two `aws` entries in `required_providers`; caller sets `alias = "replica"` on the module block
+D: Author sets `provider = aws.west` on the replica resource, because the root module's aliases are visible by name
+K: B
+G: ## Passing several configurations into a module
+A module that needs more than one configuration of the same provider declares the extra names with `configuration_aliases` inside `required_providers`:
+`aws = { source = "hashicorp/aws", configuration_aliases = [aws.replica] }`
+- Inside the module, resources then use `provider = aws.replica`.
+- The caller maps module-side names to its own configurations through the `providers` argument of the `module` block.
+- Without the declaration, Terraform rejects the module because `aws.replica` does not exist there.
+- Putting provider blocks inside a reusable module is discouraged, since it prevents `count`, `for_each` and `depends_on` on the module and makes cleanup hard.
+W: Declare the alias and map it in the call: the module declares the extra configuration name with `configuration_aliases` inside `required_providers`, its resources use `provider = aws.replica`, and the caller supplies its own `aws.west` configuration through the `providers` argument of the module block.
+X: A=Provider block in the module: allowed in the legacy style but discouraged for reusable modules; it blocks `count`, `for_each` and `depends_on` on the module and does not let the caller choose the region.
+C=Two entries and a module alias: `required_providers` has one entry per local name, and `module` blocks have no `alias` argument.
+D=Root aliases by name: resources in a module can reference only the provider configurations that module receives, not the root's aliases.
+T: A module expecting extra provider configurations declares configuration_aliases; the caller maps them via providers.
+V: Terraform
+I: Q010030
