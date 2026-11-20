@@ -1,0 +1,30 @@
+# DBX-DEP Spark recheck (spark.apache.org reachable since 2026-11-06): explanation fixes, keys unchanged; X letters are the published ones
+# src: https://spark.apache.org/docs/latest/streaming/apis-on-dataframes-and-datasets.html
+# src: https://spark.apache.org/docs/latest/streaming/structured-streaming-kafka-integration.html
+# src: https://docs.databricks.com/aws/en/structured-streaming/watermarks
+
+@ Q010972 explain
+G: ## Stream-stream joins and state
+A stream-stream join buffers rows from both sides in state until a match can no longer arrive. Joins support append mode only.
+- **Inner join**: watermarks and an event-time condition are optional, but recommended on each input so old state can be discarded; without them every key stays in state and performance suffers.
+- **Left outer join**: the Spark support matrix requires a watermark on the **right** input (here `clicks`) plus an event-time range condition for correct results; a watermark on the left input (`impressions`) is optional and lets the engine clean up all state. The engine can only declare an impression unmatched once the watermark proves that no click can still arrive, so the NULL-padded row is written late.
+- Example condition: click time between impression time and impression time plus 10 minutes.
+Example: with a 10-minute range condition and a 15-minute watermark, an unclicked impression appears in the sink roughly 25 minutes after it happened.
+W: Watermarks on both sides plus a time-range condition: the clicks watermark and the range condition are what the left outer join requires, the impressions watermark lets old state be cleaned up, and the delayed NULL rows are the expected result of append-only output.
+X: A=multipleWatermarkPolicy: that setting only picks the global watermark among watermarks that already exist on several inputs; it creates none.
+B=Impressions watermark only and update mode: a left outer join needs the watermark on the right (clicks) input, so a left-only watermark is not enough, and joins do not support update mode, so unmatched rows cannot be sent early.
+C=Inner join: an inner join cannot return impressions that have no click at all, and the anti-join afterwards recreates the logic with a batch job and more latency.
+T: A stream-stream left outer join needs a watermark on the right input and a time-bound condition (left watermark for full cleanup), and unmatched rows surface only after the watermark.
+
+@ Q010978 explain
+G: ## startingOffsets applies once
+For Kafka, `startingOffsets` (and `startingTimestamp`) only decide where a new query starts. When a query restarts from a checkpoint, it resumes from the offsets recorded there; the option is ignored.
+## Backfill pattern
+- Read the gap with a second, separate query. Either a streaming query with its own checkpoint, `startingOffsets` as per-partition JSON (or `startingTimestamp`) at the start of the gap and `trigger(availableNow=True)`, which stops after the data available at start; or a batch read (`spark.read`) with `startingOffsets` and `endingOffsets`, which bounds both ends exactly. `endingOffsets` is a batch-only option; a streaming query does not take it.
+- Make the write idempotent (a `MERGE` on a business key or an insert-only merge), because the range may overlap what silver already has.
+- The data must still exist in Kafka: retention limits how far back you can go.
+W: Separate backfill query: it reads the missing offset range from its own starting position without touching the main checkpoint, the idempotent write absorbs overlaps, and the running stream is not disturbed.
+X: B=New checkpoint for the main query: it reloads the entire retained history as new rows, which duplicates data in silver for the whole period, not only the gap.
+C=failOnDataLoss: this setting controls whether the query fails when expected offsets vanished from Kafka; it never rewinds a running checkpoint.
+D=Deleting the offsets folder: this corrupts the checkpoint, and the query then fails or starts without a consistent record of what it has processed.
+T: Kafka starting options apply to new queries only; backfill with a second query that has its own start (and checkpoint) and an idempotent write.

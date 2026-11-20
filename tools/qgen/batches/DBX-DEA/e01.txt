@@ -1,0 +1,33 @@
+# DBX-DEA explain-only fixes (Spark recheck 2026-11-20): wrong statements in explanations; keys unchanged
+# src: https://spark.apache.org/docs/latest/streaming/apis-on-dataframes-and-datasets.html
+# src: https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/file-detection-modes
+# src: https://docs.databricks.com/aws/en/structured-streaming/triggers
+
+# Q009274: X for the one-second trigger said a longer interval makes listing more frequent (it lists less often, but still lists)
+@ Q009274 explain
+G: ## File detection modes
+Auto Loader discovers new files in one of two ways:
+- **Directory listing** (default): lists the input directory. It starts quickly with no setup beyond storage access, but a stream that runs all the time (the default trigger, or a short `processingTime` interval) lists the directory again on every micro-batch, which drives LIST cost when millions of files arrive.
+- **File notification**: subscribes to file events and reads them from a queue instead of listing. The recommended form is with **file events** enabled on the external location: one queue per location serves all streams, no extra credentials per stream, and incremental discovery. Databricks calls it more performant and scalable than directory listing and recommends it for most workloads; it is set with `cloudFiles.useManagedFileEvents`.
+Both modes keep exactly-once processing, and you can switch modes across stream restarts.
+## Trigger intervals
+The trigger interval decides how often the stream checks for new data. The default trigger behaves like `processingTime` with a 0 ms interval; a longer interval means fewer checks, but every check in directory listing mode is still a listing.
+W: File notification with file events: it avoids listing altogether, so LIST cost drops and discovery scales to millions of files per hour.
+X: A=spark.read.json: a plain batch read lists and re-reads all files each run and loses incremental tracking.
+B=One-second trigger: a slightly longer interval only reduces how often the directory is listed; every micro-batch still lists it, so LIST calls stay high at this volume. The fix is to stop listing.
+D=Disabling the checkpoint: Auto Loader needs it for exactly-once state, and it does not change how files are discovered.
+T: High-volume, continuous Auto Loader: file notification with file events, not directory listing.
+
+# Q009366: X for distinct() said distinct on a stream works with state and a watermark; the Spark guide lists distinct on streaming Datasets as unsupported
+@ Q009366 explain
+G: ## Duplicates in a stream
+Structured Streaming provides exactly-once processing, but it does not remove duplicates that are already in the source. Deduplication needs state: the engine must remember the keys it has seen. Without a bound, that state grows forever.
+## Bounding state with a watermark
+A watermark (`withWatermark(column, delay)`) tells Spark how late data can be, so it can drop old state. `dropDuplicatesWithinWatermark(["event_id"])` removes duplicates on a unique identifier even when other fields such as the event time differ between copies, and it needs a watermark. Choose a delay greater than the largest gap between copies (here 30 minutes) to guarantee all duplicates are removed.
+## What streams do not support
+The Structured Streaming guide lists some DataFrame operations as unsupported on streaming Datasets, among them `distinct`, `limit` and sorting (outside aggregations in complete mode). Streaming deduplication uses `dropDuplicates` or `dropDuplicatesWithinWatermark` instead.
+W: Watermark plus dropDuplicatesWithinWatermark: it deduplicates on `event_id` even though `event_time` differs, and the one-hour watermark exceeds the 30-minute gap while letting Spark discard old keys.
+X: A=distinct() on a stream: the Spark guide lists distinct operations on streaming Datasets as not supported, and deduplicating on every column would miss copies whose event times differ anyway.
+C=dropDuplicates on both columns: the copies have different event times, so the pair is different each time and no copy is removed; without a watermark the state would also grow without bound.
+D=Batch only: streams can be deduplicated with dropDuplicates and dropDuplicatesWithinWatermark; the statement is wrong.
+T: Streaming deduplication needs state: use a watermark with dropDuplicatesWithinWatermark on a unique id, and set the delay above the maximum duplicate gap.
