@@ -115,7 +115,7 @@ with sync_playwright() as pw:
             w = q.evaluate("document.documentElement.scrollWidth")
             C.check(f"[{scheme}] {path}: readable without JS, no horizontal scroll on a phone", w <= 375 and q.inner_text("h1"), w)
         q.goto(BASE)
-        C.check(f"[{scheme}] home: static intro links the exam pages without JS", q.locator('header.top p.intro a[href="exams/#aws"]').is_visible())
+        C.check(f"[{scheme}] home: static intro links the exam pages without JS", q.locator('header.top .intro a[href="exams/#aws"]').is_visible())
         q.goto(BASE + "privacy.html")
         bg = q.evaluate("getComputedStyle(document.body).backgroundColor")
         C.check(f"[{scheme}] page background follows the color scheme", (bg == "rgb(16, 21, 28)") == (scheme == "dark"), bg)
