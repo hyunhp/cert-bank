@@ -1,6 +1,7 @@
 # TODO
 
 ## Now (warm start — keep this section current; update it with every merge)
+Updated 2026-11-20 (PR spark-recheck): Spark claims re-checked against spark.apache.org (4.3.0 docs) + docs.databricks.com: DBX-DEA/DAA/MLA 82 checked, 3 explanation fixes (DEA e01, MLA e02); DBX-DEP 79 checked, Q010973 option wording (f03) + 2 explanations (e02). Keys unchanged. Lists `cues/spark-recheck-*.json`. Left open: GAIL T2.2 Gemini app/Gems (support.google.com still blocked).
 Updated 2026-11-20 (PR pltr-aware-b12): PLTR-AWARE 285 -> 300 (pool target reached; b12 = D1 5, D2 4, D3 6, single answer, blind solve 15/15, 3 explanation fixes by reviewer). `qgen report`: every exam now at or above target.
 Updated 2026-11-20 (PR home-intro, owner: 'how the questions are written' wrapped): home intro split into 3 rows in `div.intro#introText` (sentence; 'Exam overviews' vendor chips; 'How the questions are written ->' link); sub and intro end phrases kept whole (`.nw`), sub breaks before 'Unofficial, not exam dumps.'. Phone fold (About this site) unchanged; site_test selector now `header.top .intro`.
 Updated 2026-11-20 (PR guide-drift): docs drift applied to guides and study plans (`cues/guide-drift-2026-11.json`): AZ-900 guide EN/KO (TCO calculator retired); SAP-C02 plan (Performance Insights -> CloudWatch Database Insights); CLF/SAP 'AWS Transform MGN', DEA 'AWS Quick Sight', DVA-C03 Lambda Managed Instances 90 min (async/ESM only); closed-to-new-customers note for Clarify/Ground Truth/A2I/Model Monitor in AIF/MLA-C01/MLA-C02/SAP-C03 plans and AIF/MLA-C02/AIB guides EN/KO; GCP-PDE 'Lakehouse', GCP-GAIL 'Managed Service for Apache Spark'; DBX-MLP 'Unity Gateway'; TF-TA004 module source rule by version. Blog link back on (PR 180).
@@ -38,7 +39,7 @@ Updated 2026-11-17. DEA-C01 hard set (PR dea-hard-set): owner scored 78% on our 
   keys use the guide names). PSE T1.3 (password, session and 2-step verification policy) is documented only on support.google.com (blocked here): the bank keeps to architecture-doc facts.
   Preview or tier-bound and kept out of keys: SCC Enterprise tier is deprecated, Binary Authorization continuous validation, Assured Workloads workload updates, EKM zero-downtime migration.
   Next: (Databricks list covered; platform administrator accreditation is not an exam) (was: ML Professional, GenAI Engineer Associate, Context Engineering Associate). Open gaps: Gemini app and Gems (GAIL T2.2); Gemini Cloud Assist is
-  private preview (noted in PCA); re-check Spark claims now that spark.apache.org is reachable.
+  private preview (noted in PCA); Spark claims re-checked 2026-11-20 (PR spark-recheck).
 - Done this cycle (all merged): Google Cloud vendor + GCP-ACE bank and study guide; GCP-GAIL bank and study guide; GCP-CDL bank and study guide; MLA-C02 study guide; AI-901, AI-103, AZ-305, SC-900, DP-900 banks, study guides and glossary terms; Resume button;
   docs cache + `qgen check --siblings` + PLAN.md workflow; tech-debt pass.
 - Next: Microsoft list is covered for now (AI-500 has no skills list yet, AZ-401 is beta). www.databricks.com is still
